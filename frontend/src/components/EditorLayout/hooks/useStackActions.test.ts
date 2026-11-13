@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useStackActions } from './useStackActions';
+import { useActiveNodeReapplyEligibility } from './useActiveNodeReapplyEligibility';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -20,6 +21,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 import { apiFetch } from '@/lib/api';
 import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { sha256Hex } from '@/lib/sha256';
 import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
@@ -84,6 +86,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEffectiveServices: vi.fn(),
     serviceUpdateInProgress: null,
     setServiceUpdateInProgress: vi.fn(),
+    setPendingReveal: vi.fn(),
+    pendingReveal: null,
   };
   return { ...base, ...over } as unknown as EditorState;
 }
@@ -93,6 +97,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     selectedFile: 'web.yml',
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
+    stackCounts: {},
     stackPorts: {},
     stackPortServices: {},
     stackSelfFlags: {},
@@ -166,6 +171,8 @@ function setup(over: {
   removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
   isAdmin?: boolean;
   canReapplyCompose?: boolean;
+  reapplyUnavailableReason?: Parameters<typeof useStackActions>[0]['reapplyUnavailableReason'];
+  refreshReapplyEligibility?: Parameters<typeof useStackActions>[0]['refreshReapplyEligibility'];
   hasServiceScopedUpdate?: boolean;
   diffPreviewEnabled?: boolean;
   onStackFilesChanged?: () => void;
@@ -210,6 +217,8 @@ function setup(over: {
       removeNotificationsForStack,
       isAdmin: over.isAdmin ?? false,
       canReapplyCompose: over.canReapplyCompose ?? false,
+      reapplyUnavailableReason: over.reapplyUnavailableReason ?? null,
+      refreshReapplyEligibility: over.refreshReapplyEligibility,
       serviceUrlsRef: over.serviceUrlsRef,
     }),
   );
@@ -2905,6 +2914,38 @@ describe('useStackActions.getStackMenuVisibility', () => {
     });
   });
 
+  it('offers Stop but not Deploy for an exited stack whose containers are restart-looping', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'web.yml': 'exited' } as never,
+        stackCounts: { 'web.yml': { running: 0, total: 1, restarting: 1 } } as never,
+      },
+    });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: true, showRestart: false, showUpdate: false, showTakeDown: true,
+    });
+  });
+
+  it('keeps the exited-stack flags when the node does not report a restarting count', () => {
+    const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'exited' } as never } });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: true, showStop: false, showRestart: false, showUpdate: false, showTakeDown: true,
+    });
+  });
+
+  it('keeps Stop hidden for a restarting self stack', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'sencho.yml': 'exited' } as never,
+        stackSelfFlags: { 'sencho.yml': true },
+        stackCounts: { 'sencho.yml': { running: 0, total: 1, restarting: 1 } } as never,
+      },
+    });
+    expect(result.current.getStackMenuVisibility('sencho.yml')).toEqual({
+      showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false,
+    });
+  });
+
   it('hides guarded lifecycle actions for the self stack but keeps restart', () => {
     const { result } = setup({
       stackList: {
@@ -3078,6 +3119,211 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
   });
 
+  it('refreshes a stale ineligible answer and opens the Reapply confirmation once the node recovered', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: true, reason: null });
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: false,
+      reapplyUnavailableReason: 'detecting',
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+      nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('opens the dialog with the node and the reason when the re-read still refuses', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: false, reason: 'docker_unreachable' });
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: false,
+      reapplyUnavailableReason: 'detecting',
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+      nodeName: 'Remote A', reason: 'docker_unreachable',
+    });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+  });
+
+  it('does not retarget when the active node changes while eligibility is re-read', async () => {
+    vi.mocked(apiFetch).mockReset();
+    let resolveRefresh!: (value: { canReapply: boolean; reason: null } | null) => void;
+    const refresh = vi.fn(() => new Promise<{ canReapply: boolean; reason: null } | null>((resolve) => {
+      resolveRefresh = resolve;
+    }));
+    const { result, overlayState, activeNodeHolder, rerender } = setup({
+      isAdmin: true,
+      canReapplyCompose: false,
+      reapplyUnavailableReason: 'detecting',
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+
+    let deploy!: Promise<void>;
+    act(() => {
+      deploy = result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+
+    activeNodeHolder.current = { id: 8, name: 'Remote B', type: 'remote' } as ActiveNode;
+    rerender();
+
+    await act(async () => {
+      resolveRefresh({ canReapply: true, reason: null });
+      await deploy;
+    });
+
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('re-reads a cached eligible answer at the click and opens the Reapply confirmation when it still holds', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: true, reason: null });
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+      nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('names the node and the reason when a cached eligible answer went stale', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue({ canReapply: false, reason: 'compose_cli_unavailable' });
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+      nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+    });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+  });
+
+  it('shows nothing when the click-time read of a cached eligible answer is superseded', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const refresh = vi.fn().mockResolvedValue(null);
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      refreshReapplyEligibility: refresh,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('keeps the cached answer when no re-read is wired', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      activeNode: { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalled();
+  });
+
+  describe('verifyReapplyEligibility (the endpoint-only and confirm-dialog entry points)', () => {
+    const selfStack = { selectedFile: 'sencho.yml', stackSelfFlags: { 'sencho.yml': true } };
+    const remote = { id: 7, name: 'Remote A', type: 'remote' } as ActiveNode;
+
+    it('is true and shows nothing when the fresh read is eligible', async () => {
+      const refresh = vi.fn().mockResolvedValue({ canReapply: true, reason: null });
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(true);
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
+
+    it('is false and names the node and reason when the fresh read refuses', async () => {
+      const refresh = vi.fn().mockResolvedValue({ canReapply: false, reason: 'compose_cli_unavailable' });
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+        nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+      });
+    });
+
+    it('is false and silent when the read was superseded', async () => {
+      const refresh = vi.fn().mockResolvedValue(null);
+      const { result, overlayState } = setup({
+        isAdmin: true, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
+
+    it('is false for a non-admin without reading', async () => {
+      const refresh = vi.fn();
+      const { result, overlayState } = setup({
+        isAdmin: false, canReapplyCompose: true, refreshReapplyEligibility: refresh, activeNode: remote, stackList: selfStack,
+      });
+      let ok: boolean | undefined;
+      await act(async () => { ok = await result.current.verifyReapplyEligibility(); });
+      expect(ok).toBe(false);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    });
+  });
+
   it('opens protected dialog for non-admin even when canReapplyCompose is true', async () => {
     const { result, overlayState } = setup({
       isAdmin: false,
@@ -3210,6 +3456,158 @@ describe('useStackActions.getStackMenuVisibility', () => {
     // The request carries the node captured at call time, so a switch before the
     // refusal arrives cannot make the dialog describe another node.
     expect(apiFetch).toHaveBeenCalledWith('/stacks/web/services/web/stop', { method: 'POST', nodeId: 1 });
+  });
+});
+
+describe('useStackActions overlapping reapply eligibility reads', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  // Wires the production eligibility hook to the production action hook, the way
+  // EditorLayout does, so the generation bookkeeping that returns null on a
+  // superseded read is the code under test rather than a stub.
+  function setupOverlap() {
+    const editorState = makeEditorState();
+    const stackListState = makeStackListState({
+      selectedFile: 'sencho.yml',
+      stackSelfFlags: { 'sencho.yml': true },
+    });
+    const navState = { activeView: 'editor', setActiveView: vi.fn() } as unknown as NavState;
+    const overlayState = makeOverlay();
+    const pending: Array<(value: Response) => void> = [];
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => {
+      pending.push(resolve);
+    }));
+    const activeNode = { id: 7, name: 'Remote A', type: 'remote' } as NonNullable<ActiveNode>;
+    const { result } = renderHook(() => {
+      const eligibility = useActiveNodeReapplyEligibility(activeNode.id);
+      const actions = useStackActions({
+        editorState,
+        stackListState,
+        navState,
+        overlayState,
+        activeNode,
+        setActiveNode: vi.fn(),
+        nodes: [],
+        runWithLog,
+        getLastDeployOutputLine: () => undefined,
+        diffPreviewEnabled: false,
+        canEditStack: () => true,
+        onDeletedOpenStack: vi.fn(),
+        isAdmin: true,
+        canReapplyCompose: eligibility.canReapply,
+        reapplyUnavailableReason: eligibility.reason,
+        refreshReapplyEligibility: eligibility.refresh,
+      });
+      return { eligibility, actions };
+    });
+    return { result, overlayState, pending };
+  }
+
+  const click = () => ({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+  const eligible = () => okJson({ nodes: [{ nodeId: 7, canReapplyCompose: true }] });
+  const ineligible = () => okJson({
+    nodes: [{ nodeId: 7, canReapplyCompose: false, reapplyUnavailableReason: 'detecting' }],
+  });
+
+  it('names the node and the reason when the node lost eligibility after the editor loaded as eligible', async () => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    // The editor loads on an eligible answer, so the button reads Save & Reapply.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](eligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.canReapply).toBe(true));
+
+    // The node then loses its Compose CLI; the click reads that, not the cache.
+    let deploy!: Promise<void>;
+    act(() => { deploy = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => {
+      pending[1](okJson({
+        nodes: [{ nodeId: 7, canReapplyCompose: false, reapplyUnavailableReason: 'compose_cli_unavailable' }],
+      }));
+      await deploy;
+    });
+
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledTimes(1);
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+      nodeName: 'Remote A', reason: 'compose_cli_unavailable',
+    });
+    expect(result.current.eligibility.canReapply).toBe(false);
+  });
+
+  it('still opens the Reapply confirmation when the click-time read fails on a node cached as eligible', async () => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](eligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.canReapply).toBe(true));
+
+    let deploy!: Promise<void>;
+    act(() => { deploy = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => {
+      pending[1](new Response('{}', { status: 502 }));
+      await deploy;
+    });
+
+    // The reapply route stays the authority: it names any real refusal.
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
+    expect(result.current.eligibility.canReapply).toBe(true);
+  });
+
+  it.each([
+    { label: 'both reads recover, superseded read lands second', order: [1, 0] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },
+    { label: 'both reads recover, superseded read lands first', order: [0, 1] as const, verdicts: ['eligible', 'eligible'] as const, outcome: 'confirmation' as const },
+    { label: 'older read recovers but the newer refuses, superseded read lands second', order: [1, 0] as const, verdicts: ['eligible', 'ineligible'] as const, outcome: 'refusal' as const },
+    { label: 'older read recovers but the newer refuses, superseded read lands first', order: [0, 1] as const, verdicts: ['eligible', 'ineligible'] as const, outcome: 'refusal' as const },
+  ])('keeps the newest decision when $label', async ({ order, verdicts, outcome }) => {
+    const { result, overlayState, pending } = setupOverlap();
+
+    // Settle the initial effect read on a cached false.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => { pending[0](ineligible()); });
+    await vi.waitFor(() => expect(result.current.eligibility.reason).toBe('detecting'));
+
+    // Two decisions for the same node start before either click-time read lands.
+    let older!: Promise<void>;
+    let newer!: Promise<void>;
+    act(() => { older = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    act(() => { newer = result.current.actions.deployStack(click()); });
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+
+    const responses = { eligible, ineligible };
+    const decisions = [
+      { response: responses[verdicts[0]], done: older },
+      { response: responses[verdicts[1]], done: newer },
+    ];
+    for (const index of order) {
+      const decision = decisions[index];
+      await act(async () => {
+        pending[index + 1](decision.response());
+        await decision.done;
+      });
+    }
+
+    // Only the newer read owns the decision, so the older click never opens a
+    // dialog of its own: the newer verdict alone decides which one appears.
+    if (outcome === 'confirmation') {
+      expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledTimes(1);
+      expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+        nodeId: 7, nodeType: 'remote', nodeName: 'Remote A', stackFile: 'sencho.yml',
+      });
+      expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    } else {
+      expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledTimes(1);
+      expect(overlayState.openSelfStackProtected).toHaveBeenCalledWith({
+        nodeName: 'Remote A', reason: 'detecting',
+      });
+    }
   });
 });
 
@@ -4513,5 +4911,218 @@ describe('useStackActions.refreshGitSourcePending', () => {
     const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions.openAuthoredLocation', () => {
+  const location = {
+    file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12,
+    fileHash: sha256Hex('disk content'),
+  };
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(toast.info).mockReset();
+    vi.mocked(toast.error).mockReset();
+  });
+
+  it('refuses a compose range while the buffer has unsaved edits', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'edited content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation(location);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    expect(editorState.setActiveTab).toHaveBeenCalledWith('compose');
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
+  });
+
+  it('refreshes a clean stale buffer and pins the reveal to the revision it read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fresh disk content\n', {
+      status: 200,
+      headers: { etag: 'W/"2"', 'x-compose-file': 'compose.yaml' },
+    }));
+    const { result, editorState } = setup({
+      editorState: { content: 'stale content\n', originalContent: 'stale content\n' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex('fresh disk content\n') });
+    });
+
+    expect(editorState.setContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith('fresh disk content\n');
+    expect(editorState.setComposeEtag).toHaveBeenCalledWith('W/"2"');
+    expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location: { ...location, fileHash: sha256Hex('fresh disk content\n') },
+      revision: 'fresh disk content\n',
+    });
+  });
+
+  it('refuses a range when the file changed after the location was computed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('new disk content\n', { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('opens a range in a BOM-prefixed primary file the server hashed with the BOM', async () => {
+    // The server hashes the decoded file text, which keeps a leading U+FEFF;
+    // `Response.text()` drops it, so hashing that would refuse a valid link.
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    // The normal load read the file with `res.text()`, so the clean buffer is
+    // the BOM-less text the click must refresh to the revision it verified.
+    const loadedContent = bomContent.slice(1);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent, { status: 200 }));
+    const bomLocation = { ...location, fileHash: sha256Hex(bomContent) };
+    const { result, editorState } = setup({
+      editorState: { content: loadedContent, originalContent: loadedContent },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(bomLocation);
+    });
+
+    expect(editorState.setContent).toHaveBeenCalledWith(bomContent);
+    expect(editorState.setOriginalContent).toHaveBeenCalledWith(bomContent);
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith({
+      target: { surface: 'compose', file: 'compose.yaml' },
+      location: bomLocation,
+      revision: bomContent,
+    });
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a range when the leading BOM was removed after it was computed', async () => {
+    const bomContent = '\uFEFFservices:\n  web:\n    image: nginx:alpine\n';
+    vi.mocked(apiFetch).mockResolvedValue(new Response(bomContent.slice(1), { status: 200 }));
+    const { result, editorState } = setup({
+      editorState: { content: bomContent.slice(1), originalContent: bomContent.slice(1) },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation({ ...location, fileHash: sha256Hex(bomContent) });
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/no longer current/i));
+  });
+
+  it('refuses a range that carries no source revision', () => {
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    result.current.openAuthoredLocation({ file: 'compose.yaml', line: 3, column: 5, endLine: 3, endColumn: 12 });
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/verified file revision/i));
+  });
+
+  it('does not apply a range when the stack changes while the file read is in flight', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setPendingReveal).not.toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the node changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, activeNodeHolder, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    activeNodeHolder.current = { id: 2, name: 'Remote', type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('clears a pending reveal when the compose read fails', async () => {
+    vi.mocked(apiFetch).mockRejectedValue(new Error('unreachable'));
+    const { result, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/could not confirm/i));
+  });
+
+  it('clears a pending reveal when the stack changes', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('disk content', { status: 200 }));
+    const { result, rerender, stackListState, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    await act(async () => {
+      result.current.openAuthoredLocation(location);
+    });
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(expect.objectContaining({
+      target: { surface: 'compose', file: 'compose.yaml' },
+    }));
+
+    (stackListState as unknown as { selectedFile: string | null }).selectedFile = 'other.yml';
+    rerender();
+    expect(editorState.setPendingReveal).toHaveBeenLastCalledWith(null);
+  });
+
+  it('leaves edits typed while the file read was in flight untouched', async () => {
+    let resolveRead: ((response: Response) => void) | undefined;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise<Response>((resolve) => { resolveRead = resolve; }));
+    const { result, rerender, editorState } = setup({
+      editorState: { content: 'disk content', originalContent: 'disk content' },
+    });
+
+    act(() => {
+      result.current.openAuthoredLocation(location);
+    });
+    (editorState as unknown as { content: string }).content = 'typed while reading';
+    rerender();
+    await act(async () => {
+      resolveRead?.(new Response('fresh disk content\n', { status: 200 }));
+    });
+
+    expect(editorState.setContent).not.toHaveBeenCalled();
+    expect(editorState.setPendingReveal).toHaveBeenCalledWith(null);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/save or discard/i));
   });
 });

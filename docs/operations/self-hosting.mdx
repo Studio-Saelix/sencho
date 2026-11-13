@@ -79,6 +79,8 @@ The second option matters because Sencho talks to Docker through two paths, and 
 
 The last row is the exception to everything above. See [Self-update behind a proxy](#self-update-behind-a-proxy).
 
+A Compose `hostname:` override on the Sencho service is supported. Sencho identifies its own container from the process cgroup when the hostname does not match the container ID, so self-protection and Reapply keep working with a custom hostname.
+
 The profiles below use `tecnativa/docker-socket-proxy` style flags as a worked example. Other proxies (for example `linuxserver/socket-proxy`) expose similar API-group flags; check the names against the image and version you run. Profile values are the literal strings `1` and `0`. If you run `linuxserver/socket-proxy`, add the [LinuxServer socket-proxy extras](#linuxserver-socket-proxy-extras) on top of any profile. Log viewing on that image requires `ALLOW_LOGS=1` in addition to `CONTAINERS=1`.
 
 Compose Doctor classifies socket-proxy topologies in-app and flags risky configurations such as a proxy that allows mutating API access, publishes a host port, or joins a non-internal network. See [Compose Doctor](/features/compose-doctor).

@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
@@ -29,11 +30,12 @@ import type { NetworkingNetworkBase } from './network/networkingTypes';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
+import { enabledProxyApiFlags } from '../helpers/socketProxyIdentity';
 import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
@@ -171,6 +173,12 @@ export interface BulkStackInfo {
   running?: number;
   /** Total container count for the stack; paired with `running` for the sidebar tooltip. */
   total?: number;
+  /**
+   * Containers in Docker's `restarting` state (set with `running`/`total`).
+   * A restart loop spends its downtime here rather than as `running`, so the
+   * sidebar needs the count to offer Stop on a stack that never settles.
+   */
+  restarting?: number;
   /** True when this stack is the running Sencho instance (compose project matches stack name). */
   isSelf?: boolean;
   /** Unique runtime Docker network names from listContainers NetworkSettings. Omitted when none were observed. */
@@ -329,6 +337,74 @@ export interface LabelInventoryRow {
   inspectFailed: boolean;
 }
 
+/** A bind mount on a container, normalized from Docker inspect. */
+export interface SocketInventoryMountRow {
+  type: string;
+  source: string | null;
+  destination: string | null;
+  readOnly: boolean;
+  name: string | null;
+}
+
+/** A port binding on a container, normalized from Docker inspect or list. */
+export interface SocketInventoryPortRow {
+  privatePort: number | null;
+  publicPort: number | null;
+  /** The binding address, null when Docker did not provide a readable one. */
+  ip: string | null;
+  /** The reported transport, null when it was present but unreadable. */
+  protocol: string | null;
+}
+
+export interface SocketInventoryNetworkRow {
+  name: string;
+  id: string | null;
+  ipAddress: string | null;
+}
+
+/**
+ * One container as the socket inventory needs it: the runtime metadata an
+ * authorized discovery read may use, with no raw environment values. Proxy API
+ * flags are interpreted from the full environment before any bound is applied,
+ * so bounding retained data cannot invert a flag's meaning.
+ */
+export interface SocketInventoryContainerRow {
+  id: string;
+  name: string;
+  state: string;
+  /** Docker's human-readable status line (for example "Exited (0) 2 days ago"). */
+  status: string;
+  image: string;
+  imageId: string;
+  stack: string | null;
+  service: string | null;
+  composeProject: string | null;
+  composeWorkingDir: string | null;
+  labels: Record<string, string>;
+  inspectFailed: boolean;
+  health: string | null;
+  mounts: SocketInventoryMountRow[];
+  ports: SocketInventoryPortRow[];
+  exposedPorts: string[];
+  networks: SocketInventoryNetworkRow[];
+  /** Recognized proxy API group names enabled with the literal value `1`. */
+  apiGroups: string[];
+  /** null when the security fact was present but could not be read. */
+  privileged: boolean | null;
+  /** null when the security fact was present but could not be read. */
+  readonlyRootfs: boolean | null;
+  /** A metadata list exceeded a bound or could not be read completely; the row is incomplete. */
+  metadataTruncated: boolean;
+}
+
+/** One bounded container listing for the socket inventory. */
+export interface SocketInventoryListResult {
+  rows: SocketInventoryContainerRow[];
+  /** Containers Docker listed, before the inspection bound was applied. */
+  listedContainers: number;
+  truncated: boolean;
+}
+
 /**
  * How the Docker endpoint guard treats a stop. `batch-checked` skips the guard,
  * for a caller that has just checked the whole batch with
@@ -374,6 +450,38 @@ class DockerController {
 
   public getDocker(): Docker {
     return this.docker;
+  }
+
+  /**
+   * The socket the active Docker client will dial: a unix path or the Windows
+   * named pipe. Dockerode resolves an unset `DOCKER_HOST` lazily (Docker
+   * Desktop's `~/.docker/run/docker.sock` can win over
+   * `/var/run/docker.sock`), so discovery must ask the client instead of
+   * assuming the conventional path. Returns null for tcp/ssh clients and when
+   * the modem cannot be inspected.
+   */
+  public async getDockerSocketPath(): Promise<string | null> {
+    const modem = (this.docker as unknown as {
+      modem?: {
+        socketPath?: string | (() => string | Promise<string>);
+        getSocketPath?: () => Promise<string | undefined>;
+      };
+    }).modem;
+    if (!modem) return null;
+    try {
+      if (typeof modem.getSocketPath === 'function') {
+        const resolved = await modem.getSocketPath();
+        return typeof resolved === 'string' && resolved.length > 0 ? resolved : null;
+      }
+      if (typeof modem.socketPath === 'string') return modem.socketPath || null;
+      if (typeof modem.socketPath === 'function') {
+        const resolved = await modem.socketPath();
+        return typeof resolved === 'string' && resolved.length > 0 ? resolved : null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
   }
 
   /** Drop the cached client for this node so the next lookup opens a new connection. */
@@ -2298,6 +2406,277 @@ class DockerController {
     return results;
   }
 
+  /**
+   * Containers with the runtime metadata the Docker socket inventory needs:
+   * state, Compose ownership, image identity, mounts, ports, networks, health,
+   * and the raw environment (parsed for recognized proxy flags only; never
+   * returned to a client). Stopped containers are included and carry their
+   * state. A container inspect failure degrades that row to list-level data and
+   * marks it `inspectFailed`, so an unreadable container is visible rather than
+   * silently absent.
+   */
+  public async listContainersForSocketInventory(limit = 1000): Promise<SocketInventoryListResult> {
+    const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
+    const allListed: unknown[] = await this.getAllContainers();
+    const boundedLimit = Number.isInteger(limit) && limit > 0 ? limit : 1000;
+    const listed = allListed.slice(0, boundedLimit);
+    const truncated = allListed.length > listed.length;
+    const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
+    const absDirToStack = DockerController.buildAbsDirMap(knownStacks);
+    const resolvedBase = path.resolve(COMPOSE_DIR);
+    const knownStackSet = new Set(knownStacks);
+
+    const rows = await mapWithConcurrency(listed, 8, async (raw): Promise<SocketInventoryContainerRow> => {
+      const listedRow = asRecord(raw);
+      const listedId = readUsableContainerString(listedRow?.Id);
+      const id = listedId ?? '';
+      const listedNames = listedRow?.Names;
+      const listedName = readUsableContainerString(Array.isArray(listedNames) ? listedNames[0] : undefined);
+      const name = (listedName ?? '').replace(/^\//, '');
+      const listedLabels = normalizeDockerLabels(listedRow?.Labels);
+      const listedStateValue = readUsableContainerString(listedRow?.State);
+      const listedState = listedStateValue ?? 'unknown';
+      const listedStatusValue = readUsableContainerString(listedRow?.Status);
+      const listedStatus = listedStatusValue ?? '';
+      const listedImageValue = readUsableContainerString(listedRow?.Image);
+      const listedImage = listedImageValue ?? '';
+      const listedImageIdValue = readUsableContainerString(listedRow?.ImageID);
+      const listedImageId = listedImageIdValue ?? '';
+      const listedPorts = normalizeDockerPorts(listedRow?.Ports);
+      const listedNetworkSettings = asRecord(listedRow?.NetworkSettings);
+      const listedNetworks = normalizeDockerNetworks(listedNetworkSettings?.Networks);
+      // A parent that is present but not a map (including an explicit null)
+      // makes its children unreadable; optional chaining alone would turn that
+      // into a clean absence.
+      const listedStructureIncomplete = listedRow === null
+        || (listedRow.Id !== undefined && listedId === null)
+        || (listedNames !== undefined && listedName === null)
+        || (listedRow.NetworkSettings !== undefined && listedNetworkSettings === null);
+      // A listing scalar an inspect result can replace only marks the row
+      // incomplete while it remains the value actually reported.
+      let listedStateIncomplete = listedRow?.State !== undefined && listedStateValue === null;
+      let listedImageIncomplete = listedRow?.Image !== undefined && listedImageValue === null;
+      let listedImageIdIncomplete = listedRow?.ImageID !== undefined && listedImageIdValue === null;
+      // No inspect field replaces the listing status, so an unreadable status is
+      // the value actually reported and must keep the row from reading complete.
+      const listedStatusIncomplete = listedRow?.Status !== undefined && listedStatusValue === null;
+      const rawListedLabels = Array.isArray(listedRow?.Labels)
+        ? listedRow.Labels.length
+        : Object.keys(asRecord(listedRow?.Labels) ?? {}).length;
+      const rawListedPorts = Array.isArray(listedRow?.Ports) ? listedRow.Ports.length : 0;
+      const rawListedNetworks = Object.keys(
+        asRecord(asRecord(listedRow?.NetworkSettings)?.Networks) ?? {},
+      ).length;
+
+      let labels = listedLabels.labels;
+      let state = listedState;
+      const status = listedStatus;
+      let image = listedImage;
+      let imageId = listedImageId;
+      let health: string | null = null;
+      let mounts: SocketInventoryMountRow[] = [];
+      let ports = listedPorts.ports;
+      let exposedPorts: string[] = [];
+      let networks = listedNetworks.networks;
+      let apiGroups: string[] = [];
+      // Unknown until a readable HostConfig says otherwise: an unreadable
+      // security fact is never reported as a proven negative.
+      let privileged: boolean | null = null;
+      let readonlyRootfs: boolean | null = null;
+      let metadataTruncated = rawListedLabels > 256 || rawListedPorts > 64 || rawListedNetworks > 32
+        || listedLabels.incomplete || listedPorts.incomplete || listedNetworks.incomplete;
+      let inspectFailed = id.length === 0;
+      // Inspect fields that are present but unreadable are listed fallbacks, not
+      // facts: the row still reads incomplete rather than complete with a
+      // silently substituted value.
+      let inspectFieldIncomplete = false;
+
+      if (id) {
+        try {
+          const info = await this.docker.getContainer(id).inspect();
+          // A present but unreadable parent (a scalar, an array, or an explicit
+          // null) makes every child unreadable. asRecord alone would fold it
+          // into an absent map and the children would read as cleanly empty.
+          const configValue = info.Config;
+          const config = asRecord(configValue);
+          if (configValue !== undefined && config === null) inspectFieldIncomplete = true;
+          const stateValue = info.State;
+          const stateInfo = asRecord(stateValue);
+          if (stateValue !== undefined && stateInfo === null) inspectFieldIncomplete = true;
+          const networkSettingsValue = info.NetworkSettings;
+          const networkSettings = asRecord(networkSettingsValue);
+          if (networkSettingsValue !== undefined && networkSettings === null) inspectFieldIncomplete = true;
+          const hostConfigValue = info.HostConfig;
+          const hostConfig = asRecord(hostConfigValue);
+          if (hostConfigValue !== undefined && hostConfig === null) inspectFieldIncomplete = true;
+
+          const inspectedLabels = normalizeDockerLabels(config?.Labels);
+          labels = { ...listedLabels.labels, ...inspectedLabels.labels };
+          // A scalar that is present but empty or whitespace is unreadable
+          // evidence, not a replacement: it must not erase a readable listing
+          // value, and it must keep the row from reading complete. An explicit
+          // null or a non-string is unreadable for the same reason.
+          const inspectedState = readUsableContainerString(stateInfo?.Status);
+          if (stateInfo?.Status !== undefined && inspectedState === null) {
+            inspectFieldIncomplete = true;
+          }
+          state = inspectedState ?? state;
+          if (inspectedState !== null) {
+            listedStateIncomplete = false;
+          }
+          const inspectedImage = readUsableContainerString(config?.Image);
+          if (config?.Image !== undefined && inspectedImage === null) {
+            inspectFieldIncomplete = true;
+          }
+          image = inspectedImage ?? image;
+          if (inspectedImage !== null) {
+            listedImageIncomplete = false;
+          }
+          const inspectedImageId = readUsableContainerString(info.Image);
+          if (info.Image !== undefined && inspectedImageId === null) {
+            inspectFieldIncomplete = true;
+          }
+          imageId = inspectedImageId ?? imageId;
+          if (inspectedImageId !== null) {
+            listedImageIdIncomplete = false;
+          }
+          const healthValue = stateInfo?.Health;
+          const healthInfo = asRecord(healthValue);
+          // A present Health that is not a map (including an explicit null) is
+          // unreadable, not proof that the container has no healthcheck.
+          if (healthValue !== undefined && healthInfo === null) {
+            inspectFieldIncomplete = true;
+          }
+          // A Health map without a readable Status cannot prove an absent
+          // healthcheck either: `{}` is unreadable evidence, not no evidence.
+          const rawHealth = healthInfo?.Status;
+          const inspectedHealth = readUsableContainerString(rawHealth);
+          if (healthInfo !== null && (rawHealth === undefined || inspectedHealth === null)) {
+            inspectFieldIncomplete = true;
+          }
+          health = inspectedHealth;
+          const inspectedMounts = normalizeDockerMounts(info.Mounts);
+          mounts = inspectedMounts.mounts;
+          const inspectedExposed = normalizeDockerExposedPorts(config?.ExposedPorts);
+          exposedPorts = inspectedExposed.ports;
+          // Inspect is more authoritative than the list, but it must not erase
+          // valid listing evidence when a binding is malformed: the normalizer
+          // restores the list-level published port and marks the row incomplete.
+          const inspectedPorts = normalizeInspectPorts(networkSettings?.Ports, ports);
+          ports = inspectedPorts.ports;
+          const inspectedNetworks = normalizeDockerNetworks(networkSettings?.Networks);
+          if (inspectedNetworks.networks.length > 0) {
+            // Inspect is authoritative for which networks are attached, but an
+            // unreadable field must not erase a readable listing value for the
+            // same network. Backfill per name; the row is already incomplete.
+            const listedByName = new Map(listedNetworks.networks.map(network => [network.name, network]));
+            networks = inspectedNetworks.networks.map(network => {
+              const listed = listedByName.get(network.name);
+              return listed
+                ? {
+                  name: network.name,
+                  id: network.id ?? listed.id,
+                  ipAddress: network.ipAddress ?? listed.ipAddress,
+                }
+                : network;
+            });
+          }
+          // Interpret the flags from the full environment, before any bound is
+          // applied: truncating an entry first can turn `KEY=<spaces>1` into
+          // `KEY=<spaces>` (lost) or `KEY=1<spaces>0` into `KEY=1` (false grant).
+          const rawEnv = config?.Env;
+          if (Array.isArray(rawEnv)) {
+            apiGroups = enabledProxyApiFlags(rawEnv.filter((entry): entry is string => typeof entry === 'string'));
+          }
+          const rawMounts = Array.isArray(info.Mounts) ? info.Mounts.length : 0;
+          const rawLabels = Array.isArray(config?.Labels)
+            ? config.Labels.length
+            : Object.keys(asRecord(config?.Labels) ?? {}).length;
+          const rawNetworks = Object.keys(asRecord(networkSettings?.Networks) ?? {}).length;
+          const rawExposed = Object.keys(asRecord(config?.ExposedPorts) ?? {}).length;
+          const rawPorts = Object.keys(asRecord(networkSettings?.Ports) ?? {}).length;
+          // A security fact that is present but not a boolean is unreadable; it
+          // must never be reported as a proven negative.
+          if (hostConfig !== null) {
+            if (hostConfig.Privileged !== undefined) {
+              if (typeof hostConfig.Privileged === 'boolean') {
+                privileged = hostConfig.Privileged;
+              } else {
+                inspectFieldIncomplete = true;
+              }
+            }
+            if (hostConfig.ReadonlyRootfs !== undefined) {
+              if (typeof hostConfig.ReadonlyRootfs === 'boolean') {
+                readonlyRootfs = hostConfig.ReadonlyRootfs;
+              } else {
+                inspectFieldIncomplete = true;
+              }
+            }
+          }
+          metadataTruncated = metadataTruncated || inspectedPorts.truncated || inspectedPorts.incomplete
+            || inspectedMounts.incomplete || inspectedLabels.incomplete || inspectedExposed.incomplete
+            || inspectedNetworks.incomplete || inspectFieldIncomplete
+            || !Array.isArray(info.Mounts)
+            || rawMounts > 64 || rawLabels > 256
+            || rawNetworks > 32 || rawExposed > 64 || rawPorts > 64
+            // An environment that cannot be read or contains a non-string
+            // entry may hide a recognized flag, so the row is incomplete.
+            || (rawEnv !== undefined && rawEnv !== null
+              && (!Array.isArray(rawEnv) || rawEnv.some(entry => typeof entry !== 'string')));
+        } catch (err) {
+          inspectFailed = true;
+          console.error(
+            '[DockerController] Container inspect failed for socket inventory %s:',
+            sanitizeForLog(id),
+            errorMessageForLog(err),
+          );
+        }
+      }
+
+      // Listing fields that an inspect result did not replace are the values
+      // actually reported, so their unreadability makes the row incomplete.
+      metadataTruncated = metadataTruncated || listedStructureIncomplete
+        || listedStateIncomplete || listedImageIncomplete || listedImageIdIncomplete
+        || listedStatusIncomplete;
+
+      const composeProject = labels['com.docker.compose.project'] ?? null;
+      const service = labels['com.docker.compose.service'] ?? null;
+      const composeWorkingDir = labels['com.docker.compose.project.working_dir'] ?? null;
+      const stack = DockerController.resolveContainerStack(
+        labels,
+        projectToStack,
+        knownStackSet,
+        absDirToStack,
+        resolvedBase,
+      );
+
+      return {
+        id,
+        name,
+        state,
+        status,
+        image,
+        imageId,
+        stack,
+        service,
+        composeProject,
+        composeWorkingDir,
+        labels,
+        inspectFailed,
+        health,
+        mounts,
+        ports,
+        exposedPorts,
+        networks,
+        apiGroups,
+        privileged,
+        readonlyRootfs,
+        metadataTruncated,
+      };
+    });
+    return { rows, listedContainers: allListed.length, truncated };
+  }
+
   /** Resolve a container by its durable name (not ephemeral ID). */
   public async findContainerByName(name: string): Promise<{
     id: string;
@@ -2695,13 +3074,13 @@ class DockerController {
     // only used if an inspect fails, since it never moves on restart.
     const runningByStack: Record<string, { ids: string[]; oldestCreated?: number }> = {};
 
-    // Per stack, tally running, genuinely-failed (crashed), and total containers
-    // so the status can distinguish a fully-up stack from one that is partially
-    // degraded (some running, some crashed).
-    const countsByStack: Record<string, { running: number; failed: number; total: number }> = {};
+    // Per stack, tally running, genuinely-failed (crashed), restart-looping,
+    // and total containers so the status can distinguish a fully-up stack from
+    // one that is partially degraded (some running, some crashed).
+    const countsByStack: Record<string, { running: number; failed: number; restarting: number; total: number }> = {};
     const networksByStack: Record<string, Set<string>> = {};
     for (const name of stackNames) {
-      countsByStack[name] = { running: 0, failed: 0, total: 0 };
+      countsByStack[name] = { running: 0, failed: 0, restarting: 0, total: 0 };
     }
 
     for (const container of allContainers as any[]) {
@@ -2744,8 +3123,13 @@ class DockerController {
             if (typeof service === 'string' && service.length > 0) result[stackDir].mainPortService = service;
           }
         }
-      } else if (isContainerFailed(container.State, container.Status)) {
-        counts.failed += 1;
+      } else {
+        if (isContainerFailed(container.State, container.Status)) {
+          counts.failed += 1;
+        }
+        // A restart loop is counted in every state, clean exit or not: the
+        // sidebar offers Stop from this count, and Docker is already retrying.
+        if (container.State === 'restarting') counts.restarting += 1;
       }
     }
 
@@ -2754,13 +3138,14 @@ class DockerController {
     // finished one-shot container (exit 0) stays "running". A stack with no
     // containers keeps its seeded "unknown".
     for (const name of stackNames) {
-      const { running, failed, total } = countsByStack[name];
+      const { running, failed, restarting, total } = countsByStack[name];
       if (total === 0) continue;
       if (running === 0) result[name].status = 'exited';
       else if (failed > 0) result[name].status = 'partial';
       else result[name].status = 'running';
       result[name].running = running;
       result[name].total = total;
+      result[name].restarting = restarting;
       const netNames = networksByStack[name];
       if (netNames && netNames.size > 0) {
         result[name].networks = [...netNames].sort((a, b) => a.localeCompare(b));
@@ -3670,5 +4055,555 @@ export const updateGlobalDockerNetwork = async () => {
 
 // Poll network stats every 5s (reduced from 3s to lower Docker daemon pressure)
 setInterval(updateGlobalDockerNetwork, 5000);
+
+// ── Socket inventory metadata normalization ────────────────────────────
+// Docker metadata is untrusted input: a daemon, an old API version, or a
+// proxy can return a field as a different type, null, or absent. These
+// helpers narrow every value once, so the inventory never throws on a
+// malformed field and never keeps an unbounded value.
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readContainerString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+/**
+ * A scalar that must carry usable evidence. Docker reports a readable image,
+ * image ID, state, status, name, or health status as a non-empty string, so an
+ * empty or whitespace-only value is unreadable metadata rather than a fact: it
+ * must not replace a readable fallback, and it must keep the row incomplete.
+ * The shared reader stays permissive for fields where an empty string is
+ * legitimate (a wildcard bind address, an empty label value).
+ */
+function readUsableContainerString(value: unknown): string | null {
+  const text = readContainerString(value);
+  return text !== null && text.trim().length > 0 ? text : null;
+}
+
+/**
+ * A host address Docker reports for a binding or network: the empty string (a
+ * wildcard binding, or a network with no address) or a literal IP. Any other
+ * string is malformed metadata, not an address, and must never be presented as
+ * one: null tells the reader it could not be read.
+ */
+function readBindingAddress(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (value === '') return '';
+  return isIP(value) === 0 ? null : value;
+}
+
+const MIN_TCP_PORT = 1;
+const MAX_TCP_PORT = 65535;
+
+/** An INTEGER TCP/UDP port number in 1..65535. */
+function readPortNumber(value: unknown): number | null {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= MIN_TCP_PORT
+    && value <= MAX_TCP_PORT
+    ? value
+    : null;
+}
+
+/** A port string is valid only when the whole value is a decimal port. */
+function parsePortString(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  return readPortNumber(Number.parseInt(trimmed, 10));
+}
+
+/** Docker port protocols. Anything else is unreadable metadata, not a protocol. */
+const KNOWN_PORT_PROTOCOLS = new Set(['tcp', 'udp', 'sctp']);
+
+/**
+ * A port protocol as reported, canonicalized to lower case. `recognized` is
+ * false for a non-empty protocol Docker does not publish, so callers can keep
+ * the reported value (never invent `tcp`) while marking the row incomplete.
+ * null means the value itself is unreadable (missing, non-string, or empty).
+ */
+function readPortProtocol(value: unknown): { protocol: string; recognized: boolean } | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const protocol = value.toLowerCase();
+  return { protocol, recognized: KNOWN_PORT_PROTOCOLS.has(protocol) };
+}
+
+/**
+ * A complete `private/protocol` exposed-port key. The private port must be in
+ * range and the protocol must be one Docker can publish; a key that does not
+ * parse is unreadable evidence, not a port fact.
+ */
+function normalizeExposedPortSpec(spec: string): string | null {
+  const slash = spec.lastIndexOf('/');
+  const rawPrivatePort = slash > 0 ? spec.slice(0, slash) : spec;
+  const privatePort = parsePortString(rawPrivatePort);
+  if (privatePort === null) return null;
+  if (slash <= 0) return `${privatePort}/tcp`;
+  const protocol = readPortProtocol(spec.slice(slash + 1));
+  if (protocol === null || !protocol.recognized) return null;
+  return `${privatePort}/${protocol.protocol}`;
+}
+
+interface NormalizedLabels {
+  labels: Record<string, string>;
+  /** A label collection or entry could not be read, or the list exceeded its bound. */
+  incomplete: boolean;
+}
+
+function normalizeDockerLabels(value: unknown): NormalizedLabels {
+  // A null-prototype dictionary keeps every own string key, including
+  // `__proto__`: a plain `{}` routes that assignment through the inherited
+  // setter and silently drops a readable label.
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
+  let count = 0;
+  let incomplete = false;
+  const put = (key: unknown, raw: unknown) => {
+    if (typeof key !== 'string' || key.length === 0) {
+      if (key !== undefined && key !== null) incomplete = true;
+      return;
+    }
+    if (count >= 256) return;
+    // Docker labels are strings. A non-string value (an object coerced to
+    // "[object Object]", a number, or an explicit null) is malformed metadata:
+    // never invent a label text from it, and never let the row read complete.
+    if (typeof raw !== 'string') {
+      incomplete = true;
+      return;
+    }
+    count += 1;
+    out[key] = raw;
+  };
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry !== 'string') {
+        incomplete = true;
+        continue;
+      }
+      const eq = entry.indexOf('=');
+      if (eq <= 0) put(entry, '');
+      else put(entry.slice(0, eq), entry.slice(eq + 1));
+    }
+    return { labels: out, incomplete };
+  }
+  const record = asRecord(value);
+  if (record) {
+    for (const [key, raw] of Object.entries(record)) put(key, raw);
+  } else if (value !== undefined && value !== null) {
+    incomplete = true;
+  }
+  return { labels: out, incomplete };
+}
+
+interface NormalizedMounts {
+  mounts: SocketInventoryMountRow[];
+  /**
+   * An entry, mount field, or read/write flag could not be read, a mount type
+   * had to be canonicalized, or the list exceeded its bound.
+   */
+  incomplete: boolean;
+}
+
+/**
+ * Docker's documented mount types. Any other value is not a type we can trust:
+ * it may be a host bind (so the mount must stay visible) and it is malformed
+ * metadata (so the row cannot read complete).
+ */
+const KNOWN_MOUNT_TYPES = new Set(['bind', 'volume', 'tmpfs', 'npipe', 'cluster']);
+
+function normalizeDockerMounts(value: unknown): NormalizedMounts {
+  if (!Array.isArray(value)) {
+    return { mounts: [], incomplete: value !== undefined && value !== null };
+  }
+  const mounts: SocketInventoryMountRow[] = [];
+  let incomplete = value.length > 64;
+  for (const entry of value.slice(0, 64)) {
+    const mount = asRecord(entry);
+    // A missing entry could be the socket bind: keep the row incomplete rather
+    // than letting malformed metadata read as a clean absence.
+    if (!mount) {
+      incomplete = true;
+      continue;
+    }
+    const rawType = readContainerString(mount.Type);
+    // A case/whitespace variant is read as its canonical type but still marks
+    // the row incomplete. Anything else is an unreadable type: `unknown` is a
+    // possible bind, so a consumer is never dropped just because the daemon
+    // spelled the type differently.
+    const canonicalType = rawType === null ? null : rawType.trim().toLowerCase();
+    const knownType = canonicalType !== null && KNOWN_MOUNT_TYPES.has(canonicalType)
+      ? canonicalType
+      : null;
+    if (knownType === null) incomplete = true;
+    if (rawType !== null && rawType !== knownType) incomplete = true;
+    const type = knownType ?? 'unknown';
+    const source = readContainerString(mount.Source);
+    const destination = readContainerString(mount.Destination);
+    if (source === null || destination === null) incomplete = true;
+    // An empty destination is unreadable for every type. An empty source is
+    // valid only for tmpfs; for a bind it could be the socket, and Docker
+    // always supplies one for volume, npipe, and cluster mounts.
+    if (destination === '') incomplete = true;
+    if (source === '' && type !== 'tmpfs') incomplete = true;
+    // A read/write flag that is not a boolean (including an explicit null) is
+    // unreadable; the safe reading is still writable, but the row must not look
+    // complete.
+    if (mount.RW !== undefined && typeof mount.RW !== 'boolean') {
+      incomplete = true;
+    }
+    mounts.push({
+      type,
+      source,
+      destination,
+      // A missing read/write flag is treated as writable: the safe reading is
+      // the one that does not clear a risk.
+      readOnly: mount.RW === false,
+      name: readContainerString(mount.Name),
+    });
+  }
+  return { mounts, incomplete };
+}
+
+interface NormalizedPorts {
+  ports: SocketInventoryPortRow[];
+  /** A listing entry could not be read, or the list exceeded its bound. */
+  incomplete: boolean;
+}
+
+function normalizeDockerPorts(value: unknown): NormalizedPorts {
+  if (!Array.isArray(value)) {
+    return { ports: [], incomplete: value !== undefined && value !== null };
+  }
+  const ports: SocketInventoryPortRow[] = [];
+  let incomplete = value.length > 64;
+  for (const entry of value.slice(0, 64)) {
+    const port = asRecord(entry);
+    if (!port) {
+      incomplete = true;
+      continue;
+    }
+    const privatePort = readPortNumber(port.PrivatePort);
+    // A listing entry with no readable private port is not a usable binding.
+    if (privatePort === null) incomplete = true;
+    // 0 is Docker's "not published"; any other value must be a complete,
+    // in-range integer, never a numeric prefix of a malformed string.
+    let publicPort: number | null = null;
+    if (port.PublicPort !== undefined && port.PublicPort !== null && port.PublicPort !== 0) {
+      publicPort = readPortNumber(port.PublicPort);
+      if (publicPort === null) incomplete = true;
+    }
+    const rawIp = readBindingAddress(port.IP);
+    // A published binding always carries its host address. Missing, non-string,
+    // or unparseable metadata must not become the empty string, which the
+    // response would report as a proven wildcard binding.
+    if (publicPort !== null && rawIp === null) incomplete = true;
+    if (port.IP !== undefined && rawIp === null) incomplete = true;
+    // An absent Type is Docker's default transport. A present-but-unreadable
+    // protocol is null, never a clean `tcp` default; an unknown non-empty
+    // protocol is kept as reported rather than rewritten to `tcp`. Both mark
+    // the row incomplete.
+    const protocol = port.Type === undefined
+      ? { protocol: 'tcp', recognized: true }
+      : readPortProtocol(port.Type);
+    if (port.Type !== undefined && (protocol === null || !protocol.recognized)) {
+      incomplete = true;
+    }
+    ports.push({
+      privatePort,
+      publicPort,
+      ip: rawIp,
+      protocol: protocol?.protocol ?? null,
+    });
+  }
+  return { ports, incomplete };
+}
+
+interface InspectedPorts {
+  ports: SocketInventoryPortRow[];
+  /** A per-port binding list or the overall port list exceeded its bound. */
+  truncated: boolean;
+  /** A binding could not be read, or listing evidence had to be restored. */
+  incomplete: boolean;
+}
+
+function normalizeInspectPorts(
+  value: unknown,
+  fallback: SocketInventoryPortRow[],
+): InspectedPorts {
+  const bindings = asRecord(value);
+  if (!bindings) {
+    return {
+      ports: fallback.map(port => ({ ...port })),
+      truncated: false,
+      // An absent section is not a loss; a non-null value that is not a map is.
+      incomplete: value !== undefined && value !== null,
+    };
+  }
+  const entries = Object.entries(bindings);
+  const ports: SocketInventoryPortRow[] = [];
+  let truncated = false;
+  let incomplete = false;
+  for (const [spec, rawBindings] of entries) {
+    if (ports.length >= 64) {
+      truncated = true;
+      break;
+    }
+    const slash = spec.lastIndexOf('/');
+    const rawPrivatePort = slash > 0 ? spec.slice(0, slash) : spec;
+    const privatePort = parsePortString(rawPrivatePort);
+    if (privatePort === null) incomplete = true;
+    const rawProtocol = slash > 0 ? spec.slice(slash + 1) : 'tcp';
+    // A spec without a protocol is Docker's default transport. An empty
+    // protocol is unreadable, and an unknown non-empty protocol is not a Docker
+    // transport. Keep the binding (and its exposure) and the reported value, but
+    // never rewrite it to `tcp` or let the row read complete.
+    const protocol = slash > 0 ? readPortProtocol(rawProtocol) : { protocol: 'tcp', recognized: true };
+    if (slash > 0 && (protocol === null || !protocol.recognized)) incomplete = true;
+    const protocolName = protocol?.protocol ?? null;
+    const targets = Array.isArray(rawBindings) ? rawBindings : [];
+    if (rawBindings !== undefined && rawBindings !== null && !Array.isArray(rawBindings)) {
+      incomplete = true;
+    }
+    if (targets.length === 0) {
+      ports.push({
+        privatePort,
+        publicPort: null,
+        ip: null,
+        protocol: protocolName,
+      });
+      continue;
+    }
+    if (targets.length > 8) truncated = true;
+    for (const binding of targets.slice(0, 8)) {
+      if (ports.length >= 64) {
+        truncated = true;
+        break;
+      }
+      const host = asRecord(binding);
+      if (!host) {
+        incomplete = true;
+        ports.push({
+          privatePort,
+          publicPort: null,
+          ip: null,
+          protocol: protocolName,
+        });
+        continue;
+      }
+      // Docker reports the host port as a string; an empty one means exposed only.
+      const rawPublic = host.HostPort;
+      let publicPort: number | null = null;
+      if (typeof rawPublic === 'number') {
+        if (rawPublic !== 0) {
+          publicPort = readPortNumber(rawPublic);
+          if (publicPort === null) incomplete = true;
+        }
+      } else if (typeof rawPublic === 'string') {
+        const trimmed = rawPublic.trim();
+        if (trimmed !== '') {
+          // The whole value must be a port: `2375junk`, `2375.9`, and `1e4`
+          // are malformed metadata, not the number their prefix spells.
+          publicPort = parsePortString(trimmed);
+          if (publicPort === null) incomplete = true;
+        }
+      } else {
+        // A binding without a readable HostPort is not "exposed only": Docker
+        // writes an empty string for that case, so this is unreadable metadata.
+        incomplete = true;
+      }
+      const rawIp = readBindingAddress(host.HostIp);
+      // A published binding needs a readable address. Missing, non-string, or
+      // unparseable metadata must never become the empty string, which would
+      // read as a proven wildcard binding.
+      if (publicPort !== null && rawIp === null) incomplete = true;
+      if (host.HostIp !== undefined && rawIp === null) incomplete = true;
+      ports.push({
+        privatePort,
+        publicPort,
+        ip: rawIp,
+        protocol: protocolName,
+      });
+    }
+  }
+
+  // Inspect is more authoritative than the list, but it must not silently erase
+  // valid published-port evidence when its own binding is malformed, missing, or
+  // differs. Restore every distinct list binding inspect does not already carry,
+  // fill an unreadable inspect address from the list rather than dropping it,
+  // and flag the row incomplete; a readable inspect binding still wins in place.
+  // A spec whose inspect binding has no readable public port cannot mark a
+  // listing binding on a different public port as a stale duplicate, so every
+  // distinct listing public port for that spec is kept.
+  const specKey = (port: { privatePort: number | null; protocol: string | null }) =>
+    `${port.privatePort}/${port.protocol ?? '*'}`;
+  // Inspect can only supersede a listing binding when it identifies it. A
+  // missing public port or an unreadable protocol leaves the binding it would
+  // replace unknown, so readable listing evidence is kept beside it instead of
+  // being dropped as a stale duplicate.
+  const unreadableBindingSpecs = new Set(
+    ports
+      .filter(port => port.publicPort === null || port.protocol === null)
+      .map(specKey),
+  );
+  const hasUnreadableBinding = (port: { privatePort: number | null; protocol: string | null }) =>
+    unreadableBindingSpecs.has(specKey(port))
+    || (port.protocol !== null && unreadableBindingSpecs.has(`${port.privatePort}/*`));
+  let restored = false;
+  // A matching or in-place repair at the cap needs no additional slot, so
+  // capacity is enforced only when a binding is appended. An exact-cap inspect
+  // list must still get its unreadable address, protocol, or public port
+  // repaired from the listing.
+  const appendPort = (port: SocketInventoryPortRow): boolean => {
+    if (ports.length >= 64) {
+      truncated = true;
+      return false;
+    }
+    ports.push(port);
+    return true;
+  };
+  for (const candidate of fallback) {
+    // A listing entry whose private port is unreadable already marks the row
+    // incomplete; it carries no spec to restore.
+    if (candidate.privatePort === null) continue;
+    // An unreadable protocol on either side cannot identify a distinct spec:
+    // match it against the same private port so a readable inspect binding is
+    // not duplicated when it already carries the evidence.
+    const sameSpec = (port: SocketInventoryPortRow) =>
+      port.privatePort === candidate.privatePort
+      && (candidate.protocol === null || port.protocol === null || port.protocol === candidate.protocol);
+    const sameSpecPorts = ports.filter(sameSpec);
+    if (sameSpecPorts.length === 0) {
+      if (appendPort({ ...candidate })) restored = true;
+      continue;
+    }
+    // The spec is present. An exposed-only list entry adds nothing to it.
+    if (candidate.publicPort === null) continue;
+    const exactPort = sameSpecPorts.find(port =>
+      port.publicPort === candidate.publicPort && port.ip === candidate.ip);
+    if (exactPort) {
+      // An unreadable inspect protocol does not erase the readable listing one.
+      if (exactPort.protocol === null && candidate.protocol !== null) {
+        exactPort.protocol = candidate.protocol;
+        restored = true;
+      }
+      continue;
+    }
+    if (candidate.ip !== null) {
+      // Inspect has this public port but could not read its address. The
+      // listing's readable address is still evidence, so keep it in place of
+      // the unreadable value. A second list binding on the same public port
+      // (for example the wildcard next to a loopback) then falls through and is
+      // kept as its own binding.
+      const unreadableSamePort = sameSpecPorts.find(port =>
+        port.publicPort === candidate.publicPort && port.ip === null);
+      if (unreadableSamePort) {
+        unreadableSamePort.ip = candidate.ip;
+        if (unreadableSamePort.protocol === null && candidate.protocol !== null) {
+          unreadableSamePort.protocol = candidate.protocol;
+        }
+        restored = true;
+        continue;
+      }
+    } else if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) {
+      // An unreadable list address adds no address evidence to a binding that
+      // inspect already read on the same public port.
+      continue;
+    }
+    const nullMatch = sameSpecPorts.find(port => port.publicPort === null);
+    if (nullMatch) {
+      // Inspect could not establish a valid binding for this spec, so the whole
+      // listing binding is the evidence to keep. A readable inspect address is
+      // kept only when the listing address itself is unreadable.
+      nullMatch.publicPort = candidate.publicPort;
+      nullMatch.ip = candidate.ip ?? nullMatch.ip;
+      if (nullMatch.protocol === null && candidate.protocol !== null) {
+        nullMatch.protocol = candidate.protocol;
+      }
+      restored = true;
+      continue;
+    }
+    // Inspect carries the spec on the same public port with another address.
+    // That is additional binding evidence (for example the wildcard next to a
+    // loopback), so keep it and report the row incomplete. A different valid
+    // public port is inspect's authoritative replacement for the spec, so the
+    // stale listing entry is not duplicated.
+    if (sameSpecPorts.some(port => port.publicPort === candidate.publicPort)) {
+      if (appendPort({ ...candidate })) restored = true;
+    } else if (hasUnreadableBinding(candidate)) {
+      // Inspect had no readable published binding for this spec (or could not
+      // identify its protocol), so this distinct listing public port is
+      // evidence rather than a stale duplicate.
+      if (appendPort({ ...candidate })) restored = true;
+    }
+  }
+  return { ports, truncated, incomplete: incomplete || restored };
+}
+
+interface NormalizedExposedPorts {
+  ports: string[];
+  /** A non-null exposed-port map could not be read. */
+  incomplete: boolean;
+}
+
+function normalizeDockerExposedPorts(value: unknown): NormalizedExposedPorts {
+  const record = asRecord(value);
+  if (!record) {
+    return {
+      ports: [],
+      incomplete: value !== undefined && value !== null,
+    };
+  }
+  const keys = Object.keys(record);
+  const ports: string[] = [];
+  let incomplete = keys.length > 64;
+  for (const key of keys.slice(0, 64)) {
+    const spec = normalizeExposedPortSpec(key);
+    if (spec === null) {
+      // A key that is not a complete port specification is unreadable, not a
+      // port fact: drop it and keep the row from reading complete.
+      incomplete = true;
+      continue;
+    }
+    ports.push(spec);
+  }
+  return { ports, incomplete };
+}
+
+interface NormalizedNetworks {
+  networks: SocketInventoryNetworkRow[];
+  /** A network map or entry could not be read, or the list exceeded its bound. */
+  incomplete: boolean;
+}
+
+function normalizeDockerNetworks(value: unknown): NormalizedNetworks {
+  const record = asRecord(value);
+  if (!record) {
+    return {
+      networks: [],
+      incomplete: value !== undefined && value !== null,
+    };
+  }
+  const networks: SocketInventoryNetworkRow[] = [];
+  let incomplete = false;
+  for (const [name, raw] of Object.entries(record)) {
+    if (networks.length >= 32) {
+      incomplete = true;
+      break;
+    }
+    const network = asRecord(raw);
+    if (!network) incomplete = true;
+    const id = readContainerString(network?.NetworkID);
+    const ipAddress = readBindingAddress(network?.IPAddress);
+    // A present field of the wrong type or an unparseable address is unreadable,
+    // not a null value.
+    if (network && network.NetworkID !== undefined && id === null) incomplete = true;
+    if (network && network.IPAddress !== undefined && ipAddress === null) incomplete = true;
+    networks.push({ name, id, ipAddress });
+  }
+  return { networks, incomplete };
+}
 
 export default DockerController;

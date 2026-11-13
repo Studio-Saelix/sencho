@@ -266,4 +266,93 @@ describe('useRegionData', () => {
     expect(result.current.data).toEqual(['node-2']);
     expect(result.current.status).toBe('ready');
   });
+
+  it('builds each change on the payload on screen when it runs, not on the closure that made it', async () => {
+    const { load, pending } = deferredLoader<string[]>();
+    const { result } = renderHook(() => useRegionData(1, load));
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve(['a']));
+    await waitFor(() => expect(result.current.data).toEqual(['a']));
+
+    // Two changes are made from the same render; the second runs after the first.
+    const first = result.current.update;
+    const second = result.current.update;
+    act(() => first((current) => [...current, 'b']));
+    act(() => second((current) => [...current, 'c']));
+    expect(result.current.data).toEqual(['a', 'b', 'c']);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    // Two changes landing in one tick each still build on the other.
+    act(() => {
+      first((current) => [...current, 'd']);
+      second((current) => [...current, 'e']);
+    });
+    expect(result.current.data).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('abandons a read that started before a change, like an adopted payload', async () => {
+    const { load, pending } = deferredLoader<string[]>();
+    const { result } = renderHook(() => useRegionData(1, load));
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve(['a']));
+    await waitFor(() => expect(result.current.data).toEqual(['a']));
+
+    act(() => { void result.current.refresh(); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => result.current.update((current) => [...current, 'b']));
+    await act(async () => { pending[1].resolve(['a']); });
+    expect(result.current.data).toEqual(['a', 'b']);
+  });
+
+  it('does nothing before a first payload or for another scope', async () => {
+    const { load, pending } = deferredLoader<string[]>();
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: number }) => useRegionData(scope, load),
+      { initialProps: { scope: 1 } },
+    );
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    const change = vi.fn((current: string[]) => [...current, 'x']);
+    act(() => result.current.update(change));
+    expect(change).not.toHaveBeenCalled();
+    // The first read is still the one that answers.
+    act(() => pending[0].resolve(['node-1']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-1']));
+
+    const updateNodeOne = result.current.update;
+    rerender({ scope: 2 });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].resolve(['node-2']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-2']));
+
+    act(() => updateNodeOne(change));
+    expect(change).not.toHaveBeenCalled();
+    expect(result.current.data).toEqual(['node-2']);
+  });
+
+  it('leaves the read of the scope on screen alone when another scope changes it', async () => {
+    const { load, pending } = deferredLoader<string[]>();
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: number }) => useRegionData(scope, load),
+      { initialProps: { scope: 1 } },
+    );
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve(['node-1']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-1']));
+    const updateNodeOne = result.current.update;
+    rerender({ scope: 2 });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].resolve(['node-2']));
+    await waitFor(() => expect(result.current.data).toEqual(['node-2']));
+
+    // Node 2 refreshes, and a node 1 change arrives while that read is in flight.
+    act(() => { void result.current.refresh(); });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    act(() => updateNodeOne((current) => [...current, 'late']));
+    await act(async () => { pending[2].resolve(['node-2 fresh']); });
+    expect(result.current.data).toEqual(['node-2 fresh']);
+  });
 });

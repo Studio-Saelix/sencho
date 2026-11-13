@@ -10,6 +10,7 @@ import { buildTargetImageRef } from '../helpers/selfUpdateCompose';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { MonitorService } from '../services/MonitorService';
 import SelfIdentityService from '../services/SelfIdentityService';
+import { SELF_UPDATE_UNAVAILABLE_CODES, type SelfUpdateUnavailableCode } from '../helpers/selfUpdateEligibility';
 
 let tmpDir: string;
 
@@ -35,9 +36,11 @@ function mockSelfUpdateAvailable(over: {
   pinInfo?: { pinKind: 'semver' | 'floating' | 'digest' | 'unknown'; composeImageRef: string; filePath: string } | null;
   preflight?: { ok: true } | { ok: false; reason: string };
   available?: boolean;
+  unavailableCode?: SelfUpdateUnavailableCode | null;
 } = {}) {
   const svc = SelfUpdateService.getInstance();
   vi.spyOn(svc, 'isAvailable').mockReturnValue(over.available ?? true);
+  vi.spyOn(svc, 'getUnavailableCode').mockReturnValue(over.available === false ? (over.unavailableCode ?? 'detecting') : null);
   vi.spyOn(svc, 'getPinInfo').mockResolvedValue(over.pinInfo ?? null);
   vi.spyOn(svc, 'canSelfUpdateTarget').mockResolvedValue(over.preflight ?? { ok: true });
   vi.spyOn(svc, 'triggerUpdate').mockResolvedValue(undefined);
@@ -165,6 +168,25 @@ describe('GET /api/meta pin subset', () => {
     expect(res.body.imageChannel).toBe('community');
     expect(res.body).not.toHaveProperty('composeImageRef');
     expect(res.body).not.toHaveProperty('targetImageRef');
+  });
+
+  it('omits selfUpdateUnavailable while self-update is available', async () => {
+    mockSelfUpdateAvailable();
+
+    const res = await request(app).get('/api/meta');
+
+    expect(res.body).not.toHaveProperty('selfUpdateUnavailable');
+  });
+
+  it('serializes only bounded eligibility codes', async () => {
+    for (const code of SELF_UPDATE_UNAVAILABLE_CODES) {
+      mockSelfUpdateAvailable({ available: false, unavailableCode: code });
+
+      const res = await request(app).get('/api/meta');
+
+      expect(res.body.selfUpdateUnavailable).toBe(code);
+      expect(SELF_UPDATE_UNAVAILABLE_CODES).toContain(res.body.selfUpdateUnavailable);
+    }
   });
 
   it('reports updateBlocked=true for a digest pin', async () => {

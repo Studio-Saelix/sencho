@@ -250,7 +250,7 @@ describe('networking summary', () => {
     const refusedSpec = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(refusedSpec.body.exposed.stacks).toContain(STACK);
     const specLog = warn.mock.calls.map(args => format(...args)).join('\n');
-    expect(specLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: Error: Invalid context directory in deploy spec`);
+    expect(specLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: DeploySpecRefusedError: Invalid context directory in deploy spec`);
     expect(specLog).not.toContain('env files cannot be read');
 
     // A selection read that fails keeps its own cause instead of blaming env files.

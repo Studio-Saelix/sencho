@@ -24,9 +24,11 @@ import {
 import { satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { handleImageUpdateResponse } from './imageUpdateVerificationProxy';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { serializeSocketNodeIdentity } from '../services/socket/SocketInventoryService';
 import {
   PROXY_TIER_HEADER,
   PROXY_ROLE_HEADER,
+  PROXY_NODE_IDENTITY_HEADER,
   PROXY_DEPLOY_SOURCE_HEADER,
   PROXY_DEPLOY_ACTOR_HEADER,
   PROXY_SCOPED_STACK_NAME_HEADER,
@@ -368,6 +370,14 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         proxyReq.setHeader(PROXY_ROLE_HEADER, req.proxyElevatedRole);
       } else if (req.user?.role) {
         proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
+      }
+      // A remote numbers its own nodes from one, so a socket-inventory answer it
+      // produces is about the node the hub selected only if the hub says which
+      // one. Always strip a client-supplied value; attach this hub's identity
+      // for the exact target when the dispatcher stashed it for this hop.
+      proxyReq.removeHeader(PROXY_NODE_IDENTITY_HEADER);
+      if (req.proxyNodeIdentity) {
+        proxyReq.setHeader(PROXY_NODE_IDENTITY_HEADER, serializeSocketNodeIdentity(req.proxyNodeIdentity));
       }
       // Deploy provenance: always strip client-supplied values, then set
       // interactive manual + authenticated username for proxied browser/API
@@ -869,6 +879,26 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      // Socket inventory: the remote sees this hop as its machine user (user id
+      // zero), so it cannot resolve a grant the caller holds on the exact target
+      // node. Resolve the hub-side node-scoped grant here and forward the
+      // equivalent role for this request only; a global role that already grants
+      // node:read passes through unchanged, and wrong-node or absent grants stay
+      // denied before anything is forwarded.
+      if (isSocketInventoryRead(req)) {
+        const globalRole = req.user?.role;
+        const globalGrantsNodeRead = globalRole !== undefined
+          && (globalRole === 'admin'
+            || (ROLE_PERMISSIONS[globalRole]?.includes('node:read') ?? false));
+        if (!globalGrantsNodeRead) {
+          if (!checkPermission(req, 'node:read', 'node', String(req.nodeId))) {
+            res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+            return;
+          }
+          req.proxyElevatedRole = 'node-admin';
+        }
+      }
+
       // Named-stack hub pre-check + optional scoped-evidence elevation.
       const classified = classifyStackApiPath(req.method, req.path);
       if (classified.kind === 'unknown-named') {
@@ -1238,6 +1268,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       req.proxyTarget = target;
+      // The node answers about itself, so it can only report the node the
+      // caller selected if this hub names it. Set after every gate so a
+      // refused request never carries an identity claim.
+      if (isSocketInventoryRead(req)) {
+        req.proxyNodeIdentity = {
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          mode: node.mode,
+        };
+      }
 
       // Identity routes are reworked before the hop, not during it: a request
       // naming a node this instance cannot answer for is refused here rather
@@ -1599,6 +1640,12 @@ function isSshHostKeyProbeRoute(req: Request): boolean {
 /** Node-wide refresh and target-scanner alias share the same permission gate. */
 function isImageRefreshNodeWide(req: Request): boolean {
   return req.method === 'POST' && /^\/image-updates\/(?:refresh|recheck-target)\/?$/i.test(req.path);
+}
+
+/** GET /socket/inventory (path is post-/api strip). */
+function isSocketInventoryRead(req: Request): boolean {
+  return (req.method === 'GET' || req.method === 'HEAD')
+    && /^\/socket\/inventory\/?$/i.test(req.path);
 }
 
 /**

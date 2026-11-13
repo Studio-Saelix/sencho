@@ -19,7 +19,7 @@ import { activeBulkActions } from '../helpers/bulkActionLocks';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
 import { isValidDockerNetworkName } from '../services/network/dockerNetworkName';
 import { isDebugEnabled } from '../utils/debug';
-import { getErrorMessage } from '../utils/errors';
+import { getErrorMessage, isDockerNotFoundError } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 import { buildNodeLabelInventory } from '../services/LabelInventoryService';
@@ -457,9 +457,7 @@ systemMaintenanceRouter.get('/images/:id', async (req: Request, res: Response) =
     res.json(result);
   } catch (error: unknown) {
     console.error('Failed to inspect image:', error);
-    const err = error as Record<string, unknown>;
-    const is404 = (typeof err.statusCode === 'number' && err.statusCode === 404)
-      || (error instanceof Error && error.message.includes('404'));
+    const is404 = isDockerNotFoundError(error);
     res.status(is404 ? 404 : 500).json({ error: is404 ? 'Image not found' : 'Failed to inspect image' });
   }
 });
@@ -681,9 +679,7 @@ systemMaintenanceRouter.get('/networks/:id', async (req: Request, res: Response)
     res.json(networkInfo);
   } catch (error: unknown) {
     console.error('Failed to inspect network:', error);
-    const err = error as Record<string, unknown>;
-    const is404 = (typeof err.statusCode === 'number' && err.statusCode === 404)
-      || (error instanceof Error && error.message.includes('404'));
+    const is404 = isDockerNotFoundError(error);
     res.status(is404 ? 404 : 500).json({ error: is404 ? 'Network not found' : 'Failed to inspect network' });
   }
 });

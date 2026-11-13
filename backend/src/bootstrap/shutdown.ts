@@ -18,6 +18,7 @@ import { CveIntelService } from '../services/CveIntelService';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
+import SelfUpdateService from '../services/SelfUpdateService';
 
 /**
  * Wire graceful shutdown handlers. Docker sends SIGTERM when the container
@@ -37,6 +38,7 @@ export function installShutdownHandlers(server: Server): void {
       try { MonitorService.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] MonitorService cleanup failed:', (e as Error).message);
       }
+      try { SelfUpdateService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] SelfUpdateService cleanup failed:', (e as Error).message); }
       try { AutoHealService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] AutoHealService cleanup failed:', (e as Error).message); }
       try { HealthGateService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] HealthGateService cleanup failed:', (e as Error).message); }
       try { ServiceUpdateRecoveryService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] ServiceUpdateRecoveryService cleanup failed:', (e as Error).message); }

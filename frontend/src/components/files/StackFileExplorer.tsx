@@ -16,6 +16,7 @@ import { RenameDialog } from './RenameDialog';
 import { MoveFileDialog } from './MoveFileDialog';
 import { FilePermissionsDialog } from './FilePermissionsDialog';
 import type { FileEntry, FileRoot } from '@/lib/stackFilesApi';
+import type { PendingAuthoredReveal } from '@/lib/authoredLocation';
 
 interface StackFileExplorerProps {
   stackName: string;
@@ -23,6 +24,9 @@ interface StackFileExplorerProps {
   isDarkMode: boolean;
   onNavigateToCompose?: () => void;
   onNavigateToEnv?: () => void;
+  /** A location the Doctor or Compose Labels panel asked to open in this tab. */
+  reveal?: PendingAuthoredReveal | null;
+  onRevealApplied?: () => void;
 }
 
 const DEFAULT_TREE_WIDTH = 224;
@@ -101,6 +105,8 @@ export function StackFileExplorer({
   isDarkMode,
   onNavigateToCompose,
   onNavigateToEnv,
+  reveal,
+  onRevealApplied,
 }: StackFileExplorerProps) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedEntry, setSelectedEntry] = useState<FileEntry | null>(null);
@@ -189,6 +195,17 @@ export function StackFileExplorer({
   // When a root switch is requested while the viewer has unsaved edits, hold it
   // here until the user confirms or cancels in the guard modal.
   const [pendingRootId, setPendingRootId] = useState<string | null>(null);
+  const [pendingRevealSelection, setPendingRevealSelection] = useState<PendingAuthoredReveal | null>(null);
+  // A reveal for the already-selected path must reread it: the viewer may hold
+  // content loaded before the file changed. Bumped on every applied reveal.
+  const [viewerReloadKey, setViewerReloadKey] = useState(0);
+  const revealConfirmedRef = useRef(false);
+  // The one-shot reveal object already handled, so a state update after
+  // confirmation cannot reopen the same discard dialog.
+  const handledRevealRef = useRef<PendingAuthoredReveal | null>(null);
+  // Set once the user or a reported location has chosen a root. A root list
+  // that arrives afterwards must not replace that explicit choice.
+  const rootChosenRef = useRef(false);
 
   const selectedRoot = useMemo(
     () => roots.find((r) => r.id === selectedRootId) ?? STACK_SOURCE_FALLBACK,
@@ -273,6 +290,7 @@ export function StackFileExplorer({
     setSelectedRootId(STACK_SOURCE_ROOT_ID);
     setPendingRootId(null);
     setSelectedPaths(new Set());
+    rootChosenRef.current = false;
   }, [stackName]);
 
   // Discover the stack's file roots and default to the first browsable volume
@@ -284,13 +302,16 @@ export function StackFileExplorer({
         if (cancelled) return;
         const list = fetched.length ? fetched : [STACK_SOURCE_FALLBACK];
         setRoots(list);
+        // A location the operator already opened owns the selection; the late
+        // root list must not redirect a completed source reveal to a volume.
+        if (rootChosenRef.current) return;
         const defaultVolume = list.find((r) => r.kind !== 'stack-source' && r.browsable);
         setSelectedRootId(defaultVolume?.id ?? STACK_SOURCE_ROOT_ID);
       })
       .catch(() => {
         if (cancelled) return;
         setRoots([STACK_SOURCE_FALLBACK]);
-        setSelectedRootId(STACK_SOURCE_ROOT_ID);
+        if (!rootChosenRef.current) setSelectedRootId(STACK_SOURCE_ROOT_ID);
       });
     return () => { cancelled = true; };
   }, [stackName]);
@@ -299,6 +320,7 @@ export function StackFileExplorer({
 
   // Apply a root switch: reset the open file/tree to the new root's contents.
   const applyRootSwitch = useCallback((rootId: string) => {
+    rootChosenRef.current = true;
     setSelectedRootId(rootId);
     setSelectedPath(null);
     setSelectedEntry(null);
@@ -318,6 +340,9 @@ export function StackFileExplorer({
   }, [selectedRootId, isViewerDirty, applyRootSwitch]);
 
   const applySelection = useCallback((relPath: string, entry: FileEntry) => {
+    // Opening a file is an explicit navigation choice; a roots response that
+    // arrives afterwards must not switch the viewer to another root.
+    rootChosenRef.current = true;
     setSelectedPath(relPath);
     setSelectedEntry(entry);
     const parts = relPath.split('/');
@@ -333,6 +358,58 @@ export function StackFileExplorer({
     }
     applySelection(relPath, entry);
   }, [selectedPath, isViewerDirty, applySelection]);
+
+  /**
+   * A location always belongs to the stack-source root, so it switches back to
+   * that root when needed. The entry is a minimal file entry: the viewer loads
+   * the path itself, and the toolbar's permissions action only needs the name.
+   */
+  const applyRevealSelection = useCallback((pending: PendingAuthoredReveal) => {
+    // Source locations always live under the stack-source root.
+    rootChosenRef.current = true;
+    const relPath = pending.location.file;
+    setSelectedPath(relPath);
+    setSelectedEntry({
+      name: relPath.split('/').pop() ?? relPath,
+      type: 'file',
+      size: 0,
+      mtime: 0,
+      isProtected: false,
+    });
+    const parts = relPath.split('/');
+    parts.pop();
+    setCurrentDir(parts.join('/'));
+    // Even when the path is already selected, read it again so the range is
+    // applied to the content on disk now, not a buffer loaded earlier.
+    setViewerReloadKey((key) => key + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!reveal || reveal.target.surface !== 'files') {
+      handledRevealRef.current = null;
+      return;
+    }
+    if (handledRevealRef.current === reveal) return;
+    // A dirty viewer is never replaced or re-selected, whether the reveal names
+    // the open file or another one; the confirmation below discards on purpose.
+    if (isViewerDirty) {
+      handledRevealRef.current = reveal;
+      // A one-shot navigation command from the parent, not derived state.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPendingRevealSelection(reveal);
+      return;
+    }
+    handledRevealRef.current = reveal;
+    if (selectedRootId !== STACK_SOURCE_ROOT_ID) applyRootSwitch(STACK_SOURCE_ROOT_ID);
+    applyRevealSelection(reveal);
+  }, [reveal, selectedRootId, isViewerDirty, applyRootSwitch, applyRevealSelection]);
+
+  const confirmPendingReveal = useCallback(() => {
+    if (!pendingRevealSelection) return;
+    if (selectedRootId !== STACK_SOURCE_ROOT_ID) applyRootSwitch(STACK_SOURCE_ROOT_ID);
+    applyRevealSelection(pendingRevealSelection);
+    setPendingRevealSelection(null);
+  }, [pendingRevealSelection, selectedRootId, applyRootSwitch, applyRevealSelection]);
 
   const handleDeleted = useCallback(() => {
     setSelectedPath(null);
@@ -786,6 +863,11 @@ export function StackFileExplorer({
             rootId={selectedRootId}
             onSaved={refresh}
             onDirtyChange={setIsViewerDirty}
+            reloadKey={viewerReloadKey}
+            reveal={reveal && selectedPath !== null && reveal.location.file === selectedPath && !isViewerDirty
+              ? reveal.location
+              : null}
+            onRevealApplied={onRevealApplied}
           />
         </div>
       </div>
@@ -937,6 +1019,28 @@ export function StackFileExplorer({
       >
         <p className="text-sm text-muted-foreground">
           You have unsaved changes in the current file. Switching to another file will discard them.
+        </p>
+      </ConfirmModal>
+
+      {/* Unsaved-changes guard on a requested location */}
+      <ConfirmModal
+        open={pendingRevealSelection !== null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setPendingRevealSelection(null);
+            if (!revealConfirmedRef.current) onRevealApplied?.();
+            revealConfirmedRef.current = false;
+          }
+        }}
+        onCancel={() => { setPendingRevealSelection(null); onRevealApplied?.(); }}
+        kicker="FILES · UNSAVED CHANGES"
+        title="Discard unsaved changes?"
+        description="Opening the reported location will discard the edits in the current viewer."
+        confirmLabel="Discard and open"
+        onConfirm={() => { revealConfirmedRef.current = true; confirmPendingReveal(); }}
+      >
+        <p className="text-sm text-muted-foreground">
+          You have unsaved changes in the current file. Opening the reported location will discard them.
         </p>
       </ConfirmModal>
 

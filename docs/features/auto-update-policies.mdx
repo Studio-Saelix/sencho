@@ -28,7 +28,7 @@ The **Cards** view shows the same information as one card per stack, grouped by 
   <img src="/images/auto-update/readiness-board.png" alt="Readiness board with hero counter and a sortable table of pending updates with risk badges" />
 </Frame>
 
-The hero at the top counts pending updates across every node in your fleet and tells you how many are ready to apply without human review. Its subtitle reads `X of Y ready to apply automatically across N nodes`. Stacks with a major version bump are surfaced as a separate count (`· Z blocked by major bump`) so they can be reviewed before the scheduler runs.
+The hero at the top counts pending updates across every node in your fleet and tells you how many are ready to apply without human review. Its subtitle reads `X of Y ready to apply automatically across N nodes`. Stacks with a major version bump are surfaced as a separate count (`· Z blocked by major bump`) so they can be reviewed before the scheduler runs. Until the first answer arrives the hero reads `Checking for updates` rather than a verdict, and if the status cannot be loaded it reads `Could not check for updates` with the panel below naming the status as unavailable. The phone header follows the same states, with `Checking` and `Unavailable`.
 
 In the **Cards** view, cards are grouped by node, with a section header for each node that has at least one pending update. The header shows the node name, a `local` or `remote` pill, and the stack count. The local node is listed first, followed by remote nodes alphabetically. If any of your online nodes is unreachable when the page loads, a small line under the hero reads `X of Y nodes reachable. Unreachable nodes are not shown.`
 

@@ -652,6 +652,20 @@ describe('hygiene rules', () => {
     expect(JSON.stringify(hits)).not.toMatch(/SECRET/);
     expect(hits[0].message).toContain('[redacted]@');
   });
+  // The finding and the Doctor log line quote the same image, so the rule has
+  // to hide the same secret forms the log does, not only the URL userinfo.
+  it.each([
+    ['a token query value', 'https://user:pw@host/app?token=SECRETTV2', '[redacted]@host/app?token=[redacted]'],
+    ['a password keyword', 'password=SECRETPW11', 'password=[redacted]'],
+    ['a token keyword', 'token=SECRETTOK11', 'token=[redacted]'],
+    ['an api_key keyword', 'registry.example.com/app?api_key=SECRETKEY11', 'registry.example.com/app?api_key=[redacted]'],
+    ['a Bearer credential', 'Bearer SECRETBEARER11', 'Bearer [redacted]'],
+  ])('quotes the image in the image-latest finding with %s redacted', (_variant, image, expected) => {
+    const hits = ids(runRules(ctx({ model: model([svc({ image })]) })), 'image-latest');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].message).toContain(`"${expected}"`);
+    expect(hits[0].message).not.toContain('SECRET');
+  });
   it('flags a missing restart policy and healthcheck', () => {
     const bare = model([svc({ restart: undefined, hasHealthcheck: false })]);
     const restartFindings = ids(runRules(ctx({ model: bare })), 'no-restart-policy');
@@ -802,6 +816,11 @@ describe('effective-model-expanded', () => {
     const f = runRules(ctx({ model: m, sourceServiceNames: [], sourceReadable: false }));
     expect(ids(f, 'effective-model-expanded')).toHaveLength(0);
   });
+  it('stays silent when the source was read but its service set is unknown', () => {
+    const m = model([svc({ name: 'web' }), svc({ name: 'sidecar' })]);
+    const f = runRules(ctx({ model: m, sourceServiceNames: [], sourceReadable: true, sourceServicesKnown: false }));
+    expect(ids(f, 'effective-model-expanded')).toHaveLength(0);
+  });
 });
 
 describe('exposure-intent rules', () => {
@@ -901,6 +920,17 @@ describe('exposure-intent rules', () => {
     expect(hits).toHaveLength(1);
     expect(JSON.stringify(hits)).not.toContain('SECRETD8');
     expect(hits[0].message).toContain('[redacted]@reg.invalid/postgres:16');
+  });
+  it.each([
+    ['a password keyword', 'postgres:16?password=SECRETPW12', 'postgres:16?password=[redacted]'],
+    ['a token keyword', 'postgres:16?token=SECRETTOK12', 'postgres:16?token=[redacted]'],
+    ['an api_key keyword', 'postgres:16?api_key=SECRETKEY12', 'postgres:16?api_key=[redacted]'],
+  ])('does not quote the %s of a sensitive image in the exposure finding', (_variant, image, expected) => {
+    const m = model([svc({ name: 'db', image, ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    const hits = ids(runRules(ctx({ model: m })), 'sensitive-service-broad-exposure');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].message).toContain(`(${expected})`);
+    expect(hits[0].message).not.toContain('SECRET');
   });
   it('flags a sensitive image exposed on all interfaces', () => {
     const m = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);

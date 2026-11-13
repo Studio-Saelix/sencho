@@ -107,7 +107,7 @@ On the **Activity** tab, which lists most-recent-first, the new **landing-page d
 
 **Clicking re-check doesn't fix anything, and the status still says drifted.** That's not a bug, it's the read-only design: re-check only reconciles the ledger (recording what it currently sees, as in the screenshot above) so the finding shows up in history and on the Activity timeline. It never changes what Docker is running. If you want the drifted container gone, redeploy it from the finding as in the last step above (or **Save & Deploy** from the compose editor); that's the only action that actually reconciles the runtime with the compose file.
 
-**A finding is in the way and you know it is expected.** Click **Dismiss** on the row to set it aside for the team until it changes. A toast reads `Dismissed. It returns if it changes.` with an **Undo** button. The finding moves under **1 dismissed**, where **Restore** brings it back, and the status keeps reading **drifted** because dismissing a finding does not change what is running.
+**A finding is in the way and you know it is expected.** Click **Dismiss** on the row to set it aside for the team until it changes. A toast reads `Dismissed. It returns if it changes.` with an **Undo** button. The finding moves into **1 dismissed** in the status, which opens a sheet where **Restore** brings it back, and the status keeps reading **drifted** because dismissing a finding does not change what is running.
 
 ## Related
 

@@ -1,0 +1,192 @@
+---
+title: Node Bootstrap Preflight
+description: Inspect a Linux server over SSH before you provision it. Sencho verifies the host key, inventories both host directories, and builds a versioned, reviewable plan without changing anything on the server.
+---
+
+The node bootstrap preflight is the first half of the guided provisioning workflow for a new Linux server. It connects to the host over SSH, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks.
+
+**Nothing on the target is changed.** The preflight does not install packages, create directories, write files, start services or enroll an agent. Its output is an ordered plan with exact commands that you can read, copy and download. This release only previews the plan: no action runs it yet, so **Copy plan** and **Download** are for review and for running by hand.
+
+Use it to answer questions a manual enrollment cannot:
+
+- Is the host running a supported operating system and architecture?
+- Is Docker installed, reachable, and set to survive a reboot?
+- Is the Compose directory the right one, and will existing stacks be preserved?
+- Is a previous Pilot agent or an unrelated installation already in the way?
+- Would the agent directory collide with anything?
+- Can the target reach this Sencho instance over HTTPS?
+
+## Before you start
+
+- **Supported target:** Ubuntu 22.04 or 24.04 on x86_64. Other releases and architectures are reported as unsupported rather than guessed at.
+- **Access:** an SSH user with a private key. Password authentication and SSH agent forwarding are not used. If the host needs administrator steps, the user needs non-interactive sudo (`sudo -n`); the preflight reports when sudo is required for the current plan.
+- **Network:** the target must be reachable from this Sencho instance on its SSH port, and the target must be able to reach the hub URL over HTTPS.
+- **Node name:** the name you choose is not yet used by another node in this console.
+- **Key format:** an OpenSSH private key (for example `id_ed25519`) or an RSA key in PEM format. A PKCS8 ed25519 key is rejected with a message asking for the OpenSSH format.
+
+The private key is used for the request only. It is never stored, written to a log, included in the plan, or returned in a response. Serve Sencho over HTTPS before using a real key: on a plain HTTP page the dialog warns that the key travels in cleartext.
+
+## Open the workflow
+
+Go to **Fleet**, then open **Node management** at the end of the Overview toolbar and choose **Bootstrap new Linux server**.
+
+The same menu holds **Connect existing node**, which opens the manual Add node form for a node that is already running Sencho or a Pilot agent. Manual enrollment and this preflight describe the same agent configuration; the preflight previews it in the plan and does not deploy it.
+
+## The three steps
+
+### 1. Server and directories
+
+Enter the node name, host, SSH port, SSH user, private key and, if needed, the key passphrase.
+
+<Frame>
+  <img src="/images/node-bootstrap/01-server-and-directories.png" alt="Bootstrap dialog on the Server step: node name, host, SSH port, SSH user, private key, the Compose stacks directory set to /srv/sencho-stacks, and a collapsed Advanced configuration section whose header shows the custom agent path /srv/sencho-agent." />
+</Frame>
+
+Two directories are part of this step. They are validated as you type and again by the server before any SSH connection is opened.
+
+| Directory | Default | What it holds |
+| --- | --- | --- |
+| Compose stacks directory | `/opt/docker/sencho` | The Compose project folders Sencho manages on this host. The Pilot mounts this directory at the same path inside its container. |
+| Pilot Agent installation directory | `/opt/sencho-agent` | The Pilot's `compose.yaml`, the optional hub CA, and a small bootstrap marker. It is never listed as a stack and does not hold persistent agent data. |
+
+The Agent directory is secondary, so it lives under **Advanced configuration**, collapsed by default. When you set a custom value and collapse the section, the current path stays visible in the section header.
+
+**Path rules.** Both paths must be absolute, at most 200 characters, and use only letters, digits, `.`, `_`, `-` and `/`. Dots and dot-dot segments, duplicate or trailing slashes, the filesystem root, and single-segment roots are rejected. Neither path may sit under a system root such as `/etc`, `/usr`, `/var/lib/docker`, `/app`, `/tmp` or `/run`, and the two paths must not be equal or nested. Spaces and non-ASCII characters are rejected with an example rather than silently quoted through every layer.
+
+There is no data-directory field. The agent's persistent data is the fixed `sencho-agent-data` Compose volume, created under the project-qualified name `sencho-agent_sencho-agent-data`; the preflight checks both names. That is deliberate: enrollment, self-update and recovery all depend on it.
+
+### 2. Preflight
+
+Select **Check host key** first. Sencho connects only far enough to read the server's host key and shows its algorithm, SHA-256 fingerprint, and the public key line, which matches the first two fields (algorithm and key) of the matching `.pub` file on the server. Compare the fingerprint on the server with the command the dialog shows for that algorithm, for an Ed25519 key:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+An RSA or ECDSA host key points at `ssh_host_rsa_key.pub` or `ssh_host_ecdsa_key.pub` instead.
+
+- **New host:** tick **I trust this host key** to proceed. The fingerprint is pinned for this host and port. Host names are not case-sensitive: `Server.example.com` and `server.example.com` share one pin. A database from an earlier build can hold both spellings with different keys. Sencho trusts neither: it drops the pins for that host, writes each dropped key, who approved it and when to the audit log (`bootstrap.trust.conflict`), and the next check asks for a fresh trust decision.
+- **New host, key changed before the preflight connected:** the dialog shows the key you reviewed and the key the host presents now, says that no key is pinned for this host yet, and clears your earlier consent. Tick **I trust the new host key and want it pinned for this host** to pin the new key; nothing is described as a replacement because there is no pin to replace.
+- **Known host:** a key that matches the pin proceeds without a prompt.
+- **Changed key:** Sencho blocks the preflight and shows both fingerprints. Replacing the pin is a separate, explicit action, and both fingerprints are recorded in the audit log. The confirmation covers the pinned key shown in the dialog: if another preflight replaced the pin with a different key after your host key check, Sencho refuses with `HOST_KEY_MISMATCH` and the dialog shows the current pin to review again.
+
+Each host key check and preflight is recorded in the audit log as `Checked bootstrap host key` or `Ran bootstrap preflight`; a request that was refused or failed is recorded as `Bootstrap host key check failed` or `Bootstrap preflight failed` with its status code.
+
+Once trusted, select **Run preflight**. Sencho opens one SSH connection and runs the fixed read-only catalog. The request is bounded: 15 seconds to connect, 10 seconds per command, 90 seconds overall, with output caps. Closing the dialog or editing any field cancels the request on the server, and a reply that was already on its way is discarded. If a command times out, the inspection stops there and the commands that did not run are reported as `unknown`. An inventory or identity fact from a timed-out, errored or truncated command is treated as `unknown` or `blocked`; it never becomes a clean pass.
+
+The result has four verdicts:
+
+| Verdict | Meaning |
+| --- | --- |
+| Pass | The check ran and the host satisfies it. |
+| Warning | The host can be prepared, but something is worth reading first. |
+| Blocked | The plan cannot be generated until this is resolved. Every blocker names the observed fact and one specific remedy. |
+| Unknown | The fact could not be read. Unknown is never treated as a pass, and an unknown fact the plan depends on withholds the plan the same way a blocker does. The dialog lists each one with what to confirm on the host. |
+
+A blocked inspection is still a successful inspection: it returns the evidence, no plan, and the remediation for each blocker.
+
+<Frame>
+  <img src="/images/node-bootstrap/02-preflight-evidence.png" alt="Bootstrap dialog on the Preflight step: the host key fingerprint, a Ready to plan answer with the stage row, the two-directory summary showing three preserved stacks and a directory that will be created, and the collapsed list of checks." />
+</Frame>
+
+### 3. Plan
+
+When there are no blockers and every fact the plan depends on was established, Sencho builds the plan. It contains:
+
+- Both directories, their resolved real paths where they differ, and whether each exists or will be created.
+- Directory creation commands with the exact mode (`0755` for stacks, `0700` for the agent), owner, group and privilege.
+- File writes for `compose.yaml` (`0600`), the bootstrap marker (`0600`) and, when the hub uses native TLS, `sencho-hub-ca.pem` (`0644`), all under the chosen Agent directory.
+- The Docker repository, package and service steps, or an explicit no-change row when they already apply.
+- The exact `docker compose` start command, with the project name pinned to `sencho-agent`, an explicit project directory and file, and the environment variables that could otherwise change which project runs cleared.
+- An **Expected after execution** section listing what the later execution step and readiness check will verify. This is a promise, not evidence from this run.
+- A SHA-256 digest over the plan, and a digest over the evidence it was built from.
+
+<Frame>
+  <img src="/images/node-bootstrap/03-plan-filesystem.png" alt="Bootstrap dialog on the Plan step: the two directories, then three numbered stages in execution order: creating the Agent directory at mode 0700 with its install command, writing the bootstrap marker and the Pilot compose file at mode 0600, and starting the sencho-agent project with the pinned Docker endpoint. Each step shows its privilege, and the directory and file steps show mode and owner." />
+</Frame>
+
+The plan reads **No changes have been made on this server.** Use **Copy plan** or **Download** to keep it for review. Each generated plan has its own digest, because the marker file carries the generation time. A later approval would bind to that digest, so a plan that changes is a plan that must be approved again.
+
+## Existing content is preserved
+
+**The Compose directory may already hold stacks.** The preflight inventories Compose files at depth one and two, reports the count and up to fifty names, and preserves everything. When the directory exists, the plan records a skipped step with the stack count: no creation, no `chown`, no `chmod`, and no write inside it. A root-level Compose file is reported as a warning because it usually means the operator chose a single project rather than its parent.
+
+**An earlier Pilot installation is never missed.** The preflight looks for `/opt/sencho-agent/compose.yaml` whichever Agent directory you choose. A Compose file there blocks the plan when you chose any other directory, whether or not that directory exists yet. When the default directory cannot be inspected (a parent directory is closed to the SSH user and sudo does not answer, or the inspection did not complete), the result is `unknown` and the plan is withheld; it is never read as absent. Choosing the directory that `/opt/sencho-agent` resolves to counts as choosing the default directory, so that directory is judged on its contents instead.
+
+**The Agent directory must be dedicated.** It may be missing, empty, or hold a previous bootstrap attempt for the same project and paths, identified by `sencho-bootstrap.json`. Anything else blocks the plan with a remediation. Nothing is deleted or overwritten. A marker for a different project or different directories, a compose file without a marker, or any unrelated entry always blocks.
+
+## Permissions, symlinks, persistence and space
+
+- A missing directory is planned with `install -d` and an explicit mode and owner, so the result does not depend on the session umask.
+- An existing Compose directory is never chowned or chmodded. If the SSH user cannot write it but root can, the check warns and the plan makes no change. If neither can write it, the preflight blocks.
+- A final path element that is a symlink is blocked, because it can be retargeted between approval and execution. A symlink further up the path is disclosed with the resolved real path, which enters the plan and its digest.
+- Both paths must be on local persistent filesystems. `tmpfs`, `overlay`, network filesystems and similar are blockers, because the agent must come back after a reboot with its stacks and its compose file. A separate local mount that cannot be confirmed in `/etc/fstab` is a warning; a systemd mount unit can be invisible there.
+- Free space is checked on the Compose path, the Agent path and the Docker root, each against its own reading even when two of them share a filesystem. The plan is blocked under the hard floor and warns below the comfortable level. An unreadable figure is `unknown`, never a pass, and it stays `unknown` when another filesystem is only low. The Docker root is the directory the daemon reports, measured on its own filesystem; the default `/var/lib/docker` is assumed only on a host that has no Docker CLI at all.
+
+## Edits invalidate the plan
+
+Editing any field after a preflight discards the preflight result and the plan, and a banner names what changed. An edit made while a preflight is still running cancels it and raises the same banner:
+
+| Field edited | Banner |
+|---|---|
+| Host, port or SSH user | The SSH target changed. The previous host key check, preflight and plan no longer apply. Check the host key again. |
+| Private key or passphrase | The SSH key changed. The previous preflight and plan no longer apply. Run the preflight again. |
+| Either directory | Paths changed. The previous preflight and plan no longer apply. Run the preflight again. |
+| Node name | The node name changed. The previous preflight and plan no longer apply. Run the preflight again. |
+
+When several kinds of field change, the banner shows the first row of this table that applies. The SSH target banner goes away as soon as the host key check succeeds again, because that check is what it asks for; the other banners stay until a new preflight succeeds, and one that was hidden behind it appears at that point. The plan step stays unreachable until a new preflight succeeds, and the new digest differs. The host-key pin is a property of the host, not of a path or a key, so trust survives a path, key or name edit; changing the host, port or user does drop it.
+
+## Lifecycle
+
+The plan keeps the contracts later steps depend on:
+
+- **Enrollment:** the compose file carries the mode, hub URL, enrollment token, Compose directory, Docker socket, the `sencho-agent-data` volume and the optional CA mount.
+- **Self-update:** the container's Compose labels locate the compose file and service, so a custom Agent directory remains self-updateable. The generated project and container are named `sencho-agent` and the Compose service is `agent`; the preflight uses those names to recognize an existing Pilot.
+- **Reboot:** both directories must be on persistent local storage, Docker is enabled at boot, and the agent uses `restart: unless-stopped`.
+- **Restart and recovery:** the project is idempotent, the volume survives container recreation, and the bootstrap marker distinguishes a previous attempt from an unrelated installation.
+- **Readiness:** a tunnel connection alone is not proof that the node is ready. A later readiness check inspects the running container, requires a bind mount whose source and destination both equal the chosen Compose directory, and verifies the agent can read and write it.
+
+## Changing a directory later
+
+After the Pilot has connected, its Compose directory is fixed in the Edit node form. The server refuses a changed value with `PILOT_COMPOSE_DIR_LOCKED`, because the running agent is bound to the old path. Relocation is a separate controlled operation with its own preview, approval and verification; it is not a settings edit.
+
+A Pilot that has never connected can still be corrected, with a warning that an already deployed but unconnected agent will not move. Regenerate its enrollment token after saving.
+
+The Agent installation directory has no settings field. It is chosen only here.
+
+## Limits
+
+- Ubuntu 22.04 and 24.04 on x86_64 only.
+- A target that is this Sencho instance is refused: an address on the hub's own network interfaces, or the address of the hub URL (`SENCHO_PUBLIC_URL` when it is set and valid, otherwise the host in your request), which is how a Docker or NAT deployment is told apart from the server it runs on. The hub URL check needs that name to resolve from the hub and ignores ports, so a server that shares the hub's public address is refused as well.
+- The host is a DNS name or an IPv4 address in dotted form (`10.0.0.4`). Legacy spellings such as `10.1`, `1.2.3.04` or `0x7f.1` are refused, so one server never holds two pins.
+- IPv6 targets, SSH agent forwarding, password authentication and passworded sudo are not supported in this release.
+- The preflight never changes firewall, SSH server, Docker daemon, user or group configuration.
+- Only the Docker daemon on the host's own socket (`/var/run/docker.sock`) is inspected, and every Docker command in the preflight and the plan is pinned to it with the default context. Rootless installs, custom sockets and remote Docker contexts are reported as blocked. A host where Docker is installed but stopped is blocked too: containers and volumes cannot be inventoried until the service runs.
+- The preflight asks apt where it reads its sources from (`apt-config`, so `Dir::Etc::sourcelist` and `Dir::Etc::sourceparts` overrides count), then reads that main source list and each `.list` and `.sources` file in that directory that apt accepts, whatever the file is called. The plan writes its own source to `/etc/apt/sources.list.d/docker.list` only. When apt reads its sources from anywhere else, a Docker source in the places it reports is verified as usual, but a host that still needs the repository and has no usable Docker source there is `unknown` and the plan is withheld. The same holds when apt cannot say where it reads (no answer, a warning or error such as a configuration file the SSH user cannot read, or a path holding a quote or backslash): a source seen at the default paths is not trusted then. A host where Docker and Compose already work keeps its installation and the plan in every case. Put the official Docker source where apt reads it, or restore the default locations, and run the preflight again. Every entry for `download.docker.com` in those files counts, and all of them must pass the checks below. The preflight reads a file only when it mentions `download.docker.com` anywhere (a comment included), holds a double quote or a `%` escape (apt reads both inside a word of a one-line entry, and either can hide the host's name), or is `docker.list` or `docker.sources`. apt rejects its whole source list at content it cannot parse, so such a file must parse end to end, beside the Docker entry as well as in it.
+- **One-line entries.** apt rejects its whole source list at content it cannot parse, so a file the preflight reads must parse end to end, beside the Docker entry as well as in it. A one-line entry fails the checks below unless it is `deb` or `deb-src` (the type ends at the first space, tab or vertical tab), an optional `[option=value ...]` group with a name and a value for every option, a URI with a lower-case scheme (apt looks its method up by that exact name, so `HTTPS://` fails), a suite that is not empty, and components (none for a suite that ends in a slash, where they are not allowed). Words are read as apt's own word reader reads them: a double quote anywhere in a word, in an option name too, opens a run that ends at the next double quote and may hold spaces, the quotes are dropped, a `[` runs on to the next `]`, and `%` followed by two hex digits stands for the character it encodes. So `[signed-by="/etc/apt/keyrings/a.gpg /etc/apt/keyrings/b.gpg"]`, `["signed-by"=/etc/apt/keyrings/a.gpg]` and `[%73igned-by=/etc/apt/keyrings/a.gpg]` mean what the plain spelling means, a quoted or escaped `trusted` or `arch` is the option apt applies, and a URI written as `https://download%2edocker.com/...` is Docker's host. A single quote is not a quote to apt (a single-quoted URI has no scheme, a single-quoted option value is read literally). A quote or bracket that is never closed fails the checks unless it opens after the last component or after an exact-path suite, where apt ignores it too; a missing space after the option group, or a second option group after a space, fails them. An option group whose closing bracket is written as an escape is not read, and leaves the file `unknown`. A `#` starts a comment wherever it stands outside an open `[` option group, so a `#` inside a URI cuts the line short and one inside an option value does not. A one-line suite is one word (`noble,jammy` is a single suite with a comma in it), and an architecture list is split at commas only. A no-break space or a byte order mark is not whitespace to apt: it stays part of the word it touches, so an entry with one in its type fails the checks and one in a suite, component or option value matches nothing. A URI that holds a `#`, a `?` or whitespace (a `%23`, `%3f` or `%20` counts) is a different path to apt, not the official repository's. Option names are exact: a one-line option named like a `.sources` field (`architectures`) is ignored, and the signing options (`trusted`, `allow-insecure`, `allow-weak`, `allow-downgrade-to-insecure`) count in any letter case, a weakening value always outweighing a later one that does not.
+- **`.sources` entries.** Any line that is not `Field: value` or a comment fails the checks. apt skips an indented line when no field is open (an indented comment among them), and a field may have any name, an empty one and `X-Note/foo` included. Only an empty line ends a stanza: a line of spaces or tabs continues the open field. `URIs`, `Suites` and `Components` are split at whitespace only, so a comma stays in the word, and a multi-word `Architectures` field is one list. A no-break space is part of the text next to it, not a separator, in a value or a comment. An enabled stanza with no `URIs` or `Suites`, a URI without a lower-case scheme, or components that do not fit its suites fail the checks too. A stanza whose `Types` is missing or holds anything but `deb` and `deb-src` in exactly that spelling fails them (apt rejects the whole source list at `DEB`, `deb,deb-src` or an unknown word), even when the stanza is disabled.
+- **Reasons and limits.** A line or stanza that names Docker's host in a URI that is not that host fails the checks as well. A reason about content apt rejects names the file and the line or stanza position, and the other checks name the file and, for a wrong repository, its host. A file this check does not read (an option group closed by an escape) is `unknown`, not contradicted. A reason never repeats the text of a source line, because a source line can carry a repository credential: the official repository is shown as its own URI, any other URI by its scheme and host only (by its scheme alone when it holds an `@`, since a credential can then pass for a host). Of each archive `apt-cache policy` lists for a candidate, the facts that are hashed and returned keep that redacted URI and whether the archive is the official one for the host release; the suite and component text after the URI can hold a credential too, so it is classified and never stored. The file name is the host's own path. The preflight does not check every value apt does (a malformed `Signed-By` beside the Docker entry, say), so when `apt-cache policy` itself fails, a source that read as valid is `unknown`, never verified: the Docker package source check is a warning on a host where Docker and Compose already work, and the plan is withheld on any other host. A source file that does not mention Docker is not read, so a break in it shows only through that `apt-cache policy` failure.
+- The Docker repository counts as configured only when each of its entries is Docker's official repository for the host release, is enabled, provides binary (`deb`) packages for the host's architecture, does not turn on any of `trusted`, `allow-insecure`, `allow-weak` or `allow-downgrade-to-insecure`, and names only keyrings that contain Docker's release key (checked by fingerprint, not by file name, in `/etc/apt/keyrings/docker.asc`, `/etc/apt/keyrings/docker.gpg` or `/usr/share/keyrings/docker-archive-keyring.gpg`). The architecture options (`arch`, `arch+`, `arch-`, `Architectures`, `Architectures-Add`, `Architectures-Remove`) are applied to each entry, and an entry that leaves out the host architecture does not pass even when another entry covers it. A `deb-src` entry for Docker's host is held to the signing options too. Two entries for the same source that name different keyrings, or that disagree on `trusted`, contradict each other, because apt refuses the whole source list in that case. When apt already lists candidates, they must be served from that archive; candidates whose archive apt does not show leave the result `unknown`. A repository that is missing or half-configured is completed by the plan, which writes `docker.list` only when no entry for Docker exists anywhere and apt reads its sources from the default locations. One that is present but contradicts these rules blocks the plan with the reason, even beside a file that could not be read. One that could not be read in full (a source file, a source directory or a keyring), or whose host release or architecture is unknown, is `unknown` and withholds the plan.
+- The plan previews the official Docker repository only. When apt has no candidate for a package yet, because the repository is not configured or its index was never refreshed, package versions are shown as unresolved and are resolved from the official repository at execution time. On a host where Docker and Compose already work, the plan preserves that installation and does not install or replace Docker packages. When Docker runs without Compose and Docker's own packages (`docker-ce`, `docker-ce-cli` and `containerd.io`) installed it, the only package the plan installs is the Compose plugin; the engine and every container stay as they are. When anything else installed that Docker (the distribution's `docker.io`, a snap, a binary or a partial official install), Docker's Compose package could replace the running engine, so the preflight blocks instead. Install the Compose plugin from the source that provided your Docker (`docker-compose-v2` for `docker.io` on Ubuntu), or enroll the node manually, and run the preflight again.
+
+## Troubleshooting
+
+| What you see | What to do |
+| --- | --- |
+| `HOST_KEY_MISMATCH` | The live key differs from the pinned one, or another preflight replaced the pin after your host key check. Compare the fingerprints on the host before replacing the pin. If the pin was removed while the preflight ran, the dialog asks you to trust the host key again, as for a new host. |
+| `HOST_KEY_UNTRUSTED` | Trust the key first. If the host's key changed between the check and the preflight, the dialog shows the live fingerprint next to the one you reviewed (a host with no pin) or the pin (a pinned host). On a pinned host, tick the replacement confirmation only when you know the host was rebuilt; on an unpinned host, trust the new key only when you know why it changed. |
+| `SSH_AUTH_FAILED` | Check the SSH user and that the public half of the key is in the user's `authorized_keys`. |
+| `SSH_KEY_PASSPHRASE_REQUIRED` | The key is encrypted. Enter its passphrase. |
+| `SSH_KEY_PASSPHRASE_INVALID` | The passphrase does not unlock the key. Re-enter it. |
+| `SSH_KEY_INVALID` | Use an OpenSSH private key, or convert an RSA key to PEM. PKCS8 ed25519 keys are not accepted. |
+| `SSH_UNREACHABLE` or `SSH_DNS_FAILED` | Check the address, the port and outbound connectivity from the Sencho instance. |
+| `INVALID_PATH` | The response names the field and the rule. Fix that field; typing is never blocked. |
+| `BOOTSTRAP_IN_PROGRESS` | Another preflight for the same host and port is running. Wait for it to finish. |
+| `PREFLIGHT_TIMEOUT` | The 90-second budget expired. Check the host's load and connectivity, then run it again. |
+
+## Related
+
+- [Pilot Agent](/features/pilot-agent) for the agent's architecture and self-update contract.
+- [Multi-Node Management](/features/multi-node) for manual enrollment and the two remote modes.
+- [Remote Updates](/features/remote-updates) for the update workflow, including custom install directories.
+- [Enroll a remote node](/tutorials/enroll-a-remote-node) for the manual walkthrough, including the fallback when SSH bootstrap is not available.

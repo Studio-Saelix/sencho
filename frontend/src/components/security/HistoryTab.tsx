@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -199,9 +200,14 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
               <GitCompare className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
               Compare ({selected.length}/2)
             </Button>
-            <Button variant="outline" size="sm" onClick={() => load(safePage, search)} disabled={loading}>
-              <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} strokeWidth={1.5} />
-            </Button>
+            <IconBusyButton
+              variant="outline"
+              size="sm"
+              icon={RefreshCw}
+              pending={loading}
+              onClick={() => load(safePage, search)}
+              aria-label="Refresh scan history"
+            />
           </div>
         }
       />

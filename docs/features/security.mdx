@@ -95,10 +95,10 @@ availability unknown, stale scans, and failed scans can only be dismissed for a 
 because the evidence behind them is missing or old. Items that keep the posture at Action needed cannot be dismissed; they go away when
 you resolve them.
 
-Dismissed items stay counted: the masthead and the posture word still include them. They appear under
-a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings
-one back. A toast right after dismissing offers **Undo**. Dismissing needs permission to manage the
-node.
+Dismissed items stay counted: the masthead and the posture word still include them. Select the
+**N dismissed** count on the review queue to open a sheet that lists each one with who dismissed it,
+when, and for how long; **Restore** brings one back. A toast right after dismissing offers **Undo**.
+Dismissing needs permission to manage the node.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
@@ -137,8 +137,26 @@ networking list under the label names the connector instead. A service you class
 same-node that a tunnel can reach only with unverified routing is taken at your word and not counted as
 exposed; one that a Tailscale or WireGuard connector reaches directly from a shared network namespace is, and shows an intent mismatch. A service that shares a network namespace with a cloudflared connector can be reached on localhost, but Cloudflare's ingress still decides what incoming requests reach, so that path stays unverified like a shared network. Security deliberately reads exposure differently from the stack's [detected exposure](/features/compose-networking#detected-exposure) in four places: `temporary` and `reverse-proxy` count as intentional, an intent of `internal` is taken at the operator's word for an unverified tunnel, loopback-only services never appear here because they are not exposed beyond the host, and a connector the stack itself runs counts for the services it reaches rather than for its own row. When Networking exposure intent is
 available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
-or Intent: not classified). Open Networking from that evidence to review or correct classification
-for the matching stack. Intentional exposure raises the security relevance of vulnerable findings
+or Intent: not classified). Select the **Network exposed** label to set or change that service's
+intent from a popover without leaving Security; the popover also links to the stack's networking
+for changes that belong in Compose. With several services the label lists them and each row
+carries the same action; where the intent cannot be set from here, the label opens the stack's
+networking instead. A confirmed save is reflected on the row even when the follow-up refresh
+fails, and a later successful refresh replaces it. Saves to the same stack are sent one at a time
+in the order you make them, so a save waits for the one before it and each stays reflected
+however slowly the earlier ones are answered. A save with no reply after 30 seconds is reported
+as timed out and the next one goes ahead; the node may still apply the timed-out save. A node on
+this version applies saves to a stack in the order they reach it, so a save it received first is
+applied first and the later save stays final. A later save waits behind a stalled one on the
+node and may time out too. When 16 saves to one stack, or 256 across the node's stacks, are
+waiting or being applied, the node refuses the next with a message that too many are waiting and
+does not apply it. The saves it already holds keep their order, and it accepts saves again as they
+finish; if one never finishes, the node may need a restart. A node running an older version does
+not order saves this way, so update it before relying on this. Refresh to see what the node holds. A service the row's list
+was too short to show joins the list once you save it, with its action. A warning that may involve
+services the row does not list stays visible until a refresh, or until you have saved every one
+of those services from here.
+Intentional exposure raises the security relevance of vulnerable findings
 but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
 individual findings (Accepted risk and related decisions). There is no image-level "accept residual
 risk" control. Compose Doctor acknowledgements are a separate triage surface and do not clear

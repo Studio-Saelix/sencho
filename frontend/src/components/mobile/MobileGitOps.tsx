@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
 import { attentionLabel, countCurrentTargets, hasKnownPosture, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn } from '@/lib/utils';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigation';
@@ -92,14 +93,15 @@ function MobileGitOpsBody({ headerActions }: { headerActions?: ReactNode }) {
         meta={meta}
         right={
           <div className="flex items-center gap-2">
-            <button
-              type="button"
+            <IconBusyButton
+              variant="ghost"
+              size="icon"
+              icon={RefreshCw}
+              pending={portfolio.refreshing}
               onClick={portfolio.refresh}
               aria-label="Refresh GitOps portfolio"
-              className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-stat-subtitle transition-colors hover:text-stat-value"
-            >
-              <RefreshCw className={cn('h-4 w-4', portfolio.refreshing && 'animate-spin')} strokeWidth={1.5} />
-            </button>
+              className="min-h-11 min-w-11 text-stat-subtitle hover:bg-transparent hover:text-stat-value"
+            />
             {headerActions}
           </div>
         }

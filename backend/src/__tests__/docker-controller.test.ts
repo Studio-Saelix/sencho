@@ -59,7 +59,9 @@ vi.mock('util', () => ({
   promisify: () => mockExecFileAsync,
 }));
 
+import Docker from 'dockerode';
 import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
+import { errorMessageForLog } from '../utils/safeLog';
 import { CacheService } from '../services/CacheService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -1929,6 +1931,100 @@ describe('DockerController - inspectImage', () => {
     expect(mockDocker.getImage).toHaveBeenCalledWith('sha256:abc12345');
   });
 
+  // Docker's router decodes the path before parsing the reference, so the
+  // client must not pre-encode it. Pin both requests the controller issues.
+  it('sends a percent-encoded image reference unchanged on both request paths', async () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const paths: string[] = [];
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      paths.push(opts.path);
+      callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
+
+    const dc = DockerController.getInstance(1);
+    await dc.inspectImage(image);
+
+    expect(mockDocker.getImage).toHaveBeenCalledWith(image);
+    expect(paths).toEqual([`/images/${image}/json`, `/images/${image}/history`]);
+    dial.mockRestore();
+  });
+
+  it('propagates a history failure to the same caller as an inspect failure', async () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      if (opts.path.endsWith('/history')) callback(new Error('history failed'));
+      else callback(null, { Id: 'sha256:abc' });
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.inspectImage(image)).rejects.toThrow('history failed');
+    dial.mockRestore();
+  });
+
+  // Docker's daemon can echo a credential that contains the redaction marker.
+  // Both requests in the shared Promise.all reach the collector's warning, so
+  // either rejection has to format to a credential-free message.
+  it.each([
+    {
+      name: 'inspect with a known suffix',
+      failSuffix: '/json',
+      body: '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
+      keepsReason: true,
+    },
+    {
+      name: 'history with a known suffix',
+      failSuffix: '/history',
+      body: '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
+      keepsReason: true,
+    },
+    {
+      name: 'inspect with no suffix',
+      failSuffix: '/json',
+      body: 'invalid reference format: repository name ([redacted])SuperSecret)',
+      keepsReason: false,
+    },
+    {
+      name: 'history with no suffix',
+      failSuffix: '/history',
+      body: 'invalid reference format: repository name ([redacted])SuperSecret)',
+      keepsReason: false,
+    },
+  ])('propagates a marker-bearing %s failure for the formatter to redact', async ({ failSuffix, body, keepsReason }) => {
+    const image = 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest';
+    const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
+    const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
+      opts: { path: string },
+      callback: (err: Error | null, data?: unknown) => void,
+    ) => {
+      if (opts.path.endsWith(failSuffix)) {
+        callback(new Error(body));
+      } else {
+        callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
+      }
+    }) as unknown as typeof client.modem.dial);
+    mockDocker.getImage.mockImplementationOnce((id: string) => client.getImage(id));
+
+    const dc = DockerController.getInstance(1);
+    const failure = await dc.inspectImage(image).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    const logged = errorMessageForLog(failure, { imageRef: image });
+
+    expect(logged).not.toContain('SuperSecret');
+    expect(logged).toContain('repository name ([redacted])');
+    if (keepsReason) expect(logged).toContain('must be lowercase');
+    dial.mockRestore();
+  });
+
   it('propagates 404 from Dockerode when image is missing', async () => {
     mockDocker.getImage.mockReturnValue({
       inspect: vi.fn().mockRejectedValue(Object.assign(new Error('No such image: missing'), { statusCode: 404 })),
@@ -2682,6 +2778,50 @@ describe('DockerController - getBulkStackStatuses partial status', () => {
     expect(result['empty-stack'].status).toBe('unknown');
     expect(result['empty-stack'].running).toBeUndefined();
     expect(result['empty-stack'].total).toBeUndefined();
+  });
+
+  it('counts a stack that is only restart-looping as exited with restarting 1', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      container('loop-1', 'loop-stack', 'restarting', 'Restarting (1) 5 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['loop-stack']);
+    expect(result['loop-stack'].status).toBe('exited');
+    expect(result['loop-stack'].running).toBe(0);
+    expect(result['loop-stack'].restarting).toBe(1);
+  });
+
+  it('counts a restarting sibling beside a running container', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('mix-run', 'mix-stack', 'running', 'Up 2 hours'),
+      container('mix-loop', 'mix-stack', 'restarting', 'Restarting (1) 5 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['mix-stack']);
+    expect(result['mix-stack'].status).toBe('partial');
+    expect(result['mix-stack'].restarting).toBe(1);
+  });
+
+  it('counts a restart loop that keeps exiting cleanly', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      container('zero-loop', 'zero-stack', 'restarting', 'Restarting (0) 2 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['zero-stack']);
+    // A clean exit is not a crash, so the stack status stays exited either way,
+    // but the loop itself must still be visible to the sidebar.
+    expect(result['zero-stack'].restarting).toBe(1);
+  });
+
+  it('reports restarting 0 when nothing is looping', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('nr-run', 'nr-stack', 'running', 'Up 2 hours'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['nr-stack']);
+    expect(result['nr-stack'].restarting).toBe(0);
   });
 });
 

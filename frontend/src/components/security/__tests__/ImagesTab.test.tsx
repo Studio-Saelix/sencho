@@ -8,7 +8,11 @@ import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ImagesTab } from '../ImagesTab';
-import type { ScanSummary } from '@/types/security';
+import { applySavedIntents } from '../imagesTargeting';
+import type { ImageExposureContext, ScanSummary } from '@/types/security';
+
+// These cases cover the named Networking navigation, which a session that may not edit the stack keeps.
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
 
 function summary(o: Partial<ScanSummary> & { image_ref: string; scan_id: number }): ScanSummary {
   return {
@@ -38,6 +42,7 @@ const base = {
   canScan: false,
   scanningRef: null as string | null,
   onScan: vi.fn(),
+  onIntentSaved: vi.fn(),
 };
 
 beforeEach(() => vi.clearAllMocks());
@@ -353,7 +358,7 @@ it('shows conflict banner for public_exposure intent mismatch', () => {
     />,
   );
   expect(screen.getByText('Exposure conflicts with declared intent')).toBeInTheDocument();
-  expect(screen.getByText(/Review networking to align configuration with intent/)).toBeInTheDocument();
+  expect(screen.getByText(/Align the declared intent with the published ports/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
 });
 
@@ -520,4 +525,62 @@ it('offers Retry on the error state and calls it', async () => {
   render(<ImagesTab {...base} error onRetry={onRetry} summaries={{}} />);
   await user.click(screen.getByRole('button', { name: 'Retry' }));
   expect(onRetry).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a hidden capped warning on the rendered row after repeated saves', () => {
+  const visible: ImageExposureContext[] = Array.from({ length: 20 }, (_, index) => ({
+    stackName: 'web',
+    serviceName: `svc${index}`,
+    exposureReason: 'published-port',
+    intentStatus: 'unset',
+  }));
+  let summaries = asMap(summary({
+    image_ref: 'exp:1',
+    scan_id: 1,
+    publicly_exposed: true,
+    exposure_contexts: visible,
+    exposure_context_count: 21,
+    exposure_contexts_truncated: true,
+    exposure_context_summary: {
+      hasConflict: false,
+      hasUnclassified: true,
+      hasUnavailable: false,
+      allKnownIntentional: false,
+    },
+  }));
+
+  const saved: Array<{ service: string; intent: 'public' }> = [];
+  for (let index = 0; index < visible.length; index += 1) {
+    saved.push({ service: `svc${index}`, intent: 'public' });
+    summaries = applySavedIntents(summaries, 'web', saved);
+  }
+
+  render(<ImagesTab {...base} summaries={summaries} />);
+
+  expect(screen.getByText('Intent: not classified (+20)')).toBeInTheDocument();
+});
+
+it('renders a hidden warning when settlement leaves no displayed context', () => {
+  const summaries = asMap(summary({
+    image_ref: 'exp:1',
+    scan_id: 1,
+    publicly_exposed: true,
+    exposure_contexts: [],
+    exposure_context_count: 1,
+    exposure_contexts_truncated: true,
+    exposure_context_summary: {
+      hasConflict: false,
+      hasUnclassified: true,
+      hasUnavailable: false,
+      allKnownIntentional: false,
+    },
+    exposure_context_hidden: { conflict: false, unclassified: true, unavailable: false },
+  }));
+
+  render(<ImagesTab {...base} summaries={summaries} />);
+
+  expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
+  // The row stays exposed but has no displayed context to act on.
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Network exposed/ })).not.toBeInTheDocument();
 });

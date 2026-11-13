@@ -1,4 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
+import { isFileHash, planAuthoredLocation, type AuthoredLocation } from '@/lib/authoredLocation';
+import { sha256Hex, decodeUtf8PreservingBom } from '@/lib/sha256';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
   dockerEndpointRefusal,
@@ -158,6 +160,21 @@ interface UseStackActionsOptions {
   isAdmin?: boolean;
   /** Authoritative canReapplyCompose === true for the active node. */
   canReapplyCompose?: boolean;
+  /** Why Reapply is unavailable on the active node, from the same read as
+   *  canReapplyCompose. Null/absent when the node is (or may be) eligible. */
+  reapplyUnavailableReason?: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  /**
+   * Re-read eligibility for the node that is active at click time. Returns null
+   * when this read no longer owns the decision: the active node changed
+   * mid-read, a newer read superseded it, or no node was active. A null result
+   * cancels the continuation that asked for it.
+   */
+  refreshReapplyEligibility?: () => Promise<{
+    canReapply: boolean;
+    reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+    /** False when the re-read failed; canReapply/reason are then the previous answer. */
+    proven?: boolean;
+  } | null>;
 }
 
 const PRE_DEPLOY_SUMMARY_TIMEOUT_MS = 5000;
@@ -354,6 +371,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     removeNotificationsForStack,
     isAdmin = false,
     canReapplyCompose = false,
+    reapplyUnavailableReason = null,
+    refreshReapplyEligibility,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -383,6 +402,14 @@ export function useStackActions(options: UseStackActionsOptions) {
   const selectedFileRef = useRef(stackListState.selectedFile);
   const activeNodeIdRef = useRef(activeNode?.id);
   const containersRef = useRef(editorState.containers);
+  // The compose buffer a reveal may target, read after an await.
+  const composeContentRef = useRef(editorState.content);
+  const composeOriginalContentRef = useRef(editorState.originalContent);
+  // A later location click supersedes an earlier one still fetching the file.
+  const authoredLocationRequestRef = useRef(0);
+  // A reveal belongs to the stack/node it was requested on; a switch clears it
+  // so a pending range cannot open against the new stack's files.
+  const revealOwnerRef = useRef(`${stackListState.selectedFile ?? ''}\u0000${activeNode?.id ?? ''}`);
   // Same-owner arbitration: soft refresh, Retry, and detail load can overlap
   // for one stack/node; only the newest generation may apply success or failure.
   const containersFetchGenRef = useRef(0);
@@ -390,6 +417,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     selectedFileRef.current = stackListState.selectedFile;
     activeNodeIdRef.current = activeNode?.id;
     containersRef.current = editorState.containers;
+    composeContentRef.current = editorState.content;
+    composeOriginalContentRef.current = editorState.originalContent;
+    const owner = `${stackListState.selectedFile ?? ''}\u0000${activeNode?.id ?? ''}`;
+    if (revealOwnerRef.current !== owner) {
+      revealOwnerRef.current = owner;
+      authoredLocationRequestRef.current += 1;
+      editorState.setPendingReveal(null);
+    }
   });
 
   // Cancel an open Save & Reapply confirmation if the active node or selected
@@ -466,9 +501,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     const raw = stackListState.stackStatuses[file];
     const status = raw === 'partial' ? 'running' : raw;
     const isSelf = stackListState.stackSelfFlags[file] === true;
+    // A crash loop spends its downtime in Docker's `restarting` state, so the
+    // bulk status reports it as `exited` with zero running containers. Stop is
+    // the only verb that breaks the loop, and Deploy would leave it looping.
+    const restartingCount = stackListState.stackCounts?.[file]?.restarting ?? 0;
+    const looping = restartingCount > 0;
     return {
-      showDeploy: !isSelf && status !== 'running',
-      showStop: !isSelf && status === 'running',
+      showDeploy: !isSelf && status !== 'running' && !looping,
+      showStop: !isSelf && (status === 'running' || looping),
       showRestart: status === 'running',
       showUpdate: !isSelf && status === 'running',
       showTakeDown: !isSelf && (raw === 'running' || raw === 'partial' || raw === 'exited'),
@@ -492,6 +532,39 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!hydrationReady()) return false;
     if (opNodeId !== (activeNodeIdRef.current ?? null)) return false;
     return true;
+  };
+
+  /**
+   * Decide at the click whether the active node can reapply Sencho. The cached
+   * answer may be stale in either direction (the node recovered, or lost its
+   * Compose CLI or Docker connection after the editor loaded), so a reapply
+   * confirmation only opens on a fresh read. Returns true when the node is
+   * eligible. Otherwise it returns false: either the read no longer owns the
+   * decision (a node switch or a newer read, nothing is shown), or the node is
+   * ineligible and the protected dialog names it and the reason.
+   */
+  const verifyReapplyEligibility = async (): Promise<boolean> => {
+    const node = activeNode ?? null;
+    if (!isAdmin || !node) return false;
+    const nodeId = node.id;
+    let eligible = canReapplyCompose === true;
+    let reason = reapplyUnavailableReason;
+    if (refreshReapplyEligibility) {
+      const fresh = await refreshReapplyEligibility();
+      // The hook already returns null on a switch; keep the explicit check
+      // so a different implementation cannot retarget the decision or dialog.
+      if ((activeNodeIdRef.current ?? null) !== nodeId) return false;
+      // A null result means a newer read superseded this one (or the node
+      // changed). This request is discarded: continuing with the captured
+      // answer would open a second dialog from this request while the newer
+      // one decides for itself.
+      if (!fresh) return false;
+      eligible = fresh.canReapply;
+      reason = fresh.reason;
+    }
+    if (eligible) return true;
+    overlayState.openSelfStackProtected({ nodeName: node.name, reason: reason ?? null });
+    return false;
   };
 
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
@@ -1945,11 +2018,13 @@ export function useStackActions(options: UseStackActionsOptions) {
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
-      if (isAdmin && canReapplyCompose && activeNode) {
+      const node = activeNode ?? null;
+      if (isAdmin && node) {
+        if (!(await verifyReapplyEligibility())) return;
         overlayState.setComposeReapplyCapture({
-          nodeId: activeNode.id,
-          nodeType: activeNode.type === 'local' ? 'local' : 'remote',
-          nodeName: activeNode.name,
+          nodeId: node.id,
+          nodeType: node.type === 'local' ? 'local' : 'remote',
+          nodeName: node.name,
           stackFile,
         });
         return;
@@ -2258,6 +2333,99 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEditingCompose(true);
     editorState.setActiveTab('compose');
     editorState.setIsEditing(true);
+  };
+
+  /**
+   * Open a reported authored location. One click, one handler: the compose tab
+   * when the file is the loaded primary compose file, the Files tab otherwise.
+   * A range belongs to one file revision: the compose surface re-reads the file
+   * and applies the range only when the bytes hash to the revision the location
+   * was computed against, so a clean stale buffer is refreshed, unsaved edits
+   * are preserved, and a file that changed after the report was read opens
+   * nothing. The Files surface rereads the same path in FileViewer, whose
+   * existing discard confirmation covers a dirty viewer, and which verifies the
+   * same digest before applying the range.
+   */
+  const openAuthoredLocation = (location: AuthoredLocation) => {
+    const stackFile = stackListState.selectedFile;
+    if (!stackFile) return;
+    // A location that does not name its source revision cannot be verified, so
+    // it is refused rather than applied to whatever the file holds now.
+    if (!isFileHash(location.fileHash)) {
+      editorState.setPendingReveal(null);
+      toast.info('This location has no verified file revision, so it cannot be opened. Refresh and try the link again.');
+      return;
+    }
+    const expectedHash = location.fileHash;
+    const target = planAuthoredLocation(location, editorState.composeFilename);
+    if (!target) return;
+    // Any newer click supersedes a compose file read still in flight, even when
+    // the newer one opens the Files surface.
+    const request = ++authoredLocationRequestRef.current;
+    if (target.surface === 'files') {
+      editorState.setEditingCompose(true);
+      editorState.setActiveTab('files');
+      editorState.setPendingReveal({ target, location });
+      return;
+    }
+
+    const opNodeId = activeNode?.id ?? null;
+    const showCompose = () => {
+      editorState.setEditingCompose(true);
+      editorState.setActiveTab('compose');
+    };
+    const refuseForUnsavedEdits = () => {
+      showCompose();
+      editorState.setPendingReveal(null);
+      toast.info('Save or discard your changes before opening this location.');
+    };
+
+    if (composeContentRef.current !== composeOriginalContentRef.current) {
+      refuseForUnsavedEdits();
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackFile}`, { nodeId: opNodeId });
+        if (!res.ok) throw new Error('compose file unreadable');
+        // Read the bytes the server hashed, not `res.text()`: the Fetch text
+        // decoder drops a leading UTF-8 BOM and the server's digest covers it,
+        // so a BOM-prefixed file would never match its own location.
+        const text = decodeUtf8PreservingBom(await res.arrayBuffer());
+        if (request !== authoredLocationRequestRef.current) return;
+        if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
+        if (composeContentRef.current !== composeOriginalContentRef.current) {
+          refuseForUnsavedEdits();
+          return;
+        }
+        if (sha256Hex(text) !== expectedHash) {
+          // The file moved on after the report was read; the range no longer
+          // names the same lines, so open nothing rather than a guessed range.
+          editorState.setPendingReveal(null);
+          toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
+          return;
+        }
+        // Adopt the same revision metadata loadFileCore uses, or the next
+        // save would send a stale If-Match and be refused as a concurrent
+        // edit. The file read here is the current disk state even when the
+        // buffer text happens to match it.
+        editorState.setComposeEtag(res.headers.get('etag'));
+        editorState.setComposeFilename(res.headers.get('x-compose-file'));
+        if (composeContentRef.current !== text) {
+          // The buffer is clean but older than disk: refresh it so the range
+          // applies to the content the report just located.
+          editorState.setContent(text);
+          editorState.setOriginalContent(text);
+        }
+        showCompose();
+        editorState.setPendingReveal({ target, location, revision: text });
+      } catch {
+        if (request !== authoredLocationRequestRef.current) return;
+        if (selectedFileRef.current !== stackFile || activeNodeIdRef.current !== opNodeId) return;
+        editorState.setPendingReveal(null);
+        toast.error('Could not confirm this location is still current.');
+      }
+    })();
   };
 
   const closeComposeEditor = () => {
@@ -3081,6 +3249,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     rollbackStack,
     discardChanges,
     openComposeEditor,
+    openAuthoredLocation,
     closeComposeEditor,
     scanStackConfig,
     runDeploy,
@@ -3111,6 +3280,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     openInspectImage,
     isSelfStackFile,
     openSelfStackProtectedIfNeeded,
+    verifyReapplyEligibility,
   };
 }
 

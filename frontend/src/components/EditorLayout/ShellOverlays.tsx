@@ -97,7 +97,8 @@ export function ShellOverlays({
     updateReadiness, setUpdateReadiness,
     preDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
-    selfStackProtectedOpen, setSelfStackProtectedOpen,
+    selfStackProtectedOpen,
+    selfStackProtectedContext, closeSelfStackProtected,
     dockerEndpointProtected, setDockerEndpointProtected,
     composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,
@@ -105,14 +106,16 @@ export function ShellOverlays({
   } = overlayState;
 
   // The Reapply confirm acts on the active node, so a node switch closes it
-  // rather than leaving a dialog that now targets a different Sencho.
-  const reapplyNodeId = reapplySelfTarget?.nodeId ?? null;
-  const shownForNodeId = useRef(reapplyNodeId);
+  // rather than leaving a dialog that now targets a different Sencho. The same
+  // holds for the protected dialog opened because Reapply is unavailable: its
+  // copy names a node, so it must not survive a switch to another one.
+  const dialogNodeId = reapplySelfTarget?.nodeId ?? activeNodeId ?? null;
+  const shownForNodeId = useRef(dialogNodeId);
   useEffect(() => {
-    if (shownForNodeId.current === reapplyNodeId) return;
-    shownForNodeId.current = reapplyNodeId;
-    setSelfStackProtectedOpen(false);
-  }, [reapplyNodeId, setSelfStackProtectedOpen]);
+    if (shownForNodeId.current === dialogNodeId) return;
+    shownForNodeId.current = dialogNodeId;
+    closeSelfStackProtected();
+  }, [dialogNodeId, closeSelfStackProtected]);
 
   // The refusal handlers capture the node and stack they targeted; a later
   // node or stack switch must not retarget the safe replacement preview.
@@ -162,7 +165,8 @@ export function ShellOverlays({
 
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
-        onOpenChange={setSelfStackProtectedOpen}
+        onOpenChange={(open) => { if (!open) closeSelfStackProtected(); }}
+        unavailable={selfStackProtectedContext}
         onReapply={reapplySelfTarget ? async () => {
           // Same readiness and single-flight checks as the Save & Reapply
           // confirm. Returning a promise is what keeps the dialog open: readiness
@@ -171,7 +175,10 @@ export function ShellOverlays({
             toast.error('Status data unavailable. Refresh and try again.');
             return;
           }
-          setSelfStackProtectedOpen(false);
+          // This dialog can have been open on an answer that has since gone
+          // stale. A refusal flips it to the named one in place.
+          if (!(await stackActions.verifyReapplyEligibility())) return;
+          closeSelfStackProtected();
           if (composeReapply.dispatching) return;
           void composeReapply.runReapply(reapplySelfTarget);
         } : undefined}
@@ -216,7 +223,7 @@ export function ShellOverlays({
         canRecreate={refusalContextCurrent}
         isSelfStackSelected={isSelfStackSelected}
         contextMoved={refusalContextStale}
-        onRecreate={() => {
+        onRecreate={async () => {
           const refusal = dockerEndpointProtected;
           if (!refusal || refusal.nodeId === null || !refusal.stackFile) return;
           if (!hydrationReady()) {
@@ -224,7 +231,9 @@ export function ShellOverlays({
             return;
           }
           if (composeReapply.dispatching) return;
+          const eligible = await stackActions.verifyReapplyEligibility();
           setDockerEndpointProtected(null);
+          if (!eligible) return;
           // Open the same preview the editor uses, for the node and stack that
           // were refused, with endpoint-only preselected.
           setComposeReapplyCapture({

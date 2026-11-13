@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight, Plus } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
@@ -56,6 +57,7 @@ interface StackNetworkFacts {
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS = 'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 font-normal hover:bg-transparent [&_svg]:size-3');
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 function portLabel(p: NetworkFactPort): string {
@@ -206,7 +208,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
 
   const saveIntent = useCallback(async (service: string, intent: ExposureIntent | null) => {
     const requestedKey = `${nodeId ?? ''}::${stackName}`;
-    const next = await saveExposureIntent(stackName, service, intent);
+    const next = await saveExposureIntent(stackName, service, intent, nodeId);
     if (next !== null && viewKeyRef.current === requestedKey) {
       setIntents(next);
       setIntentsUnavailable(false);
@@ -251,9 +253,14 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
               <Plus className="h-3 w-3" strokeWidth={1.5} /> create network
             </button>
           )}
-          <button type="button" onClick={() => setReloadKey(k => k + 1)} disabled={refreshing} className={ACTION_CLASS}>
-            <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} strokeWidth={1.5} /> refresh
-          </button>
+          <IconBusyButton
+            variant="ghost"
+            icon={RefreshCw}
+            label="refresh"
+            pending={refreshing}
+            onClick={() => setReloadKey(k => k + 1)}
+            className={ACTION_BUTTON_CLASS}
+          />
         </div>
       </div>
 

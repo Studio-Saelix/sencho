@@ -47,6 +47,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Node management
   'POST /nodes': 'Added node',
+  'POST /nodes/bootstrap/host-key': 'Checked bootstrap host key',
+  'POST /nodes/bootstrap/preflight': 'Ran bootstrap preflight',
   'PUT /nodes': 'Updated node',
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
@@ -168,9 +170,13 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Fleet secrets
   'POST /secrets': 'Created secret',
-  'PUT /secrets': 'Updated secret',
+  'PATCH /secrets': 'Updated secret',
   'DELETE /secrets': 'Deleted secret',
+  'POST /secrets/*/import-from-stack/preview': 'Previewed secret import',
   'POST /secrets/*/import-from-stack': 'Imported env into secret',
+  'POST /secrets/*/reveal-grant': 'Authorized secret reveal',
+  'POST /secrets/*/reveal': 'Revealed secret value',
+  'POST /secrets/*/replace': 'Replaced secret payload',
   'POST /secrets/*/push/preview': 'Previewed secret push',
   'POST /secrets/*/push': 'Pushed secret',
 
@@ -273,6 +279,10 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
       if (statusCode === 409) return 'Prune blocked: plan stale';
       if (statusCode === 400) return 'Prune request rejected';
       return `Prune failed (${statusCode})`;
+    }
+    if (method === 'POST' && normalized.startsWith('nodes/bootstrap/')) {
+      if (normalized.startsWith('nodes/bootstrap/host-key')) return `Bootstrap host key check failed (${statusCode})`;
+      if (normalized.startsWith('nodes/bootstrap/preflight')) return `Bootstrap preflight failed (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;
