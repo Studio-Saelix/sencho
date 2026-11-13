@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { getErrorMessage } from './errors';
 
 // eslint-disable-next-line no-control-regex
@@ -265,51 +266,56 @@ export function errorMessageForLog(error: unknown, options?: { imageRef?: string
 function redactImageInText(text: string, imageRef: string): string {
   // Docker receives the reference inside a URL path and its router decodes that
   // path once before the reference parser sees it, so the daemon can echo a
-  // spelling the Compose file never held. Check both spellings.
+  // spelling the Compose file never held. The decoded spelling is also the
+  // credential boundary: a literal `@` in the authored spelling can sit inside
+  // the password (`user@pw%40host/app`), so only the decoded split may decide
+  // what is credential-free. Replace an authored occurrence with that decoded
+  // rest, never with the authored rest that may still hold the password tail.
+  const decoded = decodeDockerImagePath(imageRef);
+  const reference = splitImageReference(decoded);
+  if (reference === null) return text;
+
+  // The literal marker is attacker-controlled text: a credential can contain
+  // it, and a previous call's output contains it too. The quoted-name passes
+  // have to tell text these passes reduced from text the daemon quoted, so
+  // every replacement writes this per-call sentinel and the result turns it
+  // back into the marker. The random suffix keeps the input from forging it.
+  const sentinel = `\u0000${randomUUID()}\u0000`;
   const spellings = imageRef.includes('%')
-    ? [...new Set([imageRef, decodeDockerImagePath(imageRef)])]
+    ? [...new Set([imageRef, decoded])]
     : [imageRef];
-  const references = new Map<string, { userinfo: string; rest: string }>();
   let out = text;
   for (const spelling of spellings) {
-    const reference = splitImageReference(spelling);
-    if (reference === null) continue;
-    references.set(spelling, reference);
-    out = out.split(spelling).join(`[redacted]@${reference.rest}`);
+    out = out.split(spelling).join(`${sentinel}@${reference.rest}`);
   }
-  if (references.size === 0) return out;
 
+  const { userinfo, rest } = reference;
   const bareFragments = new Set<string>();
   const anchoredFragments = new Set<string>();
-
-  for (const reference of references.values()) {
-    const { userinfo } = reference;
-    if (userinfo.includes(':') || userinfo.length >= 8) bareFragments.add(userinfo);
-    const slash = userinfo.indexOf('/');
-    const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
-    // Anchoring each fragment to the host's `@` keeps a short password piece
-    // from rewriting unrelated words. A `user:password` userinfo is
-    // credential-shaped even when short, and a long token is distinctive, so
-    // an echo of either is removed even without the host's `@`. A short
-    // token-only userinfo is removed only before the `@`: replacing a bare
-    // two- or three-letter token would rewrite ordinary words, and Docker's
-    // echo keeps the `@`.
-    anchoredFragments.add(userinfo);
-    if (tail) anchoredFragments.add(tail);
-  }
+  if (userinfo.includes(':') || userinfo.length >= 8) bareFragments.add(userinfo);
+  const slash = userinfo.indexOf('/');
+  const tail = slash === -1 ? '' : userinfo.slice(slash + 1);
+  // Anchoring each fragment to the host's `@` keeps a short password piece
+  // from rewriting unrelated words. A `user:password` userinfo is
+  // credential-shaped even when short, and a long token is distinctive, so
+  // an echo of either is removed even without the host's `@`. A short
+  // token-only userinfo is removed only before the `@`: replacing a bare
+  // two- or three-letter token would rewrite ordinary words, and Docker's
+  // echo keeps the `@`.
+  anchoredFragments.add(userinfo);
+  if (tail) anchoredFragments.add(tail);
 
   for (const fragment of bareFragments) {
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
-    out = out.split(fragment).join('[redacted]');
+    out = out.split(fragment).join(sentinel);
   }
   // Remove a fragment anchored to the host's `@` before the quoted-name pass,
-  // so a quote that still holds the host keeps its `[redacted]@host/path`
-  // context instead of collapsing to a bare marker. Punctuation-only pieces
-  // carry no credential value, and replacing them would mangle the rest of the
-  // message.
+  // so a quote that still holds the host keeps its redacted host/path context
+  // instead of collapsing to a bare marker. Punctuation-only pieces carry no
+  // credential value, and replacing them would mangle the rest of the message.
   for (const fragment of anchoredFragments) {
     if (!/[A-Za-z0-9]/.test(fragment)) continue;
-    out = out.split(`${fragment}@`).join('[redacted]@');
+    out = out.split(`${fragment}@`).join(`${sentinel}@`);
   }
   // The invalid-reference error quotes the repository name the daemon parsed,
   // which can come from a path it decoded, a Docker Hub name it normalized, or
@@ -319,13 +325,12 @@ function redactImageInText(text: string, imageRef: string): string {
   // redacted reference stay, and only the name is lost. A field an earlier pass
   // already reduced keeps the host context it still holds, but only when that
   // context is validated against the credential-free part of the reference.
-  const safeRests = [...references.values()].map((reference) => reference.rest);
-  out = redactQuotedRepositoryNames(out, safeRests);
+  out = redactQuotedRepositoryNames(out, rest, sentinel);
   // A different daemon error shape may quote a name without either known
   // suffix. Without a suffix its closing parenthesis is ambiguous, so redact
   // the rest of the message rather than stop at one the name may hold.
-  out = redactNoSuffixQuotedNames(out, safeRests);
-  return out;
+  out = redactNoSuffixQuotedNames(out, rest, sentinel);
+  return out.split(sentinel).join(REDACTION_MARKER);
 }
 
 const REDACTION_MARKER = '[redacted]';
@@ -337,20 +342,34 @@ const QUOTED_REPOSITORY_NAME_SUFFIXES = [
 ];
 
 /**
- * Whether a quoted repository name already reduced by an earlier pass may keep
- * its text. The marker alone proves nothing: a credential can contain that
- * literal, so an attacker could otherwise make a field look redacted and leave
- * the rest of it in the log. Only the two shapes the earlier passes produce are
- * kept: a bare marker, or the marker followed by `@` and part of the
- * credential-free rest of the reference. The rest is the text the log already
- * prints in the redacted image argument, so keeping a prefix of it reveals no
- * credential; anything else is redacted as a whole.
+ * Normalize a quoted repository name that an earlier pass reduced, or return
+ * null when the name may still carry a credential. A bare `[redacted]` proves
+ * nothing: a credential can contain the literal, and the daemon can quote it
+ * inside a longer name. Only the per-call sentinel proves that a redaction pass
+ * produced the text. The one exception is a field followed by a known suffix,
+ * whose matched end is the daemon's own closing parenthesis, so a previous
+ * call's marker shape can be kept for idempotence. A kept field is returned in
+ * sentinel form: a bare marker stays bare, and `sentinel@` (or marker@) keeps
+ * only a prefix of the credential-free rest of the reference, which by
+ * construction contains no credential.
  */
-function keepsRedactedContext(quotedName: string, safeRests: readonly string[]): boolean {
-  if (quotedName === REDACTION_MARKER) return true;
-  if (!quotedName.startsWith(`${REDACTION_MARKER}@`)) return false;
-  const context = quotedName.slice(REDACTION_MARKER.length + 1);
-  return safeRests.some((rest) => rest.startsWith(context));
+function keptRedactedContext(
+  quotedName: string,
+  safeRest: string,
+  sentinel: string,
+  allowPreviousOutput: boolean,
+): string | null {
+  const marker = quotedName.startsWith(sentinel)
+    ? sentinel
+    : allowPreviousOutput && quotedName.startsWith(REDACTION_MARKER)
+      ? REDACTION_MARKER
+      : null;
+  if (marker === null) return null;
+  if (quotedName === marker) return sentinel;
+  if (!quotedName.startsWith(`${marker}@`)) return null;
+  const context = quotedName.slice(marker.length + 1);
+  if (!safeRest.startsWith(context)) return null;
+  return `${sentinel}${quotedName.slice(marker.length)}`;
 }
 
 /**
@@ -361,7 +380,7 @@ function keepsRedactedContext(quotedName: string, safeRests: readonly string[]):
  * scan is linear: a regular expression over the same text backtracks
  * quadratically on a message built from many `repository name (` runs.
  */
-function redactQuotedRepositoryNames(text: string, safeRests: readonly string[]): string {
+function redactQuotedRepositoryNames(text: string, safeRest: string, sentinel: string): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -386,10 +405,9 @@ function redactQuotedRepositoryNames(text: string, safeRests: readonly string[])
     }
     if (closeAt === -1) break;
     const quotedName = text.slice(openAt + phrase.length, closeAt);
-    if (!keepsRedactedContext(quotedName, safeRests)) {
-      out += `${text.slice(copied, openAt)}repository name (${REDACTION_MARKER})`;
-      copied = closeAt + 1;
-    }
+    const kept = keptRedactedContext(quotedName, safeRest, sentinel, true);
+    out += `${text.slice(copied, openAt)}repository name (${kept ?? sentinel})`;
+    copied = closeAt + 1;
     searchFrom = closeAt + 1;
   }
   out += text.slice(copied);
@@ -397,17 +415,18 @@ function redactQuotedRepositoryNames(text: string, safeRests: readonly string[])
 }
 
 /**
- * Redact a quoted repository name that has no known daemon suffix. Replacing
- * only inside the phrase keeps a short prefix such as `Pass` from rewriting the
+ * Redact a quoted repository name that has no known daemon suffix. Only the
+ * phrase is rewritten, so a short prefix such as `Pass` does not rewrite the
  * same word elsewhere in the message, and the scan is linear in the message
  * length.
  *
  * Without a recognised suffix there is no trusted end to the name: a `)` in a
  * credential would make the first one too early and leave the tail behind. Only
- * a field an earlier pass already reduced keeps its text; any other field takes
- * the rest of the message with it.
+ * a field this call already reduced keeps its text; any other field takes the
+ * rest of the message with it. A previous call's bare marker is not proof for
+ * this pass: the daemon can quote that literal inside a longer credential.
  */
-function redactNoSuffixQuotedNames(text: string, safeRests: readonly string[]): string {
+function redactNoSuffixQuotedNames(text: string, safeRest: string, sentinel: string): string {
   const phrase = 'repository name (';
   let out = '';
   let copied = 0;
@@ -417,11 +436,14 @@ function redactNoSuffixQuotedNames(text: string, safeRests: readonly string[]): 
     if (openAt === -1) break;
     const closeAt = text.indexOf(')', openAt + phrase.length);
     const quotedName = closeAt === -1 ? '' : text.slice(openAt + phrase.length, closeAt);
-    if (closeAt !== -1 && keepsRedactedContext(quotedName, safeRests)) {
+    const kept = closeAt === -1 ? null : keptRedactedContext(quotedName, safeRest, sentinel, false);
+    if (kept !== null) {
+      out += `${text.slice(copied, openAt)}repository name (${kept})`;
+      copied = closeAt + 1;
       searchFrom = closeAt + 1;
       continue;
     }
-    out += `${text.slice(copied, openAt)}repository name (${REDACTION_MARKER})`;
+    out += `${text.slice(copied, openAt)}repository name (${sentinel})`;
     copied = text.length;
     break;
   }

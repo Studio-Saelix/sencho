@@ -717,6 +717,18 @@ describe('errorMessageForLog', () => {
       'SuperSecret',
     ],
     [
+      'in a token-only prefix split by an encoded slash',
+      '[redacted]SuperSecret%2fTail@ghcr.io/x/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'after a redacted context that is not the reference rest',
+      'user:Ab/[redacted]@SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]@SuperSecret',
+      'SuperSecret',
+    ],
+    [
       'behind an encoded slash',
       'user:Ab%2f[redacted]SuperSecret:x@registry.example.com/app:latest',
       '[redacted]SuperSecret',
@@ -777,15 +789,34 @@ describe('errorMessageForLog', () => {
   // hold one, and a marker inside it must not make the scan stop at the wrong
   // one and leave the tail behind.
   it.each([
-    ['a marker before the credential', 'repository name ([redacted]x)SuperSecret)', 'SuperSecret'],
-    ['a marker between the credential pieces', 'repository name (Super[redacted]Secret)', 'Secret'],
-    ['a marker after the credential', 'repository name (SuperSecret[redacted])', 'SuperSecret'],
-  ])('redacts a marker-bearing quoted name with no known suffix for %s', (_name, quoted, secret) => {
-    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    ['a marker before the credential', 'repository name ([redacted]x)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker immediately before the ambiguous close', 'repository name ([redacted])SuperSecret)', 'SuperSecret', 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest'],
+    ['a redacted context immediately before the ambiguous close', 'repository name ([redacted]@reg)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]@reg)SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker between the credential pieces', 'repository name (Super[redacted]Secret)', 'Secret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker after the credential', 'repository name (SuperSecret[redacted])', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['an encoded marker', 'repository name ([redacted]SuperSecret)', 'SuperSecret', 'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest'],
+    ['a marker on a digest pin', 'repository name ([redacted]SuperSecret)', 'SuperSecret', `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`],
+    ['a normalized marker credential', 'repository name (library/[redacted]Pass)', 'Pass', 'docker.io/[redacted]Pass:x@registry.example.com'],
+    ['a marker beside an invalid byte', 'repository name (\uFFFD[redacted]SuperSecret)', 'SuperSecret', 'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest'],
+  ])('redacts a marker-bearing quoted name with no known suffix for %s', (_name, quoted, secret, image) => {
     const text = errorMessageForLog(new Error(`invalid reference format: ${quoted}`), { imageRef: image });
 
     expect(text).not.toContain(secret);
     expect(text).toContain('repository name ([redacted])');
+  });
+
+  // A literal `@` in the authored spelling can sit inside the password while
+  // the decoded `@` is the credential separator. The replacement must use the
+  // decoded rest, or the authored tail leaves the password in the log.
+  it('redacts an authored percent-encoded @ instead of keeping its password tail', () => {
+    const image = 'user@pw%40host/app:latest';
+    const text = errorMessageForLog(
+      new Error(`failed for ${image}: connect refused`),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]@host/app:latest');
   });
 
   it('redacts past a marker-bearing field with no suffix to a later field', () => {
@@ -826,6 +857,19 @@ describe('errorMessageForLog', () => {
     expect(text).not.toContain('eF9xyz');
     expect(text).not.toContain('SuperSecret');
     expect(text).toContain('must be lowercase');
+  });
+
+  it('keeps a cause message after redacting a marker-bearing quoted name', () => {
+    const image = 'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest';
+    const error = new Error(
+      'invalid reference format: repository name ([redacted]x)SuperSecret) must be lowercase',
+      { cause: new Error('connect ECONNREFUSED 127.0.0.1:2375') },
+    );
+    const text = errorMessageForLog(error, { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('connect ECONNREFUSED 127.0.0.1:2375');
   });
 
   it('is idempotent after redacting a marker-bearing quoted name', () => {

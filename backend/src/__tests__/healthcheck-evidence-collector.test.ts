@@ -440,6 +440,13 @@ describe('collectServiceHealthcheckEvidence', () => {
       rest: 'ghcr.io/x/app:latest',
     },
     {
+      name: 'a token-only marker split by an encoded slash',
+      image: '[redacted]SuperSecret%2fTail@ghcr.io/x/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'ghcr.io/x/app:latest',
+    },
+    {
       name: 'a marker on a digest pin',
       image: `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
       quoted: '[redacted]SuperSecret',
@@ -479,6 +486,37 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
     expect(String(imageWarn?.[2])).not.toContain(quoted);
     expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
+  it('never logs a marker-bearing name with no daemon suffix', async () => {
+    const image = 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest';
+    const dockerError = new Error('invalid reference format: repository name ([redacted])SuperSecret)');
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+
+    expect(logged).not.toContain('SuperSecret');
+    expect(logged).toContain('repository name ([redacted])');
+    expect(logged).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an authored percent-encoded @ instead of keeping its password tail', async () => {
+    const image = 'user@pw%40host/app:latest';
+    const dockerError = new Error(`failed for ${image}: connect refused`);
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+
+    expect(logged).not.toContain('pw');
+    expect(logged).toContain('[redacted]@host/app:latest');
   });
 
   it('redacts an image credential whose @ is percent-encoded', async () => {

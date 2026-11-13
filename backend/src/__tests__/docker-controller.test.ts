@@ -1975,19 +1975,39 @@ describe('DockerController - inspectImage', () => {
   // Both requests in the shared Promise.all reach the collector's warning, so
   // either rejection has to format to a credential-free message.
   it.each([
-    ['inspect', '/json'],
-    ['history', '/history'],
-  ])('propagates a marker-bearing %s failure for the formatter to redact', async (_name, failSuffix) => {
-    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    {
+      name: 'inspect with a known suffix',
+      failSuffix: '/json',
+      body: '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
+      keepsReason: true,
+    },
+    {
+      name: 'history with a known suffix',
+      failSuffix: '/history',
+      body: '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
+      keepsReason: true,
+    },
+    {
+      name: 'inspect with no suffix',
+      failSuffix: '/json',
+      body: 'invalid reference format: repository name ([redacted])SuperSecret)',
+      keepsReason: false,
+    },
+    {
+      name: 'history with no suffix',
+      failSuffix: '/history',
+      body: 'invalid reference format: repository name ([redacted])SuperSecret)',
+      keepsReason: false,
+    },
+  ])('propagates a marker-bearing %s failure for the formatter to redact', async ({ failSuffix, body, keepsReason }) => {
+    const image = 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest';
     const client = new Docker({ socketPath: '/nonexistent/docker.sock' });
     const dial = vi.spyOn(client.modem, 'dial').mockImplementation(((
       opts: { path: string },
       callback: (err: Error | null, data?: unknown) => void,
     ) => {
       if (opts.path.endsWith(failSuffix)) {
-        callback(new Error(
-          '(HTTP code 400) unexpected - invalid reference format: repository name ([redacted]SuperSecret) must be lowercase ',
-        ));
+        callback(new Error(body));
       } else {
         callback(null, opts.path.endsWith('/history') ? [] : { Id: 'sha256:abc' });
       }
@@ -2001,7 +2021,7 @@ describe('DockerController - inspectImage', () => {
 
     expect(logged).not.toContain('SuperSecret');
     expect(logged).toContain('repository name ([redacted])');
-    expect(logged).toContain('must be lowercase');
+    if (keepsReason) expect(logged).toContain('must be lowercase');
     dial.mockRestore();
   });
 
