@@ -87,7 +87,7 @@ import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServic
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactImageForDisplay, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, evaluatedDeployCandidateVerification, policyBlockPayload, policyEvidenceFor, pulledCandidateVerifier, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning, PulledCandidateBlockedError, verifyPulledCandidates } from '../helpers/policyGate';
@@ -1979,13 +1979,14 @@ const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
 /** An acknowledgement as the API returns it. The reason is operator-entered free
  *  text and the image anchor is copied from the rendered model, which inlines a
- *  registry credential, so both are redacted in every response, the same as on the
- *  Doctor report. The stored anchor stays raw: expiry compares against it. */
+ *  registry credential or another resolved secret, so both get the full display
+ *  redaction in every response, the same as on the Doctor report. The stored
+ *  anchor stays raw: expiry compares against it. */
 function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowledgement {
   return {
     ...ack,
     reason: redactSensitiveText(ack.reason),
-    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageReference(ack.anchor_image_ref),
+    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageForDisplay(ack.anchor_image_ref),
   };
 }
 

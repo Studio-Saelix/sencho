@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactImageReference, redactSensitiveText } from '../utils/safeLog';
+import { errorMessageForLog, redactImageForDisplay, redactImageReference, redactSensitiveText } from '../utils/safeLog';
 
 describe('redactSensitiveText', () => {
   it('redacts credentials from durable log text', () => {
@@ -241,6 +241,8 @@ describe('redactSensitiveText', () => {
     ['a host with no path', 'u:SECRETA3@host', '[redacted]@host'],
     ['a literal @ in the password', 'u:p@SECRETQ7@host/app', '[redacted]@host/app'],
     ['a digest pin after the credential', 'u:SECRETA4@host/app:1@sha256:' + 'c'.repeat(64), '[redacted]@host/app:1@sha256:' + 'c'.repeat(64)],
+    ['an encoded @ before the host', 'user:pw%40registry.example.com/app:latest', '[redacted]@registry.example.com/app:latest'],
+    ['an encoded @ after a literal @', 'user@pw%40host/app', '[redacted]@host/app'],
   ])('redactImageReference drops %s and keeps the reference', (_name, image, expected) => {
     const out = redactImageReference(image);
     expect(out).toBe(expected);
@@ -264,6 +266,34 @@ describe('redactSensitiveText', () => {
     redactImageReference(`a${'@b'.repeat(100_000)}`);
     redactImageReference(`${'a'.repeat(100_000)}@sha256:`);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  // The wire field and the Doctor log line name the same image for the same
+  // failure, so a value one of them writes must not show a secret in the other.
+  it.each([
+    ['a token query beside a URL credential', 'https://user:pw@registry.example.com/app?token=abc123', '[redacted]@registry.example.com/app?token=[redacted]'],
+    ['a password keyword', 'password=hunter2', 'password=[redacted]'],
+    ['a token keyword', 'token=abc123', 'token=[redacted]'],
+    ['an api_key keyword', 'registry.example.com/app?api_key=abc123', 'registry.example.com/app?api_key=[redacted]'],
+    ['a hyphenated api-key keyword', 'app?api-key=abc123', 'app?api-key=[redacted]'],
+    ['a secret keyword', 'app?secret=abc123', 'app?secret=[redacted]'],
+    ['a Bearer credential', 'Bearer abc123', 'Bearer [redacted]'],
+    ['an image with no secret', 'nginx:1.27', 'nginx:1.27'],
+  ])('redactImageForDisplay hides %s', (_name, image, expected) => {
+    expect(redactImageForDisplay(image)).toBe(expected);
+  });
+
+  // A stored row is read through this composition after it was written through
+  // it, so the helper has to leave its own output unchanged.
+  it.each([
+    'https://user:pw@registry.example.com/app?token=abc123',
+    'password=hunter2',
+    'token=abc123',
+    'Bearer abc123',
+    'nginx:1.27',
+  ])('redactImageForDisplay is idempotent on %s', image => {
+    const once = redactImageForDisplay(image);
+    expect(redactImageForDisplay(once)).toBe(once);
   });
 
   it('keeps the image tail when a literal @ password is redacted', () => {
@@ -361,5 +391,712 @@ describe('redactSensitiveText', () => {
 
     expect(text).not.toContain('abcd1234efgh');
     expect(text).toContain('[redacted]');
+  });
+});
+
+describe('errorMessageForLog', () => {
+  it('redacts a credential-bearing image reference the error quotes', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('Ab/cD+eF9xyz=');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it.each([
+    ['a space', 'user:Ab cD+eF9xyz=@registry.example.com/app:latest', 'Ab cD+eF9xyz='],
+    ['a quote', 'user:p"ss/cD+eF9xyz=@registry.example.com/app:latest', 'p"ss'],
+    ['a literal @', 'user:p@ss/word@registry.example.com/app:latest', 'p@ss/word'],
+  ])('redacts an image credential with %s when the error echoes the whole reference', (_name, image, secret) => {
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts a token-only userinfo the error quotes', () => {
+    const image = 'ghp_SECRETD8@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('SECRETD8');
+    expect(text).toContain('[redacted]@ghcr.io/x/app:latest');
+  });
+
+  it('redacts the whole credential-shaped userinfo when the error quotes it without the host', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const text = errorMessageForLog(new Error('invalid userinfo user:Ab/cD+eF9xyz= for image'), { imageRef: image });
+
+    expect(text).not.toContain('Ab/cD+eF9xyz=');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  it('redacts a long token-only userinfo when the error quotes it without the host', () => {
+    const image = 'ghp_SECRETD8@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error('invalid userinfo ghp_SECRETD8 for image'), { imageRef: image });
+
+    expect(text).not.toContain('SECRETD8');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  // The HTTP 400 body Docker 29.9.3 returns for this credential quotes only the
+  // repository name that starts after the first `/`. The exact reference is
+  // absent and the text rule treats the `=` before the `@` as a token boundary,
+  // which is why the helper has to remove the userinfo tail on its own.
+  it('redacts the rewritten userinfo fragment Docker quotes for an invalid reference', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const body =
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase ';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('eF9xyz');
+    expect(text).not.toContain('cD+eF9xyz=');
+    expect(text).toContain('must be lowercase');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  // Docker 29.9.3 parses the reference before it validates case and quotes the
+  // parsed repository name, cut at the first `:`. The quote starts after the
+  // credential's first `/` when Docker reads that component as a domain and at
+  // the start of the reference otherwise. A colon inside the password truncates
+  // the quote before the host's `@`, so the anchored fragment above can no
+  // longer match it.
+  it.each([
+    [
+      'a long prefix',
+      'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest',
+      'cD+eF9xyz=',
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ',
+    ],
+    [
+      'a mixed-case word',
+      'user:deploy/SuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'a short prefix',
+      'user:deploy/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Pass) must be lowercase',
+    ],
+    [
+      'a multi-segment tail',
+      'user:Ab/cD/ef:gh@registry.example.com/app:latest',
+      'cD/ef',
+      'invalid reference format: repository name (cD/ef) must be lowercase',
+    ],
+    [
+      'a literal @ in the prefix',
+      'user:p/ss@Word:x@registry.example.com/app:latest',
+      'ss@Word',
+      'invalid reference format: repository name (ss@Word) must be lowercase',
+    ],
+    [
+      'a space in the prefix',
+      'user:Ab/Super Secret:x@registry.example.com/app:latest',
+      'Super Secret',
+      'invalid reference format: repository name (Super Secret) must be lowercase',
+    ],
+    [
+      'a second colon after the prefix',
+      'user:Ab/cD+eF9xyz=:x:y@registry.example.com/app:latest',
+      'cD+eF9xyz=',
+      'invalid reference format: repository name (cD+eF9xyz=) must be lowercase',
+    ],
+    [
+      'a token-only first segment',
+      'tokenonly/SuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (tokenonly/SuperSecret) must be lowercase',
+    ],
+    [
+      'a token-only first segment with a multi-segment tail',
+      'tokenonly/foo/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (tokenonly/foo/Pass) must be lowercase',
+    ],
+    [
+      'an uppercase first segment',
+      'TokenOnly/Pass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Pass) must be lowercase',
+    ],
+    [
+      'a digest pin',
+      'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      'cD+eF9xyz=',
+      'invalid reference format: repository name (cD+eF9xyz=) must be lowercase',
+    ],
+  ])('redacts the colon-cut repository name Docker quotes for %s', (_name, image, secret, body) => {
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('does not rewrite a short colon-cut prefix outside the quoted repository name', () => {
+    const image = 'user:deploy/Pass:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (Pass) must be lowercase; retry Pass later';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('retry Pass later');
+  });
+
+  it('is idempotent on a colon-cut repository name', () => {
+    const image = 'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest';
+    const body =
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('cD+eF9xyz=');
+    expect(once).toContain('repository name ([redacted])');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('removes a long colon-cut repository name in bounded time', () => {
+    const quotedTail = `cD${'/cD'.repeat(20_000)}=`;
+    const image = `user:Ab/${quotedTail}:x@registry.example.com/app:latest`;
+    const body = `invalid reference format: repository name (${quotedTail}) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain(quotedTail);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  it('redacts every slash-separated credential piece in a rewritten userinfo tail', () => {
+    const image = 'user:Ab/cD/ef+GH=@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (cD/ef+GH=@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('ef+GH=');
+    expect(text).not.toContain('cD');
+    expect(text).toContain('must be lowercase');
+  });
+
+  // A short password piece must only be replaced where it is echoed as part of
+  // the reference, not inside every word that happens to contain it.
+  it('does not rewrite unrelated words when a short password piece repeats', () => {
+    const image = 'user:Ab/c@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (c@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('reference format');
+    expect(text).toContain('lowercase');
+    expect(text).not.toContain('c@registry');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('does not rewrite a short token-only userinfo elsewhere in the message', () => {
+    const image = 'bot@ghcr.io/x/app:latest';
+    const body =
+      'unauthorized: bot access denied; retry bot later; No such image: bot@ghcr.io/x/app:latest';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('bot access denied');
+    expect(text).toContain('retry bot later');
+    expect(text).not.toContain('bot@ghcr.io');
+    expect(text).toContain('[redacted]@ghcr.io/x/app:latest');
+  });
+
+  it('removes a long rewritten userinfo tail in bounded time', () => {
+    const image = `user:Ab${'/cD'.repeat(20_000)}=@registry.example.com/app:latest`;
+    const tail = image.slice(image.indexOf('/') + 1, image.lastIndexOf('@'));
+    const body = `invalid reference format: repository name (${tail}@registry.example.com/app) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain('cD/cD');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('is idempotent on a rewritten userinfo tail', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  // Docker decodes the image request path once before its reference parser
+  // runs, and the parser normalizes a familiar Docker Hub name. The daemon can
+  // therefore quote a spelling the Compose file never held.
+  it.each([
+    [
+      'an encoded slash',
+      'user:Ab%2fSuperSecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded letter',
+      'user:Ab/Super%53ecret:x@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded colon',
+      'user:Ab/SuperSecret%3ax@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+    [
+      'a closing parenthesis in the quoted name',
+      'user:Ab%2fx)SuperSecret:y@registry.example.com/app:latest',
+      'SuperSecret',
+      'invalid reference format: repository name (x)SuperSecret) must be lowercase',
+    ],
+    [
+      'normalization plus an encoded slash',
+      'docker.io/Ab%2fPass:x@registry.example.com/app:latest',
+      'Pass',
+      'invalid reference format: repository name (Ab/Pass) must be lowercase',
+    ],
+    [
+      'an encoded token-only multi-segment prefix',
+      't%6fkenonly/foo%2fSuperSecret:x@registry.example.com/app:latest',
+      'tokenonly/foo/SuperSecret',
+      'invalid reference format: repository name (tokenonly/foo/SuperSecret) must be lowercase',
+    ],
+    [
+      'an encoded digest pin',
+      `user:Ab%2fSuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      'SuperSecret',
+      'invalid reference format: repository name (SuperSecret) must be lowercase',
+    ],
+  ])('redacts the Docker-decoded repository name for %s', (_name, image, secret, body) => {
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).not.toContain('%2f');
+    expect(text).not.toContain('%53');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it.each([
+    ['a canonical Docker Hub name', 'docker.io/Pass:x@registry.example.com'],
+    ['the legacy Docker Hub index domain', 'index.docker.io/Pass:x@registry.example.com'],
+  ])('redacts the normalized repository name for %s', (_name, image) => {
+    const body = 'invalid reference format: repository name (library/Pass) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('Pass');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  // A percent escape can decode to a byte that is not valid UTF-8. Docker's
+  // JSON error body rewrites that byte as U+FFFD, so the quoted name no longer
+  // equals any spelling the helper can reconstruct. The structured field must
+  // still lose the credential.
+  it('redacts a quoted repository name the decoder cannot reproduce', () => {
+    const image = 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (\uFFFDSuperSecret) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('leaves a quoted repository name intact when the reference carries no credential', () => {
+    const image = 'registry.example.com/App:latest';
+    const body = 'invalid reference format: repository name (App) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).toContain('repository name (App)');
+  });
+
+  // A credential can contain the literal redaction marker. Treating that text
+  // as proof the field was already redacted left the credential tail in the
+  // log, so only the marker followed by a validated part of the
+  // credential-free reference may keep its context.
+  it.each([
+    [
+      'before the credential',
+      'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'between the credential pieces',
+      'user:Ab/Super[redacted]Secret:x@registry.example.com/app:latest',
+      'Super[redacted]Secret',
+      'Secret',
+    ],
+    [
+      'after the credential',
+      'user:Ab/SuperSecret[redacted]:x@registry.example.com/app:latest',
+      'SuperSecret[redacted]',
+      'SuperSecret',
+    ],
+    [
+      'in a token-only userinfo',
+      '[redacted]SuperSecret@ghcr.io/x/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'in a token-only prefix split by an encoded slash',
+      '[redacted]SuperSecret%2fTail@ghcr.io/x/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'after a redacted context that is not the reference rest',
+      'user:Ab/[redacted]@SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]@SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'behind an encoded slash',
+      'user:Ab%2f[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'as an encoded marker',
+      'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest',
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'as an encoded marker between the credential pieces',
+      'user:Ab/Super%5Bredacted%5DSecret:x@registry.example.com/app:latest',
+      'Super[redacted]Secret',
+      'Secret',
+    ],
+    [
+      'as an encoded marker after the credential',
+      'user:Ab/SuperSecret%5Bredacted%5D:x@registry.example.com/app:latest',
+      'SuperSecret[redacted]',
+      'SuperSecret',
+    ],
+    [
+      'on a digest-pinned credential',
+      `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      '[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'beside an embedded close parenthesis',
+      'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest',
+      '[redacted]x)SuperSecret',
+      'SuperSecret',
+    ],
+    [
+      'in a normalized Docker Hub name',
+      'docker.io/[redacted]Pass:x@registry.example.com',
+      'library/[redacted]Pass',
+      'Pass',
+    ],
+    [
+      'after an invalid byte Docker rewrites',
+      'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest',
+      '\uFFFD[redacted]SuperSecret',
+      'SuperSecret',
+    ],
+  ])('redacts a quoted name whose credential contains the marker for %s', (_name, image, quoted, secret) => {
+    const body = `invalid reference format: repository name (${quoted}) must be lowercase`;
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  // Without a known suffix the closing parenthesis is ambiguous: the name can
+  // hold one, and a marker inside it must not make the scan stop at the wrong
+  // one and leave the tail behind.
+  it.each([
+    ['a marker before the credential', 'repository name ([redacted]x)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker immediately before the ambiguous close', 'repository name ([redacted])SuperSecret)', 'SuperSecret', 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest'],
+    ['a redacted context immediately before the ambiguous close', 'repository name ([redacted]@reg)SuperSecret)', 'SuperSecret', 'user:Ab/[redacted]@reg)SuperSecret:x@registry.example.com/app:latest'],
+    ['a reduced userinfo before the ambiguous close', 'repository name (user:Ab/SuperSecret:x)SuperSecret)', 'SuperSecret', 'user:Ab/SuperSecret:x@registry.example.com/app:latest'],
+    ['a reduced reference before the ambiguous close', 'repository name (user:Ab/SuperSecret:x@registry.example.com/app:latest)SuperSecret)', 'SuperSecret', 'user:Ab/SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker between the credential pieces', 'repository name (Super[redacted]Secret)', 'Secret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['a marker after the credential', 'repository name (SuperSecret[redacted])', 'SuperSecret', 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest'],
+    ['an encoded marker', 'repository name ([redacted]SuperSecret)', 'SuperSecret', 'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest'],
+    ['a marker on a digest pin', 'repository name ([redacted]SuperSecret)', 'SuperSecret', `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`],
+    ['a normalized marker credential', 'repository name (library/[redacted]Pass)', 'Pass', 'docker.io/[redacted]Pass:x@registry.example.com'],
+    ['a marker beside an invalid byte', 'repository name (\uFFFD[redacted]SuperSecret)', 'SuperSecret', 'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest'],
+  ])('redacts a marker-bearing quoted name with no known suffix for %s', (_name, quoted, secret, image) => {
+    const text = errorMessageForLog(new Error(`invalid reference format: ${quoted}`), { imageRef: image });
+
+    expect(text).not.toContain(secret);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  // A literal `@` in the authored spelling can sit inside the password while
+  // the decoded `@` is the credential separator. The replacement must use the
+  // decoded rest, or the authored tail leaves the password in the log.
+  it('redacts an authored percent-encoded @ instead of keeping its password tail', () => {
+    const image = 'user@pw%40host/app:latest';
+    const text = errorMessageForLog(
+      new Error(`failed for ${image}: connect refused`),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]@host/app:latest');
+  });
+
+  it('redacts a partial authored echo of an encoded token', () => {
+    const image = 'ghp_ab%2fSuperSecret@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('failed to parse ghp_ab%2fSuperSecret for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('failed to parse [redacted] for image');
+  });
+
+  it('redacts a partial authored echo whose @ is percent-encoded', () => {
+    const image = 'user@pw%40host/app:latest';
+    const text = errorMessageForLog(
+      new Error('connect failed for user@pw%40host/app TAILWORD'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]%40host/app TAILWORD');
+  });
+
+  it('redacts a partial authored echo when a path escape follows the authority', () => {
+    const image = 'user:pw%40host/app%40tail';
+    const text = errorMessageForLog(
+      new Error('failed for user:pw%40host/app: connect refused'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('failed for [redacted]%40host/app: connect refused');
+  });
+
+  it('redacts a partial authored echo on a digest-pinned reference', () => {
+    const image = `user:pw%40host/app:latest@sha256:${'a'.repeat(64)}`;
+    const text = errorMessageForLog(
+      new Error('failed for user:pw%40host/app TAILWORD'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('pw');
+    expect(text).toContain('[redacted]%40host/app TAILWORD');
+  });
+
+  it('redacts past a marker-bearing field with no suffix to a later field', () => {
+    const image = 'user:Ab/[redacted]Foo:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name ([redacted]Foo) retry: repository name (x)SuperSecret)';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('[redacted]Foo');
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  it('redacts every field when a marker-bearing field makes the suffix scan span them', () => {
+    const image = 'user:Ab/[redacted]Foo:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name ([redacted]Foo) must be lowercase: repository name (x)SuperSecret) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('[redacted]Foo');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('redacts a cause message whose field follows an already-redacted field', () => {
+    const image = 'user:Ab/cD+eF9xyz=@registry.example.com/app:latest';
+    const error = new Error(
+      'invalid reference format: repository name (cD+eF9xyz=@registry.example.com/app) must be lowercase',
+      {
+        cause: new Error(
+          'invalid reference format: repository name ([redacted]x)SuperSecret) must be lowercase',
+        ),
+      },
+    );
+    const text = errorMessageForLog(error, { imageRef: image });
+
+    expect(text).not.toContain('eF9xyz');
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('keeps a cause message after redacting a marker-bearing quoted name', () => {
+    const image = 'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest';
+    const error = new Error(
+      'invalid reference format: repository name ([redacted]x)SuperSecret) must be lowercase',
+      { cause: new Error('connect ECONNREFUSED 127.0.0.1:2375') },
+    );
+    const text = errorMessageForLog(error, { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted])');
+    expect(text).toContain('connect ECONNREFUSED 127.0.0.1:2375');
+  });
+
+  it('is idempotent after redacting a marker-bearing quoted name', () => {
+    const image = 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name ([redacted]SuperSecret) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('SuperSecret');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('is idempotent after redacting a no-suffix quoted name', () => {
+    const image = 'user:Ab/SuperSecret:x@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (user:Ab/SuperSecret:x@registry.example.com/app:latest)SuperSecret)';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('SuperSecret');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('is idempotent after redacting a partial authored echo', () => {
+    const image = 'user@pw%40host/app:latest';
+    const body = 'connect failed for user@pw%40host/app TAILWORD';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).not.toContain('pw');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('redacts a colon-free token the daemon splits with a decoded slash', () => {
+    const image = 'ghp_ab%2fSuperSecret@registry.example.com/app:latest';
+    const body =
+      'invalid reference format: repository name (ghp_ab/SuperSecret@registry.example.com/app) must be lowercase';
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app');
+    expect(text).toContain('must be lowercase');
+  });
+
+  it('redacts a percent-decoded reference the error echoes', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/SuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an echoed reference whose invalid byte became U+FFFD', () => {
+    const image = 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/\uFFFDSuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an echoed reference whose truncated multi-byte sequence became U+FFFD', () => {
+    const image = 'user:Ab%2f%E2%82SuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('No such image: user:Ab/\uFFFD\uFFFDSuperSecret:x@registry.example.com/app:latest'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).not.toContain('user:Ab/');
+    expect(text).toContain('No such image: [redacted]@registry.example.com/app:latest');
+  });
+
+  it('decodes the valid escapes of an image with a malformed one', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app%zz:latest';
+    const text = errorMessageForLog(
+      new Error('invalid userinfo user:Ab/SuperSecret:x for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  it('redacts a decoded userinfo the error quotes without the host', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const text = errorMessageForLog(
+      new Error('invalid userinfo user:Ab/SuperSecret:x for image'),
+      { imageRef: image },
+    );
+
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('invalid userinfo [redacted] for image');
+  });
+
+  it('is idempotent on a Docker-decoded repository name', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const body = 'invalid reference format: repository name (SuperSecret) must be lowercase';
+    const once = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(once).toContain('repository name ([redacted])');
+    expect(errorMessageForLog(new Error(once), { imageRef: image })).toBe(once);
+  });
+
+  it('redacts a hostile run of repository-name phrases in bounded time', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const body = `${'repository name (a'.repeat(50_000)}repository name (SuperSecret) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain('SuperSecret');
+    expect(text).toContain('repository name ([redacted]) must be lowercase');
+  });
+
+  it('redacts a hostile run of unterminated repository-name phrases in bounded time', () => {
+    const image = 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest';
+    const body = `repository name (SuperSecret) must be lowercase${'repository name (a'.repeat(50_000)}`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain('SuperSecret');
+  });
+
+  it('removes a long percent-encoded repository name in bounded time', () => {
+    const encodedTail = `cD${'%2fcD'.repeat(20_000)}=`;
+    const decodedTail = encodedTail.replace(/%2f/g, '/');
+    const image = `user:Ab/${encodedTail}:x@registry.example.com/app:latest`;
+    const body = `invalid reference format: repository name (${decodedTail}) must be lowercase`;
+    const started = Date.now();
+    const text = errorMessageForLog(new Error(body), { imageRef: image });
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain(decodedTail);
+    expect(text).toContain('repository name ([redacted])');
+  });
+
+  it('keeps a digest-pinned image reference the error quotes intact', () => {
+    const image = 'ghcr.io/team/app:1.0@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809';
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).toBe(`No such image: ${image}`);
+  });
+
+  it('keeps a digest pin on a credential-bearing reference it redacts', () => {
+    const digest = 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const image = `user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest@${digest}`;
+    const text = errorMessageForLog(new Error(`No such image: ${image}`), { imageRef: image });
+
+    expect(text).not.toContain('cD+eF9xyz=');
+    expect(text).toContain(`[redacted]@registry.example.com/app:latest@${digest}`);
   });
 });

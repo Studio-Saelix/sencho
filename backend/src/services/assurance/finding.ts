@@ -26,7 +26,7 @@ import type {
   AliasRelation, AssuranceRule, AssuranceSeverity, CanonicalRuleId, EvidenceLayer, ExternalRuleId,
   FindingClass, FindingConfidence, IdentityBasis, SubjectKind,
 } from './types';
-import { redactImageReference, redactSensitiveText } from '../../utils/safeLog';
+import { redactImageForDisplay, redactSensitiveText } from '../../utils/safeLog';
 
 export interface AssuranceScope {
   nodeId: number;
@@ -425,8 +425,9 @@ function storedSubjectKind(value: string | null | undefined): SubjectKind | unde
 /**
  * The message shapes of the two rules that quote a Compose `image` value. A row
  * an older build stored carries the image raw, in these templates, so the quoted
- * value is cleaned by the reference's own grammar before the generic text pass,
- * which cannot see a credential with a space, a slash, or no path after the host.
+ * value goes through the same image redaction the live rules and the Doctor log
+ * use; that grammar step catches a credential with a space, a slash, or no path
+ * after the host, which the generic text pass alone cannot see.
  */
 const QUOTED_IMAGE_MESSAGES: ReadonlyMap<string, RegExp> = new Map([
   ['image-latest', /^(Service "[^"]*" uses ")(.*)(", which resolves to a moving latest tag\..*)$/s],
@@ -435,7 +436,7 @@ const QUOTED_IMAGE_MESSAGES: ReadonlyMap<string, RegExp> = new Map([
 
 function redactQuotedImage(ruleId: string, message: string): string {
   const match = QUOTED_IMAGE_MESSAGES.get(ruleId)?.exec(message);
-  return match === null || match === undefined ? message : `${match[1]}${redactImageReference(match[2])}${match[3]}`;
+  return match === null || match === undefined ? message : `${match[1]}${redactImageForDisplay(match[2])}${match[3]}`;
 }
 
 /**
