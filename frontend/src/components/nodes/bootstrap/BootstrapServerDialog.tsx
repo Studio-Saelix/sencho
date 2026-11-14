@@ -235,9 +235,11 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
 
         {step === 'target' && <BootstrapTargetStep wizard={wizard} />}
 
-        {step === 'run' && run.operation && run.progressStale && isOperationRunning(run.operation) && (
+        {step === 'run' && run.operation && run.progressStale && (isOperationRunning(run.operation) || run.settling) && (
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning" data-testid="bootstrap-progress-stale">
-            Progress could not be refreshed. The run continues on the hub; reopen it to check again.
+            {isOperationRunning(run.operation)
+              ? 'Progress could not be refreshed. The run continues on the hub; reopen it to check again.'
+              : 'Whether the Pilot has connected since could not be checked. Reopen the run to check again.'}
           </p>
         )}
 

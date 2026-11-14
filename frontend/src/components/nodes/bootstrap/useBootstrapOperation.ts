@@ -7,7 +7,7 @@ import {
   listBootstrapOperations,
   releaseBootstrapOperation,
 } from './bootstrapApi';
-import { isOperationRunning } from './operationStatus';
+import { canSettleOnRead, isOperationRunning } from './operationStatus';
 import type { BootstrapOperation, BootstrapOperationDetail } from './types';
 
 /**
@@ -15,11 +15,16 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  *
  * The run lives on the hub, so this hook only reads it. While the shown
  * operation is running and the dialog is open, it is fetched again every two
- * seconds; a hidden tab skips the fetch and an operation that stopped ends
- * the polling. Nothing polls while the dialog is closed.
+ * seconds; a hidden tab skips the fetch. A run that stopped for good ends the
+ * polling, but one the hub can still settle on a read (stopped partway, outcome
+ * unknown, cancelled, with a node whose Pilot may connect late) is read every
+ * few seconds, so the open dialog learns it became enrolled instead of offering
+ * Retry and Release for a connected node. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
+/** The slower read of a stopped run that may still be settled by a late Pilot. */
+export const SETTLE_POLL_MS = 5_000;
 
 export interface UseBootstrapOperationOptions {
   open: boolean;
@@ -55,8 +60,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // The shown operation's id, so a reply for one the operator has moved away
   // from is dropped instead of replacing the current view.
   const shownRef = useRef<string | null>(null);
+  // Bumped whenever the shown operation is replaced by an answer the operator
+  // caused (opening, retrying, cancelling, releasing). A progress read that began
+  // before then is older than that answer and is dropped, so it cannot put the
+  // previous state (a stopped run's Retry and Release) back on screen.
+  const viewEpoch = useRef(0);
 
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
+    viewEpoch.current += 1;
     shownRef.current = detail?.id ?? null;
     setOperation(detail);
     setPollFailures(0);
@@ -129,6 +140,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   }, [show]);
 
   const running = operation !== null && isOperationRunning(operation);
+  const settling = operation !== null && canSettleOnRead(operation);
+  const polling = running || settling;
   const operationId = operation?.id ?? null;
   // A run that no longer exists (or a session that ended) will not come back on the next tick.
   const [pollStopped, setPollStopped] = useState(false);
@@ -136,8 +149,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // nothing on the hub still gets the next tick.
   const [pollTick, setPollTick] = useState(0);
   useEffect(() => {
-    if (!open || !running || !operationId || pollStopped) return;
+    if (!open || !polling || !operationId || pollStopped) return;
     const controller = new AbortController();
+    const epoch = viewEpoch.current;
     const timer = window.setTimeout(() => {
       // A hidden tab does not poll; the next visible tick picks the run up.
       if (document.hidden) {
@@ -146,6 +160,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       }
       void client.get(operationId, controller.signal)
         .then((detail) => {
+          if (epoch !== viewEpoch.current) return;
           if (shownRef.current === detail.id) setOperation(detail);
           setPollFailures(0);
         })
@@ -161,14 +176,38 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         .finally(() => {
           if (!controller.signal.aborted) setPollTick((tick) => tick + 1);
         });
-    }, OPERATION_POLL_MS);
+    }, running ? OPERATION_POLL_MS : SETTLE_POLL_MS);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
     // client.* is stable module API unless a test injects it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, running, operationId, pollTick, pollStopped]);
+  }, [open, polling, running, operationId, pollTick, pollStopped]);
+
+  // The list is the other place a stopped run is shown. While no run is open and one of its rows may still be
+  // settled by a late Pilot, it is read again, so a row does not keep offering Retry for a node that is enrolled.
+  const listSettling = operation === null && operations.some(canSettleOnRead);
+  const [listTick, setListTick] = useState(0);
+  useEffect(() => {
+    if (!open || !listSettling) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      if (document.hidden) {
+        setListTick((tick) => tick + 1);
+        return;
+      }
+      void refreshList(controller.signal).finally(() => {
+        if (!controller.signal.aborted) setListTick((tick) => tick + 1);
+      });
+    }, SETTLE_POLL_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+    // refreshList is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, listSettling, listTick]);
 
   // A newly shown operation polls again.
   const [pollFor, setPollFor] = useState<string | null>(null);
@@ -180,8 +219,10 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const act = useCallback(async (kind: 'cancel' | 'release') => {
     if (!operationId) return;
     setBusy(kind);
+    viewEpoch.current += 1;
     try {
       const detail = kind === 'cancel' ? await client.cancel(operationId) : await client.release(operationId);
+      viewEpoch.current += 1;
       if (shownRef.current === detail.id) setOperation(detail);
       if (kind === 'release') toast.success('Server released. Nothing on it was changed.');
       void refreshList();
@@ -202,6 +243,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     loadMore,
     /** Progress has not refreshed for three reads in a row, or the run can no longer be read. */
     progressStale: pollStopped || pollFailures >= 3,
+    /** The shown run has stopped but the hub may still settle it (a Pilot that connects late). */
+    settling,
     busy,
     show,
     openOperation,

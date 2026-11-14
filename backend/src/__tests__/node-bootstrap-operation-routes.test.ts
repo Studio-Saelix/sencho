@@ -4,6 +4,9 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
+import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
+import { makeFacts } from './__helpers__/bootstrapFacts';
 
 /**
  * The operation routes' guards and refusals. Execution itself is covered
@@ -80,6 +83,35 @@ describe('bootstrap operation routes: refusals', () => {
     const res = await request(app).post('/api/nodes/bootstrap/operations').set('Authorization', adminAuth).send(BODY);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PLAN_NOT_CURRENT');
+  });
+
+  it('refuses a key that cannot be read with the preflight\'s own answer, and leaves the approval for the corrected key', async () => {
+    const facts = makeFacts();
+    const plan = buildBootstrapPlan({ facts, targetName: 'media-server', hubUrl: 'https://sencho.example.com', caPem: null, now: Date.now() });
+    const operations = NodeBootstrapOperationService.getInstance();
+    operations.rememberPlan({
+      inspection: {
+        observedAt: Date.now(), target: facts.target, hostKey: facts.hostKey, paths: facts.paths, agent: facts.agent,
+        dockerRoot: facts.dockerRoot, checks: [], blockers: 0, warnings: 0,
+      },
+      plan,
+      blocked: false,
+    }, TEST_USERNAME, null);
+    const body = {
+      host: plan.target.host, port: plan.target.port, username: plan.target.username, expectedFingerprint: plan.hostKeyFingerprint,
+      targetName: plan.targetName, composeDir: plan.paths.composeDir.input, agentDir: plan.paths.agentDir.input, planDigest: plan.digest,
+    };
+    const before = (await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth)).body.operations.length;
+    for (const privateKey of ['not a key', ' ']) {
+      const res = await request(app).post('/api/nodes/bootstrap/operations').set('Authorization', adminAuth).send({ ...body, privateKey });
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('SSH_KEY_INVALID');
+    }
+    // Neither refusal spent the approval or recorded a run: the plan is still current for the same digest.
+    const retried = await request(app).post('/api/nodes/bootstrap/operations').set('Authorization', adminAuth).send({ ...body, privateKey: 'still not a key' });
+    expect(retried.body.code).toBe('SSH_KEY_INVALID');
+    const after = (await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth)).body.operations.length;
+    expect(after).toBe(before);
   });
 
   it('refuses a malformed digest and a host key replacement at execution', async () => {

@@ -16,6 +16,18 @@ export function isOperationRunning(op: Pick<BootstrapOperation, 'state'>): boole
   return RUNNING_STATES.includes(op.state);
 }
 
+/**
+ * Stopped states the hub can still settle on a read: a Pilot that connects after
+ * the run gave up (or was cancelled or interrupted) turns the run into `enrolled`
+ * the next time it is read. Mirrors the backend's reconcilable states; the run
+ * needs a node and must still hold its server, because only then can it settle.
+ */
+const SETTLEABLE_STATES: readonly BootstrapOperationState[] = ['partial', 'outcome_unknown', 'cancelled'];
+
+export function canSettleOnRead(op: Pick<BootstrapOperation, 'state' | 'active' | 'nodeId'>): boolean {
+  return op.active && op.nodeId !== null && SETTLEABLE_STATES.includes(op.state);
+}
+
 type Phase = 'recheck' | 'docker' | 'files' | 'start' | 'enroll';
 
 const PHASE_LABEL: Record<Phase, string> = {

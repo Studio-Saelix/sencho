@@ -15,7 +15,7 @@ import {
   startBootstrapOperation,
 } from '../bootstrapApi';
 import { operationAnswer, operationStages } from '../operationStatus';
-import { OPERATION_POLL_MS, useBootstrapOperation } from '../useBootstrapOperation';
+import { OPERATION_POLL_MS, SETTLE_POLL_MS, useBootstrapOperation } from '../useBootstrapOperation';
 import type {
   BootstrapHostKeyResult,
   BootstrapOperationDetail,
@@ -318,6 +318,89 @@ describe('progress polling', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['partial', 'outcome_unknown', 'cancelled'] as const)('keeps reading a run stopped as %s until a late Pilot settles it, then stops', async (state) => {
+    vi.useFakeTimers();
+    const stopped = { ...STOPPED, state, nodeId: 4 };
+    vi.mocked(fetchBootstrapOperation)
+      .mockResolvedValueOnce({ ...stopped })
+      .mockResolvedValueOnce({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false } });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(stopped));
+    expect(result.current.settling).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.operation?.state).toBe(state);
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+    expect(result.current.operation).toMatchObject({ state: 'enrolled', actions: { retry: false, release: false } });
+    expect(result.current.settling).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 5); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['a failed run', { state: 'failed' as const, nodeId: 4 }],
+    ['a blocked run', { state: 'blocked' as const, nodeId: 4 }],
+    ['a run that needs recovery', { state: 'recovery_required' as const, nodeId: 4 }],
+    ['a stopped run with no node to connect', { state: 'partial' as const, nodeId: null }],
+    ['a stopped run that was released', { state: 'partial' as const, nodeId: 4, active: false }],
+  ])('does not poll %s: the hub cannot settle it on a read', async (_label, overrides) => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show({ ...STOPPED, ...overrides }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 4); });
+    expect(fetchBootstrapOperation).not.toHaveBeenCalled();
+    expect(result.current.settling).toBe(false);
+  });
+
+  it('drops a read that began before the operator retried, so it cannot put the stopped state back', async () => {
+    vi.useFakeTimers();
+    const stopped = { ...STOPPED, nodeId: 4 };
+    let answer: (detail: BootstrapOperationDetail) => void = () => {};
+    vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(stopped));
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+
+    // The retry is shown while the read is in flight; the read then answers with the old stopped run.
+    act(() => result.current.show({ ...stopped, state: 'rechecking', attempt: 2, actions: { cancel: true, retry: false, release: false } }));
+    await act(async () => { answer({ ...stopped }); });
+    expect(result.current.operation).toMatchObject({ state: 'rechecking', attempt: 2 });
+  });
+
+  it('drops a read that began before Release, so Release does not reappear', async () => {
+    vi.useFakeTimers();
+    const stopped = { ...STOPPED, nodeId: 4 };
+    let answer: (detail: BootstrapOperationDetail) => void = () => {};
+    vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    vi.mocked(releaseBootstrapOperation).mockResolvedValueOnce({ ...stopped, active: false, actions: { cancel: false, retry: false, release: false } });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(stopped));
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    await act(async () => { await result.current.release(); });
+    await act(async () => { answer({ ...stopped }); });
+    expect(result.current.operation).toMatchObject({ active: false, actions: { release: false } });
+  });
+
+  it('reads the list again while a listed stopped run may still be settled, and stops once none may', async () => {
+    vi.useFakeTimers();
+    const listed = { ...STOPPED, nodeId: 4 };
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: [listed], nextCursor: null })
+      .mockResolvedValueOnce({ operations: [{ ...listed, state: 'enrolled', active: false, actions: { cancel: false, retry: false, release: false } }], nextCursor: null });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.operations[0].state).toBe('partial');
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
+    expect(result.current.operations[0]).toMatchObject({ state: 'enrolled', actions: { retry: false } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 5); });
+    expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps polling through a step that changes nothing, and never polls while closed', async () => {
     vi.useFakeTimers();
     const same = operation();
@@ -335,6 +418,28 @@ describe('progress polling', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(OPERATION_POLL_MS); });
     }
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('a run dialog left open on a stopped run', () => {
+  it('learns the Pilot connected late: Retry and Release give way to Enrolled', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const stopped = { ...STOPPED, nodeId: 4, error: { code: 'ENROLLMENT_NOT_CONNECTED', message: 'The Pilot did not connect in time.' } };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation)
+      .mockResolvedValueOnce({ ...stopped })
+      .mockResolvedValue({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false } });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const row = await screen.findByTestId(`bootstrap-run-${stopped.id}`);
+    await user.click(within(row).getByRole('button', { name: 'View' }));
+    expect(await screen.findByRole('button', { name: /Release server/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry/ })).toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 2); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Release server/ })).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /^Retry/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/is enrolled/)).toBeInTheDocument();
   });
 });
 

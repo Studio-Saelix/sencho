@@ -27,7 +27,7 @@ The preflight answers questions a manual enrollment cannot:
 - **Node name:** the name you choose is not yet used by another node in this console.
 - **Key format:** an OpenSSH private key (for example `id_ed25519`) or an RSA key in PEM format. A PKCS8 ed25519 key is rejected with a message asking for the OpenSSH format.
 
-The private key is used for the preflight and, when you approve the plan, for the run. Sencho holds it in memory only for that time. It is never stored, written to a log, included in the plan, or returned in a response, which is why a retry asks for it again. Serve Sencho over HTTPS before using a real key: on a plain HTTP page the dialog warns that the key travels in cleartext.
+The private key is used for the preflight and, when you approve the plan, for the run. The approval reads the key first: a key that cannot be read, or an encrypted one whose passphrase is missing or wrong, is refused with the `SSH_KEY_*` answers below before any run is created, and the approved plan stays valid, so you correct the key and approve the same plan again. Sencho holds it in memory only for that time. It is never stored, written to a log, included in the plan, or returned in a response, which is why a retry asks for it again. Serve Sencho over HTTPS before using a real key: on a plain HTTP page the dialog warns that the key travels in cleartext.
 
 Only an administrator signed in to the Sencho web interface can run the preflight or a plan. API tokens cannot start, retry, cancel or release a run.
 
@@ -176,7 +176,7 @@ A retry reuses the node the run registered, by its identity rather than its name
 
 ### When Sencho restarts
 
-The private key lives only in memory, so a run cannot continue after Sencho restarts. A run that had not changed anything is recorded as **Blocked**; any other is recorded as **Outcome unknown**, and **Retry** picks it up from the server's actual state. If the Pilot had already started, it can still connect on its own afterwards: the run shows **Enrolled** the next time it is opened.
+The private key lives only in memory, so a run cannot continue after Sencho restarts. A run that had not changed anything is recorded as **Blocked**; any other is recorded as **Outcome unknown**, and **Retry** picks it up from the server's actual state. If the Pilot had already started, it can still connect on its own afterwards: the run shows **Enrolled** the next time it is read. A run window left open on a stopped run, or the list of runs, re-reads it every few seconds while the node's Pilot may still connect, so **Retry** and **Release server** give way to **Enrolled** without reopening it.
 
 ## Existing content is preserved
 

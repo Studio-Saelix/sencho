@@ -41,7 +41,28 @@ function officialPolicy(codename = 'noble', origin = 'https://download.docker.co
  * no-clobber refusals behave as they would over SSH.
  */
 
-const PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAprivate-key-material-for-tests\n-----END OPENSSH PRIVATE KEY-----';
+// A key ssh2 can read: approval refuses a key it cannot parse, so the fixtures are real ones.
+const PRIVATE_KEY = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+}).privateKey;
+const KEY_PASSPHRASE = 'correct horse battery staple';
+const ENCRYPTED_KEY = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem', cipher: 'aes-256-cbc', passphrase: KEY_PASSPHRASE },
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+}).privateKey;
+/** Text that passes the route's `min(1)` and is not a key: what the one-use approval must not be spent on. */
+const UNREADABLE_KEYS: Array<{ label: string; privateKey: string; passphrase?: string | null; code: string }> = [
+  { label: 'text that is not a key', privateKey: 'not a key', code: 'SSH_KEY_INVALID' },
+  { label: 'only whitespace', privateKey: '   \n ', code: 'SSH_KEY_INVALID' },
+  { label: 'a PEM block with no key material', privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----', code: 'SSH_KEY_INVALID' },
+  { label: 'a public key', privateKey: PRIVATE_KEY.replace(/PRIVATE/g, 'PUBLIC').slice(0, 120), code: 'SSH_KEY_INVALID' },
+  { label: 'an encrypted key with no passphrase', privateKey: ENCRYPTED_KEY, code: 'SSH_KEY_PASSPHRASE_REQUIRED' },
+  { label: 'an encrypted key with an empty passphrase', privateKey: ENCRYPTED_KEY, passphrase: '', code: 'SSH_KEY_PASSPHRASE_REQUIRED' },
+  { label: 'an encrypted key with the wrong passphrase', privateKey: ENCRYPTED_KEY, passphrase: 'wrong', code: 'SSH_KEY_PASSPHRASE_INVALID' },
+];
 const HUB_URL = 'https://sencho.example.com';
 const NOW = 1_762_300_000_000;
 const AUDIT = { username: TEST_USERNAME, ip: '127.0.0.1', method: 'POST', path: '/api/nodes/bootstrap/operations' };
@@ -361,6 +382,54 @@ describe('bootstrap operations: approval', () => {
     expect(() => h.service.start({ ...mine.request, expectedFingerprint: 'SHA256:other' }, context())).toThrow(/does not match the reviewed plan/);
     expect(() => h.service.start({ ...mine.request, username: 'root' }, context())).toThrow(/does not match the reviewed plan/);
     expect(h.host.opened).toBe(0);
+  });
+
+  it('refuses every key the run could not read before it spends the approval or creates a run', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const runsBefore = allOperations().length;
+    for (const { label, privateKey, passphrase, code } of UNREADABLE_KEYS) {
+      const refused = { ...request, privateKey, ...(passphrase !== undefined ? { passphrase } : {}) };
+      expect(() => h.service.start(refused, context()), label).toThrow(expect.objectContaining({ name: 'SshTransportError', code }));
+    }
+    expect(allOperations()).toHaveLength(runsBefore);
+    expect(h.host.opened).toBe(0);
+    // The approval is unspent: the same reviewed plan runs once the key is corrected, here with its passphrase.
+    const op = h.service.start({ ...request, privateKey: ENCRYPTED_KEY, passphrase: KEY_PASSPHRASE }, context());
+    await h.service.settled();
+    expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled' });
+    expect(allOperations()).toHaveLength(runsBefore + 1);
+    expect(h.host.opened).toBeGreaterThan(0);
+  });
+
+  it('refuses an unreadable key on a retry too, leaving the stopped run and the approval as they were', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const first = approve(h);
+    const op = h.service.start(first.request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped.state).toBe('partial');
+    h.facts.current = makeFacts({
+      target: h.facts.current.target,
+      hostKey: h.facts.current.hostKey,
+      agentDir: {
+        exists: true, isDirectory: true, realPath: '/opt/sencho-agent', writableByUser: true, readableByUser: true,
+        entries: ['compose.yaml', 'sencho-bootstrap.json'], hasMarker: true, hasComposeFile: true,
+        markerProject: 'sencho-agent', markerComposeDir: '/opt/docker/sencho', markerAgentDir: '/opt/sencho-agent',
+      },
+    });
+    const second = approve(h, op.id);
+    const opened = h.host.opened;
+    for (const { privateKey, passphrase, code } of UNREADABLE_KEYS) {
+      expect(() => h.service.retry(op.id, { ...second.request, privateKey, ...(passphrase !== undefined ? { passphrase } : {}) }, context()))
+        .toThrow(expect.objectContaining({ name: 'SshTransportError', code }));
+    }
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', attempt: 1, active: true });
+    expect(h.host.opened).toBe(opened);
+    const retried = h.service.retry(op.id, second.request, context());
+    expect(retried).toMatchObject({ state: 'rechecking', attempt: 2 });
+    await h.service.settled();
+    db.deleteNode(stopped.nodeId as number);
   });
 
   it('refuses an approval older than ten minutes', () => {

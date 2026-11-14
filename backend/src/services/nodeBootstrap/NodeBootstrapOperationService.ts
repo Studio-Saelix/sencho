@@ -23,7 +23,7 @@ import {
 import { canonicalJson, sha256Hex } from './planBuilder';
 import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR, HUB_CA_STEP_ID } from './pathPolicy';
 import { sshExecClient, type BootstrapExecTransport, type ExecSession } from './sshExecClient';
-import { SshTransportError } from './sshProbeClient';
+import { parsePrivateKey, SshTransportError } from './sshProbeClient';
 import {
   COMPOSE_STEP_ID,
   RunCancelled,
@@ -335,6 +335,10 @@ export class NodeBootstrapOperationService {
     if (!matches) {
       throw new BootstrapError(409, 'PLAN_NOT_CURRENT', 'The request does not match the reviewed plan. Run the preflight again.');
     }
+    // The run reads the key the moment it opens its session, so a key that cannot be read (or a passphrase that does
+    // not unlock it) is refused here, while the approval is still unspent and no run row exists. The error is the
+    // preflight's own (`SSH_KEY_*`), so the operator fixes the key and approves the same plan again.
+    parsePrivateKey(request.privateKey, request.passphrase);
     return plan;
   }
 
