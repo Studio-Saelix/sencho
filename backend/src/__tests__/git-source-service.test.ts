@@ -348,6 +348,17 @@ function asFiles(content: string): import('../services/GitSourceService').Compos
     return [{ path: 'compose.yaml', content }];
 }
 
+/** The reported nested alias shape: each level references the last nine times. */
+function nestedAliasBomb(levels: number): string {
+    const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+    for (let level = 1; level <= levels; level += 1) {
+        const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
+        lines.push(`x${level}: &a${level} [${refs}]`);
+    }
+    lines.push('services:', '  web:', '    image: nginx:alpine');
+    return `${lines.join('\n')}\n`;
+}
+
 /** Best-effort teardown for tests that materialize a stack on disk. */
 async function cleanupStackDir(name: string) {
     const { FileSystemService } = await import('../services/FileSystemService');
@@ -517,6 +528,63 @@ describe('GitSourceService.validateCompose (YAML pre-check)', () => {
         const r = await svc().validateCompose(asFiles('services:\n  web:\n    image: "unterminated\n'), null, null);
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/YAML parse error/i);
+    });
+
+    it('refuses an include dependency over the alias budget without spawning Compose', async () => {
+        const bombDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-git-guard-'));
+        const bomb = path.join(bombDir, 'bomb.yaml');
+        fs.writeFileSync(bomb, nestedAliasBomb(12));
+        const instance = svc();
+        const runSpy = vi.spyOn(
+            instance as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> },
+            'runDockerCompose',
+        ).mockResolvedValue({ code: 1, stdout: '', stderr: 'guard should have refused' });
+        try {
+            const r = await instance.validateCompose(
+                asFiles(`include:\n  - ${bomb}\nservices:\n  web:\n    image: nginx\n`),
+                null,
+                null,
+            );
+            expect(r.ok).toBe(false);
+            expect(r.error).toContain('nested YAML aliases');
+            expect(runSpy).not.toHaveBeenCalled();
+        } finally {
+            runSpy.mockRestore();
+            fs.rmSync(bombDir, { recursive: true, force: true });
+        }
+    });
+
+    it('refuses an include dependency in a staged candidate without spawning Compose', async () => {
+        const candidateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-git-candidate-'));
+        fs.writeFileSync(
+            path.join(candidateDir, 'compose.yaml'),
+            'include:\n  - bomb.yaml\nservices:\n  web:\n    image: nginx\n',
+        );
+        fs.writeFileSync(path.join(candidateDir, 'bomb.yaml'), nestedAliasBomb(12));
+        const instance = svc();
+        const runSpy = vi.spyOn(
+            instance as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> },
+            'runDockerCompose',
+        ).mockResolvedValue({ code: 1, stdout: '', stderr: 'guard should have refused' });
+        try {
+            const validate = (instance as unknown as {
+                validateCandidate: (
+                    stackName: string,
+                    candidateRelPath: string,
+                    composePaths: string[],
+                    contextDir: string | null,
+                    syncEnv: boolean,
+                    validationRoot?: string,
+                ) => Promise<{ ok: boolean; error?: string }>;
+            }).validateCandidate.bind(instance);
+            const r = await validate('my-stack', 'candidate', ['compose.yaml'], null, false, candidateDir);
+            expect(r.ok).toBe(false);
+            expect(r.error).toContain('nested YAML aliases');
+            expect(runSpy).not.toHaveBeenCalled();
+        } finally {
+            runSpy.mockRestore();
+            fs.rmSync(candidateDir, { recursive: true, force: true });
+        }
     });
 
     it('scrubs absolute validation paths from docker compose stderr', async () => {

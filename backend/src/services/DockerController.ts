@@ -33,6 +33,9 @@ import { getErrorMessage } from '../utils/errors';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import {
+  assertComposeInputsWithinExpansionLimits,
+} from '../helpers/composeExpansionGuard';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
 import { enabledProxyApiFlags } from '../helpers/socketProxyIdentity';
@@ -3282,6 +3285,13 @@ class DockerController {
   private async fetchComposePsContainers(stackName: string, stackDir: string): Promise<ComposePsContainer[]> {
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    // `compose ps` composes the project too, so the same expansion bound
+    // applies before the CLI reads the files, including a COMPOSE_FILE
+    // selection from the environment or an env file.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      invocation: [...filePrefix, ...envFileArgs],
+    });
     const { stdout, stderr } = await execFileAsync(
       'docker',
       ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],

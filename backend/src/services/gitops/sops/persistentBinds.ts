@@ -3,6 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import * as YAML from 'yaml';
 import { isValidRelativeStackPath } from '../../../utils/validation';
+import {
+  assertComposeInputsWithinExpansionLimits,
+  ComposeExpansionRefusal,
+} from '../../../helpers/composeExpansionGuard';
 
 /** Compose layer written inside the overlay and removed with it. */
 export const BIND_REMAP_FILENAME = '.sencho-bind-remap.yml';
@@ -367,7 +371,7 @@ async function writeRemapFile(overlayDir: string, secretsRoot: string, yaml: str
  * at all". Answering it from Compose keeps the rule in one place instead of
  * restating which driver forms Compose resolves.
  */
-function readModel(
+async function readModel(
   overlayDir: string,
   secretsRoot: string,
   composeArgs: string[],
@@ -375,9 +379,22 @@ function readModel(
 ): Promise<OverlayModelRead> {
   const overlay = path.resolve(overlayDir);
   const root = path.resolve(secretsRoot);
-  if (!overlay.startsWith(root + path.sep)) return Promise.resolve({ status: 'unusable' });
+  if (!overlay.startsWith(root + path.sep)) return { status: 'unusable' };
+  try {
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: overlay,
+      invocation: composeArgs,
+    });
+  } catch (err) {
+    if (err instanceof ComposeExpansionRefusal) {
+      // The caller already treats a failed render as unsafe to remap; the
+      // deploy is refused by its own inputs check before Compose runs.
+      return { status: 'failed' };
+    }
+    throw err;
+  }
   const flags = mode === 'authored' ? ['--no-path-resolution'] : [];
-  return new Promise((resolve, reject) => {
+  return new Promise<OverlayModelRead>((resolve, reject) => {
     const child = spawn('docker', [...composeArgs, 'config', '--format', 'json', ...flags], {
       cwd: overlay,
       env: {

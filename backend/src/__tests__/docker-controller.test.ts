@@ -6,7 +6,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
-const { mockDocker, composeDirRef, mockExecFileAsync } = vi.hoisted(() => {
+const { mockDocker, composeDirRef, mockExecFileAsync, mockAssertComposeInputs, MockComposeExpansionRefusal } = vi.hoisted(() => {
+  class MockComposeExpansionRefusal extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'ComposeExpansionRefusal';
+    }
+  }
   const mockDocker = {
     df: vi.fn(),
     listImages: vi.fn().mockResolvedValue([]),
@@ -28,8 +34,25 @@ const { mockDocker, composeDirRef, mockExecFileAsync } = vi.hoisted(() => {
     mockDocker,
     composeDirRef: { current: '/test/compose' },
     mockExecFileAsync: vi.fn(),
+    mockAssertComposeInputs: vi.fn<(opts: unknown) => Promise<void>>().mockResolvedValue(undefined),
+    MockComposeExpansionRefusal,
   };
 });
+
+// `compose ps` composition is guarded by the alias-expansion helper, whose own
+// read is covered by its tests. Here it stays out of the way, and the test
+// below drives it to prove the ps path is behind it.
+vi.mock('../helpers/composeExpansionGuard', () => ({
+  assertComposeInputsWithinExpansionLimits: mockAssertComposeInputs,
+  ComposeExpansionRefusal: MockComposeExpansionRefusal,
+}));
+
+// The ps path builds its compose prefix from these helpers; a fixed prefix lets
+// the test assert the guard sees the whole invocation, not only the -f values.
+vi.mock('../utils/authoredComposeArgs', () => ({
+  authoredComposeFileArgs: () => ['-f', 'compose.yaml'],
+  authoredComposeEnvFileArgs: async () => ['--env-file', '.env'],
+}));
 
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
@@ -3147,6 +3170,25 @@ describe('DockerController - missing stack directory', () => {
     const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
     expect(logged).toMatch(/Docker Compose Error for/);
     expect(logged).toContain('Docker CLI unavailable on this node');
+    errSpy.mockRestore();
+  });
+
+  it('does not run compose ps when the stack inputs expand past the alias budget', async () => {
+    vi.spyOn(fs, 'stat').mockResolvedValue({ isDirectory: () => true } as Awaited<ReturnType<typeof fs.stat>>);
+    mockAssertComposeInputs.mockRejectedValueOnce(new MockComposeExpansionRefusal('Compose file "compose.yaml" was refused.'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.getContainersByStack('my-stack')).resolves.toEqual([]);
+
+    expect(mockAssertComposeInputs).toHaveBeenCalledWith({
+      cwd: expect.any(String),
+      invocation: ['-f', 'compose.yaml', '--env-file', '.env'],
+    });
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    // The empty result is not silent: the refusal reaches the log.
+    const logged = errSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+    expect(logged).toContain('Compose file "compose.yaml" was refused.');
     errSpy.mockRestore();
   });
 });
