@@ -1957,6 +1957,63 @@ describe('B4: Compose starts only the approved project', () => {
       expect(dockerRuns()).toBe(1);
     });
 
+    // The Compose directory is named safe/alias/stacks; alias leads to open/hop, which leads to safe/real/stacks. Docker looks "hop" up in "open", which is on neither the physical path nor the name as written, so whoever can write in "open" can repoint the bind source after every check passed.
+    describe('a place that only a link\'s target passes through (B4)', () => {
+      const nested = (targets: 'absolute' | 'relative') => {
+        const safe = path.join(root, 'safe');
+        const open = path.join(root, 'open');
+        fs.mkdirSync(path.join(safe, 'real'), { recursive: true, mode: 0o755 });
+        fs.mkdirSync(open, { mode: 0o755 });
+        fs.renameSync(stacks, path.join(safe, 'real', 'stacks'));
+        const hop = targets === 'absolute' ? path.join(safe, 'real') : path.join('..', 'safe', 'real');
+        const alias = targets === 'absolute' ? path.join(open, 'hop') : path.join('..', 'open', 'hop');
+        fs.symlinkSync(hop, path.join(open, 'hop'));
+        fs.symlinkSync(alias, path.join(safe, 'alias'));
+        const named = path.join(safe, 'alias', 'stacks');
+        const physical = path.join(safe, 'real', 'stacks');
+        const plan = (withCa: boolean) => {
+          const base = planOf({ agent: identity(agent), stacks: identity(physical) }, withCa) as unknown as { paths: { composeDir: { input: string; realPath: string } } };
+          base.paths.composeDir.input = named;
+          base.paths.composeDir.realPath = approvedPath(named);
+          return base as unknown as BootstrapPlan;
+        };
+        return { open, named, plan, step: (sudo: boolean) => startStep(sudo, { agent, stacks: named }) };
+      };
+      const cases = (['absolute', 'relative'] as const).flatMap((targets) => [false, true].flatMap((sudo) => [true, false].map((withCa) => [targets, sudo, withCa] as const)));
+
+      it.each(cases)('starts while every directory the name passes through is closed, and refuses once another user can change the one only a target passes through (%s targets, sudo: %s, hub CA: %s)', async (targets, sudo, withCa) => {
+        const { open, plan, step } = nested(targets);
+        if (sudo) asRootFor(String(process.getuid?.() ?? 0));
+        if (!withCa) fs.unlinkSync(path.join(agent, 'sencho-hub-ca.pem'));
+        expect((await runPlanStep(step(sudo), startContext(), plan(withCa))).status).toBe('done');
+        expect(dockerRuns()).toBe(1);
+        // A retried start, after the directory was opened.
+        fs.chmodSync(open, 0o777);
+        const retried = await failureOf(() => runPlanStep(step(sudo), startContext(), plan(withCa)));
+        expect(retried).toMatchObject({ kind: 'failed', code: 'CONTEXT_NOT_SEALED', changedNothing: true });
+        expect(dockerRuns()).toBe(1);
+      });
+
+      it.each(cases)('refuses before Docker on a first start when it is already open (%s targets, sudo: %s, hub CA: %s)', async (targets, sudo, withCa) => {
+        const { open, plan, step } = nested(targets);
+        if (sudo) asRootFor(String(process.getuid?.() ?? 0));
+        if (!withCa) fs.unlinkSync(path.join(agent, 'sencho-hub-ca.pem'));
+        fs.chmodSync(open, 0o777);
+        const failure = await failureOf(() => runPlanStep(step(sudo), startContext(), plan(withCa)));
+        expect(failure).toMatchObject({ kind: 'failed', code: 'CONTEXT_NOT_SEALED', changedNothing: true });
+        expect(dockerRuns()).toBe(0);
+      });
+
+      it('names the directory only the target passes through', () => {
+        const { open, named, step } = nested('absolute');
+        fs.chmodSync(open, 0o777);
+        const result = runShell(step(false).command as string, startInput({ agentIdentity: identity(agent), composeIdentity: identity(path.join(root, 'safe', 'real', 'stacks')), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256(CA_TEXT) }), env);
+        expect(result.status).toBe(START_EXIT.notSealed);
+        expect(result.stderr).toContain(approvedPath(open));
+        expect(named).toContain('alias');
+      });
+    });
+
     it('accepts a sticky world-writable parent above the Compose directory when this user owns the Compose directory, and ignores the Compose directory\'s own mode', async () => {
       stacksBelow('sticky', 0o1777);
       fs.chmodSync(stacks, 0o777);

@@ -204,13 +204,18 @@ export function shellQuote(value: string): string {
  * a failed owner, group or member lookup included.
  *
  * `sealed_under NAME KIDOWNER` takes a directory as it is written, links
- * included, and checks the place each of its components is looked up in: NAME
- * resolved, then the directory NAME is in, and so on up, each one resolved and
- * walked. A link in the name lives in a directory somebody could rewrite, and
- * Docker follows the name as written, so the physical path alone is not enough.
- * `KIDOWNER` is the owner of whatever is (or will be) in NAME. A link as the last
- * component of the Compose directory's own path is not looked at here: the entry
- * check refuses one before this runs.
+ * included, and follows it one component at a time the way the kernel does,
+ * checking the directory each component is looked up in (with `sealed`). A link
+ * on the way is followed in the same walk, so the directories its target names
+ * are checked too, however many links lead through them, whether the target is
+ * absolute or relative: a link lives in a directory somebody could rewrite, and
+ * Docker follows the name as written, so neither the physical path nor the
+ * parents of the name as written are enough. It reports 2 for a name it cannot
+ * follow to the end (a loop of more than 40 links, a missing or non-directory
+ * component, a link target it cannot read exactly). `KIDOWNER` is the owner of
+ * whatever is (or will be) in NAME. A link as the last component of the Compose
+ * directory's own path is not looked at here: the entry check refuses one before
+ * this runs.
  *
  * The account is the SSH user: the user itself, or, for root, the user sudo
  * reports (`SUDO_UID`) when it is a number.
@@ -263,15 +268,43 @@ export const SEALED_DIRECTORY_SHELL = [
   '    s=$(dirname -- "$s")',
   '  done',
   '}',
+  // Walks NAME one component at a time, as the kernel resolves it, and checks the directory each component is looked up in: the directory itself and everything above it (`sealed`), with the entry looked up as the sticky rule's entry. A link met on the way is followed the same way: its target's components are looked up in the directories the target names, which are not on the path as written, and any of them could be rewritten to send Docker elsewhere. A name that cannot be followed to the end (a loop, a missing or non-directory component, a target that cannot be read exactly) reports 2, never a guess. `wc` is always a physical directory.
+  // Every directory is checked, and the last one that fails (the nearest to the end of the name) is the one reported, as when only the physical path was walked.
+  'wcheck() { sealed "$1" "$2" && return 0; wr=$?; wb=$bad; }',
   'sealed_under() {',
-  '  sn=$1; ko=$2',
+  '  wn=$1; wo=$2; wh=0; wr=0; wb=',
+  '  wnl=$(printf "\\n_"); wnl=${wnl%_}',
+  '  case $wn in /*) wc=/ ;; *) wc=$(pwd -P 2>/dev/null) || { bad=$wn; return 2; } ;; esac',
   '  while :; do',
-  '    pa=$(cd -P -- "$sn" 2>/dev/null && pwd -P) || { bad=$sn; return 2; }',
-  '    sealed "$pa" "$ko" || return $?',
-  '    if [ "$sn" = / ]; then return 0; fi',
-  '    ko=$(stat -c %u -- "$sn" 2>/dev/null) || { bad=$sn; return 2; }',
-  '    sn=$(dirname -- "$sn")',
+  '    while :; do case $wn in /*) wn=${wn#/} ;; *) break ;; esac; done',
+  '    [ -n "$wn" ] || break',
+  '    wk=${wn%%/*}',
+  '    case $wn in */*) wn=${wn#*/} ;; *) wn= ;; esac',
+  '    if [ "$wk" = . ]; then continue; fi',
+  '    if [ "$wk" = .. ]; then',
+  '      wq=$(stat -c %u -- "$wc" 2>/dev/null) || { bad=$wc; return 2; }',
+  '      wcheck "$wc" "$wq"',
+  '      wc=$(dirname -- "$wc"); continue',
+  '    fi',
+  '    wx=${wc%/}/$wk',
+  '    wq=$(stat -c %u -- "$wx" 2>/dev/null) || { bad=$wx; return 2; }',
+  '    wcheck "$wc" "$wq"',
+  '    if [ -L "$wx" ]; then',
+  '      wh=$((wh + 1))',
+  '      if [ "$wh" -gt 40 ]; then bad=$wx; return 2; fi',
+  '      wl=$(readlink -- "$wx" && printf x) || { bad=$wx; return 2; }',
+  '      wl=${wl%x}; wl=${wl%?}',
+  '      case $wl in ""|*"$wnl"*) bad=$wx; return 2 ;; esac',
+  '      case $wl in /*) wc=/ ;; esac',
+  '      wn=$wl/$wn',
+  '    elif [ -d "$wx" ]; then',
+  '      wc=$wx',
+  '    else',
+  '      bad=$wx; return 2',
+  '    fi',
   '  done',
+  '  wcheck "$wc" "$wo"',
+  '  bad=$wb; return $wr',
   '}',
 ].join('\n');
 

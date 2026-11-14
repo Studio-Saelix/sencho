@@ -24,6 +24,7 @@ import {
   parsePathFacts,
   parseVolumeNames,
 } from '../services/nodeBootstrap/probes';
+import { SEALED_DIRECTORY_SHELL } from '../services/nodeBootstrap/pathPolicy';
 import { scrubCommandOutput, type SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
 import { identityOf } from './__helpers__/bootstrapCommands';
 import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
@@ -627,6 +628,85 @@ describe('bootstrap Docker endpoint pinning', () => {
       expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
       chmodSync(holder, 0o777);
       expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: holder });
+    });
+
+    describe('a directory that only a link\'s target passes through (B4)', () => {
+      // base/safe/alias -> base/open/hop -> base/safe/real, with the stacks directory in real. The physical path and the name's own parents are all closed; "open", where "hop" is looked up, is on neither.
+      const nested = (targets: 'absolute' | 'relative') => {
+        const safe = path.join(base, 'safe');
+        const open = path.join(base, 'open');
+        mkdirSync(path.join(safe, 'real', 'stacks'), { recursive: true, mode: 0o755 });
+        mkdirSync(open, { mode: 0o755 });
+        symlinkSync(targets === 'absolute' ? path.join(safe, 'real') : path.join('..', 'safe', 'real'), path.join(open, 'hop'));
+        symlinkSync(targets === 'absolute' ? path.join(open, 'hop') : path.join('..', 'open', 'hop'), path.join(safe, 'alias'));
+        return { safe, open, name: path.join(safe, 'alias', 'stacks') };
+      };
+
+      it.each([['absolute'], ['relative']] as const)('reports both chains of an existing directory as open, naming the directory only a target passes through (%s targets)', (targets) => {
+        const { open, name } = nested(targets);
+        expect(factsOf(name)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+        chmodSync(open, 0o777);
+        expect(factsOf(name)).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+      });
+
+      it.each([['absolute'], ['relative']] as const)('reports it open for a directory that does not exist yet, judged by the nearest ancestor the link leads through (%s targets)', (targets) => {
+        const { open, safe } = nested(targets);
+        const missing = path.join(safe, 'alias', 'new');
+        expect(factsOf(missing)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+        chmodSync(open, 0o777);
+        expect(factsOf(missing)).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+      });
+
+      it('follows a chain of links, a link whose target climbs out with ..., and links inside a target', () => {
+        const hops = path.join(base, 'hops');
+        const stash = path.join(base, 'stash');
+        mkdirSync(path.join(base, 'real', 'stacks'), { recursive: true, mode: 0o755 });
+        mkdirSync(hops, { mode: 0o755 });
+        mkdirSync(stash, { mode: 0o755 });
+        // base/hops/l1 -> ../stash/l2 ; base/stash/l2 -> ../real ; the name is base/hops/l1/stacks.
+        symlinkSync(path.join('..', 'real'), path.join(stash, 'l2'));
+        symlinkSync(path.join('..', 'stash', 'l2'), path.join(hops, 'l1'));
+        const name = path.join(hops, 'l1', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        chmodSync(stash, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: stash });
+        chmodSync(stash, 0o755);
+        chmodSync(hops, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: hops });
+      });
+
+      /** The shared walk on its own, for names the preflight never gets to (a loop has no nearest existing ancestor). */
+      const walk = (name: string, kid = '') => {
+        const out = execFileSync('sh', ['-c', `${SEALED_DIRECTORY_SHELL}\nsealed_under "$1" "$2"; r=$?; echo "$r:$bad"`, 'sencho-walk', name, kid], { encoding: 'utf8' }).trim();
+        const [code, ...rest] = out.split(':');
+        return { code: Number(code), bad: rest.join(':') };
+      };
+
+      it('reports a name it cannot follow to the end as not inspected, never as sealed', () => {
+        symlinkSync('b', path.join(base, 'a'));
+        symlinkSync('a', path.join(base, 'b'));
+        expect(walk(path.join(base, 'a'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        // A dangling link, and a component that is a file.
+        symlinkSync(path.join(base, 'nowhere'), path.join(base, 'dangling'));
+        expect(walk(path.join(base, 'dangling'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        writeFileSync(path.join(base, 'file'), '');
+        expect(walk(path.join(base, 'file', 'x'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        // A link target that ends in a line break cannot be read back exactly.
+        mkdirSync(path.join(base, 'real'));
+        symlinkSync('real\n', path.join(base, 'nl'));
+        expect(walk(path.join(base, 'nl'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+      });
+
+      it('follows a long chain of links that ends, and refuses one longer than the kernel allows', () => {
+        mkdirSync(path.join(base, 'end'));
+        let previous = 'end';
+        for (let i = 0; i < 39; i++) { symlinkSync(previous, path.join(base, `n${i}`)); previous = `n${i}`; }
+        expect(walk(path.join(base, previous), String(process.getuid?.() ?? 0))).toEqual({ code: 0, bad: '' });
+        symlinkSync(previous, path.join(base, 'n39'));
+        symlinkSync('n39', path.join(base, 'n40'));
+        symlinkSync('n40', path.join(base, 'n41'));
+        expect(walk(path.join(base, 'n41'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+      });
     });
 
     it('treats a directory with an access control list that grants write through its group bits as writable by others', () => {
