@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import os from 'os';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeBootstrapService } from '../services/nodeBootstrap/NodeBootstrapService';
+import { ownHostAddresses } from '../services/nodeBootstrap/targetPolicy';
 import {
   SshTransportError,
   type BootstrapTransport,
@@ -20,7 +22,7 @@ const HUB_KEY = 'SHA256:hubhostkey000000000000000000000000000000000';
 const OTHER_KEY = 'SHA256:someotherserverkey00000000000000000000000';
 const HUB_URL = 'https://hub.example.com';
 
-/** An SSH world keyed by `address:port`, with the transport policy the real client applies. */
+/** An SSH world keyed by `address:port`; `runCommands` applies the `refusedFingerprints` rule of the real client. */
 class FakeSshWorld implements BootstrapTransport {
   public readonly keys = new Map<string, string>();
   public readonly keyscans: Array<{ address: string; port: number; timeoutMs: number | undefined }> = [];
@@ -41,7 +43,8 @@ class FakeSshWorld implements BootstrapTransport {
     options: { refusedFingerprints?: ReadonlySet<string> } = {},
   ): Promise<never> {
     const fingerprint = this.keys.get(`${session.address}:${session.port}`);
-    if (fingerprint && options.refusedFingerprints?.has(fingerprint)) {
+    if (!fingerprint) throw new SshTransportError('SSH_UNREACHABLE', 'The target refused the SSH connection.');
+    if (options.refusedFingerprints?.has(fingerprint)) {
       throw new SshTransportError('SELF_TARGET', 'The target presents the SSH host key of the server running this Sencho instance.');
     }
     this.authAttempts += 1;
@@ -53,7 +56,11 @@ let tmpDir: string;
 beforeAll(async () => { tmpDir = await setupTestDb(); });
 afterAll(() => { cleanupTestDb(tmpDir); });
 
-function service(world: FakeSshWorld, ownAddresses: () => Promise<string[]>) {
+function service(
+  world: FakeSshWorld,
+  ownAddresses: () => Promise<string[]>,
+  extra: Partial<ConstructorParameters<typeof NodeBootstrapService>[0]> = {},
+) {
   return new NodeBootstrapService({
     transport: world,
     db: DatabaseService.getInstance(),
@@ -61,6 +68,7 @@ function service(world: FakeSshWorld, ownAddresses: () => Promise<string[]>) {
     ownHostAddresses: ownAddresses,
     resolveAddresses: async (host) => [host],
     caPem: () => null,
+    ...extra,
   });
 }
 
@@ -136,12 +144,115 @@ describe('bootstrap target that is the hub host reached through another of its a
       .resolves.toMatchObject({ fingerprint: HUB_KEY });
   });
 
-  it('bounds each own-address key scan, so a silent address cannot hold the request', async () => {
-    const hanging = vi.spyOn(world, 'captureHostKey');
-    await service(world, own).captureHostKey({ host: '10.0.2.200', port: 22 }, { hubUrl: HUB_URL }).catch(() => undefined);
+  it('passes a cap of at most 3 seconds to each own-address key scan', async () => {
+    await service(world, own).captureHostKey({ host: '10.0.2.200', port: 22 }, { hubUrl: HUB_URL });
     const ownScans = world.keyscans.filter((scan) => scan.address !== '10.0.2.200');
     expect(ownScans.length).toBeGreaterThan(0);
     for (const scan of ownScans) expect(scan.timeoutMs).toBeLessThanOrEqual(3_000);
-    hanging.mockRestore();
+  });
+
+  it('finds the hub host on the target port when nothing answers on 22', async () => {
+    world.keys.delete('151.145.63.14:22');
+    world.keys.delete('172.17.0.1:22');
+    world.keys.set('151.145.63.14:2222', HUB_KEY);
+    world.keys.set('10.0.2.109:2222', HUB_KEY);
+    await expect(service(world, own).captureHostKey({ host: '10.0.2.109', port: 2222 }, { hubUrl: HUB_URL }))
+      .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+  });
+
+  it('scans port 22 once when the target is on 22', async () => {
+    await service(world, own).captureHostKey({ host: '10.0.2.200', port: 22 }, { hubUrl: HUB_URL });
+    const ownScans = world.keyscans.filter((scan) => scan.address === '151.145.63.14');
+    expect(ownScans).toHaveLength(1);
+  });
+
+  it('refuses a name when any of its records is the hub host, even after one that is down', async () => {
+    const records = ['10.0.2.250', '10.0.2.109'];
+    const resolveAddresses = async () => records;
+    await expect(service(world, own, { resolveAddresses }).captureHostKey({ host: 'media.example.com', port: 22 }, { hubUrl: HUB_URL }))
+      .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    await expect(service(world, own, { resolveAddresses }).preflight(preflightRequest('media.example.com'), { hubUrl: HUB_URL, audit }))
+      .rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    expect(world.authAttempts).toBe(0);
+  });
+
+  it('refuses the execution recheck of an approved address that now presents the hub key', async () => {
+    await expect(service(world, own).preflight(preflightRequest('10.0.2.109'), {
+      hubUrl: HUB_URL,
+      audit,
+      pinnedAddress: '10.0.2.109',
+      planNow: 1_762_300_000_000,
+    })).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+    expect(world.authAttempts).toBe(0);
+  });
+
+  it('never dials an address the outbound policy blocks or an IPv6 one, whatever the Host header named', async () => {
+    const poisoned = async () => ['127.0.0.1', '169.254.169.254', '0.0.0.0', 'fe80::1', '172.17.0.1'];
+    await service(world, poisoned).captureHostKey({ host: '10.0.2.200', port: 22 }, { hubUrl: 'https://169.254.169.254' });
+    const dialed = world.keyscans.map((scan) => scan.address);
+    expect(dialed).not.toContain('127.0.0.1');
+    expect(dialed).not.toContain('169.254.169.254');
+    expect(dialed).not.toContain('0.0.0.0');
+    expect(dialed).not.toContain('fe80::1');
+    expect(dialed).toContain('172.17.0.1');
+  });
+
+  it('stops a host-key capture whose request budget ran out before the own keys were read', async () => {
+    let clock = 1_000_000;
+    const slowTarget = new FakeSshWorld();
+    slowTarget.keys.set('10.0.2.109:22', HUB_KEY);
+    slowTarget.keys.set('172.17.0.1:22', HUB_KEY);
+    const original = slowTarget.captureHostKey.bind(slowTarget);
+    vi.spyOn(slowTarget, 'captureHostKey').mockImplementation(async (target, options) => {
+      const result = await original(target, options);
+      clock += 90_000;
+      return result;
+    });
+    await expect(service(slowTarget, own, { now: () => clock, requestBudgetMs: 90_000 })
+      .captureHostKey({ host: '10.0.2.109', port: 22 }, { hubUrl: HUB_URL }))
+      .rejects.toMatchObject({ code: 'PREFLIGHT_TIMEOUT' });
+  });
+
+  it('stops a host-key capture that was cancelled while the own keys were being read', async () => {
+    const controller = new AbortController();
+    const cancelling = new FakeSshWorld();
+    cancelling.keys.set('10.0.2.109:22', HUB_KEY);
+    const original = cancelling.captureHostKey.bind(cancelling);
+    vi.spyOn(cancelling, 'captureHostKey').mockImplementation(async (target, options) => {
+      if (target.address === '172.17.0.1') controller.abort();
+      return original(target, options);
+    });
+    await expect(service(cancelling, own).captureHostKey({ host: '10.0.2.109', port: 22 }, { hubUrl: HUB_URL, signal: controller.signal }))
+      .rejects.toMatchObject({ message: 'The request was cancelled.' });
+  });
+
+  it('does not let a hung own-address list hold the request past the probe cap', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const hung = () => new Promise<string[]>(() => {});
+      const pending = service(world, hung).captureHostKey({ host: '10.0.2.109', port: 22 }, { hubUrl: HUB_URL });
+      const settled = expect(pending).resolves.toMatchObject({ fingerprint: HUB_KEY });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
+
+describe('the own-host address list', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('holds the hub host, the gateways and the interfaces, each once', async () => {
+    vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      eth0: [
+        { address: '172.30.0.5', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: '172.30.0.5/24' },
+        { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', mac: '00:00:00:00:00:00', internal: false, cidr: 'fe80::1/64', scopeid: 1 },
+      ],
+    });
+    const list = await ownHostAddresses('151.145.63.14');
+    expect(list).toEqual(expect.arrayContaining(['151.145.63.14', '172.30.0.5', '172.30.0.1', '172.17.0.1']));
+    expect(new Set(list).size).toBe(list.length);
+  });
+});
+

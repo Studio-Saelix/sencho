@@ -146,12 +146,12 @@ async function ownAddresses(hubHost: string | null, resolve: ResolveAddresses): 
 }
 
 /**
- * Every address that may reach the machine running this hub, for the host-key
- * comparison in the service: a target that answers with the host key of one of
- * these is the hub's own host, however it was addressed. A container cannot list
- * the host's other interfaces (a private NIC, a bridge address that is not
- * `.1`), so the address check above cannot name them; this list is where the
- * hub can still ask the host for its key.
+ * Every address the hub knows for itself or the machine hosting it (interfaces,
+ * gateways, the hub host), for the host-key comparison in the service: a target
+ * that answers with the SSH host key of one of these is the hub's own host. A
+ * container cannot list the host's other interfaces (a private NIC, a bridge
+ * address that is not `.1`), so the address check above cannot name them; this
+ * list is where the hub can still ask the host for its key.
  */
 export async function ownHostAddresses(
   hubHost: string | null,

@@ -1,4 +1,5 @@
 import net from 'net';
+import { isDisallowedOutboundTargetAddress } from '../../utils/outboundTarget';
 import { pilotHubCaPem } from '../../helpers/pilotEnrollment';
 import { DatabaseService, type NodeBootstrapTrust } from '../DatabaseService';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
@@ -97,7 +98,7 @@ export class BootstrapError extends Error {
 }
 
 function selfTargetBootstrapError(): BootstrapError {
-  return new BootstrapError(400, 'INVALID_TARGET', 'The target resolves to this Sencho instance.', { field: 'host' });
+  return new BootstrapError(400, 'INVALID_TARGET', 'The target presents the SSH host key of the server running this Sencho instance.', { field: 'host' });
 }
 
 export interface BootstrapPreflightRequest {
@@ -125,7 +126,7 @@ type AuditContext = BootstrapAuditContext;
 /** `hubHost` is the host clients reach the hub on; a target resolving to it is refused as the hub itself. */
 type AddressResolver = (host: string, hubHost?: string | null) => Promise<string[]>;
 
-/** How long one own-host key probe may take; the probes run in parallel. */
+/** The longest one own-host key probe may take (less when the request budget is shorter); the probes run in parallel. */
 const OWN_HOST_KEY_PROBE_MS = 3_000;
 
 function hubHostOf(hubUrl: string | undefined): string | null {
@@ -143,7 +144,7 @@ interface BootstrapDeps {
   db: DatabaseService;
   now: () => number;
   resolveAddresses: AddressResolver;
-  /** Addresses that may reach the hub's own host, probed for its SSH host key. */
+  /** Addresses the hub knows for itself or its host, probed for the host's SSH host key. */
   ownHostAddresses: (hubHost: string | null) => Promise<string[]>;
   caPem: () => string | null;
   /** Preflight request budget, including DNS; default is the advertised 90 seconds. */
@@ -315,8 +316,8 @@ export class NodeBootstrapService {
       throw lastError ?? new Error('No address answered');
     });
 
-    // Another address of the hub's own host is not in the interface list, so a
-    // target is also the hub itself when it answers with the host's own key.
+    // A container cannot list its host's other addresses, so a target is also the
+    // hub itself when it answers with the key of an address the hub does know.
     const ownKeys = await this.ownHostKeys(addresses, port, hubHostOf(options.hubUrl), deadline, options.signal);
     if (ownKeys.has(observation.fingerprint)) throw selfTargetBootstrapError();
 
@@ -569,13 +570,19 @@ export class NodeBootstrapService {
 
   /**
    * SSH host key fingerprints of the machine running this hub, read from the
-   * addresses that may reach it (see `ownHostAddresses`) on the target's port and
-   * on 22. An address that does not answer adds nothing, and so does the
-   * target's own address, so a host that is not the hub's never refuses itself.
-   * This is the check that catches the host's other interface addresses, which a
-   * container cannot enumerate; it cannot see a host whose SSH server does not
-   * listen on any of those addresses, or one that listens only on a port other
-   * than the target's and 22.
+   * addresses the hub knows for itself or its host (see `ownHostAddresses`) on the
+   * target's port and on 22. Only addresses the outbound policy allows are
+   * dialed, because the hub host can come from the request's `Host` header. The
+   * target's own resolved addresses are skipped, so a host that is not the hub's
+   * never refuses itself.
+   *
+   * This catches a server that is the hub's own host through an address the hub
+   * cannot list, when its SSH server also answers on an address the hub knows.
+   * It is best effort: an address that does not answer, an own-address list that
+   * cannot be built, or an SSH server on a port other than the target's and 22
+   * leaves the set smaller and refuses nothing. An exhausted request budget or a
+   * cancelled request is not best effort: it stops the request, so a capture
+   * never returns a key that was not compared.
    */
   private async ownHostKeys(
     targetAddresses: readonly string[],
@@ -585,18 +592,27 @@ export class NodeBootstrapService {
     signal?: AbortSignal,
   ): Promise<Set<string>> {
     const fingerprints = new Set<string>();
+    if (signal?.aborted) throw cancelledError();
+    const timeoutMs = Math.min(OWN_HOST_KEY_PROBE_MS, deadline - this.deps.now());
+    if (timeoutMs <= 0) throw this.budgetError();
     let candidates: string[];
+    let timer: NodeJS.Timeout | null = null;
     try {
-      candidates = await this.deps.ownHostAddresses(hubHost);
-    } catch {
+      // The list repeats the hub host's DNS lookup, so it gets the probes' own cap.
+      candidates = await Promise.race([
+        this.deps.ownHostAddresses(hubHost),
+        new Promise<string[]>((resolve) => { timer = setTimeout(() => resolve([]), timeoutMs); }),
+      ]);
+    } catch (error: unknown) {
+      console.warn(`[Bootstrap] Own-address list failed (${(error as { code?: string } | null)?.code ?? 'unknown'}); the own-host key check is skipped.`);
       return fingerprints;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     const skip = new Set(targetAddresses);
     const ports = port === 22 ? [22] : [port, 22];
-    const timeoutMs = Math.min(OWN_HOST_KEY_PROBE_MS, deadline - this.deps.now());
-    if (timeoutMs <= 0 || signal?.aborted) return fingerprints;
     await Promise.all(candidates
-      .filter((address) => net.isIP(address) === 4 && !skip.has(address))
+      .filter((address) => net.isIP(address) === 4 && !skip.has(address) && !isDisallowedOutboundTargetAddress(address))
       .flatMap((address) => ports.map(async (candidatePort) => {
         try {
           const observation = await this.deps.transport.captureHostKey(
@@ -605,9 +621,11 @@ export class NodeBootstrapService {
           );
           fingerprints.add(observation.fingerprint);
         } catch {
-          // Nothing listens there, or it did not answer in time: it adds no key.
+          // No SSH server answered there in time, or the request was cancelled
+          // (the next check of the signal stops the request).
         }
       })));
+    if (signal?.aborted) throw cancelledError();
     return fingerprints;
   }
 
