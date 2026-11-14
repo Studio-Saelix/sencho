@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
@@ -255,9 +256,16 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
             await compose.downStack(stackName);
           }
         } catch (downErr) {
-          dockerDownCompleted = false;
-          dockerDownRefused = isDockerEndpointProtectedError(downErr);
-          console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
+          if (downErr instanceof ComposeExpansionRefusal) {
+            // Sencho refused to run Compose for this stack, and the stack is the
+            // one this request just created, so nothing was ever started: there
+            // is nothing to take down, and its files go as for any rollback.
+            console.warn('[Templates] Rollback of %s skips Docker down: %s', sanitizeForLog(stackName), sanitizeForLog(downErr.message));
+          } else {
+            dockerDownCompleted = false;
+            dockerDownRefused = isDockerEndpointProtectedError(downErr);
+            console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
+          }
         }
 
         // A refused down leaves containers running; their files must stay.

@@ -395,6 +395,10 @@ export class ComposeService {
     let declared: string[] | null = null;
     try {
       const result = await this.renderConfig(stackName);
+      // Sencho's own refusal says why the volumes cannot be read, which is a
+      // different answer from "they could not be checked": name the refused
+      // input instead of the generic unverified-volumes wording.
+      if (result.refusal) throw new ComposeExpansionRefusal(result.refusal);
       if (result.rendered !== null) {
         const parsed: unknown = JSON.parse(result.rendered);
         // The model parser tolerates anything and returns an empty model, which
@@ -411,6 +415,7 @@ export class ComposeService {
         );
       }
     } catch (error) {
+      if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
     if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
@@ -2077,7 +2082,11 @@ export class ComposeService {
       } catch (err) {
         if (!isClosed && ws.readyState === WebSocket.OPEN) {
           if (!isWaitingForActivity) {
-            ws.send(`\r\n\x1b[31m[Sencho] Error tracking containers. Retrying...\x1b[0m\r\n`);
+            // A refusal names the file and the reason; "Retrying" alone would
+            // hide why no container is ever found.
+            ws.send(err instanceof ComposeExpansionRefusal
+              ? `\r\n\x1b[33m[Sencho] ${err.message} Retrying...\x1b[0m\r\n`
+              : `\r\n\x1b[31m[Sencho] Error tracking containers. Retrying...\x1b[0m\r\n`);
             isWaitingForActivity = true;
           }
           setTimeout(startStream, 2000);
@@ -3171,6 +3180,10 @@ export class ComposeService {
       await this.supersedeGatesForContainerOp(stackName, 'the stack was torn down during the observation');
       await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackPath, undefined, false);
     } catch (error) {
+      // Sencho's refusal to run Compose is not "nothing to clean up": the stack
+      // may be running, and the caller decides what is left (stack deletion
+      // keeps the files, a template rollback has nothing started to remove).
+      if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }
   }

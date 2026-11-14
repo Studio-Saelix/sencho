@@ -116,6 +116,8 @@ import {
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../helpers/composeRefusalRoute';
+import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
@@ -766,6 +768,9 @@ async function runStackBulkOp(
       }
       if (outcome.kind === 'data-restore') {
         return { stackName, ok: false, error: outcome.message, code: DATA_RESTORE_FENCE_CODE };
+      }
+      if (outcome.kind === 'compose-refused') {
+        return { stackName, ok: false, error: outcome.message, code: COMPOSE_INPUTS_REFUSED_CODE };
       }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
@@ -1561,6 +1566,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(423).json({ error: result.error, code: RECOVERY_VOLUME_PROTECTED_CODE });
       return;
     }
+    if (result.code === 'compose_inputs_refused') {
+      res.status(409).json({ error: result.error, code: COMPOSE_INPUTS_REFUSED_CODE });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
@@ -1597,6 +1606,8 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
   } catch (error) {
     outcome = 'error';
     console.error('[Stacks] Failed to fetch containers for %s:', sanitizeForLog(stackName), error);
+    // A refused stack is not an empty one: say why the list cannot be read.
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to fetch containers' });
   } finally {
     logDebugTiming('[Stacks:debug]', {
@@ -2238,6 +2249,7 @@ stacksRouter.get('/:stackName/label-inventory', async (req: Request, res: Respon
   } catch (error) {
     console.error('[Stacks] Failed to build label inventory for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to build label inventory' });
   }
 });
@@ -2549,6 +2561,9 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (sendIfRecoveryVolumeProtected(res, error)) return;
+    // A refusal ran nothing, like the two above: say why, and keep it out of
+    // the failure feed.
+    if (sendIfComposeInputsRefused(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
@@ -2591,6 +2606,8 @@ export type ContainerActionOutcome =
   | { kind: 'endpoint-protected'; message: string; reason: string }
   /** A data restore owns a volume one of the containers mounts, so its start was refused. */
   | { kind: 'data-restore'; message: string }
+  /** Sencho refused to hand the stack's inputs to Compose, so its containers could not be listed. */
+  | { kind: 'compose-refused'; message: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2650,6 +2667,7 @@ export async function containerActionForStack(
       return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
     }
     if (isDataRestoreFenceError(error)) return { kind: 'data-restore', message: error.message };
+    if (error instanceof ComposeExpansionRefusal) return { kind: 'compose-refused', message: error.message };
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2692,6 +2710,10 @@ async function bulkContainerOp(
     }
     if (outcome.kind === 'data-restore') {
       res.status(409).json({ error: outcome.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
+    if (outcome.kind === 'compose-refused') {
+      res.status(409).json({ error: outcome.message, code: COMPOSE_INPUTS_REFUSED_CODE });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2792,6 +2814,7 @@ async function handleServiceAction(
       res.status(409).json({ error: error.message, code: error.code });
       return;
     }
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   } finally {
     releaseStackOpLock(req, stackName);

@@ -3678,6 +3678,25 @@ describe('ComposeService - streamLogs', () => {
     expect(sent).toContain('No containers found. Waiting for activity');
   });
 
+  it('names the refusal on the log stream instead of a bare "Error tracking containers"', async () => {
+    mockGetContainersByStack.mockRejectedValue(
+      new MockComposeExpansionRefusal('Compose file "compose.yaml" expands to more than 250,000 nodes through nested YAML aliases.'),
+    );
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockGetContainersByStack).toHaveBeenCalledTimes(1));
+
+    const sent = (ws.send as ReturnType<typeof vi.fn>).mock.calls.flatMap((c) => String(c[0])).join('');
+    expect(sent).toContain('nested YAML aliases');
+    expect(sent).not.toContain('Error tracking containers');
+    // The file may be fixed while the stream is open, so it keeps retrying.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockGetContainersByStack).toHaveBeenCalledTimes(2);
+    mockGetContainersByStack.mockReset();
+  });
+
   it('stops retrying after the websocket closes', async () => {
     mockGetContainersByStack.mockResolvedValue([]);
     const ws = createMockWs();
@@ -3982,5 +4001,62 @@ describe('ComposeService - update policy re-check in updateStack', () => {
     expect(beforeUp).toHaveBeenCalledTimes(1);
     const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
     expect(spawnArgs.some(args => args.includes('up'))).toBe(true);
+  });
+});
+
+describe('ComposeService - a refused stack is never reported as torn down or stopped', () => {
+  const REFUSAL = 'Compose file "compose.yaml" expands to more than 250,000 nodes through nested YAML aliases.';
+
+  it('downStack hands the refusal to its caller instead of swallowing it as "nothing to clean up"', async () => {
+    mockSpawn.mockClear();
+    mockAssertComposeInputs.mockRejectedValue(new MockComposeExpansionRefusal(REFUSAL));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await expect(ComposeService.getInstance(1).downStack('my-stack')).rejects.toBeInstanceOf(MockComposeExpansionRefusal);
+      await expect(ComposeService.getInstance(1).downStack('my-stack', { removeVolumes: false })).rejects.toThrow('nested YAML aliases');
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('nothing to clean up'))).toBe(false);
+    } finally {
+      mockAssertComposeInputs.mockReset();
+      mockAssertComposeInputs.mockResolvedValue(undefined);
+      warn.mockRestore();
+    }
+  });
+
+  it('downStack still swallows an ordinary teardown failure', async () => {
+    mockSpawn.mockImplementationOnce(() => { throw new Error('spawn docker ENOENT'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await expect(ComposeService.getInstance(1).downStack('my-stack')).resolves.toBeUndefined();
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('nothing to clean up'))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it.each(['down', 'stop', 'restart', 'start'] as const)('runCommand %s rejects with the refusal before Compose runs', async (action) => {
+    mockSpawn.mockClear();
+    mockAssertComposeInputs.mockRejectedValueOnce(new MockComposeExpansionRefusal(REFUSAL));
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', action)).rejects.toBeInstanceOf(MockComposeExpansionRefusal);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('runDown rejects with the refusal before Compose runs', async () => {
+    mockSpawn.mockClear();
+    mockAssertComposeInputs.mockRejectedValueOnce(new MockComposeExpansionRefusal(REFUSAL));
+
+    await expect(ComposeService.getInstance(1).runDown('my-stack')).rejects.toBeInstanceOf(MockComposeExpansionRefusal);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it.each(['runDown', 'downStack'] as const)('%s --volumes names the refusal, not "volumes could not be checked"', async (method) => {
+    mockSpawn.mockClear();
+    const svc = ComposeService.getInstance(1);
+    vi.spyOn(svc, 'renderConfig').mockResolvedValue({
+      rendered: null, stderr: '', code: null, timedOut: false, refusal: REFUSAL,
+    });
+
+    await expect(svc[method]('my-stack', { removeVolumes: true })).rejects.toBeInstanceOf(MockComposeExpansionRefusal);
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

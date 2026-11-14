@@ -3083,14 +3083,16 @@ describe('DockerController - missing stack directory', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const dc = DockerController.getInstance(1);
-    await expect(dc.getContainersByStack('my-stack')).resolves.toEqual([]);
+    // A refusal is not an empty stack: it reaches the caller instead of falling
+    // back to a name-matched listing that reads as "no containers".
+    await expect(dc.getContainersByStack('my-stack')).rejects.toBeInstanceOf(MockComposeExpansionRefusal);
 
     expect(mockAssertComposeInputs).toHaveBeenCalledWith({
       cwd: expect.any(String),
       invocation: ['-f', 'compose.yaml', '--env-file', '.env'],
     });
     expect(mockExecFileAsync).not.toHaveBeenCalled();
-    // The empty result is not silent: the refusal reaches the log.
+    expect(mockDocker.listContainers).not.toHaveBeenCalled();
     const logged = errSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
     expect(logged).toContain('Compose file "compose.yaml" was refused.');
     errSpy.mockRestore();

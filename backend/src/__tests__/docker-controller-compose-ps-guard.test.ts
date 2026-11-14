@@ -10,8 +10,9 @@ import { promises as fsPromises } from 'fs';
 import os from 'os';
 import path from 'path';
 
-const { mockExecFileAsync, composeDirRef } = vi.hoisted(() => ({
+const { mockExecFileAsync, mockListContainers, composeDirRef } = vi.hoisted(() => ({
   mockExecFileAsync: vi.fn(),
+  mockListContainers: vi.fn(),
   composeDirRef: { current: '' },
 }));
 
@@ -26,7 +27,7 @@ vi.mock('util', () => ({
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
-      getDocker: () => ({ listContainers: vi.fn().mockResolvedValue([]) }),
+      getDocker: () => ({ listContainers: mockListContainers }),
       getDefaultNodeId: () => 1,
       getComposeDir: () => composeDirRef.current,
     }),
@@ -43,6 +44,7 @@ vi.mock('../services/DatabaseService', () => ({
 }));
 
 import DockerController from '../services/DockerController';
+import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 
 function nestedAliasBomb(levels: number): string {
   const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
@@ -63,6 +65,7 @@ let savedComposeFile: string | undefined;
 beforeEach(async () => {
   vi.clearAllMocks();
   mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+  mockListContainers.mockResolvedValue([]);
   savedComposeFile = process.env.COMPOSE_FILE;
   delete process.env.COMPOSE_FILE;
   root = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-ps-guard-'));
@@ -91,13 +94,18 @@ async function listContainers(): Promise<unknown[]> {
   }
 }
 
+/** A refused stack is not an empty one: the refusal reaches the caller, and neither compose ps nor a name-matched fallback runs. */
+async function expectRefused(): Promise<void> {
+  await expect(listContainers()).rejects.toBeInstanceOf(ComposeExpansionRefusal);
+  expect(mockExecFileAsync).not.toHaveBeenCalled();
+  expect(mockListContainers).not.toHaveBeenCalled();
+}
+
 describe('DockerController compose ps uses the real guard', () => {
   it('does not run compose ps for a discovered bomb', async () => {
     await writeStackFile('compose.yaml', nestedAliasBomb(12));
 
-    await expect(listContainers()).resolves.toEqual([]);
-
-    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    await expectRefused();
   });
 
   it('does not run compose ps for a bomb selected by the project .env', async () => {
@@ -105,36 +113,43 @@ describe('DockerController compose ps uses the real guard', () => {
     await writeStackFile('selected.yaml', nestedAliasBomb(12));
     await writeStackFile('.env', 'COMPOSE_FILE=selected.yaml\n');
 
-    await expect(listContainers()).resolves.toEqual([]);
-
-    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    await expectRefused();
   });
 
   it('does not run compose ps for a bomb in an include dependency', async () => {
     await writeStackFile('compose.yaml', 'include:\n  - dep.yaml\nservices:\n  web:\n    image: nginx:alpine\n');
     await writeStackFile('dep.yaml', nestedAliasBomb(12));
 
-    await expect(listContainers()).resolves.toEqual([]);
-
-    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    await expectRefused();
   });
 
   it('does not run compose ps for an include of a device', async () => {
     await writeStackFile('compose.yaml', 'include:\n  - /dev/zero\n');
 
-    await expect(listContainers()).resolves.toEqual([]);
-
-    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    await expectRefused();
   });
 
-  it('logs the refusal so the empty result is not silent', async () => {
+  it('hands the refusal text to the caller, so a stop or delete can say why', async () => {
     await writeStackFile('compose.yaml', nestedAliasBomb(12));
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await DockerController.getInstance(1).getContainersByStack('stack');
+    await expect(DockerController.getInstance(1).getContainersByStack('stack'))
+      .rejects.toThrow('nested YAML aliases');
 
-    const logged = errSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
-    expect(logged).toContain('nested YAML aliases');
+    errSpy.mockRestore();
+  });
+
+  it('fails closed for the callers that classify orphans: no fallback, and the reason is kept', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dc = DockerController.getInstance(1);
+
+    await expect(dc.getLegacyOrphanContainersByStack('stack')).resolves.toEqual([]);
+    const classified = await dc.classifyLegacyOrphansForUpdate('stack');
+
+    expect(classified.status).toBe('classification_failed');
+    expect((classified as { error: string }).error).toContain('nested YAML aliases');
+    expect(mockListContainers).not.toHaveBeenCalled();
     errSpy.mockRestore();
   });
 
@@ -144,5 +159,37 @@ describe('DockerController compose ps uses the real guard', () => {
     await listContainers();
 
     expect(mockExecFileAsync).toHaveBeenCalled();
+  });
+});
+
+describe('DockerController.listContainersBoundToStackDir reads the Engine without Compose', () => {
+  it('returns every container Compose started from the stack directory, in any state, and runs no Compose', async () => {
+    await writeStackFile('compose.yaml', nestedAliasBomb(12));
+    mockListContainers.mockResolvedValue([
+      { Id: 'a', Names: ['/stack-web-1'], State: 'running', Labels: { 'com.docker.compose.project': 'stack', 'com.docker.compose.project.working_dir': stackDir } },
+      { Id: 'b', Names: ['/stack-old-1'], State: 'exited', Labels: { 'com.docker.compose.project': 'stack', 'com.docker.compose.project.config_files': path.join(stackDir, 'compose.yaml') } },
+      // Same name shape, another directory: not this stack's.
+      { Id: 'c', Names: ['/stack-web-2'], State: 'running', Labels: { 'com.docker.compose.project': 'stack', 'com.docker.compose.project.working_dir': path.join(root, 'elsewhere') } },
+      // No Compose labels at all: never matched by name.
+      { Id: 'd', Names: ['/stack-web-1'], State: 'running', Labels: {} },
+    ]);
+
+    const bound = await DockerController.getInstance(1).listContainersBoundToStackDir('stack');
+
+    expect(bound).toEqual([
+      { Id: 'a', Name: 'stack-web-1', State: 'running' },
+      { Id: 'b', Name: 'stack-old-1', State: 'exited' },
+    ]);
+    expect(mockListContainers).toHaveBeenCalledWith({ all: true, filters: { label: ['com.docker.compose.project'] } });
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('throws when the Engine cannot be listed, so "unknown" is never read as "none"', async () => {
+    mockListContainers.mockRejectedValue(new Error('engine unreachable'));
+    await expect(DockerController.getInstance(1).listContainersBoundToStackDir('stack')).rejects.toThrow('engine unreachable');
+  });
+
+  it('rejects a stack name that is not valid', async () => {
+    await expect(DockerController.getInstance(1).listContainersBoundToStackDir('../x')).rejects.toThrow('Invalid stack path');
   });
 });

@@ -35,6 +35,7 @@ import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import {
   assertComposeInputsWithinExpansionLimits,
+  ComposeExpansionRefusal,
 } from '../helpers/composeExpansionGuard';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { mapWithConcurrency } from '../utils/mapWithConcurrency';
@@ -3454,6 +3455,14 @@ class DockerController {
         return await this.enrichContainers(mapped);
       }
     } catch (error) {
+      // Sencho's refusal to hand the inputs to Compose is not "no containers":
+      // the stack may be running, and an empty list would let a stop, restart,
+      // or delete read as done. It reaches the caller, which says why, and no
+      // name-matched fallback runs.
+      if (error instanceof ComposeExpansionRefusal) {
+        console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(error.message));
+        throw error;
+      }
       // If command fails (e.g., stack not deployed, invalid YAML, missing env_file,
       // or host under memory pressure causing posix_spawn to fail with ENOMEM,
       // which Linux libuv can surface as ENOENT).
@@ -3465,6 +3474,33 @@ class DockerController {
 
     // Empty successful ps or compose error: soft fallback for UI listing (never break the page).
     return this.listViaSoftSmartFallback(stackName, stackDir);
+  }
+
+  /**
+   * Containers on this node that Compose started from this stack's directory,
+   * read from the Engine API alone: no Compose invocation, so it still answers
+   * for a stack whose inputs Sencho refuses to hand to Compose. Any state counts
+   * (a stopped container is still bound to the stack). Evidence is the same
+   * working-dir or config-file label `smartFallback` trusts, never a name.
+   * Throws when the engine cannot be listed: callers asking "is anything left
+   * behind?" must treat that as unknown, not as none.
+   */
+  public async listContainersBoundToStackDir(stackName: string): Promise<Array<{ Id: string; Name: string; State: string }>> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    const all = await this.docker.listContainers({
+      all: true,
+      filters: { label: ['com.docker.compose.project'] },
+    });
+    return all
+      .filter((c) => DockerController.containerHasStackDirEvidence(c.Labels, stackDir))
+      .map((c) => ({
+        Id: c.Id,
+        Name: c.Names?.[0]?.replace(/^\//, '') ?? c.Id,
+        State: c.State ?? 'unknown',
+      }));
   }
 
   /** UI listing path: smartFallback, or empty list if it throws. */

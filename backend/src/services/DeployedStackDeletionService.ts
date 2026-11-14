@@ -26,6 +26,7 @@ import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
+import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
   BLUEPRINT_MARKER_FILENAME,
@@ -67,7 +68,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'compose_inputs_refused' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -316,11 +317,28 @@ export class DeployedStackDeletionService {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'recovery_volume_protected', error: downErr.message };
         }
-        console.warn(
-          '[DeployedStackDeletion] Compose down failed or no-op for %s:',
-          sanitizeForLog(stackName),
-          downErr,
-        );
+        // Sencho refused to hand the stack's inputs to Compose, so nothing was
+        // torn down. With containers still bound to the directory, deleting its
+        // files would orphan them with a success response; with none, there is
+        // nothing to tear down and the stack is still removable.
+        if (downErr instanceof ComposeExpansionRefusal) {
+          const left = await this.containersLeftBehindByRefusal(nodeId, stackName, downErr);
+          if (left) {
+            db.updateCleanupPendingStatus(intentId, 'cancelled');
+            return { ok: false, code: 'compose_inputs_refused', error: left };
+          }
+          console.warn(
+            '[DeployedStackDeletion] Compose refused %s and no container is bound to it; deleting its files:',
+            sanitizeForLog(stackName),
+            sanitizeForLog(downErr.message),
+          );
+        } else {
+          console.warn(
+            '[DeployedStackDeletion] Compose down failed or no-op for %s:',
+            sanitizeForLog(stackName),
+            downErr,
+          );
+        }
       }
 
       if (intent.prune_volumes_requested === 1) {
@@ -350,6 +368,36 @@ export class DeployedStackDeletionService {
     const finalized = await this.finalizeLogicalDeletion(input, intentId);
     if (!finalized.ok) return finalized;
     return { ok: true, status: skipPhysical ? 'already_absent' : 'deleted' };
+  }
+
+  /**
+   * The message to refuse a delete with when Compose could not be run for the
+   * stack and containers Compose started from its directory still exist, or null
+   * when none do. Read from the Engine API, which needs no Compose. A lookup that
+   * fails is not "none": the delete is refused with that as the reason.
+   */
+  private async containersLeftBehindByRefusal(
+    nodeId: number,
+    stackName: string,
+    refusal: ComposeExpansionRefusal,
+  ): Promise<string | null> {
+    let bound: Array<{ Name: string; State: string }>;
+    try {
+      bound = await DockerController.getInstance(nodeId).listContainersBoundToStackDir(stackName);
+    } catch (lookupErr) {
+      console.warn(
+        '[DeployedStackDeletion] Could not list the containers of %s after a Compose refusal:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(lookupErr, 'unknown')),
+      );
+      return `${refusal.message} Sencho could not check whether containers of this stack are still running, so nothing was deleted.`;
+    }
+    if (bound.length === 0) return null;
+    const names = bound.slice(0, 5).map((c) => c.Name).join(', ');
+    const more = bound.length > 5 ? ` and ${bound.length - 5} more` : '';
+    return `${refusal.message} ${bound.length} container${bound.length === 1 ? '' : 's'} of this stack ` +
+      `(${names}${more}) would be left running without it, so nothing was deleted. ` +
+      'Fix the refused input and delete again, or remove those containers first.';
   }
 
   /** Ready transaction, secondary DB/RBAC cleanup, mesh opt-out, sweep, invalidate. */
