@@ -1,8 +1,9 @@
 /**
  * MobileReadinessCard is the one-up phone card for the Updates readiness board.
- * Its Apply button is disabled when the update is blocked (major bump),
- * digest verification failed without a confirmed update, or an apply is
- * already in flight; manual apply works regardless of schedule. The Auto: Off
+ * Its Apply button is disabled when digest verification failed without a
+ * confirmed update, or an apply is already in flight; manual apply works
+ * regardless of schedule. A blocked major bump or a newer tag offers Open
+ * stack editor in its place when the session can edit the stack. The Auto: Off
  * pill still reflects the absence of a covering auto-update schedule.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -20,7 +21,11 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
+type CanFn = (action: string, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
+const authState = vi.hoisted(() => ({ can: ((): boolean => true) as CanFn }));
+vi.mock('@/context/AuthContext', () => ({
+  useAuth: () => ({ can: (...args: Parameters<CanFn>) => authState.can(...args) }),
+}));
 vi.mock('@/context/DeployFeedbackContext', () => ({
   useDeployFeedback: () => ({
     runWithLog: async (_params: unknown, fn: (started: Promise<void>, ds: string) => Promise<unknown>) =>
@@ -333,7 +338,7 @@ it('enables Apply for a safe, non-blocked update', async () => {
   expect(await screen.findByTestId('digest-rebuild-hint-content')).toHaveTextContent(/same tag, newer content/i);
 });
 
-it('disables Apply for tag-only advisory updates', () => {
+it('offers Open stack editor instead of Apply for tag-only advisory updates', () => {
   render(
     <MobileReadinessCard
       card={card({
@@ -362,11 +367,89 @@ it('disables Apply for tag-only advisory updates', () => {
     />,
   );
   expect(screen.getByText(/Newer tag/i)).toBeInTheDocument();
-  expect(apply()).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Open stack editor for nextcloud' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
 });
 
+type PhonePreview = NonNullable<StackCard['preview']>;
 
-it('disables Apply when the update is blocked (major bump)', () => {
+function tagOnlyPhonePreview(
+  summary: Partial<PhonePreview['summary']> = {},
+  extraImages: PhonePreview['images'] = [],
+  imageStatus: 'ok' | 'partial' | 'failed' = 'ok',
+): PhonePreview {
+  return {
+    stack_name: 'nextcloud',
+    images: [{
+      service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.5',
+      has_update: true, digest_update: false, tag_update: true, semver_bump: 'patch', check_status: imageStatus,
+    }, ...extraImages],
+    summary: {
+      has_update: true, primary_image: 'nextcloud', current_tag: '27.1.4', next_tag: '27.1.5',
+      semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null, check_status: 'ok',
+      ...summary,
+    },
+    rollback_target: null,
+    changelog: 'Fixes.',
+  };
+}
+
+async function openStackEventsDuring(act: () => void | Promise<void>): Promise<CustomEvent[]> {
+  const opened: CustomEvent[] = [];
+  const listener = (e: Event) => opened.push(e as CustomEvent);
+  window.addEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  try {
+    await act();
+  } finally {
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, listener);
+  }
+  return opened;
+}
+
+it('keeps the disabled Apply on the phone card when the session cannot edit the stack', () => {
+  authState.can = (action) => action !== 'stack:edit';
+  try {
+    render(<MobileReadinessCard card={card({ preview: tagOnlyPhonePreview() })} onApply={vi.fn()} />);
+    expect(apply()).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+  } finally {
+    authState.can = () => true;
+  }
+});
+
+it('keeps the disabled Apply on the phone card for an uncertain check', () => {
+  render(<MobileReadinessCard card={card({ preview: tagOnlyPhonePreview({ check_status: 'partial' }, [], 'partial') })} onApply={vi.fn()} />);
+  expect(apply()).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+});
+
+it('keeps the disabled Apply and its reason on the phone card for a review-required stack', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: tagOnlyPhonePreview({}, [{
+          service: 'db', image: 'postgres:16', current_tag: '16', next_tag: '16', has_update: false,
+          digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok', digest_error: 'registry timeout',
+        }]),
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(apply()).toBeDisabled();
+  expect(apply()).toHaveAttribute('title', expect.stringContaining('failed digest verification'));
+  expect(screen.queryByRole('button', { name: /Open stack editor/i })).toBeNull();
+});
+
+it('opens the phone card\'s own stack on its own node from Open stack editor', async () => {
+  const opened = await openStackEventsDuring(() => {
+    render(<MobileReadinessCard card={card({ nodeId: 2, preview: tagOnlyPhonePreview() })} onApply={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open stack editor for nextcloud' }));
+  });
+  expect(opened).toHaveLength(1);
+  expect(opened[0].detail).toMatchObject({ stackName: 'nextcloud', nodeId: 2, destination: 'editor' });
+});
+
+it('offers Open stack editor, with the reason, when the update is blocked (major bump)', () => {
   render(
     <MobileReadinessCard
       card={card({
@@ -381,7 +464,8 @@ it('disables Apply when the update is blocked (major bump)', () => {
       onApply={vi.fn()}
     />,
   );
-  expect(apply()).toBeDisabled();
+  expect(screen.getByRole('button', { name: /Open stack editor/i })).toHaveAttribute('title', 'Major version bump');
+  expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
 });
 
 it('disables Apply for verification-only preview (no confirmed update)', () => {
@@ -580,6 +664,28 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
+  it('says a stack has no schedule once, in the pill, and counts ready updates once in the hero', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+
+    expect(await screen.findByTestId('auto-pill')).toHaveTextContent('Auto: Off');
+    expect(screen.queryByText('No schedule')).toBeNull();
+    expect(screen.getAllByText(/0 of 1 ready to apply automatically/)).toHaveLength(1);
+    expect(screen.queryByText('Ready')).toBeNull();
+  });
+
   it('does not present a next run on the card for a stack the schedule will skip', async () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') {
@@ -615,8 +721,9 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await screen.findByTestId('readiness-table');
     fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
 
-    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(await screen.findByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
     expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
   });
 
   it('shows the recorded policy skip for a stack on a remote node', async () => {
@@ -658,8 +765,9 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await screen.findByTestId('readiness-table');
     fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
 
-    expect(await screen.findByText('Skipped by update policy')).toBeInTheDocument();
+    expect(await screen.findByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
     expect(screen.queryByText(/Scheduled ·/)).toBeNull();
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
   });
 
@@ -712,7 +820,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     // The node-scoped key keeps the local allow and the remote skip apart even
     // though both nodes run a stack with the same name.
     expect(await screen.findAllByText(/Scheduled ·/)).toHaveLength(1);
-    expect(screen.getByText('Skipped by update policy')).toBeInTheDocument();
+    expect(screen.getByTestId('auto-pill')).toHaveAttribute('data-state', 'skipped');
+    expect(screen.queryByText('Skipped by update policy')).toBeNull();
   });
 
   it('applies a single service and refreshes the authoritative update preview', async () => {
@@ -1549,73 +1658,195 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
   });
 
-  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+  function nginxPreview(summary: Record<string, unknown> = {}, image: Record<string, unknown> = {}, extraImages: Record<string, unknown>[] = []) {
+    return {
+      stack_name: 'nginx',
+      images: [{
+        service: 'web',
+        image: 'nginx:1.25.3',
+        current_tag: '1.25.3',
+        next_tag: '1.31.3',
+        has_update: true,
+        digest_update: false,
+        tag_update: true,
+        semver_bump: 'minor',
+        check_status: 'ok',
+        check_error: null,
+        digest_error: null,
+        ...image,
+      }, ...extraImages],
+      summary: {
+        has_update: true,
+        primary_image: 'nginx',
+        current_tag: '1.25.3',
+        next_tag: '1.31.3',
+        semver_bump: 'minor',
+        update_kind: 'tag',
+        blocked: false,
+        blocked_reason: null,
+        rebuild_available: false,
+        check_status: 'ok',
+        verification_failed: false,
+        verification_error: null,
+        ...summary,
+      },
+      rollback_target: null,
+      changelog: null,
+    };
+  }
+
+  /** One `nginx` stack with a pending update on each node in `nodeIds`, previewed as `preview`. */
+  function mockNginx(preview: unknown = nginxPreview(), nodeIds: number[] = [1]) {
+    const fleet = Object.fromEntries(nodeIds.map(id => [String(id), { nginx: true }]));
+    const detail = Object.fromEntries(nodeIds.map(id => [String(id), {
+      nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+    }]));
     mockedFetch.mockImplementation((url: string) => {
-      if (url === '/image-updates/fleet') {
-        return Promise.resolve({ ok: true, json: async () => ({ '1': { nginx: true } }) });
-      }
-      if (url.startsWith('/scheduled-tasks')) {
-        return Promise.resolve({ ok: true, json: async () => [] });
-      }
-      if (url === '/image-updates/fleet/detail') {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            '1': {
-              nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
-            },
-          }),
-        });
-      }
+      if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => fleet });
+      if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === '/image-updates/fleet/detail') return Promise.resolve({ ok: true, json: async () => detail });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     mockedFetchForNode.mockImplementation((url: string) => {
       if (String(url).includes('/update-preview')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            stack_name: 'nginx',
-            images: [{
-              service: 'web',
-              image: 'nginx:1.25.3',
-              current_tag: '1.25.3',
-              next_tag: '1.31.3',
-              has_update: true,
-              digest_update: false,
-              tag_update: true,
-              semver_bump: 'minor',
-              check_status: 'ok',
-              check_error: null,
-              digest_error: null,
-            }],
-            summary: {
-              has_update: true,
-              primary_image: 'nginx',
-              current_tag: '1.25.3',
-              next_tag: '1.31.3',
-              semver_bump: 'minor',
-              update_kind: 'tag',
-              blocked: false,
-              blocked_reason: null,
-              rebuild_available: false,
-              check_status: 'ok',
-              verification_failed: false,
-              verification_error: null,
-            },
-            rollback_target: null,
-            changelog: null,
-          }),
-        });
+        return preview === null
+          ? Promise.resolve({ ok: false, status: 500, json: async () => ({}) })
+          : Promise.resolve({ ok: true, json: async () => preview });
       }
       return Promise.resolve({ ok: true, json: async () => null });
     });
+  }
+
+  async function renderBoard(view: 'table' | 'cards') {
+    render(<AutoUpdateReadinessView />);
+    await screen.findByTestId('readiness-table');
+    if (view === 'cards') fireEvent.click(screen.getByRole('radio', { name: 'Cards' }));
+  }
+
+  const editorVerb = { name: /Open stack editor/i };
+  const BLOCKED_REASON = 'Major version jumps require human review before applying.';
+
+  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+    mockNginx();
 
     render(<AutoUpdateReadinessView />);
 
     expect(await screen.findByText(/1 update pending/)).toBeInTheDocument();
     expect(screen.getAllByText('nginx').length).toBeGreaterThan(0);
     expect(screen.queryByText(/Everything is up to date/)).toBeNull();
-    expect(screen.getByRole('button', { name: /Apply now/i })).toBeDisabled();
+    expect(await screen.findByRole('button', editorVerb)).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+  });
+
+  describe.each(['table', 'cards'] as const)('%s view', (view) => {
+    afterEach(() => {
+      authState.can = () => true;
+      window.localStorage.removeItem('sencho-readiness-view');
+    });
+
+    it('offers Open stack editor for a tag-only advisory and opens that stack on its node', async () => {
+      mockNginx();
+      const opened = await openStackEventsDuring(async () => {
+        await renderBoard(view);
+        fireEvent.click(await screen.findByRole('button', { name: 'Open stack editor for nginx' }));
+      });
+
+      expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+      expect(opened).toHaveLength(1);
+      expect(opened[0].detail).toMatchObject({ stackName: 'nginx', nodeId: 1, destination: 'editor' });
+    });
+
+    it('offers Open stack editor on a blocked major bump and keeps its reason readable', async () => {
+      mockNginx(nginxPreview({ semver_bump: 'major', blocked: true, blocked_reason: BLOCKED_REASON }, { semver_bump: 'major' }));
+
+      await renderBoard(view);
+      const verb = await screen.findByRole('button', editorVerb);
+
+      expect(verb).toBeEnabled();
+      expect(verb).toHaveAttribute('title', BLOCKED_REASON);
+      expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+      if (view === 'table') fireEvent.click(screen.getByRole('button', { name: 'Show details for nginx' }));
+      expect(await screen.findByText(BLOCKED_REASON)).toBeInTheDocument();
+    });
+
+    it('keeps the disabled Apply, with no editor verb, when the session cannot edit the stack', async () => {
+      mockNginx();
+      authState.can = (action) => action !== 'stack:edit';
+
+      await renderBoard(view);
+
+      expect(await screen.findByRole('button', { name: /Apply now/i })).toBeDisabled();
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+    });
+
+    it('asks about edit authority for that stack on that node, and opens each node\'s own row', async () => {
+      mockNodes.splice(0, mockNodes.length,
+        { id: 1, name: 'Local', type: 'local', status: 'online' },
+        { id: 2, name: 'Edge', type: 'remote', status: 'online' },
+      );
+      mockNginx(nginxPreview(), [1, 2]);
+      const asked: unknown[][] = [];
+      authState.can = (action, type, id, nodeId) => {
+        if (action === 'stack:edit') asked.push([type, id, nodeId]);
+        return !(action === 'stack:edit' && nodeId === 1);
+      };
+      const opened = await openStackEventsDuring(async () => {
+        await renderBoard(view);
+        fireEvent.click(await screen.findByRole('button', editorVerb));
+      });
+
+      expect(asked).toContainEqual(['stack', 'nginx', 1]);
+      expect(asked).toContainEqual(['stack', 'nginx', 2]);
+      expect(screen.getAllByRole('button', { name: /Apply now/i })).toHaveLength(1);
+      expect(opened.map(e => e.detail.nodeId)).toEqual([2]);
+    });
+
+    it('shows no editor verb while the preview is failed', async () => {
+      mockNginx(null);
+
+      await renderBoard(view);
+      await screen.findAllByText(/Preview failed/i);
+
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+    });
+
+    it.each(['partial', 'failed'] as const)('keeps the disabled Apply for an uncertain check (%s)', async (status) => {
+      mockNginx(nginxPreview({ check_status: status }, { check_status: status }));
+
+      await renderBoard(view);
+
+      expect(await screen.findByRole('button', { name: /Apply now/i })).toBeDisabled();
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+    });
+
+    it('keeps the disabled Apply, with the reason, for a blocked major whose check is uncertain', async () => {
+      mockNginx(nginxPreview(
+        { semver_bump: 'major', blocked: true, blocked_reason: BLOCKED_REASON, check_status: 'partial' },
+        { semver_bump: 'major', check_status: 'partial' },
+      ));
+
+      await renderBoard(view);
+      const apply = await screen.findByRole('button', { name: /Apply now/i });
+
+      expect(apply).toBeDisabled();
+      expect(apply).toHaveAttribute('title', BLOCKED_REASON);
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+    });
+
+    it('keeps the disabled Apply and its reason for a review-required stack', async () => {
+      mockNginx(nginxPreview({}, {}, [{
+        service: 'db', image: 'postgres:16', current_tag: '16', next_tag: '16', has_update: false,
+        digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok', digest_error: 'registry timeout',
+      }]));
+
+      await renderBoard(view);
+      const apply = await screen.findByRole('button', { name: /Apply now/i });
+
+      expect(apply).toBeDisabled();
+      expect(apply).toHaveAttribute('title', expect.stringContaining('failed digest verification'));
+      expect(screen.queryByRole('button', editorVerb)).toBeNull();
+    });
   });
 
   it('keeps a sticky card instead of silently clearing it when a remote sends a legacy preview missing verification_failed entirely', async () => {
