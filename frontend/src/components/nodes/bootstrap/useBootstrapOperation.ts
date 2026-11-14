@@ -134,32 +134,37 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   /**
    * Read the list again for a settle poll. A plain re-read would put page one back and drop every page "Show more"
-   * added, so those pages are kept: their rows that may still settle are read one by one, and an answer that was
-   * overtaken by a page load or by another read of the list is dropped (the next tick tries again).
+   * added, so those pages are kept. A run that fell off the first page (a newer hold pushed it down, or it was
+   * released) and a run on a later page that may still settle are read one by one. An answer that a page load or another
+   * read of the list overtook is dropped (the next tick tries again); the read itself never invalidates a page load in flight.
    */
   const refreshSettling = useCallback(async (signal: AbortSignal) => {
-    if (extraPages.current === 0) {
-      await refreshList(signal);
-      return;
-    }
-    const generation = listGeneration.current;
     const pages = extraPages.current;
+    const generation = listGeneration.current;
     try {
       const page = await client.list(signal);
       const firstIds = new Set(page.operations.map((operation) => operation.id));
       const before = firstPageIds.current;
-      const tail = operationsRef.current.filter((operation) => !before.has(operation.id) && !firstIds.has(operation.id));
+      const tail = pages === 0
+        ? []
+        : operationsRef.current.filter((operation) => !firstIds.has(operation.id));
       const reread = new Map<string, BootstrapOperation>();
-      await Promise.all(tail.filter(canSettleOnRead).map(async (operation) => {
+      await Promise.all(tail.filter((operation) => before.has(operation.id) || canSettleOnRead(operation)).map(async (operation) => {
         try {
           reread.set(operation.id, await client.get(operation.id, signal));
         } catch {
           // The row keeps what it showed; the next tick reads it again.
         }
       }));
+      // Another read of the list (open, release, cancel) overtook this one, or a page was loaded meanwhile.
       if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current) return;
       firstPageIds.current = firstIds;
-      setOperations([...page.operations, ...tail.map((operation) => reread.get(operation.id) ?? operation)]);
+      const kept = tail
+        .map((operation) => reread.get(operation.id) ?? operation)
+        // A run that was on the first page and no longer holds its server has left the list of holds.
+        .filter((operation) => operation.active || !before.has(operation.id));
+      setOperations([...page.operations, ...kept]);
+      if (pages === 0) setNextCursor(page.nextCursor);
       setListFailed(false);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -168,7 +173,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     }
     // client.* is stable module API unless a test injects it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshList]);
+  }, []);
 
   const openOperation = useCallback(async (id: string): Promise<BootstrapOperationDetail | null> => {
     setBusy('open');

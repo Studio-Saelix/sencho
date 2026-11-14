@@ -426,6 +426,43 @@ describe('progress polling', () => {
     expect(result.current.hasMoreOperations).toBe(false);
   });
 
+  it('does not lose the first page "Show more" is loading when a settle tick lands meanwhile', async () => {
+    vi.useFakeTimers();
+    const row = (id: string) => ({ ...STOPPED, id, nodeId: 4, targetName: id });
+    let answerPage: (page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void = () => {};
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: [row('a'), row('b')], nextCursor: 'c1' })
+      .mockImplementationOnce(() => new Promise((resolve) => { answerPage = resolve; }))
+      .mockResolvedValue({ operations: [row('a'), row('b')], nextCursor: 'c1' });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    // "Show more" is asked for; its answer is still on the way when the settle tick reads the first page.
+    let loading: Promise<void> = Promise.resolve();
+    await act(async () => { loading = result.current.loadMore(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    await act(async () => { answerPage({ operations: [row('c')], nextCursor: null }); await loading; });
+    expect(result.current.operations.map((entry) => entry.id)).toEqual(['a', 'b', 'c']);
+    expect(result.current.hasMoreOperations).toBe(false);
+  });
+
+  it('keeps a run a newer hold pushed off the first page, and drops one that stopped holding its server', async () => {
+    vi.useFakeTimers();
+    // None of these can settle (no Pilot was started), so only having been on page one makes the hook read them.
+    const row = (id: string, extra: Partial<BootstrapOperationDetail> = {}) => ({ ...STOPPED, id, nodeId: 4, agentStarted: true, targetName: id, ...extra });
+    const held = (id: string) => row(id, { agentStarted: false });
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: [row('a'), row('b', { agentStarted: false })], nextCursor: 'c1' })
+      .mockResolvedValueOnce({ operations: [held('c')], nextCursor: null })
+      // Two new holds push a and b off page one, and a was released meanwhile.
+      .mockResolvedValueOnce({ operations: [held('n'), held('m')], nextCursor: 'c1' });
+    vi.mocked(fetchBootstrapOperation).mockImplementation(async (id: string) => (id === 'a' ? row('a', { active: false }) : held(id)));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await result.current.loadMore(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(result.current.operations.map((entry) => entry.id)).toEqual(['n', 'm', 'b', 'c']);
+  });
+
   it('does not read the list while a run is open', async () => {
     vi.useFakeTimers();
     const listed = { ...STOPPED, nodeId: 4 };
