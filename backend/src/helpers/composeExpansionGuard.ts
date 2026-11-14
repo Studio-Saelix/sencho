@@ -1197,7 +1197,7 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem
   if (isSeq(resolved)) {
     for (const item of resolved.items) {
       // Compose removes a list entry tagged `!reset`, so it neither sets nor takes out a name.
-      if (hasTag(item, targets, '!reset')) continue;
+      if (isReset(item, targets)) continue;
       const text = textOf(item, targets);
       if (text !== undefined) out.push({ kind: 'entry', text });
     }
@@ -1228,10 +1228,9 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem
 function readFilePaths(node: unknown, targets: Map<Node, Node>, kind: 'env_file' | 'label_file'): ReadFile[] {
   const resolved = deref(unlessReset(node, targets), targets);
   const out: ReadFile[] = [];
-  if (resolved === undefined) return out;
   for (const item of isSeq(resolved) ? resolved.items : [resolved]) {
     // Compose removes a list entry tagged `!reset`, so it names no file.
-    if (isSeq(resolved) && hasTag(item, targets, '!reset')) continue;
+    if (isSeq(resolved) && isReset(item, targets)) continue;
     const text = textOf(item, targets);
     if (text !== undefined) {
       out.push({ path: text, format: undefined });
@@ -1265,7 +1264,7 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
     // An `include:` or an entry of it tagged `!reset` is removed, with the files it named.
     const resolved = deref(unlessReset(include, targets), targets);
     for (const raw of isSeq(resolved) ? resolved.items : [resolved]) {
-      if (resolved === undefined || (isSeq(resolved) && isReset(raw, targets))) continue;
+      if (isSeq(resolved) && isReset(raw, targets)) continue;
       const entry = deref(raw, targets);
       const single = textOf(entry, targets);
       if (single !== undefined) {
