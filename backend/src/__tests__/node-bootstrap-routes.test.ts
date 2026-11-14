@@ -319,7 +319,17 @@ describe('bootstrap routes: the hub as a target in a Docker or NAT deployment', 
     expect(captureSpy).not.toHaveBeenCalled();
   });
 
+  /** The hub host's SSH key answers on the addresses the hub knows; `others` maps any other address. */
+  const sshWorld = (others: Record<string, string> = {}) => vi.spyOn(sshProbeClient, 'captureHostKey').mockImplementation(async (target) => {
+    const fingerprint = target.address === PUBLIC_IP || target.address === '172.17.0.1'
+      ? 'SHA256:hubhost'
+      : others[target.address];
+    if (!fingerprint) throw new SshTransportError('SSH_UNREACHABLE', 'nothing listens');
+    return { algorithm: 'ssh-ed25519', fingerprint, knownHostsLine: `${target.host} ssh-ed25519 AAAA` };
+  });
+
   it('does not refuse an unrelated target in the preflight either', async () => {
+    sshWorld();
     const runSpy = vi.spyOn(sshProbeClient, 'runCommands').mockRejectedValue(new SshTransportError('SSH_UNREACHABLE', 'fixture target down'));
     const res = await request(app)
       .post('/api/nodes/bootstrap/preflight')
@@ -332,16 +342,39 @@ describe('bootstrap routes: the hub as a target in a Docker or NAT deployment', 
   });
 
   it('does not refuse an unrelated target', async () => {
-    const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey').mockResolvedValue({
-      algorithm: 'ssh-ed25519', fingerprint: 'SHA256:other', knownHostsLine: '8.8.8.8 ssh-ed25519 AAAA',
-    });
+    const captureSpy = sshWorld({ '8.8.8.8': 'SHA256:other' });
     const res = await request(app)
       .post('/api/nodes/bootstrap/host-key')
       .set('Authorization', adminAuth)
       .set('Host', `${PUBLIC_IP}:1852`)
       .send({ host: '8.8.8.8' });
     expect(res.status).toBe(200);
-    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls.filter(([target]) => target.address === '8.8.8.8')).toHaveLength(1);
+  });
+
+  it('refuses another address of the hub host that no interface list names, by its SSH host key', async () => {
+    // A private NIC of the Docker host: not an interface of the container, not a gateway.
+    sshWorld({ '10.0.2.109': 'SHA256:hubhost' });
+    // Stands in for the transport's key exchange, which the SSH integration suite runs for real.
+    const runSpy = vi.spyOn(sshProbeClient, 'runCommands').mockImplementation(async (_session, _commands, options) => {
+      if (options?.refusedFingerprints?.has('SHA256:hubhost')) throw new SshTransportError('SELF_TARGET', 'hub host key');
+      throw new SshTransportError('SSH_AUTH_FAILED', 'would have authenticated');
+    });
+    const hostKey = await request(app)
+      .post('/api/nodes/bootstrap/host-key')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send({ host: '10.0.2.109' });
+    expect(hostKey.status).toBe(400);
+    expect(hostKey.body.code).toBe('INVALID_TARGET');
+    const preflight = await request(app)
+      .post('/api/nodes/bootstrap/preflight')
+      .set('Authorization', adminAuth)
+      .set('Host', `${PUBLIC_IP}:1852`)
+      .send({ ...preflightBody, host: '10.0.2.109', expectedFingerprint: 'SHA256:hubhost' });
+    expect(preflight.status).toBe(400);
+    expect(preflight.body.code).toBe('INVALID_TARGET');
+    expect(runSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -517,6 +550,7 @@ describe('bootstrap service orchestration', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
     });
@@ -636,6 +670,7 @@ describe('bootstrap service orchestration', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'],
       caPem: () => null,
     });
@@ -650,6 +685,7 @@ describe('bootstrap service orchestration', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'],
       caPem: () => null,
     });
@@ -758,6 +794,7 @@ describe('bootstrap service trust serialization', () => {
       transport: new FakeTransport(),
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: resolver,
       caPem: () => null,
     });
@@ -829,6 +866,7 @@ describe('bootstrap service trust serialization', () => {
       transport,
       db,
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
     });
@@ -873,6 +911,7 @@ describe('bootstrap service trust serialization', () => {
       transport,
       db,
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
     });
@@ -899,6 +938,7 @@ describe('bootstrap service trust serialization', () => {
       transport: new FakeTransport(),
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => {
         await new Promise((resolve) => setTimeout(resolve, 500));
         return ['192.168.1.50'];
@@ -935,6 +975,7 @@ describe('bootstrap service trust serialization', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: clock.now,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.10', '192.168.1.20'],
       caPem: () => null,
       requestBudgetMs: 300,
@@ -969,6 +1010,7 @@ describe('bootstrap service trust serialization', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
     });
@@ -995,6 +1037,7 @@ describe('bootstrap service trust serialization', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: (host) => resolveTargetAddresses(host, async () => [{ address: '127.0.0.1', family: 4 }]),
       caPem: () => null,
     });
@@ -1032,6 +1075,7 @@ describe('bootstrap service failure handling', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
       ...extra,
@@ -1583,6 +1627,7 @@ describe('bootstrap service failure handling', () => {
       runCommands: async () => [],
     };
     await expect(makeService(transport, {
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['10.0.0.1', '10.0.0.2', '10.0.0.3'],
       requestBudgetMs: 120,
       now: clock.now,
@@ -1614,6 +1659,7 @@ describe('bootstrap service failure handling', () => {
 
   it('words the budget error from the configured budget', async () => {
     const svc = makeService(new FakeTransport(), {
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); return ['192.168.1.50']; },
       requestBudgetMs: 1000,
     });
@@ -1675,6 +1721,7 @@ describe('bootstrap service target identity: DNS names are case-insensitive', ()
     transport,
     db: db(),
     now: () => 1_762_300_000_000,
+    ownHostAddresses: async () => [],
     resolveAddresses: async () => ['192.168.1.50'],
     caPem: () => null,
   });
@@ -1721,6 +1768,7 @@ describe('bootstrap service target identity: DNS names are case-insensitive', ()
       transport: new FakeTransport(probeOutputs(), liveKey),
       db: db(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.50'],
       caPem: () => null,
     });
@@ -1741,6 +1789,7 @@ describe('bootstrap service target identity: DNS names are case-insensitive', ()
       transport: new FakeTransport(probeOutputs(), liveKey),
       db: db(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => {
         calls += 1;
         if (calls === 1) await gate;
@@ -1911,6 +1960,7 @@ describe('bootstrap service cancellation and missing host key', () => {
       transport,
       db: DatabaseService.getInstance(),
       now: () => 1_762_300_000_000,
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['10.0.0.1', '10.0.0.2'],
       caPem: () => null,
       ...extra,
@@ -1961,6 +2011,7 @@ describe('bootstrap service cancellation and missing host key', () => {
       },
     };
     const svc = build(transport, {
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => {
         resolves += 1;
         if (resolves === 1) await new Promise(() => {});

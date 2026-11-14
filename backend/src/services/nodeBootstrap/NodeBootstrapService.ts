@@ -1,3 +1,4 @@
+import net from 'net';
 import { pilotHubCaPem } from '../../helpers/pilotEnrollment';
 import { DatabaseService, type NodeBootstrapTrust } from '../DatabaseService';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
@@ -37,6 +38,7 @@ import {
   type SshCommandResult,
 } from './sshProbeClient';
 import {
+  ownHostAddresses,
   resolveTargetAddresses,
   validateTarget,
   type BootstrapTargetInput,
@@ -94,6 +96,10 @@ export class BootstrapError extends Error {
   }
 }
 
+function selfTargetBootstrapError(): BootstrapError {
+  return new BootstrapError(400, 'INVALID_TARGET', 'The target resolves to this Sencho instance.', { field: 'host' });
+}
+
 export interface BootstrapPreflightRequest {
   host: string;
   port?: number;
@@ -119,6 +125,9 @@ type AuditContext = BootstrapAuditContext;
 /** `hubHost` is the host clients reach the hub on; a target resolving to it is refused as the hub itself. */
 type AddressResolver = (host: string, hubHost?: string | null) => Promise<string[]>;
 
+/** How long one own-host key probe may take; the probes run in parallel. */
+const OWN_HOST_KEY_PROBE_MS = 3_000;
+
 function hubHostOf(hubUrl: string | undefined): string | null {
   if (!hubUrl) return null;
   try {
@@ -134,6 +143,8 @@ interface BootstrapDeps {
   db: DatabaseService;
   now: () => number;
   resolveAddresses: AddressResolver;
+  /** Addresses that may reach the hub's own host, probed for its SSH host key. */
+  ownHostAddresses: (hubHost: string | null) => Promise<string[]>;
   caPem: () => string | null;
   /** Preflight request budget, including DNS; default is the advertised 90 seconds. */
   requestBudgetMs: number;
@@ -148,6 +159,7 @@ const DEFAULT_DEPS: Omit<BootstrapDeps, 'db'> = {
   transport: sshProbeClient,
   now: () => Date.now(),
   resolveAddresses: (hostname, hubHost) => resolveTargetAddresses(hostname, undefined, hubHost),
+  ownHostAddresses: (hubHost) => ownHostAddresses(hubHost),
   caPem: () => pilotHubCaPem() ?? null,
   requestBudgetMs: SSH_TOTAL_TIMEOUT_MS,
 };
@@ -303,6 +315,11 @@ export class NodeBootstrapService {
       throw lastError ?? new Error('No address answered');
     });
 
+    // Another address of the hub's own host is not in the interface list, so a
+    // target is also the hub itself when it answers with the host's own key.
+    const ownKeys = await this.ownHostKeys(addresses, port, hubHostOf(options.hubUrl), deadline, options.signal);
+    if (ownKeys.has(observation.fingerprint)) throw selfTargetBootstrapError();
+
     const pin = this.deps.db.getNodeBootstrapTrust(host, port);
     const trust = pin
       ? (pin.fingerprint === observation.fingerprint ? 'trusted' : 'changed')
@@ -375,6 +392,7 @@ export class NodeBootstrapService {
         throw new BootstrapError(409, 'TARGET_CHANGED', 'The host no longer resolves to the address the plan was approved for. Run the preflight again.');
       }
       dialed = addresses[0];
+      const ownKeys = await this.ownHostKeys(resolved, targetInput.port, hubHostOf(context.hubUrl), deadline, context.signal);
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
@@ -391,6 +409,7 @@ export class NodeBootstrapService {
             paths,
             remaining,
             (observation) => { hostKey = observation; },
+            ownKeys,
             context.signal,
           );
           if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')
@@ -415,6 +434,7 @@ export class NodeBootstrapService {
           return probeResults;
         } catch (error: unknown) {
           if (error instanceof BootstrapError) throw error;
+          if (error instanceof SshTransportError && error.code === 'SELF_TARGET') throw selfTargetBootstrapError();
           if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') {
             // A live key that changes between capture and connection is a trust
             // event, not a generic transport failure. Keep both identities.
@@ -547,6 +567,50 @@ export class NodeBootstrapService {
     );
   }
 
+  /**
+   * SSH host key fingerprints of the machine running this hub, read from the
+   * addresses that may reach it (see `ownHostAddresses`) on the target's port and
+   * on 22. An address that does not answer adds nothing, and so does the
+   * target's own address, so a host that is not the hub's never refuses itself.
+   * This is the check that catches the host's other interface addresses, which a
+   * container cannot enumerate; it cannot see a host whose SSH server does not
+   * listen on any of those addresses, or one that listens only on a port other
+   * than the target's and 22.
+   */
+  private async ownHostKeys(
+    targetAddresses: readonly string[],
+    port: number,
+    hubHost: string | null,
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<Set<string>> {
+    const fingerprints = new Set<string>();
+    let candidates: string[];
+    try {
+      candidates = await this.deps.ownHostAddresses(hubHost);
+    } catch {
+      return fingerprints;
+    }
+    const skip = new Set(targetAddresses);
+    const ports = port === 22 ? [22] : [port, 22];
+    const timeoutMs = Math.min(OWN_HOST_KEY_PROBE_MS, deadline - this.deps.now());
+    if (timeoutMs <= 0 || signal?.aborted) return fingerprints;
+    await Promise.all(candidates
+      .filter((address) => net.isIP(address) === 4 && !skip.has(address))
+      .flatMap((address) => ports.map(async (candidatePort) => {
+        try {
+          const observation = await this.deps.transport.captureHostKey(
+            { host: address, address, port: candidatePort },
+            { timeoutMs, signal },
+          );
+          fingerprints.add(observation.fingerprint);
+        } catch {
+          // Nothing listens there, or it did not answer in time: it adds no key.
+        }
+      })));
+    return fingerprints;
+  }
+
   private async resolveOrThrow(host: string, deadline: number, signal?: AbortSignal, hubHost: string | null = null): Promise<string[]> {
     const remaining = deadline - this.deps.now();
     if (remaining <= 0) throw this.budgetError();
@@ -595,6 +659,7 @@ export class NodeBootstrapService {
     paths: { composeDir: string; agentDir: string },
     totalMs: number,
     onHostKey: (observation: HostKeyObservation) => void,
+    refusedFingerprints: ReadonlySet<string>,
     signal?: AbortSignal,
   ): Promise<SshCommandResult[]> {
     const catalog = buildProbeCatalog({
@@ -612,7 +677,7 @@ export class NodeBootstrapService {
         passphrase,
       },
       catalog.map(({ id, command }) => ({ id, command })),
-      { expectedFingerprint, onHostKey, totalMs, signal },
+      { expectedFingerprint, onHostKey, refusedFingerprints, totalMs, signal },
     );
   }
 

@@ -51,6 +51,7 @@ export type SshErrorCode =
   | 'SSH_UNREACHABLE'
   | 'SSH_DNS_FAILED'
   | 'HOST_KEY_UNTRUSTED'
+  | 'SELF_TARGET'
   | 'PREFLIGHT_TIMEOUT';
 
 export class SshTransportError extends Error {
@@ -61,8 +62,13 @@ export class SshTransportError extends Error {
     super(message);
     this.name = 'SshTransportError';
     this.code = code;
-    this.status = code === 'PREFLIGHT_TIMEOUT' ? 504 : code === 'HOST_KEY_UNTRUSTED' ? 409 : 422;
+    this.status = code === 'PREFLIGHT_TIMEOUT' ? 504 : code === 'HOST_KEY_UNTRUSTED' ? 409 : code === 'SELF_TARGET' ? 400 : 422;
   }
+}
+
+/** The target presented the host key of the machine running this hub. */
+export function selfTargetError(): SshTransportError {
+  return new SshTransportError('SELF_TARGET', 'The target presents the SSH host key of the server running this Sencho instance.');
 }
 
 /** The caller went away before the request finished. */
@@ -80,6 +86,12 @@ export interface BootstrapTransport {
       totalMs?: number;
       perCommandMs?: number;
       onHostKey?: (observation: HostKeyObservation) => void;
+      /**
+       * Host key fingerprints of the machine running this hub. A target that
+       * presents one is the hub's own host: the session stops at the key
+       * exchange, before any authentication, with `SELF_TARGET`.
+       */
+      refusedFingerprints?: ReadonlySet<string>;
       /** Aborts the session and releases the connection when the caller goes away. */
       signal?: AbortSignal;
     },
@@ -346,6 +358,7 @@ function runSession(
     totalMs: number;
     perCommandMs: number;
     onHostKey?: (observation: HostKeyObservation) => void;
+    refusedFingerprints?: ReadonlySet<string>;
     signal?: AbortSignal;
   },
 ): Promise<SshCommandResult[]> {
@@ -362,6 +375,11 @@ function runSession(
       keepaliveCountMax: 2,
       hostVerifier: (key: Buffer) => {
         const observation = hostKeyObservation(session.host, key);
+        // The hub's own host key ends the session before any authentication.
+        if (options.refusedFingerprints?.has(observation.fingerprint)) {
+          selfTarget = true;
+          return false;
+        }
         options.onHostKey?.(observation);
         // No expected fingerprint means no trust decision was made: refuse
         // before authentication rather than accept whatever key answers.
@@ -380,6 +398,7 @@ function runSession(
     let finished = false;
     let ready = false;
     let hostKeyRejected = false;
+    let selfTarget = false;
     let completed = 0;
     let remainingBytes = SSH_MAX_BYTES_TOTAL;
     let aborted = false;
@@ -407,6 +426,10 @@ function runSession(
       clearWatchdog();
       options.signal?.removeEventListener('abort', onAbort);
       conn.destroy();
+      if (selfTarget) {
+        reject(selfTargetError());
+        return;
+      }
       if (hostKeyRejected) {
         reject(new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.'));
         return;
@@ -540,7 +563,7 @@ function runSession(
       finished = true;
       clearWatchdog();
       if (!ready) {
-        reject(hostKeyRejected
+        reject(selfTarget ? selfTargetError() : hostKeyRejected
           ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
           : new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before authentication.'));
         return;
@@ -575,6 +598,7 @@ export class SshProbeClient implements BootstrapTransport {
       totalMs?: number;
       perCommandMs?: number;
       onHostKey?: (observation: HostKeyObservation) => void;
+      refusedFingerprints?: ReadonlySet<string>;
       signal?: AbortSignal;
     } = {},
   ): Promise<SshCommandResult[]> {
@@ -587,6 +611,7 @@ export class SshProbeClient implements BootstrapTransport {
       totalMs: options.totalMs ?? SSH_TOTAL_TIMEOUT_MS,
       perCommandMs: options.perCommandMs ?? SSH_COMMAND_TIMEOUT_MS,
       onHostKey: options.onHostKey,
+      refusedFingerprints: options.refusedFingerprints,
       signal: options.signal,
     });
   }

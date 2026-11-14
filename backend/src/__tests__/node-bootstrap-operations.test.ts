@@ -1197,6 +1197,7 @@ describe('bootstrap recheck: the address pin', () => {
     const service = new RealPreflightService({
       db,
       transport: { captureHostKey: vi.fn(), runCommands },
+      ownHostAddresses: async () => [],
       resolveAddresses: async () => ['192.168.1.77'],
       caPem: () => null,
     });
