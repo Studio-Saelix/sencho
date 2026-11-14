@@ -982,8 +982,11 @@ function replacesEarlier(node: unknown, targets: Map<Node, Node>): boolean {
 
 /**
  * True for a node tagged `!reset`. Compose removes the node and ignores the
- * value attached to the tag, so what it holds names no file, sets no format or
- * directory, and assigns no variable: every reader takes it as absent.
+ * value attached to the tag, so no reader takes a file, a format, a directory,
+ * or an assignment from it. The node is not absent everywhere: a mapping value
+ * tagged `!reset` in `environment:` still names its variable, and
+ * `environmentOf` takes the earlier value out for it, where a list entry tagged
+ * `!reset` is skipped and leaves an earlier value alone.
  */
 function isReset(node: unknown, targets: Map<Node, Node>): boolean {
   return hasTag(node, targets, '!reset');
