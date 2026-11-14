@@ -9,11 +9,10 @@ export const COMPOSE_INPUTS_REFUSED_CODE = 'compose_inputs_refused';
  * guard's refusal, and returns true (the caller returns). Any other error
  * returns false.
  *
- * Every operation that needs Compose to read a stack runs the guard first, so
- * every route over such an operation reaches this refusal: it must say so
- * instead of reading as "no containers", a generic 500, or a success. The text
- * names the file and the reason and never a value from it, so it is safe to
- * show.
+ * Every operation that needs Compose to read a stack runs the guard first, so a
+ * route over such an operation can reach this refusal and should say so instead
+ * of reading as "no containers", a generic 500, or a success. The text names the
+ * file and the reason and never a value from it, so it is safe to show.
  */
 export function sendIfComposeInputsRefused(res: Response, error: unknown): boolean {
   if (!(error instanceof ComposeExpansionRefusal)) return false;

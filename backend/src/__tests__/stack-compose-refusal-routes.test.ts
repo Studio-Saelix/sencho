@@ -5,8 +5,10 @@
  * 500, or a success for work it did not do. Delete in particular must not remove
  * the files of a stack whose containers are still bound to its directory.
  *
- * The refusal here is the guard's real exception class; Compose, the container
- * listing and the Engine lookup are the only mocked seams.
+ * The refusal here is the guard's real exception class. Compose, the container
+ * listing, the Engine lookup and the Docker endpoint guard are stubbed, so these
+ * tests pin the route and deletion behavior; the real guard-to-delete wiring is
+ * covered by the last describe block.
  */
 import fs from 'fs';
 import path from 'path';
@@ -27,6 +29,7 @@ const mocks = {
   pruneManagedOnly: vi.fn(),
 };
 
+let dispatchAlert: ReturnType<typeof vi.spyOn>;
 let tmpDir: string;
 let ComposeService: typeof import('../services/ComposeService').ComposeService;
 let DockerController: typeof import('../services/DockerController').default;
@@ -78,7 +81,7 @@ beforeEach(async () => {
   vi.spyOn(DockerController.prototype, 'assertNoDockerEndpointContainers').mockResolvedValue(undefined);
   vi.spyOn(DockerController.prototype, 'pruneManagedOnly').mockImplementation(mocks.pruneManagedOnly);
   const { NotificationService } = await import('../services/NotificationService');
-  vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+  dispatchAlert = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
   const { MeshService } = await import('../services/MeshService');
   vi.spyOn(MeshService.getInstance(), 'optOutStack').mockResolvedValue(undefined);
   writeStack('refused');
@@ -99,6 +102,7 @@ describe('refused stack: operations that need Compose to read it say why', () =>
     expect(res.body).toEqual({ error: REFUSAL, code: 'compose_inputs_refused' });
     expect(mocks.stopContainer).not.toHaveBeenCalled();
     expect(mocks.restartContainer).not.toHaveBeenCalled();
+    expect(dispatchAlert).not.toHaveBeenCalled();
   });
 
   it.each(['stop', 'restart', 'start'] as const)('POST /services/web/%s answers 409 with the refusal', async (action) => {
@@ -111,6 +115,15 @@ describe('refused stack: operations that need Compose to read it say why', () =>
     const res = await request(app).post('/api/stacks/refused/down').set('Cookie', authCookie);
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ error: REFUSAL, code: 'compose_inputs_refused' });
+    // A refusal ran nothing, so it stays out of the failure feed.
+    expect(dispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('POST /down still reports an ordinary failure to the failure feed (control)', async () => {
+    mocks.runDown.mockRejectedValue(new Error('daemon said no'));
+    const res = await request(app).post('/api/stacks/refused/down').set('Cookie', authCookie);
+    expect(res.status).toBe(500);
+    expect(dispatchAlert).toHaveBeenCalled();
   });
 
   it('POST /down?removeVolumes=true carries the refusal too', async () => {
@@ -135,6 +148,7 @@ describe('refused stack: operations that need Compose to read it say why', () =>
     expect(res.body.results).toEqual([
       { stackName: 'refused', ok: false, error: REFUSAL, code: 'compose_inputs_refused' },
     ]);
+    expect(dispatchAlert).not.toHaveBeenCalled();
   });
 });
 
@@ -164,6 +178,63 @@ describe('refused stack: Delete never orphans running containers', () => {
     expect(res.body.code).toBe('compose_inputs_refused');
     expect(res.body.error).toContain('could not check whether containers');
     expect(fs.existsSync(path.join(stackDir('refused'), 'compose.yaml'))).toBe(true);
+  });
+
+  it('keeps the volumes of a refused delete that still has containers, even when pruning was asked for', async () => {
+    mocks.listBound.mockResolvedValue([{ Id: 'a', Name: 'refused-web-1', State: 'running' }]);
+
+    const res = await request(app).delete('/api/stacks/refused?pruneVolumes=true').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(mocks.pruneManagedOnly).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(stackDir('refused'), 'compose.yaml'))).toBe(true);
+  });
+
+  it('prunes the volumes of a refused delete once nothing is bound to the stack', async () => {
+    const res = await request(app).delete('/api/stacks/refused?pruneVolumes=true').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(mocks.pruneManagedOnly).toHaveBeenCalledWith('volumes', ['refused']);
+  });
+
+  it('cancels the deletion intent of a refused delete, so a retry is not blocked and boot does not replay it', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const status = () => (DatabaseService.getInstance().getDb()
+      .prepare('SELECT status FROM stack_update_cleanup_pending WHERE stack_name = ? ORDER BY created_at DESC LIMIT 1')
+      .get('refused') as { status: string } | undefined)?.status;
+
+    mocks.listBound.mockResolvedValue([{ Id: 'a', Name: 'refused-web-1', State: 'running' }]);
+    expect((await request(app).delete('/api/stacks/refused').set('Cookie', authCookie)).status).toBe(409);
+    expect(status()).toBe('cancelled');
+
+    mocks.listBound.mockRejectedValue(new Error('engine unreachable'));
+    expect((await request(app).delete('/api/stacks/refused').set('Cookie', authCookie)).status).toBe(409);
+    expect(status()).toBe('cancelled');
+
+    // The same name deletes once nothing is left behind.
+    mocks.listBound.mockResolvedValue([]);
+    expect((await request(app).delete('/api/stacks/refused').set('Cookie', authCookie)).status).toBe(200);
+  });
+
+  it('names at most five containers and counts the rest', async () => {
+    mocks.listBound.mockResolvedValue(
+      Array.from({ length: 7 }, (_, i) => ({ Id: `c${i}`, Name: `refused-svc${i}-1`, State: 'running' })),
+    );
+
+    const res = await request(app).delete('/api/stacks/refused').set('Cookie', authCookie);
+
+    expect(res.body.error).toContain('7 containers');
+    expect(res.body.error).toContain('refused-svc4-1');
+    expect(res.body.error).not.toContain('refused-svc5-1');
+    expect(res.body.error).toContain('and 2 more');
+  });
+
+  it('says "1 container" for a single one', async () => {
+    mocks.listBound.mockResolvedValue([{ Id: 'a', Name: 'refused-web-1', State: 'exited' }]);
+
+    const res = await request(app).delete('/api/stacks/refused').set('Cookie', authCookie);
+
+    expect(res.body.error).toContain('1 container of this stack');
   });
 
   it('still removes a refused stack that has no container bound to it', async () => {
@@ -260,5 +331,44 @@ describe('refused stack: the Fleet container list', () => {
     const res = await request(app).get('/api/fleet/node/9/stacks/refused/containers').set('Cookie', authCookie);
 
     expect(res.status).toBe(502);
+  });
+});
+
+describe('refused stack: the real guard, the real down, and Delete together', () => {
+  const BOMB = (() => {
+    const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+    for (let level = 1; level <= 12; level += 1) {
+      const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
+      lines.push(`x${level}: &a${level} [${refs}]`);
+    }
+    lines.push('services:', '  web:', '    image: nginx:alpine');
+    return `${lines.join('\n')}\n`;
+  })();
+
+  beforeEach(() => {
+    // The refusal below comes from the real guard reading a real file; only the
+    // Docker endpoint guard and the spawn are out of the picture.
+    vi.mocked(ComposeService.prototype.downStack).mockRestore();
+    vi.spyOn(ComposeService.prototype as unknown as { assertDockerEndpointSafe: () => Promise<void> }, 'assertDockerEndpointSafe').mockResolvedValue(undefined);
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), BOMB);
+  });
+
+  it('keeps the files of a bombed stack whose containers are still bound, and says why', async () => {
+    mocks.listBound.mockResolvedValue([{ Id: 'a', Name: 'refused-web-1', State: 'running' }]);
+
+    const res = await request(app).delete('/api/stacks/refused').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('nested YAML aliases');
+    expect(res.body.error).toContain('refused-web-1');
+    expect(fs.existsSync(path.join(stackDir('refused'), 'compose.yaml'))).toBe(true);
+  });
+
+  it('still deletes a bombed stack with nothing bound to it', async () => {
+    const res = await request(app).delete('/api/stacks/refused').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(stackDir('refused'))).toBe(false);
   });
 });

@@ -390,6 +390,9 @@ export class ComposeService {
    * service `env_file:` entries or enforce required interpolation), so a project
    * `config` rejects can still be one `down --volumes` removes volumes from. Removing what cannot be seen is not a pass.
    * Callers that must still tear such a stack down do it without removing volumes.
+   * The exception is an input Sencho refused to hand to Compose: that throws
+   * `ComposeExpansionRefusal` instead, because the same guard refuses the down
+   * without volumes too.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declared: string[] | null = null;
@@ -3174,11 +3177,14 @@ export class ComposeService {
       const args = options?.removeVolumes
         ? ['down', '--volumes', '--remove-orphans']
         : ['down', '--remove-orphans'];
+      // Resolve the arguments first, as runDown does: a refused stack costs no
+      // live gate, and stack deletion keeps a stack that still runs.
+      const composeArgs = await this.authoredComposeArgs(stackName, args);
       // Teardown removes the containers a gate would be observing (stack deletion,
       // and the rollback down of a failed template deploy), so it ends the gates
       // first, for the same reason runDown does.
       await this.supersedeGatesForContainerOp(stackName, 'the stack was torn down during the observation');
-      await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackPath, undefined, false);
+      await this.execute('docker', composeArgs, stackPath, undefined, false);
     } catch (error) {
       // Sencho's refusal to run Compose is not "nothing to clean up": the stack
       // may be running, and the caller decides what is left (stack deletion

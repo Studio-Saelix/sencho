@@ -374,7 +374,8 @@ export class DeployedStackDeletionService {
    * The message to refuse a delete with when Compose could not be run for the
    * stack and containers Compose started from its directory still exist, or null
    * when none do. Read from the Engine API, which needs no Compose. A lookup that
-   * fails is not "none": the delete is refused with that as the reason.
+   * fails is not "none": the delete is refused, with a note that the check could
+   * not run.
    */
   private async containersLeftBehindByRefusal(
     nodeId: number,
@@ -396,7 +397,7 @@ export class DeployedStackDeletionService {
     const names = bound.slice(0, 5).map((c) => c.Name).join(', ');
     const more = bound.length > 5 ? ` and ${bound.length - 5} more` : '';
     return `${refusal.message} ${bound.length} container${bound.length === 1 ? '' : 's'} of this stack ` +
-      `(${names}${more}) would be left running without it, so nothing was deleted. ` +
+      `(${names}${more}) would be left behind without it, so nothing was deleted. ` +
       'Fix the refused input and delete again, or remove those containers first.';
   }
 

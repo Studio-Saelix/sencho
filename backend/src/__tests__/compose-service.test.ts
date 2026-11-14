@@ -4009,6 +4009,7 @@ describe('ComposeService - a refused stack is never reported as torn down or sto
 
   it('downStack hands the refusal to its caller instead of swallowing it as "nothing to clean up"', async () => {
     mockSpawn.mockClear();
+    mockSupersedeForContainerOp.mockClear();
     mockAssertComposeInputs.mockRejectedValue(new MockComposeExpansionRefusal(REFUSAL));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
@@ -4017,6 +4018,9 @@ describe('ComposeService - a refused stack is never reported as torn down or sto
       await expect(ComposeService.getInstance(1).downStack('my-stack', { removeVolumes: false })).rejects.toThrow('nested YAML aliases');
       expect(mockSpawn).not.toHaveBeenCalled();
       expect(warn.mock.calls.some((call) => String(call[0]).includes('nothing to clean up'))).toBe(false);
+      // The stack keeps running, so a refused teardown must not end the health
+      // gates that observe it.
+      expect(mockSupersedeForContainerOp).not.toHaveBeenCalled();
     } finally {
       mockAssertComposeInputs.mockReset();
       mockAssertComposeInputs.mockResolvedValue(undefined);
