@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-14)
 
 
+### Highlights
+
+<!-- highlights-hash: 5c3a0970843d13fb -->
+
+Compose Doctor now works from a proper source model of your Compose files, so findings point at the actual lines that caused them, and the rule registry behind it is canonical and normalized. Registry credentials are redacted from Doctor log lines, so you can share output without leaking them. Dismissed findings are easier to work through: clicking a count opens the full list in a sheet, on both the fleet readiness view and the other findings lists.
+
+Recovery points are more useful. You can browse and download the contents of a saved point before committing to a restore, and you can restore a point over its own volume. Secret bundles are masked by default with a per-key reveal, and the Encrypt archives switch now shows as on while its passphrase is still pending.
+
+Node and network work got attention. There is a read-only bootstrap preflight and a node management menu, and socket discovery now finds Docker socket proxies and direct consumers per node. Network references are validated before the legacy inspect call, and the topology refresh control stays visible while reloading. Image exposure intent can be set from a Network exposed label, and security checks now evaluate the image an update will pull rather than the one currently installed.
+
+A crash-looping stack can be stopped from its stack page, with a single alert per loop. Updates no longer claim an all-clear before the first readiness load answers, Recheck and first load have delay-gated feedback, and tag-only rows open the stack editor directly. Self-update eligibility recovers and names its reason when it cannot. Smaller fixes cover the x/net floor in the recovery helper and source-built CLI binaries, label inventory degrading cleanly when a deploy spec is refused, Docker inspect status winning over a 404 in messages, and single create actions in empty fleet tabs.
+
 ### Added
 
 * **assurance:** author the Compose source model and locate findings on it ([#2253](https://github.com/Studio-Saelix/sencho/issues/2253)) ([a1e41f7](https://github.com/Studio-Saelix/sencho/commit/a1e41f7cda7df4c4ede974683379fe28e7c5d6ab))
