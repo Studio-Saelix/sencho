@@ -1,4 +1,5 @@
 import dnsPromises from 'dns/promises';
+import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import { isDisallowedOutboundTargetAddress } from '../../utils/outboundTarget';
@@ -111,15 +112,22 @@ const systemResolve: ResolveAddresses = (hostname) =>
   dnsPromises.lookup(hostname, { all: true, verbatim: true });
 
 /**
- * The addresses this instance answers on. The interface list is all a bare-metal
- * install needs, but inside a container it holds only the bridge address, so the
- * host the operator used to reach the hub (the request host or SENCHO_PUBLIC_URL)
- * is added: its IPv4 address is the public address of a Docker or NAT deployment.
+ * The addresses of this instance and of the host it runs on. The interface list
+ * is all a bare-metal install needs, but inside a container it holds only the
+ * bridge address, so two more sources are added:
+ *
+ * - the host the operator used to reach the hub (the request host or
+ *   SENCHO_PUBLIC_URL), whose IPv4 address is the public address of a Docker or
+ *   NAT deployment;
+ * - the gateways the hub routes through (see {@link gatewayAddresses}), which in
+ *   a container are the Docker host itself.
+ *
  * A hub host that does not resolve adds nothing and is logged; it does not
  * refuse the target, because this check is a convenience, not the outbound policy.
  */
 async function ownAddresses(hubHost: string | null, resolve: ResolveAddresses): Promise<Set<string>> {
   const addresses = ownInterfaceAddresses();
+  for (const gateway of gatewayAddresses()) addresses.add(gateway);
   if (!hubHost) return addresses;
   if (net.isIP(hubHost) === 4) {
     addresses.add(hubHost);
@@ -146,6 +154,61 @@ function ownInterfaceAddresses(): Set<string> {
     }
   }
   return addresses;
+}
+
+/** Docker's default bridge (`docker0`) gateway: the address of the Docker host on that bridge. */
+const DOCKER_DEFAULT_BRIDGE_GATEWAY = '172.17.0.1';
+
+function ipv4ToInt(address: string): number {
+  return address.split('.').reduce((acc, part) => (acc * 256) + Number(part), 0);
+}
+
+function intToIpv4(value: number): string {
+  return [24, 16, 8, 0].map((shift) => Math.floor(value / 2 ** shift) % 256).join('.');
+}
+
+/** The default-route gateways in the kernel's route table (Linux); none where it cannot be read. */
+function defaultRouteGateways(): string[] {
+  let table: string;
+  try {
+    table = fs.readFileSync('/proc/net/route', 'utf8');
+  } catch {
+    return [];
+  }
+  const gateways: string[] = [];
+  for (const line of table.split('\n').slice(1)) {
+    const [, destination, gateway] = line.trim().split(/\s+/);
+    if (destination !== '00000000' || !gateway || !/^[0-9A-Fa-f]{8}$/.test(gateway) || gateway === '00000000') continue;
+    // The kernel prints the address as a little-endian hex word.
+    const octets = gateway.match(/../g)!.map((pair) => parseInt(pair, 16)).reverse();
+    gateways.push(octets.join('.'));
+  }
+  return gateways;
+}
+
+/**
+ * Addresses of the machine that hosts this instance, as seen from inside it.
+ * A container's network gateway is the Docker host, and a bridge network's
+ * gateway is the first address of its subnet, so the target `172.17.0.1` is the
+ * same server as the public address the guard already refuses. The set holds
+ * the default-route gateways, the first address of every subnet an interface
+ * is on, and Docker's default bridge gateway. A bridge network the hub is not
+ * attached to cannot be told from a LAN address here and is not covered.
+ */
+function gatewayAddresses(): Set<string> {
+  const gateways = new Set<string>([DOCKER_DEFAULT_BRIDGE_GATEWAY, ...defaultRouteGateways()]);
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.internal || entry.family !== 'IPv4' || net.isIP(entry.netmask) !== 4) continue;
+      const mask = ipv4ToInt(entry.netmask);
+      const hostBits = 32 - (mask.toString(2).replace(/0/g, '').length);
+      // A /31 or /32 has no separate gateway address.
+      if (hostBits < 2 || hostBits > 24) continue;
+      const network = Math.floor(ipv4ToInt(entry.address) / 2 ** hostBits) * 2 ** hostBits;
+      gateways.add(intToIpv4(network + 1));
+    }
+  }
+  return gateways;
 }
 
 /**

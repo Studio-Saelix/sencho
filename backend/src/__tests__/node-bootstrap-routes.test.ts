@@ -281,6 +281,31 @@ describe('bootstrap routes: the hub as a target in a Docker or NAT deployment', 
     expect(runSpy).not.toHaveBeenCalled();
   });
 
+  it('refuses the Docker gateway of the hub host, which is the same server as the address it was reached on', async () => {
+    const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey');
+    const runSpy = vi.spyOn(sshProbeClient, 'runCommands');
+    {
+      const gateway = '172.17.0.1';
+      const hostKey = await request(app)
+        .post('/api/nodes/bootstrap/host-key')
+        .set('Authorization', adminAuth)
+        .set('Host', `${PUBLIC_IP}:1852`)
+        .send({ host: gateway });
+      expect(hostKey.status).toBe(400);
+      expect(hostKey.body.code).toBe('INVALID_TARGET');
+      expect(hostKey.body.error ?? hostKey.body.message).toBe('The target resolves to this Sencho instance.');
+      const preflight = await request(app)
+        .post('/api/nodes/bootstrap/preflight')
+        .set('Authorization', adminAuth)
+        .set('Host', `${PUBLIC_IP}:1852`)
+        .send({ ...preflightBody, host: gateway });
+      expect(preflight.status).toBe(400);
+      expect(preflight.body.code).toBe('INVALID_TARGET');
+    }
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
   it('refuses the address in SENCHO_PUBLIC_URL when the request arrives on another host', async () => {
     process.env.SENCHO_PUBLIC_URL = `https://${PUBLIC_IP}`;
     const captureSpy = vi.spyOn(sshProbeClient, 'captureHostKey');
