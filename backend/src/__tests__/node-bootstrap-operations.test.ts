@@ -745,7 +745,7 @@ describe('bootstrap operations: enrollment and retry', () => {
     const op = h.service.start(request, context());
     await h.service.settled();
     const stopped = h.service.get(op.id);
-    expect(stopped).toMatchObject({ state: 'partial', active: true, error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    expect(stopped).toMatchObject({ state: 'partial', active: true, agentStarted: true, error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
     h.tunnels.connect(stopped.nodeId as number);
     const reconciled = h.service.get(op.id);
     expect(reconciled).toMatchObject({ state: 'enrolled', active: false });
@@ -1375,7 +1375,7 @@ describe('bootstrap operations: round two review cases', () => {
     const { request } = approve(h);
     const op = h.service.start(request, context());
     await h.service.settled();
-    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'START_INPUT_INCOMPLETE' } });
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', agentStarted: false, error: { code: 'START_INPUT_INCOMPLETE' } });
     expect(h.service.retryOwnership(op.id, h.facts.current.target.host, 22).agentStarted).toBe(false);
     h.service.release(op.id, AUDIT);
     const nodeId = h.service.get(op.id).nodeId;
@@ -1391,7 +1391,7 @@ describe('bootstrap operations: round two review cases', () => {
     const { request } = approve(h);
     const op = h.service.start(request, context());
     await h.service.settled();
-    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'DIRECTORY_CHANGED' } });
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', agentStarted: false, error: { code: 'DIRECTORY_CHANGED' } });
     expect(h.service.retryOwnership(op.id, h.facts.current.target.host, 22).agentStarted).toBe(false);
     h.service.release(op.id, AUDIT);
     const nodeId = h.service.get(op.id).nodeId;

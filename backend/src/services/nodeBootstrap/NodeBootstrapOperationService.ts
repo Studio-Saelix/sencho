@@ -129,6 +129,8 @@ export interface OperationView {
   step: string | null;
   nodeId: number | null;
   changesMade: boolean;
+  /** The Pilot container was started: only then can a Pilot connect after the run stopped, and the hub settle the run on a read. */
+  agentStarted: boolean;
   active: boolean;
   cancelRequested: boolean;
   error: { code: string; message: string } | null;
@@ -336,8 +338,8 @@ export class NodeBootstrapOperationService {
       throw new BootstrapError(409, 'PLAN_NOT_CURRENT', 'The request does not match the reviewed plan. Run the preflight again.');
     }
     // The run reads the key the moment it opens its session, so a key that cannot be read (or a passphrase that does
-    // not unlock it) is refused here, while the approval is still unspent and no run row exists. The error is the
-    // preflight's own (`SSH_KEY_*`), so the operator fixes the key and approves the same plan again.
+    // not unlock it) is refused here, before the approval is spent and before a run is created or (on a retry)
+    // advanced. The error is the preflight's own (`SSH_KEY_*`), so the caller fixes the key and approves the same plan again.
     parsePrivateKey(request.privateKey, request.passphrase);
     return plan;
   }
@@ -992,6 +994,7 @@ export class NodeBootstrapOperationService {
       step: op.step,
       nodeId: op.node_id,
       changesMade: op.changes_made === 1,
+      agentStarted: op.agent_started === 1,
       active: op.active === 1,
       cancelRequested: op.cancel_requested === 1,
       error: op.error_code ? { code: op.error_code, message: op.error_message ?? '' } : null,

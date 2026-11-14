@@ -199,6 +199,8 @@ export interface BootstrapOperation {
   step: string | null;
   nodeId: number | null;
   changesMade: boolean;
+  /** The Pilot container was started, so the Pilot can still connect after the run stopped. */
+  agentStarted: boolean;
   active: boolean;
   cancelRequested: boolean;
   error: { code: string; message: string } | null;

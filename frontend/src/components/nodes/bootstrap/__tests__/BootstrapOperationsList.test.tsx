@@ -24,6 +24,7 @@ function operation(index: number, overrides: Partial<BootstrapOperation> = {}): 
     step: null,
     nodeId: null,
     changesMade: true,
+    agentStarted: true,
     active: true,
     cancelRequested: false,
     error: null,

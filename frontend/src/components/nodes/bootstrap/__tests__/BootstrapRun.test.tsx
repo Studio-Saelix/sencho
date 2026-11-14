@@ -145,6 +145,7 @@ function operation(overrides: Partial<BootstrapOperationDetail> = {}): Bootstrap
     step: 'install-docker-packages',
     nodeId: null,
     changesMade: true,
+    agentStarted: true,
     active: true,
     cancelRequested: false,
     error: null,
@@ -345,6 +346,7 @@ describe('progress polling', () => {
     ['a blocked run', { state: 'blocked' as const, nodeId: 4 }],
     ['a run that needs recovery', { state: 'recovery_required' as const, nodeId: 4 }],
     ['a stopped run with no node to connect', { state: 'partial' as const, nodeId: null }],
+    ['a stopped run whose Pilot was never started', { state: 'partial' as const, nodeId: 4, agentStarted: false }],
     ['a stopped run that was released', { state: 'partial' as const, nodeId: 4, active: false }],
   ])('does not poll %s: the hub cannot settle it on a read', async (_label, overrides) => {
     vi.useFakeTimers();
@@ -401,6 +403,67 @@ describe('progress polling', () => {
     expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the pages "Show more" added when the settle read replaces the first page, and reads their settleable rows', async () => {
+    vi.useFakeTimers();
+    const row = (id: string, extra: Partial<BootstrapOperationDetail> = {}) => ({ ...STOPPED, id, nodeId: 4, targetName: id, ...extra });
+    const first = [row('first-1'), row('first-2')];
+    const second = [row('second-1')];
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: first, nextCursor: 'c1' })
+      .mockResolvedValueOnce({ operations: second, nextCursor: null })
+      // The settle read: page one changed (first-1 enrolled), and it still names a further page.
+      .mockResolvedValueOnce({ operations: [row('first-1', { state: 'enrolled', active: false }), first[1]], nextCursor: 'c1' });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue(row('second-1', { state: 'enrolled', active: false }));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.operations.map((entry) => entry.id)).toEqual(['first-1', 'first-2', 'second-1']);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(result.current.operations.map((entry) => `${entry.id}:${entry.state}`)).toEqual(['first-1:enrolled', 'first-2:partial', 'second-1:enrolled']);
+    expect(fetchBootstrapOperation).toHaveBeenCalledWith('second-1', expect.anything());
+    // The settle read did not touch the cursor of the pages already loaded.
+    expect(result.current.hasMoreOperations).toBe(false);
+  });
+
+  it('does not read the list while a run is open', async () => {
+    vi.useFakeTimers();
+    const listed = { ...STOPPED, nodeId: 4 };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [listed], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue({ ...listed });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    act(() => result.current.show({ ...listed }));
+    vi.mocked(listBootstrapOperations).mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 3); });
+    expect(listBootstrapOperations).not.toHaveBeenCalled();
+    expect(fetchBootstrapOperation).toHaveBeenCalled();
+  });
+
+  it('keeps the stopped state on screen through failed settle reads, marks it stale, and stops on a run that is gone', async () => {
+    vi.useFakeTimers();
+    const { BootstrapApiError } = await import('../bootstrapApi');
+    const stopped = { ...STOPPED, nodeId: 4 };
+    vi.mocked(fetchBootstrapOperation).mockRejectedValue(new Error('hub unreachable'));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(stopped));
+    for (let tick = 0; tick < 3; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    }
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(3);
+    expect(result.current.progressStale).toBe(true);
+    expect(result.current.operation?.state).toBe('partial');
+
+    vi.mocked(fetchBootstrapOperation).mockReset();
+    vi.mocked(fetchBootstrapOperation).mockRejectedValue(new BootstrapApiError('Bootstrap operation not found.', 'OPERATION_NOT_FOUND', null));
+    act(() => result.current.show({ ...stopped, id: '33333333-3333-4333-8333-333333333333' }));
+    for (let tick = 0; tick < 4; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    }
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.progressStale).toBe(true);
+  });
+
   it('keeps polling through a step that changes nothing, and never polls while closed', async () => {
     vi.useFakeTimers();
     const same = operation();
@@ -440,6 +503,25 @@ describe('a run dialog left open on a stopped run', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: /Release server/ })).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /^Retry/ })).not.toBeInTheDocument();
     expect(screen.getByText(/is enrolled/)).toBeInTheDocument();
+  });
+});
+
+describe('a stopped run whose reads fail', () => {
+  it('says the Pilot check could not be made, and keeps Retry and Release', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const stopped = { ...STOPPED, nodeId: 4 };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValueOnce({ ...stopped }).mockRejectedValue(new Error('hub unreachable'));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const row = await screen.findByTestId(`bootstrap-run-${stopped.id}`);
+    await user.click(within(row).getByRole('button', { name: 'View' }));
+    await screen.findByRole('button', { name: /Release server/ });
+    for (let tick = 0; tick < 3; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    }
+    expect(await screen.findByTestId('bootstrap-progress-stale')).toHaveTextContent('Whether the Pilot has connected since could not be checked');
+    expect(screen.getByRole('button', { name: /Release server/ })).toBeInTheDocument();
   });
 });
 

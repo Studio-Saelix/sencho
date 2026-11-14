@@ -54,6 +54,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // Bumped when a read of the first page starts and again when its answer is applied, so a later page that
   // was asked for with the old cursor, before or while that read ran, is dropped instead of stitched onto the new list.
   const listGeneration = useRef(0);
+  // Which rows the first page held at its last read, how many further pages "Show more" has added below it, and
+  // the rows now shown: a settle read replaces the first page without dropping those further pages.
+  const firstPageIds = useRef<Set<string>>(new Set());
+  const extraPages = useRef(0);
+  const operationsRef = useRef<BootstrapOperation[]>([]);
   // Consecutive failed progress reads for the shown run; reset by any answer.
   const [pollFailures, setPollFailures] = useState(0);
   const [busy, setBusy] = useState<OperationBusy>(null);
@@ -78,6 +83,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     try {
       const page = await client.list(signal);
       listGeneration.current += 1;
+      firstPageIds.current = new Set(page.operations.map((operation) => operation.id));
+      extraPages.current = 0;
       setOperations(page.operations);
       setNextCursor(page.nextCursor);
       setListFailed(false);
@@ -113,6 +120,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         const known = new Set(shown.map((operation) => operation.id));
         return [...shown, ...page.operations.filter((operation) => !known.has(operation.id))];
       });
+      extraPages.current += 1;
       setNextCursor(page.nextCursor);
     } catch (error: unknown) {
       if (generation !== listGeneration.current) return;
@@ -123,6 +131,44 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nextCursor, loadingMore]);
+
+  /**
+   * Read the list again for a settle poll. A plain re-read would put page one back and drop every page "Show more"
+   * added, so those pages are kept: their rows that may still settle are read one by one, and an answer that was
+   * overtaken by a page load or by another read of the list is dropped (the next tick tries again).
+   */
+  const refreshSettling = useCallback(async (signal: AbortSignal) => {
+    if (extraPages.current === 0) {
+      await refreshList(signal);
+      return;
+    }
+    const generation = listGeneration.current;
+    const pages = extraPages.current;
+    try {
+      const page = await client.list(signal);
+      const firstIds = new Set(page.operations.map((operation) => operation.id));
+      const before = firstPageIds.current;
+      const tail = operationsRef.current.filter((operation) => !before.has(operation.id) && !firstIds.has(operation.id));
+      const reread = new Map<string, BootstrapOperation>();
+      await Promise.all(tail.filter(canSettleOnRead).map(async (operation) => {
+        try {
+          reread.set(operation.id, await client.get(operation.id, signal));
+        } catch {
+          // The row keeps what it showed; the next tick reads it again.
+        }
+      }));
+      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current) return;
+      firstPageIds.current = firstIds;
+      setOperations([...page.operations, ...tail.map((operation) => reread.get(operation.id) ?? operation)]);
+      setListFailed(false);
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      console.warn('Bootstrap operations could not be listed:', error);
+      setListFailed(true);
+    }
+    // client.* is stable module API unless a test injects it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshList]);
 
   const openOperation = useCallback(async (id: string): Promise<BootstrapOperationDetail | null> => {
     setBusy('open');
@@ -187,6 +233,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   // The list is the other place a stopped run is shown. While no run is open and one of its rows may still be
   // settled by a late Pilot, it is read again, so a row does not keep offering Retry for a node that is enrolled.
+  useEffect(() => { operationsRef.current = operations; }, [operations]);
   const listSettling = operation === null && operations.some(canSettleOnRead);
   const [listTick, setListTick] = useState(0);
   useEffect(() => {
@@ -197,7 +244,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         setListTick((tick) => tick + 1);
         return;
       }
-      void refreshList(controller.signal).finally(() => {
+      void refreshSettling(controller.signal).finally(() => {
         if (!controller.signal.aborted) setListTick((tick) => tick + 1);
       });
     }, SETTLE_POLL_MS);
@@ -205,7 +252,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       window.clearTimeout(timer);
       controller.abort();
     };
-    // refreshList is stable.
+    // refreshSettling is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, listSettling, listTick]);
 
