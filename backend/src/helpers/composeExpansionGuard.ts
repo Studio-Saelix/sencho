@@ -53,12 +53,15 @@
  * over each definition alone, and only once every definition of the run is
  * known. A `!override` or `!reset` tag drops what the earlier definitions gave
  * for that key (a list, `environment:`, a service, or a section), as it does in
- * Compose; inside an included project it drops only what that project's own
- * files gave, and a later file of the run can still drop what the project
- * gave. What Compose interpolates when it loads a definition (the
- * `environment:` entries, and the `env_file` and `label_file` paths and
- * `format`) is interpolated with the environment that definition was loaded
- * under; the env files' own text is interpolated with the run's environment.
+ * Compose; `!override` then holds the replacement, where `!reset` removes the
+ * node and the value attached to it is ignored, so no reader takes a path, a
+ * format, a directory, or an assignment from it. Inside an included project a
+ * tag drops only what that project's own files gave, and a later file of the
+ * run can still drop what the project gave. What Compose interpolates when it
+ * loads a definition (the `environment:` entries, the `env_file` and
+ * `label_file` paths, and the `format` of an `env_file` entry) is interpolated
+ * with the environment that definition was loaded under; the env files' own
+ * text is interpolated with the run's environment.
  */
 import { createHash } from 'crypto';
 import path from 'path';
@@ -852,8 +855,9 @@ type DependencyGroup = IncludeGroup | ExtendsGroup;
 
 /**
  * A service's `env_file` or `label_file` entry, as written. A `format` of `raw`
- * means the file has no interpolation. Both `path` and `format` are kept as
- * written, because Compose interpolates them when it loads the definition.
+ * (only an `env_file` entry has one) means the file has no interpolation. Both
+ * `path` and `format` are kept as written, because Compose interpolates them
+ * when it loads the definition.
  */
 interface ReadFile {
   path: string;
@@ -969,10 +973,30 @@ function deref(node: unknown, targets: Map<Node, Node>): unknown {
 /**
  * True for a node Compose's `!override` or `!reset` tag marks: it replaces what
  * the definitions applied before it gave for that key, where an untagged one is
- * added to them.
+ * added to them. A `!override` node then holds the replacement; a `!reset` node
+ * holds nothing (see `isReset`).
  */
 function replacesEarlier(node: unknown, targets: Map<Node, Node>): boolean {
-  return hasTag(node, targets, '!override') || hasTag(node, targets, '!reset');
+  return hasTag(node, targets, '!override') || isReset(node, targets);
+}
+
+/**
+ * True for a node tagged `!reset`. Compose removes the node and ignores the
+ * value attached to the tag, so what it holds names no file, sets no format or
+ * directory, and assigns no variable: every reader takes it as absent.
+ */
+function isReset(node: unknown, targets: Map<Node, Node>): boolean {
+  return hasTag(node, targets, '!reset');
+}
+
+/** The node, or undefined when it is tagged `!reset` and Compose removes it. */
+function unlessReset(node: unknown, targets: Map<Node, Node>): unknown {
+  return isReset(node, targets) ? undefined : node;
+}
+
+/** The text of a scalar key or path, or undefined for one that is absent or tagged `!reset`. */
+function liveTextOf(node: unknown, targets: Map<Node, Node>): string | undefined {
+  return textOf(unlessReset(node, targets), targets);
 }
 
 /** True when a node (or the node an alias names) carries the given tag. */
@@ -1093,11 +1117,15 @@ function environmentValueOf(node: unknown, targets: Map<Node, Node>): string | n
   return composePlainScalarText(written);
 }
 
+/**
+ * The texts of a scalar or a list of them. Nothing is read from a node tagged
+ * `!reset`, or from a list entry tagged `!reset`: Compose removes both.
+ */
 function textListOf(node: unknown, targets: Map<Node, Node>): string[] {
-  const resolved = deref(node, targets);
+  const resolved = deref(unlessReset(node, targets), targets);
   if (isSeq(resolved)) {
     return resolved.items
-      .map((item) => textOf(item, targets))
+      .map((item) => liveTextOf(item, targets))
       .filter((item): item is string => item !== undefined);
   }
   const single = textOf(resolved, targets);
@@ -1161,7 +1189,8 @@ function entriesOf(node: unknown, targets: Map<Node, Node>): Map<string, unknown
  * interpolated, since the interpolation can supply the name or the `=`.
  */
 function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem[] {
-  const resolved = deref(node, targets);
+  // An `environment:` tagged `!reset` is removed with whatever it held.
+  const resolved = deref(unlessReset(node, targets), targets);
   const out: EnvironmentItem[] = [];
   if (isSeq(resolved)) {
     for (const item of resolved.items) {
@@ -1175,6 +1204,11 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem
   const fields = entriesOf(resolved, targets);
   if (fields === null) return out;
   for (const [name, value] of fields) {
+    // Compose removes a variable tagged `!reset`, so an earlier value for it is gone.
+    if (isReset(value, targets)) {
+      out.push({ kind: 'clear', name });
+      continue;
+    }
     const text = environmentValueOf(value, targets);
     if (text === null) out.push({ kind: 'clear', name });
     else if (text !== undefined) out.push({ kind: 'assign', name, value: text });
@@ -1182,10 +1216,17 @@ function environmentOf(node: unknown, targets: Map<Node, Node>): EnvironmentItem
   return out;
 }
 
-/** The files of a service's `env_file` or `label_file`: a string, a list, or maps with a `path`. */
-function readFilePaths(node: unknown, targets: Map<Node, Node>): ReadFile[] {
-  const resolved = deref(node, targets);
+/**
+ * The files of a service's `env_file` (a string, a list, or maps with a `path`
+ * and a `format`) or `label_file` (a string or a list of strings: Compose
+ * rejects a map there, so none is read). A node or a list entry tagged
+ * `!reset` names no file, and neither does a `path` tagged `!reset`; a `format`
+ * tagged `!reset` is absent.
+ */
+function readFilePaths(node: unknown, targets: Map<Node, Node>, kind: 'env_file' | 'label_file'): ReadFile[] {
+  const resolved = deref(unlessReset(node, targets), targets);
   const out: ReadFile[] = [];
+  if (resolved === undefined) return out;
   for (const item of isSeq(resolved) ? resolved.items : [resolved]) {
     // Compose removes a list entry tagged `!reset`, so it names no file.
     if (isSeq(resolved) && hasTag(item, targets, '!reset')) continue;
@@ -1194,9 +1235,10 @@ function readFilePaths(node: unknown, targets: Map<Node, Node>): ReadFile[] {
       out.push({ path: text, format: undefined });
       continue;
     }
+    if (kind === 'label_file') continue;
     const fields = entriesOf(item, targets);
-    const mapped = fields === null ? undefined : textOf(fields.get('path'), targets);
-    if (mapped !== undefined) out.push({ path: mapped, format: textOf(fields?.get('format'), targets) });
+    const mapped = fields === null ? undefined : liveTextOf(fields.get('path'), targets);
+    if (mapped !== undefined) out.push({ path: mapped, format: liveTextOf(fields?.get('format'), targets) });
   }
   return out;
 }
@@ -1218,8 +1260,10 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
 
   const include = root.get('include');
   if (include !== undefined) {
-    const resolved = deref(include, targets);
+    // An `include:` or an entry of it tagged `!reset` is removed, with the files it named.
+    const resolved = deref(unlessReset(include, targets), targets);
     for (const raw of isSeq(resolved) ? resolved.items : [resolved]) {
+      if (resolved === undefined || (isSeq(resolved) && isReset(raw, targets))) continue;
       const entry = deref(raw, targets);
       const single = textOf(entry, targets);
       if (single !== undefined) {
@@ -1230,7 +1274,7 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
       if (fields === null) continue;
       const paths = textListOf(fields.get('path'), targets);
       if (paths.length === 0) continue;
-      const projectDirectory = textOf(fields.get('project_directory'), targets);
+      const projectDirectory = liveTextOf(fields.get('project_directory'), targets);
       groups.push({
         kind: 'include',
         paths,
@@ -1246,12 +1290,14 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
   // to a job definition, so a job's dependency has to be measured too.
   for (const section of ['services', 'jobs'] as const) {
     if (replacesEarlier(root.get(section), targets)) replacedSections.add(section);
-    const definitions = entriesOf(root.get(section), targets);
+    // A section tagged `!reset` is removed with every service it held.
+    const definitions = entriesOf(unlessReset(root.get(section), targets), targets);
     if (definitions === null) continue;
     for (const [name, definition] of definitions) {
       const owner = `${section}\0${name}`;
       const size = countExpandedNodes(definition, targets, sizes, new Set());
-      const fields = entriesOf(definition, targets);
+      // A service tagged `!reset` is removed with whatever its definition held.
+      const fields = entriesOf(unlessReset(definition, targets), targets);
       const reads: ServiceInfo['reads'] = {
         envFiles: [],
         labelFiles: [],
@@ -1260,8 +1306,8 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
         replaces: { service: replacesEarlier(definition, targets), envFiles: false, labelFiles: false, environment: false },
       };
       if (fields !== null) {
-        reads.envFiles = readFilePaths(fields.get('env_file'), targets);
-        reads.labelFiles = readFilePaths(fields.get('label_file'), targets);
+        reads.envFiles = readFilePaths(fields.get('env_file'), targets, 'env_file');
+        reads.labelFiles = readFilePaths(fields.get('label_file'), targets, 'label_file');
         reads.replaces.envFiles = replacesEarlier(fields.get('env_file'), targets);
         reads.replaces.labelFiles = replacesEarlier(fields.get('label_file'), targets);
         reads.replaces.environment = replacesEarlier(fields.get('environment'), targets);
@@ -1275,13 +1321,13 @@ function extractDependencies(measured: MeasuredDocument): DocumentDependencies {
           reads.environmentMisread = true;
         }
       }
-      const extendsNode = fields?.get('extends');
+      const extendsNode = unlessReset(fields?.get('extends'), targets);
       let parent: string | null = null;
       if (extendsNode !== undefined) {
         const shorthand = textOf(extendsNode, targets);
         const extendsFields = shorthand === undefined ? entriesOf(extendsNode, targets) : null;
-        const file = extendsFields === null ? undefined : textOf(extendsFields.get('file'), targets);
-        const service = shorthand ?? (extendsFields === null ? undefined : textOf(extendsFields.get('service'), targets));
+        const file = extendsFields === null ? undefined : liveTextOf(extendsFields.get('file'), targets);
+        const service = shorthand ?? (extendsFields === null ? undefined : liveTextOf(extendsFields.get('service'), targets));
         const parentId = service !== undefined && service.length > 0 ? `${section}\0${service}` : null;
         if (file !== undefined && file.length > 0) {
           groups.push({ kind: 'extends', paths: [file], owner, parent: parentId });

@@ -3051,14 +3051,13 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
       });
 
-      it('reads the format of an included label_file with its own environment', async () => {
+      it('reads no map of an included label_file, which Compose rejects before it loads a file', async () => {
+        // Compose 5.7.0: `label_file.0 must be a string`. There is no format to read for a label file.
         const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
         await write('sub/e.env', lines);
         await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    label_file:\n      - path: e.env\n        format: ${FMT}\n');
-        await write('sub/.env', 'FMT=raw\n');
-        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
         await write('sub/.env', 'FMT=other\n');
-        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).rejects.toThrow(TOO_LONG);
+        await expect(run(dir, ['compose', '-f', 'a.yaml', 'config'])).resolves.toBeUndefined();
       });
 
       it('reads the text of an env file with the run’s environment, not the included project’s', async () => {
@@ -3247,38 +3246,285 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
 
     describe('a format is interpolated before it is compared with raw', () => {
       const lines = 'A=1\n' + Array.from({ length: 21 }, () => 'A=${A}${A}').join('\n') + '\n';
-      const asFormat = (kind: 'env_file' | 'label_file', format: string): string =>
-        `services:\n  web:\n    image: nginx\n    ${kind}:\n      - path: e.env\n        format: ${format}\n`;
+      const asFormat = (format: string): string =>
+        `services:\n  web:\n    image: nginx\n    env_file:\n      - path: e.env\n        format: ${format}\n`;
 
-      describe.each(['env_file', 'label_file'] as const)('%s', (kind) => {
+      beforeEach(async () => {
+        await write('e.env', lines);
+      });
+
+      it.each(['${FMT}', '"${FMT}"'])('reads a file raw when %s names raw', async (format) => {
+        await write('.env', 'FMT=raw\n');
+        await write('compose.yaml', asFormat(format));
+        await expect(run()).resolves.toBeUndefined();
+      });
+
+      it('reads a file raw when the default of the format names raw', async () => {
+        await write('.env', 'X=1\n');
+        await write('compose.yaml', asFormat('${FMT:-raw}'));
+        await expect(run()).resolves.toBeUndefined();
+      });
+
+      it('still refuses when the interpolated format is not raw, or names nothing', async () => {
+        await write('.env', 'FMT=other\n');
+        await write('compose.yaml', asFormat('${FMT}'));
+        await expect(run()).rejects.toThrow(TOO_LONG);
+        await write('.env', 'X=1\n');
+        await expect(run()).rejects.toThrow(TOO_LONG);
+      });
+
+      it('still reads a literal raw format literally', async () => {
+        await write('compose.yaml', asFormat('raw'));
+        await expect(run()).resolves.toBeUndefined();
+      });
+
+      it('reads no format from a label_file map, which Compose rejects', async () => {
+        await write('compose.yaml', asFormat('${FMT}').replace('env_file', 'label_file'));
+        await write('.env', 'FMT=other\n');
+        await expect(run()).resolves.toBeUndefined();
+      });
+    });
+
+    // Compose removes a node tagged `!reset` and ignores the value attached to
+    // the tag, where `!override` replaces the earlier value with it. Each shape
+    // below was rendered with Compose 5.7.0 against the controls beside it.
+    describe('a node tagged !reset is removed, and the value attached to the tag is not read', () => {
+      const MIB = /larger than 1 MiB/;
+      const bomb = `A0=seed\n${Array.from({ length: 24 }, (_, i) => `A${i + 1}="\${A${i}}\${A${i}}"`).join('\n')}\n`;
+      const aFile = (kind: string, tagged: string): string => `services:\n  web:\n    image: nginx\n    ${kind}: ${tagged}\n`;
+
+      describe('a format that decides whether a chain is interpolated', () => {
+        const withFormat = (format: string): string =>
+          `services:\n  web:\n    image: nginx\n    environment:\n      SEED: ${seedText}\n    env_file:\n      - path: e1.env\n        format: ${format}\n`;
         beforeEach(async () => {
-          await write('e.env', lines);
+          await write('e1.env', `${seedChain}${continuation}`);
         });
 
-        it.each(['${FMT}', '"${FMT}"'])('reads a file raw when %s names raw', async (format) => {
-          await write('.env', 'FMT=raw\n');
-          await write('compose.yaml', asFormat(kind, format));
-          await expect(run()).resolves.toBeUndefined();
+        it('refuses a format tagged !reset, which Compose drops so the file is interpolated', async () => {
+          for (const format of ['!reset raw', '!reset "raw"']) {
+            await write('compose.yaml', withFormat(format));
+            await expect(run()).rejects.toThrow(TOO_LONG);
+          }
         });
 
-        it('reads a file raw when the default of the format names raw', async () => {
-          await write('.env', 'X=1\n');
-          await write('compose.yaml', asFormat(kind, '${FMT:-raw}'));
-          await expect(run()).resolves.toBeUndefined();
+        it('still reads the file literally for a literal raw format and for one tagged !override', async () => {
+          for (const format of ['raw', '!override raw']) {
+            await write('compose.yaml', withFormat(format));
+            await expect(run()).resolves.toBeUndefined();
+          }
         });
 
-        it('still refuses when the interpolated format is not raw, or names nothing', async () => {
-          await write('.env', 'FMT=other\n');
-          await write('compose.yaml', asFormat(kind, '${FMT}'));
+        it('refuses a format tagged !reset in a job, which shares the reader', async () => {
+          await write('compose.yaml', withFormat('!reset raw').replace('services:\n  web:', 'jobs:\n  web:'));
           await expect(run()).rejects.toThrow(TOO_LONG);
-          await write('.env', 'X=1\n');
+        });
+      });
+
+      describe('what an include reads for the project it loads', () => {
+        // The included project's .env holds the seed; the decoy a tagged value names holds a short one.
+        beforeEach(async () => {
+          await write('sub/.env', `FROM=${seedText}\n`);
+          await write('decoy/.env', 'FROM=ab\n');
+          await write('payload.env', 'FROM=ab\n');
+          const chain = `${seedChain}${continuation}`;
+          await write('sub/e1.env', chain);
+          await write('decoy/e1.env', chain);
+          await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      SEED: ${FROM}\n    env_file: [e1.env]\n');
+        });
+        const include = (entry: string): string => `include:\n  - path: sub/inc.yaml\n${entry}`;
+
+        it('falls back to the included project\'s own .env when env_file is tagged !reset', async () => {
+          await write('compose.yaml', include('    env_file: !reset payload.env\n'));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', include('    env_file: !reset [payload.env]\n'));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          // Untagged, the file is what the project is interpolated with.
+          await write('compose.yaml', include('    env_file: payload.env\n'));
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', include('    env_file: !override payload.env\n'));
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('falls back to the included file\'s directory when project_directory is tagged !reset', async () => {
+          const decoy = path.join(dir, 'decoy');
+          await write('compose.yaml', include(`    project_directory: !reset ${decoy}\n`));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', include(`    project_directory: ${decoy}\n`));
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', include(`    project_directory: !override ${decoy}\n`));
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('keeps an env_file entry tagged !reset out of the list and reads the others', async () => {
+          await write('compose.yaml', include('    env_file: [!reset payload.env, payload.env]\n'));
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', include('    env_file: [!reset other.env]\n'));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+        });
+      });
+
+      describe('a file that Compose does not load', () => {
+        beforeEach(async () => {
+          await write('big.yaml', `# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\nservices:\n  big:\n    image: nginx\n`);
+          await write('compose.yaml', 'include:\n  - path: big.yaml\nservices:\n  extra:\n    image: nginx\n');
+        });
+
+        it('refuses a big include path that is not tagged', async () => {
+          await expect(run()).rejects.toThrow(MIB);
+        });
+
+        it.each([
+          ['a path tagged !reset', 'include:\n  - path: !reset big.yaml\n'],
+          ['an entry tagged !reset', 'include:\n  - !reset big.yaml\n'],
+          ['a map entry tagged !reset', 'include:\n  - !reset {path: big.yaml}\n'],
+          ['a path list entry tagged !reset', 'include:\n  - path: [!reset big.yaml]\n'],
+          ['the whole include tagged !reset', 'include: !reset\n  - big.yaml\n'],
+        ])('accepts %s, which Compose removes', async (_name, include) => {
+          await write('compose.yaml', `${include}services:\n  extra:\n    image: nginx\n`);
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('opens the other path of a list when one entry is tagged !reset', async () => {
+          await write('ok.yaml', SAFE_COMPOSE);
+          await write('compose.yaml', 'include:\n  - path: [!reset big.yaml, ok.yaml]\n');
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', 'include:\n  - path: [!reset ok.yaml, big.yaml]\n');
+          await expect(run()).rejects.toThrow(MIB);
+        });
+
+        it.each([
+          ['a file tagged !reset', '    extends:\n      file: !reset big.yaml\n      service: base\n'],
+          ['the whole extends tagged !reset', '    extends: !reset\n      file: big.yaml\n      service: base\n'],
+        ])('accepts an extends with %s', async (_name, extending) => {
+          await write('compose.yaml', `services:\n  base:\n    image: nginx\n  web:\n    image: nginx\n${extending}`);
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', 'services:\n  base:\n    image: nginx\n  web:\n    extends:\n      file: big.yaml\n      service: base\n');
+          await expect(run()).rejects.toThrow(MIB);
+        });
+      });
+
+      describe.each(['services', 'jobs'])('the env files, labels, and variables of a %s entry', (section) => {
+        const entryWith = (body: string): string => `${section}:\n  web:\n    image: nginx\n${body}`;
+
+        beforeEach(async () => {
+          await write('bomb.env', bomb);
+        });
+
+        it.each([
+          ['a list tagged !reset', '!reset [bomb.env]', ''],
+          ['a scalar tagged !reset', '!reset bomb.env', ''],
+          ['a list of maps tagged !reset', '!reset [{path: bomb.env}]', ''],
+          ['an alias of an anchor tagged !reset', '*gone', 'x-gone: &gone !reset [bomb.env]\n'],
+        ])('names no file when env_file or label_file is %s', async (_name, value, prefix) => {
+          for (const kind of ['env_file', 'label_file']) {
+            if (kind === 'label_file' && value.includes('path')) continue;
+            await write('compose.yaml', `${prefix}${entryWith(`    ${kind}: ${value}\n`)}`);
+            await expect(run()).resolves.toBeUndefined();
+          }
+        });
+
+        it('still refuses the same list when it is not tagged, or tagged !override', async () => {
+          for (const kind of ['env_file', 'label_file']) {
+            for (const tag of ['', '!override ']) {
+              await write('compose.yaml', entryWith(`    ${kind}: ${tag}[bomb.env]\n`));
+              await expect(run()).rejects.toThrow(TOO_LONG);
+            }
+          }
+        });
+
+        it('reads no value from an environment tagged !reset, and drops what an earlier file gave', async () => {
+          await write('e1.env', seedChain);
+          await write('e2.env', continuation);
+          const seeded = (environment: string): string =>
+            `${section}:\n  web:\n    image: nginx\n    environment:${environment}\n    env_file: [e1.env, e2.env]\n`;
+          // The payload is the seed, and Compose ignores it.
+          for (const environment of [` !reset\n      SEED: ${seedText}`, ` !reset [SEED=${seedText}]`]) {
+            await write('compose.yaml', seeded(environment));
+            await expect(run()).resolves.toBeUndefined();
+          }
+          await write('compose.yaml', seeded(`\n      SEED: ${seedText}`));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          // A later file that resets the whole environment drops the earlier seed, whatever it names.
+          await write('a.yaml', seeded(`\n      SEED: ${seedText}`));
+          for (const environment of [' !reset\n      SEED: small', ' !reset [SEED=small]', ' !reset {}', ' !reset null']) {
+            await write('b.yaml', `${section}:\n  web:\n    environment:${environment}\n`);
+            await expect(run(dir, A_B)).resolves.toBeUndefined();
+          }
+          await write('b.yaml', `${section}:\n  web:\n    environment: !override\n      SEED: ${seedText}\n`);
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        });
+
+        it('reads no value from a variable tagged !reset, and takes out the one an earlier file gave', async () => {
+          await write('e1.env', seedChain);
+          await write('e2.env', continuation);
+          const seeded = (environment: string): string =>
+            `${section}:\n  web:\n    image: nginx\n    environment:\n${environment}    env_file: [e1.env, e2.env]\n`;
+          await write('compose.yaml', seeded(`      SEED: !reset ${seedText}\n`));
+          await expect(run()).resolves.toBeUndefined();
+          await write('a.yaml', seeded(`      SEED: ${seedText}\n`));
+          await write('b.yaml', `${section}:\n  web:\n    environment:\n      SEED: !reset small\n`);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+          // Another variable tagged !reset leaves the seed where it was.
+          await write('b.yaml', `${section}:\n  web:\n    environment:\n      OTHER: !reset small\n`);
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+          // The same name given a value after the reset is a seed again.
+          await write('b.yaml', `${section}:\n  web:\n    environment:\n      SEED: ${seedText}\n`);
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        });
+
+        it('drops the list of an earlier file when a later file resets it with a payload', async () => {
+          await write('e1.env', seedChain);
+          await write('e2.env', continuation);
+          await write('a.yaml', `${section}:\n  web:\n    image: nginx\n    environment:\n      SEED: ${seedText}\n    env_file: [e1.env]\n`);
+          for (const payload of ['[e2.env]', '[e1.env, e2.env]', 'e1.env', '[]']) {
+            await write('b.yaml', `${section}:\n  web:\n    env_file: !reset ${payload}\n`);
+            await expect(run(dir, A_B)).resolves.toBeUndefined();
+          }
+          await write('b.yaml', `${section}:\n  web:\n    env_file: [e2.env]\n`);
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+          await write('b.yaml', `${section}:\n  web:\n    env_file: !override [e2.env]\n`);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+          await write('b.yaml', `${section}:\n  web:\n    env_file: !override [e1.env, e2.env]\n`);
+          await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
+        });
+
+        it('reads no definition from an entry tagged !reset, and no entry from a section tagged !reset', async () => {
+          await write('compose.yaml', `${section}:\n  web: !reset\n    image: nginx\n    env_file: [bomb.env]\n  other:\n    image: nginx\n`);
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', `${section}: !reset\n  web:\n    image: nginx\n    env_file: [bomb.env]\n`);
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', `${section}:\n  web: !override\n    image: nginx\n    env_file: [bomb.env]\n`);
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', `${section}: !override\n  web:\n    image: nginx\n    env_file: [bomb.env]\n`);
           await expect(run()).rejects.toThrow(TOO_LONG);
         });
 
-        it('still reads a literal raw format literally', async () => {
-          await write('compose.yaml', asFormat(kind, 'raw'));
+        it('reads no path or format from an env_file map when that field is tagged !reset', async () => {
+          await write('compose.yaml', entryWith('    env_file:\n      - path: !reset bomb.env\n'));
+          await expect(run()).resolves.toBeUndefined();
+          await write('compose.yaml', entryWith('    env_file:\n      - path: bomb.env\n        format: !reset raw\n'));
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', entryWith('    env_file:\n      - path: bomb.env\n        format: !override raw\n'));
           await expect(run()).resolves.toBeUndefined();
         });
+      });
+
+      it('still accepts an empty list tagged !reset', async () => {
+        await write('bomb.env', bomb);
+        for (const kind of ['env_file', 'label_file']) {
+          await write('compose.yaml', aFile(kind, '!reset []'));
+          await expect(run()).resolves.toBeUndefined();
+        }
+      });
+
+      it('applies one corrected reading to every entry point that shares the helper', async () => {
+        // A caller hands the helper its own cwd and invocation; the tag is read the same for each.
+        await write('bomb.env', bomb);
+        await write('compose.yaml', aFile('env_file', '!reset [bomb.env]'));
+        await expect(run(dir, ['compose', '-f', 'compose.yaml', 'up', '-d'])).resolves.toBeUndefined();
+        await expect(run(dir, ['compose', '-f', 'compose.yaml', 'config', '--format', 'json'])).resolves.toBeUndefined();
+        await write('compose.yaml', aFile('env_file', '[bomb.env]'));
+        await expect(run(dir, ['compose', '-f', 'compose.yaml', 'up', '-d'])).rejects.toThrow(TOO_LONG);
       });
     });
   });
