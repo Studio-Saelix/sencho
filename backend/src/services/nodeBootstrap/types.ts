@@ -58,6 +58,9 @@ export interface HostKeyObservation {
   knownHostsLine: string;
 }
 
+/** The result of walking a directory and everything above it for a writer other than root and the SSH user. */
+export type TrustChain = { state: 'sealed' } | { state: 'open' | 'unreadable'; at: string };
+
 export interface PathObservation {
   input: string;
   normalized: string;
@@ -75,6 +78,28 @@ export interface PathObservation {
   writableBySudo: boolean;
   parentWritableByUser: boolean | null;
   nearestExistingAncestor: string | null;
+  /**
+   * Identity (`<device>:<inode>:<owner uid>:<birth time>`) of the directory this
+   * path resolves to, as the preflight saw it; null when the path is not an
+   * existing directory, or when the host reports no creation time for it (such
+   * an identity cannot tell the directory from a successor that reuses its inode). Execution refuses any directory that is not this one,
+   * so a directory swapped in under the same name after the approval is not
+   * written, even one that took over the inode number of the approved one.
+   */
+  identity: string | null;
+  /** The same for `nearestExistingAncestor`, the directory a missing path is created in (null on the same terms). */
+  nearestExistingAncestorIdentity: string | null;
+  /**
+   * Whether anyone but root and the SSH user can change this directory or a
+   * directory above it (`trustSelf`), or a directory above it only
+   * (`trustAbove`); for a missing path, the nearest existing ancestor stands
+   * for it. Docker opens the compose file and the daemon the bind sources by
+   * name after the start step has looked at them, so the start step runs only
+   * where nobody else could have put anything at those names. Absent when the
+   * host did not report it, which withholds the plan like an unreadable chain.
+   */
+  trustSelf?: TrustChain;
+  trustAbove?: TrustChain;
   filesystem: { type: string; source: string; mountPoint: string } | null;
   freeBytes: number | null;
   mountInFstab: boolean | null;
@@ -286,6 +311,8 @@ export interface BootstrapPlanStep {
 export interface BootstrapPlanPath {
   input: string;
   realPath: string | null;
+  /** Identity of the directory as the preflight saw it (see `PathObservation.identity`); null when the plan creates it. */
+  identity: string | null;
   exists: boolean;
   created: boolean;
   stackCount?: number | null;

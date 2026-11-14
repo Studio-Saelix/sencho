@@ -2,6 +2,8 @@ import { apiFetch } from '@/lib/api';
 import type {
   BootstrapCapabilities,
   BootstrapHostKeyResult,
+  BootstrapOperation,
+  BootstrapOperationDetail,
   BootstrapPreflightResult,
 } from './types';
 
@@ -113,6 +115,8 @@ export interface PreflightInput {
   targetName: string;
   composeDir: string;
   agentDir: string;
+  /** Set when the preflight prepares a retry of this operation. */
+  operationId?: string;
 }
 
 export async function runBootstrapPreflight(
@@ -127,4 +131,60 @@ export async function runBootstrapPreflight(
   });
   if (!res.ok) throw await toError(res);
   return await res.json() as BootstrapPreflightResult;
+}
+
+/**
+ * Running an approved plan sends the preflight inputs again (the hub never
+ * stores the key) and names the reviewed plan by digest.
+ */
+export type ExecuteInput = Omit<PreflightInput, 'operationId' | 'replacePinnedFingerprint' | 'reviewedPinnedFingerprint'> & {
+  planDigest: string;
+};
+
+async function sendOperation(path: string, body: unknown, signal?: AbortSignal): Promise<BootstrapOperationDetail> {
+  const res = await apiFetch(path, {
+    method: 'POST',
+    localOnly: true,
+    signal,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw await toError(res);
+  return await res.json() as BootstrapOperationDetail;
+}
+
+export function startBootstrapOperation(input: ExecuteInput): Promise<BootstrapOperationDetail> {
+  return sendOperation('/nodes/bootstrap/operations', input);
+}
+
+export function retryBootstrapOperation(id: string, input: ExecuteInput): Promise<BootstrapOperationDetail> {
+  return sendOperation(`/nodes/bootstrap/operations/${encodeURIComponent(id)}/retry`, input);
+}
+
+export function cancelBootstrapOperation(id: string): Promise<BootstrapOperationDetail> {
+  return sendOperation(`/nodes/bootstrap/operations/${encodeURIComponent(id)}/cancel`, undefined);
+}
+
+export function releaseBootstrapOperation(id: string): Promise<BootstrapOperationDetail> {
+  return sendOperation(`/nodes/bootstrap/operations/${encodeURIComponent(id)}/release`, undefined);
+}
+
+export async function fetchBootstrapOperation(id: string, signal?: AbortSignal): Promise<BootstrapOperationDetail> {
+  const res = await apiFetch(`/nodes/bootstrap/operations/${encodeURIComponent(id)}`, { localOnly: true, signal });
+  if (!res.ok) throw await toError(res);
+  return await res.json() as BootstrapOperationDetail;
+}
+
+/** One page of runs: those that still hold a server, and with the first page the latest finished ones. */
+export interface BootstrapOperationPage {
+  operations: BootstrapOperation[];
+  /** Pass it back to read the next page of held runs; null when there are no more. */
+  nextCursor: string | null;
+}
+
+export async function listBootstrapOperations(signal?: AbortSignal, cursor?: string | null): Promise<BootstrapOperationPage> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+  const res = await apiFetch(`/nodes/bootstrap/operations${query}`, { localOnly: true, signal });
+  if (!res.ok) throw await toError(res);
+  const body = await res.json() as { operations?: BootstrapOperation[]; nextCursor?: string | null };
+  return { operations: body.operations ?? [], nextCursor: body.nextCursor ?? null };
 }

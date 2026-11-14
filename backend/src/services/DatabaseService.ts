@@ -560,6 +560,104 @@ export interface PilotEnrollment {
     used_at: number | null;
 }
 
+/** Lifecycle of one approved bootstrap execution. See NodeBootstrapOperationService. */
+export type NodeBootstrapOperationState =
+    | 'rechecking'
+    | 'running'
+    | 'enrolling'
+    | 'enrolled'
+    | 'blocked'
+    | 'failed'
+    | 'partial'
+    | 'cancelled'
+    | 'outcome_unknown'
+    | 'recovery_required';
+
+export interface NodeBootstrapOperation {
+    id: string;
+    target_key: string;
+    host: string;
+    port: number;
+    username: string;
+    address: string;
+    target_name: string;
+    host_key_fingerprint: string;
+    compose_dir: string;
+    agent_dir: string;
+    plan_json: string;
+    plan_digest: string;
+    approved_by: string;
+    approved_at: number;
+    attempt: number;
+    state: NodeBootstrapOperationState;
+    stage: string | null;
+    step: string | null;
+    node_id: number | null;
+    /** 1 once a step may have changed the host; never reset. */
+    changes_made: 0 | 1;
+    /** 1 once the start step began, so the Pilot container may exist. */
+    agent_started: 0 | 1;
+    /** 1 while the operation holds its target (the per-target lock). */
+    active: 0 | 1;
+    cancel_requested: 0 | 1;
+    error_code: string | null;
+    error_message: string | null;
+    enrollment_expires_at: number | null;
+    created_at: number;
+    updated_at: number;
+    finished_at: number | null;
+}
+
+export type NodeBootstrapEventStatus = 'started' | 'done' | 'skipped' | 'failed' | 'unknown' | 'info';
+
+export interface NodeBootstrapEvent {
+    id: number;
+    operation_id: string;
+    attempt: number;
+    at: number;
+    stage: string | null;
+    step: string | null;
+    status: NodeBootstrapEventStatus;
+    message: string;
+    detail: string | null;
+}
+
+/**
+ * Progress a running operation records about itself. Lifecycle, lock and
+ * approval columns are not here: they change only through
+ * `transitionNodeBootstrapOperation`, a compare-and-set on the state.
+ */
+export type NodeBootstrapOperationProgress = Partial<Pick<NodeBootstrapOperation,
+    'stage' | 'step' | 'node_id' | 'changes_made' | 'agent_started' | 'cancel_requested' | 'enrollment_expires_at'>>;
+
+/** What a state transition may also write. The identity columns (target, host, key, directories) never change after insert. */
+export type NodeBootstrapOperationTransition = NodeBootstrapOperationProgress & Partial<Pick<NodeBootstrapOperation,
+    'state' | 'active' | 'error_code' | 'error_message' | 'finished_at' | 'attempt' | 'plan_json'
+    | 'plan_digest' | 'approved_by' | 'approved_at'>>;
+
+const BOOTSTRAP_OPERATION_COLUMNS: ReadonlyArray<keyof NodeBootstrapOperation> = [
+    'id', 'target_key', 'host', 'port', 'username', 'address', 'target_name', 'host_key_fingerprint',
+    'compose_dir', 'agent_dir', 'plan_json', 'plan_digest', 'approved_by', 'approved_at', 'attempt', 'state',
+    'stage', 'step', 'node_id', 'changes_made', 'agent_started', 'active', 'cancel_requested', 'error_code',
+    'error_message', 'enrollment_expires_at', 'created_at', 'updated_at', 'finished_at',
+];
+const BOOTSTRAP_OPERATION_COLUMN_SET: ReadonlySet<string> = new Set(BOOTSTRAP_OPERATION_COLUMNS);
+
+/** `column = ?` assignments for the keys of `updates`, each checked against the fixed column list. */
+function bootstrapAssignments(updates: NodeBootstrapOperationTransition): { assignments: string[]; values: Array<string | number | null> } {
+    const assignments: string[] = [];
+    const values: Array<string | number | null> = [];
+    for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined) continue;
+        if (!BOOTSTRAP_OPERATION_COLUMN_SET.has(key) || key === 'id') {
+            throw new Error(`Unknown bootstrap operation column: ${key}`);
+        }
+        assignments.push(`${key} = ?`);
+        values.push(value as string | number | null);
+    }
+    return { assignments, values };
+}
+
 /** Trust-on-first-use pin for a bootstrap SSH host key, keyed by host and port. */
 export interface NodeBootstrapTrust {
     host: string;
@@ -1649,6 +1747,63 @@ export class DatabaseService {
         last_seen_at INTEGER NOT NULL,
         PRIMARY KEY (host, port)
       );
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_operations (
+        id TEXT PRIMARY KEY,
+        target_key TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        address TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        host_key_fingerprint TEXT NOT NULL,
+        compose_dir TEXT NOT NULL,
+        agent_dir TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        plan_digest TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL,
+        stage TEXT,
+        step TEXT,
+        node_id INTEGER,
+        changes_made INTEGER NOT NULL DEFAULT 0,
+        agent_started INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        error_message TEXT,
+        enrollment_expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_target
+        ON node_bootstrap_operations(target_key) WHERE active = 1;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_key
+        ON node_bootstrap_operations(host_key_fingerprint) WHERE active = 1;
+      -- A page of held runs seeks to its cursor in this index and reads on in the order it is returned,
+      -- and the finished history reads the newest rows of the second one, so neither reads rows it does not return.
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 1;
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_finished_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 0;
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        stage TEXT,
+        step TEXT,
+        status TEXT NOT NULL,
+        message TEXT NOT NULL,
+        detail TEXT,
+        FOREIGN KEY (operation_id) REFERENCES node_bootstrap_operations(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_events_op ON node_bootstrap_events(operation_id, id);
 
       CREATE TABLE IF NOT EXISTS system_state (
         key TEXT PRIMARY KEY,
@@ -6584,6 +6739,139 @@ stmt.run('gitops_schema_version', '1');
             record.approved_at,
             record.last_seen_at,
         );
+    }
+
+    // --- Node bootstrap operations ---
+
+    /** Operations kept for history; older inactive rows are pruned on insert. */
+    public static readonly BOOTSTRAP_OPERATION_HISTORY = 50;
+    /** Events kept per operation; older rows are pruned on insert. */
+    public static readonly BOOTSTRAP_EVENTS_PER_OPERATION = 300;
+
+    /**
+     * Insert a new operation holding the per-target lock. Throws
+     * `BOOTSTRAP_LOCK_HELD` when another active operation holds the same
+     * target or host key; the partial unique indexes make the check atomic.
+     */
+    public insertNodeBootstrapOperation(op: NodeBootstrapOperation): void {
+        const columns = BOOTSTRAP_OPERATION_COLUMNS;
+        const insert = this.db.prepare(
+            `INSERT INTO node_bootstrap_operations (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+        );
+        try {
+            this.db.transaction(() => {
+                insert.run(...columns.map((column) => op[column]));
+                // Only finished runs are trimmed, newest kept, read through the finished index: the holds are never read.
+                const pruned = this.db.prepare(
+                    `DELETE FROM node_bootstrap_operations WHERE active = 0 AND id NOT IN (
+                        SELECT id FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?
+                    ) RETURNING id`
+                ).all(DatabaseService.BOOTSTRAP_OPERATION_HISTORY) as Array<{ id: string }>;
+                // The foreign key is declarative only, so the events of the runs just pruned go here, by the operation index.
+                const dropEvents = this.db.prepare('DELETE FROM node_bootstrap_events WHERE operation_id = ?');
+                for (const { id } of pruned) dropEvents.run(id);
+            })();
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : '';
+            if (message.includes('UNIQUE constraint failed')) {
+                throw Object.assign(new Error('Another bootstrap operation holds this target.'), { code: 'BOOTSTRAP_LOCK_HELD' });
+            }
+            throw error;
+        }
+    }
+
+    public getNodeBootstrapOperation(id: string): NodeBootstrapOperation | undefined {
+        return this.db.prepare('SELECT * FROM node_bootstrap_operations WHERE id = ?').get(id) as NodeBootstrapOperation | undefined;
+    }
+
+    /** The active operation holding a target or host key, if any. */
+    public getActiveNodeBootstrapOperation(targetKey: string, fingerprint: string | null): NodeBootstrapOperation | undefined {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_operations WHERE active = 1 AND (target_key = ? OR host_key_fingerprint = ?) ORDER BY created_at DESC LIMIT 1'
+        ).get(targetKey, fingerprint ?? '') as NodeBootstrapOperation | undefined;
+    }
+
+    /**
+     * One page of the operations that still hold their server, newest first,
+     * after the row named by `after` (a keyset on creation time and id, so a
+     * row that changes state or is released while an operator pages through
+     * never shifts the rows still to come). Every hold is reachable by paging;
+     * none is skipped.
+     */
+    public listActiveNodeBootstrapOperations(limit: number, after: { createdAt: number; id: string } | null = null): NodeBootstrapOperation[] {
+        if (after === null) {
+            return this.db.prepare(
+                'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?'
+            ).all(limit) as NodeBootstrapOperation[];
+        }
+        // A row-value comparison, so the index is searched for the cursor instead of read from its newest end up to it.
+        return this.db.prepare(
+            `SELECT * FROM node_bootstrap_operations
+             WHERE active = 1 AND (created_at, id) < (?, ?)
+             ORDER BY created_at DESC, id DESC LIMIT ?`
+        ).all(after.createdAt, after.id, limit) as NodeBootstrapOperation[];
+    }
+
+    /** The latest operations that no longer hold their server. */
+    public listFinishedNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?'
+        ).all(limit) as NodeBootstrapOperation[];
+    }
+
+    public listNodeBootstrapOperationsInStates(states: readonly NodeBootstrapOperationState[]): NodeBootstrapOperation[] {
+        if (states.length === 0) return [];
+        return this.db.prepare(
+            `SELECT * FROM node_bootstrap_operations WHERE state IN (${states.map(() => '?').join(', ')})`
+        ).all(...states) as NodeBootstrapOperation[];
+    }
+
+    public updateNodeBootstrapOperation(id: string, updates: NodeBootstrapOperationProgress, now: number): void {
+        const { assignments, values } = bootstrapAssignments(updates);
+        assignments.push('updated_at = ?');
+        this.db.prepare(
+            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ?`
+        ).run(...values, now, id);
+    }
+
+    /**
+     * Compare-and-set the lifecycle state. Returns false when the row is no
+     * longer in one of `from`, so two writers can never both win a transition.
+     */
+    public transitionNodeBootstrapOperation(
+        id: string,
+        from: readonly NodeBootstrapOperationState[],
+        updates: NodeBootstrapOperationTransition,
+        now: number,
+        options: { stillActive?: boolean } = {},
+    ): boolean {
+        const { assignments, values } = bootstrapAssignments(updates);
+        assignments.push('updated_at = ?');
+        // `stillActive` keeps a release that lands first from being undone: the row is only moved while it still holds its server.
+        const result = this.db.prepare(
+            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})${options.stillActive ? ' AND active = 1' : ''}`
+        ).run(...values, now, id, ...from);
+        return result.changes === 1;
+    }
+
+    public appendNodeBootstrapEvent(event: Omit<NodeBootstrapEvent, 'id'>): void {
+        this.db.transaction(() => {
+            this.db.prepare(
+                `INSERT INTO node_bootstrap_events (operation_id, attempt, at, stage, step, status, message, detail)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(event.operation_id, event.attempt, event.at, event.stage, event.step, event.status, event.message, event.detail);
+            this.db.prepare(
+                `DELETE FROM node_bootstrap_events WHERE operation_id = ? AND id NOT IN (
+                    SELECT id FROM node_bootstrap_events WHERE operation_id = ? ORDER BY id DESC LIMIT ?
+                )`
+            ).run(event.operation_id, event.operation_id, DatabaseService.BOOTSTRAP_EVENTS_PER_OPERATION);
+        })();
+    }
+
+    public listNodeBootstrapEvents(operationId: string): NodeBootstrapEvent[] {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_events WHERE operation_id = ? ORDER BY id ASC'
+        ).all(operationId) as NodeBootstrapEvent[];
     }
 
     public deletePilotEnrollment(nodeId: number): void {

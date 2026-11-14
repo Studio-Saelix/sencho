@@ -77,7 +77,7 @@ export function BootstrapTargetStep({ wizard }: { wizard: ReturnType<typeof useN
           <p role="alert" className="text-xs text-destructive">{fieldError('privateKey')}</p>
         ) : (
           <p className="text-xs text-muted-foreground">
-            Used for this preflight only. It is never stored, logged or included in the plan.
+            Used for the preflight and, once you approve, for the run. Held in memory only, never stored, logged or included in the plan.
           </p>
         )}
       </div>

@@ -491,7 +491,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
       expect(evidence(facts).blockers).toBe(0);
       expect(evidence(facts).planSuppressed).toBe(false);
       const commands = planCommands(facts);
-      const install = commands.filter((command) => command.includes('apt-get install'));
+      const install = commands.filter((command) => /apt-get (-o \S+ )?install /.test(command));
       expect(install).toHaveLength(1);
       expect(install[0]).toContain('docker-compose-plugin=2.29.7-1~ubuntu.24.04~noble');
       expect(install[0]).not.toMatch(REPLACEMENT);
@@ -506,7 +506,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
         pkg.name === 'docker-buildx-plugin' ? { ...pkg, installedVersion: null } : { ...pkg }
       )),
     });
-    const install = planCommands(facts).filter((command) => command.includes('apt-get install'));
+    const install = planCommands(facts).filter((command) => /apt-get (-o \S+ )?install /.test(command));
     expect(install).toHaveLength(1);
     expect(install[0]).toContain('docker-compose-plugin');
     expect(install[0]).not.toContain('docker-buildx-plugin');
@@ -517,7 +517,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
     const distribution = makeFacts({ docker: { composeVersion: null }, packages: NOT_INSTALLED.map((pkg) => ({ ...pkg })), containers: workloads });
     expect(() => planCommands(distribution)).toThrow(/not installed from Docker packages/);
     const official = makeFacts({ docker: { composeVersion: null }, packages: OFFICIAL_ENGINE_NO_COMPOSE.map((pkg) => ({ ...pkg })), containers: workloads });
-    const installs = planCommands(official).filter((command) => command.includes('apt-get install'));
+    const installs = planCommands(official).filter((command) => /apt-get (-o \S+ )?install /.test(command));
     expect(installs).toHaveLength(1);
     expect(installs[0]).not.toMatch(REPLACEMENT);
   });
@@ -550,7 +550,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
       packages: NOT_INSTALLED.map((pkg) => ({ ...pkg })),
       repo: { dockerSourceConfigured: false, keyringPresent: false, sourceVerified: false, keyringVerified: false },
     });
-    const install = planCommands(facts).find((command) => command.includes('apt-get install')) ?? '';
+    const install = planCommands(facts).find((command) => /apt-get (-o \S+ )?install /.test(command)) ?? '';
     for (const name of ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin']) {
       expect(install).toContain(name);
     }
@@ -558,7 +558,7 @@ describe('a working Docker engine is never replaced (S4-R)', () => {
 
   it('keeps preserving an engine that has Compose', () => {
     const facts = makeFacts({ packages: NOT_INSTALLED.map((pkg) => ({ ...pkg })), containers: workloads });
-    expect(planCommands(facts).some((command) => command.includes('apt-get install'))).toBe(false);
+    expect(planCommands(facts).some((command) => /apt-get (-o \S+ )?install /.test(command))).toBe(false);
   });
 
   it('leaves a stopped distribution engine to the daemon check', () => {

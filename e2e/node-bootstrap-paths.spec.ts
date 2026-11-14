@@ -96,7 +96,7 @@ function planFor(composeDir: string, agentDir: string) {
           rationale: 'The agent keeps its compose file in a dedicated directory.',
           effect: 'directory-create',
           privilege: 'user',
-          command: `install -d -m 0700 -o 'ubuntu' -g 'ubuntu' -- '${agentDir}'`,
+          command: `sh -c 'set -eu ...' sencho-mkdir '${agentDir}' '0700' 'ubuntu' 'ubuntu' '0' '${agentDir}' '64768:2:1000:2026-01-01'`,
           target: { path: agentDir, mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
           disruptive: false,
           reversible: 'yes',
@@ -136,7 +136,7 @@ function planFor(composeDir: string, agentDir: string) {
           rationale: 'Pinned project name.',
           effect: 'container-start',
           privilege: 'sudo',
-          command: `env -u DOCKER_HOST docker compose --project-name sencho-agent --project-directory '${agentDir}' -f '${agentDir}/compose.yaml' up -d`,
+          command: `sh -c 'set -eu ... exec env -u DOCKER_HOST docker compose --project-name sencho-agent --project-directory . -f ./compose.yaml up -d' sencho-start '${agentDir}' '${agentDir}' '/opt/docker/sencho' '/opt/docker/sencho'`,
           disruptive: true,
           reversible: 'yes',
           pointOfNoReturn: true,
@@ -257,7 +257,7 @@ test.describe('Node bootstrap wizard', () => {
     await expect(page.getByText('Not changed')).toBeVisible();
     await expect(page.getByText('/srv/sencho-stacks').first()).toBeVisible();
     await expect(page.getByText('/srv/sencho-agent').first()).toBeVisible();
-    await expect(page.getByText(/install -d -m 0700/)).toBeVisible();
+    await expect(page.getByText(/sencho-mkdir .* '0700'/)).toBeVisible();
     await expect(page.getByText(/--project-name sencho-agent/)).toBeVisible();
     await expect(page.getByText('No changes have been made on this server.').first()).toBeVisible();
     const firstDigest = await page.locator('code', { hasText: /^sha256:/ }).innerText();
@@ -274,5 +274,48 @@ test.describe('Node bootstrap wizard', () => {
     await expect(page.getByText('1. Pilot Agent installation directory')).toBeVisible();
     const secondDigest = await page.locator('code', { hasText: /^sha256:/ }).innerText();
     expect(secondDigest).not.toBe(firstDigest);
+  });
+
+  test('approves the reviewed plan in two clicks and follows the run to enrolled', async ({ page }) => {
+    await loginAs(page);
+    await mockBootstrap(page);
+    const operationId = '11111111-1111-4111-8111-111111111111';
+    const plan = planFor('/opt/docker/sencho', '/opt/sencho-agent');
+    const operation = (state: string, stage: string | null) => ({
+      id: operationId, targetName: 'media-server', host: 'server.example.com', port: 22, username: 'ubuntu',
+      address: '192.168.1.50', hostKeyFingerprint: 'SHA256:abc', composeDir: '/opt/docker/sencho', agentDir: '/opt/sencho-agent',
+      planDigest: plan.digest, approvedBy: 'admin', approvedAt: 1_762_300_000_000, attempt: 1, state, stage, step: null,
+      nodeId: state === 'enrolled' ? 7 : null, changesMade: state !== 'rechecking', active: state !== 'enrolled', cancelRequested: false,
+      error: null, enrollmentExpiresAt: null, createdAt: 1_762_300_000_000, updatedAt: 1_762_300_000_000, finishedAt: null,
+      actions: { cancel: state !== 'enrolled', retry: false, release: false }, plan, events: [],
+    });
+    let executeBody: Record<string, unknown> | null = null;
+    await page.route('**/api/nodes/bootstrap/operations', (route: Route) => {
+      if (route.request().method() === 'POST') {
+        executeBody = route.request().postDataJSON() as Record<string, unknown>;
+        return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(operation('rechecking', null)) });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ operations: [] }) });
+    });
+    await page.route(`**/api/nodes/bootstrap/operations/${operationId}`, (route: Route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify(operation('enrolled', 'enroll')),
+    }));
+
+    await page.goto('/nodes/local/fleet');
+    await openWizard(page);
+    await fillConnection(page);
+    await page.getByRole('button', { name: 'Check host key' }).click();
+    await page.getByRole('checkbox', { name: /I trust this host key/ }).check();
+    await page.getByRole('button', { name: 'Run preflight' }).click();
+
+    await page.getByRole('button', { name: 'Approve and run' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toContainText(`Plan sha256:${plan.digest}`);
+    expect(executeBody).toBeNull();
+    await confirm.getByRole('button', { name: 'Approve and run' }).click();
+
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('Re-checking');
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('readiness for deployments has not been verified', { timeout: 10_000 });
+    expect(executeBody).toMatchObject({ planDigest: plan.digest, host: 'server.example.com', targetName: 'media-server' });
   });
 });

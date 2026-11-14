@@ -8,15 +8,16 @@ import {
   repoVerified,
   unsupportedComposeAddition,
 } from './evidence';
-import { DOCKER_LOCAL_ASSIGNMENTS, DOCKER_LOCAL_UNSET_ARGS, debianArchitecture } from './probes';
+import { debianArchitecture } from './probes';
+import { SYSTEM_DIRECTORY, createDirectoryCommand, startProjectCommand } from './executionCommands';
 import {
   BOOTSTRAP_MARKER_FILENAME,
   BOOTSTRAP_MARKER_SCHEMA_VERSION,
+  HUB_CA_STEP_ID,
   PILOT_CONTAINER_NAME,
   PILOT_DATA_VOLUME,
   PILOT_IMAGE_REF,
   PILOT_PROJECT_NAME,
-  shellQuote,
 } from './pathPolicy';
 import type {
   BootstrapFacts,
@@ -40,6 +41,13 @@ import type {
 export const BOOTSTRAP_PLAN_VERSION = 1 as const;
 
 const MARKER_MODE = '0600';
+/**
+ * A freshly booted Ubuntu host often runs its own apt jobs for a few minutes;
+ * the install waits up to five minutes for the dpkg lock instead of failing at
+ * once. (The metadata refresh takes a different lock, which apt cannot wait
+ * for, so the run retries that step instead.)
+ */
+const APT_LOCK_WAIT = '-o DPkg::Lock::Timeout=300';
 const COMPOSE_FILE_MODE = '0600';
 const CA_FILE_MODE = '0644';
 
@@ -74,31 +82,17 @@ function sudoCommand(command: string, sudo: boolean): string {
   return sudo ? `sudo -n ${command}` : command;
 }
 
-function installDirCommand(path: string, mode: string, owner: string, group: string, sudo: boolean): string {
-  return sudoCommand(`install -d -m ${mode} -o ${shellQuote(owner)} -g ${shellQuote(group)} -- ${shellQuote(path)}`, sudo);
-}
-
-function startCommand(agentDir: string, sudo: boolean): string {
-  const compose = `${agentDir}/compose.yaml`;
-  // Pin both the Docker endpoint and the Compose project: a configured remote
-  // context or ambient Compose variable must not change which daemon or project
-  // this command starts.
-  const base = [
-    `env ${DOCKER_LOCAL_UNSET_ARGS} -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES ${DOCKER_LOCAL_ASSIGNMENTS}`,
-    'docker compose',
-    `--project-name ${PILOT_PROJECT_NAME}`,
-    `--project-directory ${shellQuote(agentDir)}`,
-    `-f ${shellQuote(compose)}`,
-    'up -d',
-  ].join(' ');
-  return sudoCommand(base, sudo);
+/** The identity a directory step is bound to; a plan is never built without it (the preflight blocks first). */
+function requiredIdentity(identity: string | null, directory: string): string {
+  if (!identity || identity.endsWith(':-')) throw new Error(`The plan requires an identity with a creation time for the directory ${directory} is created in.`);
+  return identity;
 }
 
 function packageInstallCommand(packages: DockerPackage[], resolved: boolean): string {
   const specs = packages.map((pkg) => (
     resolved && pkg.candidateVersion ? `${pkg.name}=${pkg.candidateVersion}` : pkg.name
   ));
-  return `apt-get install -y --no-install-recommends ${specs.join(' ')}`;
+  return `apt-get ${APT_LOCK_WAIT} install -y --no-install-recommends ${specs.join(' ')}`;
 }
 
 function aptUpdateStep(sudo: boolean): BootstrapPlanStep {
@@ -129,7 +123,7 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
       rationale: 'The Docker repository key must be readable by apt from a stable location.',
       effect: 'directory-create',
       privilege: sudo ? 'sudo' : 'user',
-      command: installDirCommand('/etc/apt/keyrings', '0755', 'root', 'root', sudo),
+      command: createDirectoryCommand('/etc/apt/keyrings', { mode: '0755', owner: 'root', group: 'root' }, { sudo, allowExisting: true, approved: '/etc/apt/keyrings', binding: SYSTEM_DIRECTORY }),
       target: { path: '/etc/apt/keyrings', mode: '0755', owner: 'root', group: 'root', preserveExisting: true },
       disruptive: false,
       reversible: 'yes',
@@ -139,27 +133,15 @@ function repoSteps(facts: BootstrapFacts, sudo: boolean): BootstrapPlanStep[] {
     {
       id: 'docker-key',
       title: 'Fetch the Docker repository key',
-      rationale: 'apt verifies the Docker package signatures with this key.',
+      rationale: 'apt verifies the Docker package signatures with this key. The download is checked as Docker\'s release key before it is put in place, with the mode and owner below.',
       effect: 'file-write',
       privilege: sudo ? 'sudo' : 'user',
-      command: sudoCommand('curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc', sudo),
+      command: sudoCommand('curl -fsSL https://download.docker.com/linux/ubuntu/gpg', sudo),
       target: { path: '/etc/apt/keyrings/docker.asc', mode: CA_FILE_MODE, owner: 'root', group: 'root', preserveExisting: false },
       disruptive: false,
       reversible: 'yes',
       pointOfNoReturn: false,
       timeoutMs: 30_000,
-    },
-    {
-      id: 'docker-key-mode',
-      title: 'Make the Docker key world-readable',
-      rationale: 'apt reads the key as a non-root user.',
-      effect: 'file-write',
-      privilege: sudo ? 'sudo' : 'user',
-      command: sudoCommand('chmod 0644 /etc/apt/keyrings/docker.asc', sudo),
-      disruptive: false,
-      reversible: 'yes',
-      pointOfNoReturn: false,
-      timeoutMs: 10_000,
     },
     {
       id: 'docker-sources',
@@ -255,7 +237,7 @@ function agentProjectSteps(
   ];
   if (input.caPem) {
     steps.push({
-      id: 'agent-hub-ca',
+      id: HUB_CA_STEP_ID,
       title: 'Write the hub CA certificate',
       rationale: 'The Pilot trusts the hub certificate chain from this file.',
       effect: 'file-write',
@@ -359,7 +341,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     }
     const versionsKnown = packagesToInstall.every((pkg) => pkg.candidateVersion !== null);
     if (!versionsKnown) {
-      notices.push('Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Execution re-checks the resolved versions before installation.');
+      notices.push("Package versions are not available from the local apt index yet, so they are resolved from the official repository when the plan runs. Before installing, the run checks that every package's candidate comes from the official Docker repository, and installs nothing if one does not.");
     }
     stages.push({
       id: 'docker_packages',
@@ -438,7 +420,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'Sencho manages the Compose project folders in this directory.',
         effect: 'directory-create',
         privilege: composeDir.parentWritableByUser ? 'user' : 'sudo',
-        command: installDirCommand(composeDir.input, '0755', owner, group, !composeDir.parentWritableByUser && !root),
+        command: createDirectoryCommand(composeDir.input, { mode: '0755', owner, group }, { sudo: !composeDir.parentWritableByUser && !root, allowExisting: false, approved: composeDir.realPath ?? composeDir.input, binding: requiredIdentity(composeDir.nearestExistingAncestorIdentity, composeDir.input) }),
         target: { path: composeDir.input, mode: '0755', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -467,7 +449,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
         rationale: 'The agent keeps its compose file and hub CA in a dedicated directory.',
         effect: 'directory-create',
         privilege: agentDir.parentWritableByUser ? 'user' : 'sudo',
-        command: installDirCommand(agentDir.input, '0700', owner, group, !agentDir.parentWritableByUser && !root),
+        command: createDirectoryCommand(agentDir.input, { mode: '0700', owner, group }, { sudo: !agentDir.parentWritableByUser && !root, allowExisting: false, approved: agentDir.realPath ?? agentDir.input, binding: requiredIdentity(agentDir.nearestExistingAncestorIdentity, agentDir.input) }),
         target: { path: agentDir.input, mode: '0700', owner, group, preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -493,10 +475,14 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     steps: [{
       id: 'start-agent',
       title: `Start the ${PILOT_PROJECT_NAME} project`,
-      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs.',
+      rationale: 'The project name, directory and local Docker endpoint are pinned so ambient variables and contexts cannot change which project or daemon runs. The agent directory is entered by identity, the compose file and hub CA are checked against the plan, and nothing starts unless only root and the SSH user can change the Agent directory and its parents, the parents of the Compose directory, and those two files, because Docker opens them by name after the check; a directory swapped in after the approval is not started.',
       effect: 'container-start',
       privilege: startSudo ? 'sudo' : 'user',
-      command: startCommand(agentDir.input, startSudo),
+      command: startProjectCommand(
+        { path: agentDir.input, approved: agentDir.realPath ?? agentDir.input },
+        { path: composeDir.input, approved: composeDir.realPath ?? composeDir.input },
+        startSudo,
+      ),
       disruptive: true,
       reversible: 'yes',
       pointOfNoReturn: true,
@@ -511,7 +497,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     const volumeNames = facts.agent.dataVolumeNames.length > 0
       ? facts.agent.dataVolumeNames.join(', ')
       : PILOT_DATA_VOLUME;
-    notices.push(`The ${volumeNames} volume already exists. Execution verifies the stored Pilot identity before reusing it.`);
+    notices.push(`The ${volumeNames} volume already exists and is kept. Only a volume this bootstrap's own earlier attempt created gets this far; any other blocks the preflight.`);
   }
   if (previousAttempt) {
     notices.push('A previous bootstrap attempt was found in the agent directory. Execution reconciles it against this plan and never overwrites a file whose content differs.');
@@ -534,6 +520,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       composeDir: {
         input: composeDir.input,
         realPath: composeDir.realPath,
+        identity: composeDir.exists ? composeDir.identity : null,
         exists: composeDir.exists,
         created: !composeDir.exists,
         stackCount: composeDir.stackCount,
@@ -541,6 +528,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       agentDir: {
         input: agentDir.input,
         realPath: agentDir.realPath,
+        identity: agentDir.exists ? agentDir.identity : null,
         exists: agentDir.exists,
         created: !agentDir.exists,
       },
@@ -556,11 +544,11 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
     ],
     versions,
     redactions: [
-      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when execution starts, valid for 15 minutes and never written to the plan.' },
-      { placeholder: '{{SSH_PRIVATE_KEY}}', purpose: 'Used only for this preflight and never stored, logged or returned.' },
+      { placeholder: '{{SENCHO_ENROLL_TOKEN}}', purpose: 'Minted when the run reaches the compose file, after the Docker steps. Valid once, for 15 minutes, and never written to the plan.' },
+      { placeholder: '{{SSH_PRIVATE_KEY}}', purpose: 'Used for the preflight and, when you approve, for the run. Held in memory only, never stored, logged or returned.' },
     ],
     verification: [
-      { id: 'project-exists', title: `The ${PILOT_PROJECT_NAME} project exists`, expected: 'docker compose ls lists the project', slice: 'S2' },
+      { id: 'project-exists', title: `The ${PILOT_PROJECT_NAME} project exists`, expected: `docker inspect shows the ${PILOT_CONTAINER_NAME} container in the ${PILOT_PROJECT_NAME} project`, slice: 'S2' },
       { id: 'container-running', title: `The ${PILOT_CONTAINER_NAME} container is running`, expected: 'docker inspect reports running', slice: 'S2' },
       { id: 'labels-point-at-dir', title: 'Compose labels point at the chosen agent directory', expected: `${agentDir.input} in com.docker.compose.project.working_dir`, slice: 'S2' },
       { id: 'compose-mount', title: 'The Compose directory is mounted at the same path', expected: `bind source and target both equal ${composeDir.input}`, slice: 'S3' },
@@ -655,7 +643,7 @@ export function formatPlanText(plan: BootstrapPlan): string {
   for (const notice of plan.notices) lines.push(`Note: ${notice}`);
   lines.push('');
   lines.push('Expected after execution:');
-  for (const item of plan.verification) lines.push(`- [${item.slice}] ${item.title}: ${item.expected}`);
+  for (const item of plan.verification) lines.push(`- [${item.slice === 'S2' ? 'run' : 'readiness'}] ${item.title}: ${item.expected}`);
   lines.push('');
   lines.push(`Plan digest: sha256:${plan.digest}`);
   return lines.join('\n');
