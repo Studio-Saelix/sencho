@@ -54,6 +54,12 @@ export type SshErrorCode =
   | 'SELF_TARGET'
   | 'PREFLIGHT_TIMEOUT';
 
+const ERROR_STATUS: Partial<Record<SshErrorCode, number>> = {
+  PREFLIGHT_TIMEOUT: 504,
+  HOST_KEY_UNTRUSTED: 409,
+  SELF_TARGET: 400,
+};
+
 export class SshTransportError extends Error {
   public readonly code: SshErrorCode;
   public readonly status: number;
@@ -62,7 +68,7 @@ export class SshTransportError extends Error {
     super(message);
     this.name = 'SshTransportError';
     this.code = code;
-    this.status = code === 'PREFLIGHT_TIMEOUT' ? 504 : code === 'HOST_KEY_UNTRUSTED' ? 409 : code === 'SELF_TARGET' ? 400 : 422;
+    this.status = ERROR_STATUS[code] ?? 422;
   }
 }
 
@@ -563,9 +569,13 @@ function runSession(
       finished = true;
       clearWatchdog();
       if (!ready) {
-        reject(selfTarget ? selfTargetError() : hostKeyRejected
-          ? new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.')
-          : new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before authentication.'));
+        if (selfTarget) {
+          reject(selfTargetError());
+        } else if (hostKeyRejected) {
+          reject(new SshTransportError('HOST_KEY_UNTRUSTED', 'The host key changed before the preflight connected.'));
+        } else {
+          reject(new SshTransportError('SSH_UNREACHABLE', 'The SSH connection closed before authentication.'));
+        }
         return;
       }
       if (completed < commands.length) {
