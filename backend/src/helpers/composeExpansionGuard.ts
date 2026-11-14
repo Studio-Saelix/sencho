@@ -1146,7 +1146,9 @@ function isMergeKey(key: unknown): boolean {
 /**
  * The entries of a mapping with its `<<` merges applied. An explicit key wins
  * over a merged one, and an earlier merge source over a later one, the way
- * Compose's YAML decoder resolves them.
+ * Compose's YAML decoder resolves them. A merge value, or a source in a list of
+ * them, tagged `!reset` is removed with what it held, like any other node
+ * tagged `!reset`.
  */
 function mapEntries(map: YAMLMap, targets: Map<Node, Node>, seen = new Set<unknown>()): Map<string, unknown> {
   const entries = new Map<string, unknown>();
@@ -1162,9 +1164,9 @@ function mapEntries(map: YAMLMap, targets: Map<Node, Node>, seen = new Set<unkno
   if (seen.has(map)) return entries;
   seen.add(map);
   for (const merge of merges) {
-    const resolved = deref(merge, targets);
+    const resolved = deref(unlessReset(merge, targets), targets);
     for (const source of isSeq(resolved) ? resolved.items : [resolved]) {
-      const sourceMap = deref(source, targets);
+      const sourceMap = deref(unlessReset(source, targets), targets);
       if (!isMap(sourceMap)) continue;
       for (const [key, value] of mapEntries(sourceMap, targets, seen)) {
         if (!entries.has(key)) entries.set(key, value);
@@ -1544,7 +1546,7 @@ function effectiveReads(
     };
     const parent = inherited.get(id) ?? (info.parent === null ? undefined : effectiveOf(info.parent));
     active.delete(id);
-    // A list or `environment:` tagged `!override` in the extending service
+    // A list or `environment:` tagged `!override` or `!reset` in the extending service
     // replaces what the parent gave it (a tag on the whole service does not
     // drop the parent's lists). Compose keeps the extending service's tags when
     // it combines the result with another file's definition; the parent's own

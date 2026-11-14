@@ -3212,9 +3212,13 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
       it.each([
         ['a list entry tagged !override', '\n      - !override A'],
         ['a list entry tagged !!str', '\n      - !!str A'],
-        ['a map entry tagged !reset', '\n      A: !reset null'],
       ])('accepts it when a later file gives %s, which Compose applies as written', async (_name, environment) => {
         await write('b.yaml', second(environment));
+        await expect(run(dir, A_B)).resolves.toBeUndefined();
+      });
+
+      it('accepts it when a later file tags the variable !reset, which Compose removes', async () => {
+        await write('b.yaml', second('\n      A: !reset null'));
         await expect(run(dir, A_B)).resolves.toBeUndefined();
       });
 
@@ -3278,7 +3282,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         await expect(run()).resolves.toBeUndefined();
       });
 
-      it('reads no format from a label_file map, which Compose rejects', async () => {
+      it('reads nothing from a label_file map, which Compose rejects', async () => {
         await write('compose.yaml', asFormat('${FMT}').replace('env_file', 'label_file'));
         await write('.env', 'FMT=other\n');
         await expect(run()).resolves.toBeUndefined();
@@ -3286,8 +3290,10 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
     });
 
     // Compose removes a node tagged `!reset` and ignores the value attached to
-    // the tag, where `!override` replaces the earlier value with it. Each shape
-    // below was rendered with Compose 5.7.0 against the controls beside it.
+    // the tag, where `!override` replaces the earlier value with it. The shapes
+    // below were rendered with Compose 5.7.0 against the controls beside them,
+    // except the `jobs` variants (Compose 5.7.0 rejects `jobs:`), which pin the
+    // reader a service shares with a job.
     describe('a node tagged !reset is removed, and the value attached to the tag is not read', () => {
       const MIB = /larger than 1 MiB/;
       const bomb = `A0=seed\n${Array.from({ length: 24 }, (_, i) => `A${i + 1}="\${A${i}}\${A${i}}"`).join('\n')}\n`;
@@ -3356,10 +3362,12 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         });
 
         it('keeps an env_file entry tagged !reset out of the list and reads the others', async () => {
-          await write('compose.yaml', include('    env_file: [!reset payload.env, payload.env]\n'));
-          await expect(run()).resolves.toBeUndefined();
-          await write('compose.yaml', include('    env_file: [!reset other.env]\n'));
+          // A later entry overrides an earlier one, so the short value wins only if the tagged entry is read.
+          await write('kept.env', `FROM=${seedText}\n`);
+          await write('compose.yaml', include('    env_file: [kept.env, !reset payload.env]\n'));
           await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', include('    env_file: [kept.env, payload.env]\n'));
+          await expect(run()).resolves.toBeUndefined();
         });
       });
 
@@ -3401,6 +3409,19 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           await write('compose.yaml', 'services:\n  base:\n    image: nginx\n  web:\n    extends:\n      file: big.yaml\n      service: base\n');
           await expect(run()).rejects.toThrow(MIB);
         });
+
+        it.each([
+          ['a service tagged !reset', '    extends:\n      service: !reset base\n'],
+          ['the shorthand tagged !reset', '    extends: !reset base\n'],
+        ])('does not join the chain of the service an extends names when it has %s', async (_name, extending) => {
+          await write('e1.env', `${seedChain}`);
+          await write('e2.env', continuation);
+          const parent = `services:\n  base:\n    image: nginx\n    environment:\n      SEED: ${seedText}\n    env_file: [e1.env]\n  web:\n    env_file: [e2.env]\n`;
+          await write('compose.yaml', `${parent}    extends: base\n`);
+          await expect(run()).rejects.toThrow(TOO_LONG);
+          await write('compose.yaml', `${parent}${extending}`);
+          await expect(run()).resolves.toBeUndefined();
+        });
       });
 
       describe.each(['services', 'jobs'])('the env files, labels, and variables of a %s entry', (section) => {
@@ -3417,6 +3438,7 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           ['an alias of an anchor tagged !reset', '*gone', 'x-gone: &gone !reset [bomb.env]\n'],
         ])('names no file when env_file or label_file is %s', async (_name, value, prefix) => {
           for (const kind of ['env_file', 'label_file']) {
+            // Compose rejects a label_file written as a map, so there is no file to name.
             if (kind === 'label_file' && value.includes('path')) continue;
             await write('compose.yaml', `${prefix}${entryWith(`    ${kind}: ${value}\n`)}`);
             await expect(run()).resolves.toBeUndefined();
@@ -3488,6 +3510,15 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
           await expect(run(dir, A_B)).rejects.toThrow(TOO_LONG);
         });
 
+        it('drops the earlier definition of a service or section a later file tags !reset, whatever it holds', async () => {
+          await write('e1.env', seedChain);
+          await write('a.yaml', `${section}:\n  web:\n    image: nginx\n    environment:\n      SEED: ${seedText}\n    env_file: [e1.env]\n`);
+          await write('b.yaml', `${section}:\n  web: !reset\n    env_file: [bomb.env]\n  other:\n    image: nginx\n`);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+          await write('b.yaml', `${section}: !reset\n  web:\n    env_file: [bomb.env]\n`);
+          await expect(run(dir, A_B)).resolves.toBeUndefined();
+        });
+
         it('reads no definition from an entry tagged !reset, and no entry from a section tagged !reset', async () => {
           await write('compose.yaml', `${section}:\n  web: !reset\n    image: nginx\n    env_file: [bomb.env]\n  other:\n    image: nginx\n`);
           await expect(run()).resolves.toBeUndefined();
@@ -3509,16 +3540,66 @@ describe('assertComposeInputsWithinExpansionLimits - scalar text, interpolation 
         });
       });
 
+      describe('a map tagged !reset that another map merges in with << contributes nothing', () => {
+        it('refuses a format a merge brings from a map tagged !reset, which Compose drops', async () => {
+          await write('e1.env', `${seedChain}${continuation}`);
+          const web = (item: string): string =>
+            `x-fm: &fm !reset {format: raw}\nservices:\n  web:\n    image: nginx\n    environment:\n      SEED: ${seedText}\n    env_file:\n      - ${item}\n`;
+          for (const item of ['{path: e1.env, <<: *fm}', '{path: e1.env, <<: !reset {format: raw}}', '{path: e1.env, <<: [*fm]}']) {
+            await write('compose.yaml', web(item));
+            await expect(run()).rejects.toThrow(TOO_LONG);
+          }
+          // The same merge without the tag gives the format.
+          await write('compose.yaml', web('{path: e1.env, <<: *fm}').replace('&fm !reset', '&fm'));
+          await expect(run()).resolves.toBeUndefined();
+        });
+
+        it('reads an include project directory and env_file from a merge only when the merged map is not tagged !reset', async () => {
+          await write('sub/.env', `FROM=${seedText}\n`);
+          await write('decoy/.env', 'FROM=ab\n');
+          await write('payload.env', 'FROM=ab\n');
+          const chain = `${seedChain}${continuation}`;
+          await write('sub/e1.env', chain);
+          await write('decoy/e1.env', chain);
+          await write('sub/inc.yaml', 'services:\n  web:\n    image: nginx\n    environment:\n      SEED: ${FROM}\n    env_file: [e1.env]\n');
+          const decoy = path.join(dir, 'decoy');
+          for (const payload of [`{project_directory: ${decoy}}`, '{env_file: payload.env}']) {
+            await write('compose.yaml', `x-p: &p !reset ${payload}\ninclude:\n  - {path: sub/inc.yaml, <<: *p}\n`);
+            await expect(run()).rejects.toThrow(TOO_LONG);
+            await write('compose.yaml', `x-p: &p ${payload}\ninclude:\n  - {path: sub/inc.yaml, <<: *p}\n`);
+            await expect(run()).resolves.toBeUndefined();
+          }
+        });
+
+        it('accepts the shapes whose only payload comes from a merge of a map tagged !reset', async () => {
+          await write('bomb.env', bomb);
+          await write('big.yaml', `# ${'x'.repeat(MAX_COMPOSE_INPUT_BYTES)}\nservices:\n  big:\n    image: nginx\n`);
+          await write('e1.env', seedChain);
+          await write('e2.env', continuation);
+          const cases: Record<string, string> = {
+            'a service': 'x-b: &b !reset {env_file: [bomb.env]}\nservices:\n  web:\n    <<: *b\n',
+            'an environment': `x-e: &e !reset {SEED: "${seedText}"}\nservices:\n  web:\n    image: nginx\n    environment:\n      <<: *e\n    env_file: [e1.env, e2.env]\n`,
+            'an include entry': 'x-i: &i !reset {path: big.yaml}\ninclude:\n  - <<: *i\n',
+            'an extends': 'x-x: &x !reset {file: big.yaml}\nservices:\n  base:\n    image: nginx\n  web:\n    extends:\n      service: base\n      <<: *x\n',
+          };
+          for (const [name, source] of Object.entries(cases)) {
+            await write('compose.yaml', source);
+            await expect(run(), name).resolves.toBeUndefined();
+            await write('compose.yaml', source.replace('&b !reset', '&b').replace('&e !reset', '&e').replace('&i !reset', '&i').replace('&x !reset', '&x'));
+            await expect(run(), `${name}, untagged`).rejects.toThrow(/too long|larger than 1 MiB/);
+          }
+        });
+      });
+
       it('still accepts an empty list tagged !reset', async () => {
-        await write('bomb.env', bomb);
         for (const kind of ['env_file', 'label_file']) {
           await write('compose.yaml', aFile(kind, '!reset []'));
           await expect(run()).resolves.toBeUndefined();
         }
       });
 
-      it('applies one corrected reading to every entry point that shares the helper', async () => {
-        // A caller hands the helper its own cwd and invocation; the tag is read the same for each.
+      it('reads a !reset env_file list as absent for up and for config --format json', async () => {
+        // Every caller reaches the same helper with its own invocation; the tag does not depend on the subcommand.
         await write('bomb.env', bomb);
         await write('compose.yaml', aFile('env_file', '!reset [bomb.env]'));
         await expect(run(dir, ['compose', '-f', 'compose.yaml', 'up', '-d'])).resolves.toBeUndefined();
