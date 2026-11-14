@@ -268,8 +268,17 @@ export const SEALED_DIRECTORY_SHELL = [
   '    s=$(dirname -- "$s")',
   '  done',
   '}',
-  // Walks NAME one component at a time, as the kernel resolves it, and checks the directory each component is looked up in: the directory itself and everything above it (`sealed`), with the entry looked up as the sticky rule's entry. A link met on the way is followed the same way: its target's components are looked up in the directories the target names, which are not on the path as written, and any of them could be rewritten to send Docker elsewhere. A name that cannot be followed to the end (a loop, a missing or non-directory component, a target that cannot be read exactly) reports 2, never a guess. `wc` is always a physical directory.
-  // Every directory is checked, and the last one that fails (the nearest to the end of the name) is the one reported, as when only the physical path was walked.
+  // Walks NAME one component at a time, as the kernel resolves it, and checks the
+  // directory each component is looked up in: the directory itself and everything
+  // above it (`sealed`), with the entry looked up as the sticky rule's entry. A link
+  // met on the way is followed in the same walk, so the directories its target names,
+  // which are not on the path as written, are checked too: any of them could be
+  // rewritten to send Docker elsewhere. A name that cannot be followed to the end
+  // (a loop, a missing or non-directory component, a target that cannot be read
+  // exactly) reports 2 at once, in place of any earlier failure, never a guess. `wc` is
+  // always a physical directory.
+  // Every directory is checked, and the last one that fails (the nearest to the end
+  // of the name) is the one reported, as when only the physical path was walked.
   'wcheck() { sealed "$1" "$2" && return 0; wr=$?; wb=$bad; }',
   'sealed_under() {',
   '  wn=$1; wo=$2; wh=0; wr=0; wb=',

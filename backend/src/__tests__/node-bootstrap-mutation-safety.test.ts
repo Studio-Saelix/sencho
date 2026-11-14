@@ -1957,8 +1957,8 @@ describe('B4: Compose starts only the approved project', () => {
       expect(dockerRuns()).toBe(1);
     });
 
-    // The Compose directory is named safe/alias/stacks; alias leads to open/hop, which leads to safe/real/stacks. Docker looks "hop" up in "open", which is on neither the physical path nor the name as written, so whoever can write in "open" can repoint the bind source after every check passed.
-    describe('a place that only a link\'s target passes through (B4)', () => {
+    // The Compose directory is named safe/alias/stacks; alias leads to open/hop, which leads to safe/real (where stacks is). Docker looks "hop" up in "open", which is on neither the physical path nor the name as written, so whoever can write in "open" can repoint the bind source after every check passed.
+    describe('a place that only a link\'s target passes through', () => {
       const nested = (targets: 'absolute' | 'relative') => {
         const safe = path.join(root, 'safe');
         const open = path.join(root, 'open');
@@ -2004,13 +2004,22 @@ describe('B4: Compose starts only the approved project', () => {
         expect(dockerRuns()).toBe(0);
       });
 
+      it('says it could not inspect the name, and starts nothing, when a link in it cannot be read', async () => {
+        const { step } = nested('absolute');
+        const realReadlink = execFileSync('sh', ['-c', 'command -v readlink'], { encoding: 'utf8' }).trim();
+        fs.writeFileSync(path.join(root, 'bin', 'readlink'), `#!/bin/sh\nexit 1\n# ${realReadlink}\n`, { mode: 0o755 });
+        const result = runShell(step(false).command as string, startInput({ agentIdentity: identity(agent), composeIdentity: identity(path.join(root, 'safe', 'real', 'stacks')), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256(CA_TEXT) }), env);
+        expect(result.status).toBe(START_EXIT.notSealed);
+        expect(result.stderr).toMatch(/could not inspect/);
+        expect(dockerRuns()).toBe(0);
+      });
+
       it('names the directory only the target passes through', () => {
-        const { open, named, step } = nested('absolute');
+        const { open, step } = nested('absolute');
         fs.chmodSync(open, 0o777);
         const result = runShell(step(false).command as string, startInput({ agentIdentity: identity(agent), composeIdentity: identity(path.join(root, 'safe', 'real', 'stacks')), composeSha256: sha256(COMPOSE_TEXT), caSha256: sha256(CA_TEXT) }), env);
         expect(result.status).toBe(START_EXIT.notSealed);
         expect(result.stderr).toContain(approvedPath(open));
-        expect(named).toContain('alias');
       });
     });
 

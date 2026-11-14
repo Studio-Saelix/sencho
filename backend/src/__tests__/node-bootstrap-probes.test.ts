@@ -630,7 +630,7 @@ describe('bootstrap Docker endpoint pinning', () => {
       expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: holder });
     });
 
-    describe('a directory that only a link\'s target passes through (B4)', () => {
+    describe('a directory that only a link\'s target passes through', () => {
       // base/safe/alias -> base/open/hop -> base/safe/real, with the stacks directory in real. The physical path and the name's own parents are all closed; "open", where "hop" is looked up, is on neither.
       const nested = (targets: 'absolute' | 'relative') => {
         const safe = path.join(base, 'safe');
@@ -657,7 +657,7 @@ describe('bootstrap Docker endpoint pinning', () => {
         expect(factsOf(missing)).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
       });
 
-      it('follows a chain of links, a link whose target climbs out with ..., and links inside a target', () => {
+      it('follows a chain of links, each in another directory, and a link whose target climbs out with ..', () => {
         const hops = path.join(base, 'hops');
         const stash = path.join(base, 'stash');
         mkdirSync(path.join(base, 'real', 'stacks'), { recursive: true, mode: 0o755 });
@@ -676,36 +676,78 @@ describe('bootstrap Docker endpoint pinning', () => {
       });
 
       /** The shared walk on its own, for names the preflight never gets to (a loop has no nearest existing ancestor). */
-      const walk = (name: string, kid = '') => {
-        const out = execFileSync('sh', ['-c', `${SEALED_DIRECTORY_SHELL}\nsealed_under "$1" "$2"; r=$?; echo "$r:$bad"`, 'sencho-walk', name, kid], { encoding: 'utf8' }).trim();
+      const walk = (name: string, kid = String(process.getuid?.() ?? 0), env: NodeJS.ProcessEnv = {}, cwd?: string) => {
+        const out = execFileSync('sh', ['-c', `${SEALED_DIRECTORY_SHELL}\nsealed_under "$1" "$2"; r=$?; echo "$r:$bad"`, 'sencho-walk', name, kid], { encoding: 'utf8', cwd, env: { ...process.env, ...env } }).trim();
         const [code, ...rest] = out.split(':');
         return { code: Number(code), bad: rest.join(':') };
       };
 
+      it('judges a sticky directory by the owner of the entry looked up in it, which is the link itself and not what it leads to', () => {
+        const { open, safe } = nested('absolute');
+        chmodSync(open, 0o1777);
+        const name = path.join(safe, 'alias', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        // The same directory when the link in it belongs to somebody else: that user can remove and replace it.
+        const REAL_STAT = execFileSync('sh', ['-c', 'command -v stat'], { encoding: 'utf8' }).trim();
+        const shims = path.join(base, 'stat-shim');
+        mkdirSync(shims);
+        writeFileSync(path.join(shims, 'stat'), `#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = %u ] && [ "$4" = "${path.join(open, 'hop')}" ]; then echo 54321; exit 0; fi\nexec "${REAL_STAT}" "$@"\n`, { mode: 0o755 });
+        expect(factsOf(name, { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustAbove).toEqual({ state: 'open', at: open });
+      });
+
+      it('names the directory nearest the end of the name when several can be changed', () => {
+        // base/safe/alias -> base/open1/hop1 -> base/open2/hop2 -> base/safe/real, and both open1 and open2 are writable.
+        const { open: open1, safe } = nested('absolute');
+        const open2 = path.join(base, 'open2');
+        mkdirSync(open2, { mode: 0o755 });
+        symlinkSync(path.join(safe, 'real'), path.join(open2, 'hop2'));
+        rmSync(path.join(open1, 'hop'));
+        symlinkSync(path.join(open2, 'hop2'), path.join(open1, 'hop'));
+        const name = path.join(safe, 'alias', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        chmodSync(open1, 0o777);
+        chmodSync(open2, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: open2 });
+      });
+
+      it('applies . and .. in a name to the directory a link leads to, not to the name before it', () => {
+        const { open, safe } = nested('absolute');
+        // safe/alias/../x is safe/x (the parent of safe/real), not open/x.
+        mkdirSync(path.join(safe, 'x'), { mode: 0o755 });
+        expect(walk(`${safe}/./alias/../x`)).toEqual({ code: 0, bad: '' });
+        chmodSync(open, 0o777);
+        expect(walk(`${safe}/./alias/../x`)).toEqual({ code: 1, bad: open });
+        expect(walk(`${safe}/alias/../missing`)).toMatchObject({ code: 2 });
+      });
+
+      it('takes a name that is relative to the working directory, and a link in it that jumps to an absolute path', () => {
+        const { open, safe } = nested('absolute');
+        expect(walk('alias/stacks', undefined, {}, safe)).toEqual({ code: 0, bad: '' });
+        chmodSync(open, 0o777);
+        expect(walk('alias/stacks', undefined, {}, safe)).toEqual({ code: 1, bad: open });
+      });
+
       it('reports a name it cannot follow to the end as not inspected, never as sealed', () => {
         symlinkSync('b', path.join(base, 'a'));
         symlinkSync('a', path.join(base, 'b'));
-        expect(walk(path.join(base, 'a'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        expect(walk(path.join(base, 'a'))).toMatchObject({ code: 2 });
         // A dangling link, and a component that is a file.
         symlinkSync(path.join(base, 'nowhere'), path.join(base, 'dangling'));
-        expect(walk(path.join(base, 'dangling'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        expect(walk(path.join(base, 'dangling'))).toMatchObject({ code: 2 });
         writeFileSync(path.join(base, 'file'), '');
-        expect(walk(path.join(base, 'file', 'x'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        expect(walk(path.join(base, 'file', 'x'))).toMatchObject({ code: 2 });
         // A link target that ends in a line break cannot be read back exactly.
         mkdirSync(path.join(base, 'real'));
         symlinkSync('real\n', path.join(base, 'nl'));
-        expect(walk(path.join(base, 'nl'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        expect(walk(path.join(base, 'nl'))).toMatchObject({ code: 2 });
       });
 
-      it('follows a long chain of links that ends, and refuses one longer than the kernel allows', () => {
+      it('follows a chain of 40 links, and refuses one of 41, as the kernel does', () => {
         mkdirSync(path.join(base, 'end'));
         let previous = 'end';
-        for (let i = 0; i < 39; i++) { symlinkSync(previous, path.join(base, `n${i}`)); previous = `n${i}`; }
-        expect(walk(path.join(base, previous), String(process.getuid?.() ?? 0))).toEqual({ code: 0, bad: '' });
-        symlinkSync(previous, path.join(base, 'n39'));
-        symlinkSync('n39', path.join(base, 'n40'));
-        symlinkSync('n40', path.join(base, 'n41'));
-        expect(walk(path.join(base, 'n41'), String(process.getuid?.() ?? 0))).toMatchObject({ code: 2 });
+        for (let i = 0; i < 41; i++) { symlinkSync(previous, path.join(base, `n${i}`)); previous = `n${i}`; }
+        expect(walk(path.join(base, 'n39'))).toEqual({ code: 0, bad: '' });
+        expect(walk(path.join(base, 'n40'))).toMatchObject({ code: 2 });
       });
     });
 
