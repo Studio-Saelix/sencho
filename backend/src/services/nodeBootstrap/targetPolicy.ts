@@ -187,13 +187,19 @@ function defaultRouteGateways(): string[] {
 }
 
 /**
- * Addresses of the machine that hosts this instance, as seen from inside it.
- * A container's network gateway is the Docker host, and a bridge network's
- * gateway is the first address of its subnet, so the target `172.17.0.1` is the
- * same server as the public address the guard already refuses. The set holds
- * the default-route gateways, the first address of every subnet an interface
- * is on, and Docker's default bridge gateway. A bridge network the hub is not
- * attached to cannot be told from a LAN address here and is not covered.
+ * Gateway addresses that stand for the machine hosting this instance. Inside a
+ * bridge-networked container the default gateway, and the first host address
+ * (`.1` of a /24) of each attached subnet, is the Docker host itself, so the
+ * target `172.17.0.1` is the same server as the public address the guard
+ * already refuses. The set holds the default-route gateways (Linux
+ * `/proc/net/route`), the first host address of every IPv4 subnet from /8 to
+ * /30 an interface is on (a /31 or /32 has no separate gateway; a shorter
+ * prefix is not a bridge), and Docker's default bridge gateway.
+ *
+ * This is a heuristic that over-refuses on purpose: outside a container the
+ * same addresses are the network's router, which is refused too. A bridge
+ * network the hub is not attached to cannot be told from a LAN address and is
+ * not covered.
  */
 function gatewayAddresses(): Set<string> {
   const gateways = new Set<string>([DOCKER_DEFAULT_BRIDGE_GATEWAY, ...defaultRouteGateways()]);
@@ -213,9 +219,9 @@ function gatewayAddresses(): Set<string> {
 
 /**
  * Resolve a host to the addresses that may be dialed. Any blocked record, or a
- * record that is one of this instance's own addresses (its network interfaces
- * plus `hubHost`, the host clients reach the hub on, when it resolves), rejects
- * the whole target.
+ * record that is one of this instance's own addresses (its network interfaces,
+ * `hubHost` when it resolves, and the gateway addresses of `gatewayAddresses`),
+ * rejects the whole target.
  */
 export async function resolveTargetAddresses(
   host: string,

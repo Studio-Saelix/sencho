@@ -129,6 +129,30 @@ describe('bootstrap target address policy', () => {
       await expect(resolveTargetAddresses('10.30.40.1', dns)).rejects.toMatchObject({ code: 'INVALID_TARGET' });
     });
 
+    it('finds the first host address of a subnet that is not octet aligned, and adds none for a /31, a /32 or a prefix shorter than /8', async () => {
+      vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+        eth0: iface('172.20.17.5', '255.255.240.0', '172.20.17.5/20'),
+        ts0: iface('100.64.1.9', '255.255.255.255', '100.64.1.9/32'),
+        p2p0: iface('10.50.0.1', '255.255.255.254', '10.50.0.1/31'),
+        wide0: iface('11.9.9.9', '254.0.0.0', '11.9.9.9/7'),
+      });
+      await expect(resolveTargetAddresses('172.20.16.1', dns)).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+      await expect(resolveTargetAddresses('172.20.17.1', dns)).resolves.toEqual(['172.20.17.1']);
+      await expect(resolveTargetAddresses('100.64.1.10', dns)).resolves.toEqual(['100.64.1.10']);
+      await expect(resolveTargetAddresses('10.50.0.0', dns)).resolves.toEqual(['10.50.0.0']);
+      await expect(resolveTargetAddresses('10.0.0.1', dns)).resolves.toEqual(['10.0.0.1']);
+    });
+
+    it('reads only default routes and accepts the gateway of a static route, with hex in either case and a header-only table', async () => {
+      vi.spyOn(os, 'networkInterfaces').mockReturnValue({ eth0: iface('10.9.9.2', '255.255.255.0', '10.9.9.2/24') });
+      // Static route to 10.9.9.0 via 10.20.0.1 (0100140A) is not a default route.
+      routeTable(['0009090A', '0100140A'], ['00000000', '0212A8c0']);
+      await expect(resolveTargetAddresses('10.20.0.1', dns)).resolves.toEqual(['10.20.0.1']);
+      await expect(resolveTargetAddresses('192.168.18.2', dns)).rejects.toMatchObject({ code: 'INVALID_TARGET' });
+      routeTable();
+      await expect(resolveTargetAddresses('8.8.8.8', dns)).resolves.toEqual(['8.8.8.8']);
+    });
+
     it('still accepts other private and public addresses', async () => {
       vi.spyOn(os, 'networkInterfaces').mockReturnValue({ eth0: iface('172.20.0.5', '255.255.0.0', '172.20.0.5/16') });
       routeTable(['00000000', '0100140A']);
