@@ -270,6 +270,30 @@ describe('ResticEngine.dumpFile', () => {
       .toEqual({ ok: false, errorClass: 'integrity_mismatch' });
     expect(warn.mock.calls[0].join(' ')).toContain('does not exist');
   });
+
+  it('stops handing the body to the sink once the caller aborted', async () => {
+    const controller = new AbortController();
+    const { runner } = runnerReturning((spec) => {
+      const control = { pause: () => undefined, resume: () => undefined };
+      spec.onStdoutChunk?.(Buffer.from('first'), control);
+      // The sink aborted during the first chunk. The helper can still be
+      // producing, so the rest of the body must not reach it.
+      spec.onStdoutChunk?.(Buffer.from('second'), control);
+      return { exitCode: 0 };
+    });
+    const received: string[] = [];
+    const result = await engineWith(runner).dumpFile(
+      READ('/a.txt'),
+      11,
+      (chunk) => {
+        received.push(chunk.toString());
+        controller.abort();
+      },
+      readContext(controller.signal),
+    );
+    expect(result).toEqual({ ok: false, errorClass: 'interrupted' });
+    expect(received).toEqual(['first']);
+  });
 });
 
 // --- The runner's streaming lifecycle ---------------------------------------
