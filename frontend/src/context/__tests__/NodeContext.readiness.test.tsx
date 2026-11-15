@@ -57,4 +57,28 @@ describe('NodeContext readiness refresh', () => {
     await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'), { timeout: 3000 });
     expect(listCalls()).toBe(before + 2);
   });
+  it('ignores a node list that arrives after a newer one, so a replaced verdict does not come back', async () => {
+    const pending: Array<(state: 'provisional' | 'ready') => void> = [];
+    let first = true;
+    apiFetch.mockImplementation((path: string) => {
+      if (path !== '/nodes') return Promise.resolve({ ok: true, json: async () => ({}) });
+      if (first) {
+        first = false;
+        return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped('provisional')] });
+      }
+      return new Promise((resolve) => {
+        pending.push((state) => resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] }));
+      });
+    });
+    const { result } = renderHook(() => useNodes(), { wrapper });
+    await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'));
+
+    // Two refetches start; the older one answers last with a verdict the newer one already replaced.
+    act(() => { window.dispatchEvent(new Event('node-not-found')); });
+    act(() => { window.dispatchEvent(new Event('node-not-found')); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => { pending[1]('provisional'); });
+    await act(async () => { pending[0]('ready'); });
+    expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional');
+  });
 });

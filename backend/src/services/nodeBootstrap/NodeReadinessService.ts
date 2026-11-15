@@ -31,9 +31,10 @@ import {
  * There is no poller. A check is one bounded HTTP request; checks for one node
  * never overlap, and a check requested while one runs makes that check run
  * once more when it ends (up to MAX_RERUNS), so the stored verdict normally
- * describes the newest tunnel. A dropped tunnel, or a hub start, puts a ready node back
- * to provisional until the next check. Nodes enrolled by hand have no readiness row and are never checked,
- * so their connection status means what it always meant.
+ * describes the newest tunnel. A dropped tunnel, or a hub start, puts a ready
+ * node back to provisional until the next check. Nodes enrolled by hand have
+ * no readiness row and are never checked, so their connection status means
+ * what it always meant.
  */
 
 export const READINESS_TIMEOUT_MS = 15_000;
@@ -124,8 +125,12 @@ export function effectiveReadinessState(row: Pick<NodeReadinessRow, 'state' | 'g
 
 export function readinessView(row: NodeReadinessRow): NodeReadinessView {
   const gates = parseGates(row.gates_json);
-  // Logged on the single-node read only, so a damaged row does not flood the log on every node-list fetch.
-  if (gates === null) console.warn(`[Readiness] Node ${row.node_id} has stored gates that cannot be read; it reads as not ready.`);
+  // Only a ready verdict changes meaning when its gates cannot be read. The node list does not come
+  // through here, but every run view does, so this repeats on each run-view read until the next check
+  // rewrites the row.
+  if (gates === null && row.state === 'ready') {
+    console.warn(`[Readiness] Node ${row.node_id} has a ready verdict whose stored gates cannot be read; it reads as not ready.`);
+  }
   return {
     state: effectiveReadinessState(row),
     operationId: row.operation_id,

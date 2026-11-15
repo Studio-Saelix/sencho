@@ -139,11 +139,17 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Readiness announcements can start refetches close together; only the newest one may write the list,
+  // so a slow earlier response cannot bring back a verdict a later one already replaced.
+  const nodesRequestSeqRef = useRef(0);
+
   const refreshNodes = useCallback(async () => {
+    const seq = ++nodesRequestSeqRef.current;
     try {
       const res = await apiFetch('/nodes');
       if (res.ok) {
         const data = await res.json();
+        if (seq !== nodesRequestSeqRef.current) return;
         setNodes(data);
 
         const currentActive = activeNodeRef.current;

@@ -473,6 +473,24 @@ describe('node readiness', () => {
     }
   });
 
+  it('logs unreadable stored gates only when they back a ready verdict', () => {
+    const { nodeId, operationId, service } = setup();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+      db.recordNodeReadinessResult(nodeId, operationId, { state: 'not_ready', gatesJson: 'not json', agentVersion: '1.0.0', checkedAt: Date.now() });
+      service.get(nodeId);
+      expect(warn).not.toHaveBeenCalled();
+      db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+      db.recordNodeReadinessResult(nodeId, operationId, { state: 'ready', gatesJson: 'not json', agentVersion: '1.0.0', checkedAt: Date.now() });
+      expect(service.get(nodeId)?.state).toBe('not_ready');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain(`Node ${nodeId}`);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('audits the first verdict of a new enrollment even when it repeats the last one', async () => {
     const { nodeId, operationId, model, tunnels, service } = setup();
     announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);

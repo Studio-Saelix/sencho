@@ -219,20 +219,29 @@ describe('MobileFleet node identity', () => {
     expect(badge).toHaveAttribute('data-state', 'not_ready');
   });
 
-  it('shows no readiness badge once the node is ready, or for a node with no readiness', async () => {
+  it('shows the badge only on the node that has not passed, not on a ready node or one with no readiness', async () => {
     useNodesMock.mockReturnValue({
-      nodes: [{
-        id: 2, name: 'Edge', type: 'remote', mode: 'pilot_agent',
-        readiness: { state: 'ready', checkedAt: 1, operationId: 'op-1', operationState: 'enrolled' },
-      }],
+      nodes: [
+        { id: 1, name: 'Local', type: 'local', readiness: null },
+        {
+          id: 2, name: 'Edge', type: 'remote', mode: 'pilot_agent',
+          readiness: { state: 'ready', checkedAt: 1, operationId: 'op-1', operationState: 'enrolled' },
+        },
+        {
+          id: 3, name: 'Fresh', type: 'remote', mode: 'pilot_agent',
+          readiness: { state: 'verifying', checkedAt: null, operationId: 'op-2', operationState: 'enrolled' },
+        },
+      ],
       activeNode: null,
       hasCapability: vi.fn(() => false),
     });
-    setupFetch([makeNode(), edge({ mode: 'pilot_agent' })], []);
+    setupFetch([makeNode(), edge({ mode: 'pilot_agent' }), makeNode({ id: 3, name: 'Fresh', type: 'remote', mode: 'pilot_agent' })], []);
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
 
-    await screen.findByText('Edge');
-    expect(screen.queryByTestId('node-readiness-badge')).not.toBeInTheDocument();
+    const badges = await screen.findAllByTestId('node-readiness-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent('Verifying');
+    expect(screen.getByRole('button', { name: /Fresh/ })).toContainElement(badges[0]);
   });
 
   it('says offline and cordoned together for an offline cordoned node, keeping its pin', async () => {
