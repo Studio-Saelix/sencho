@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildBootstrapEvidence, DENIED_FILESYSTEMS } from '../services/nodeBootstrap/evidence';
-import { makeFacts } from './__helpers__/bootstrapFacts';
+import { makeFacts, type FactsOverrides } from './__helpers__/bootstrapFacts';
+import { parsePathFacts } from '../services/nodeBootstrap/probes';
 import type { BootstrapCheck, BootstrapFacts } from '../services/nodeBootstrap/types';
 
 function evidence(facts: BootstrapFacts, nodeNameTaken = false) {
@@ -207,9 +208,64 @@ describe('bootstrap evidence: conflicts and network', () => {
     }), 'agent_conflict').status).toBe('blocked');
   });
 
-  it('warns about a data volume without a project and reports unknown when unreadable', () => {
-    expect(check(makeFacts({ agent: { dataVolumeExists: true } }), 'agent_conflict').status).toBe('warn');
+  it('blocks a data volume without a project, since it can hold another Pilot identity, and reports unknown when unreadable', () => {
+    const volume = check(makeFacts({ agent: { dataVolumeExists: true } }), 'agent_conflict');
+    expect(volume.status).toBe('blocked');
+    expect(volume.summary).toMatch(/another Pilot's identity/);
     expect(check(makeFacts({ agent: { dataVolumeExists: null } }), 'agent_conflict').status).toBe('unknown');
+  });
+
+  describe('a retry of an operation that reached its start step', () => {
+    const ownMarker = {
+      exists: true,
+      isDirectory: true,
+      entries: ['compose.yaml', 'sencho-bootstrap.json'],
+      hasMarker: true,
+      hasComposeFile: true,
+      markerProject: 'sencho-agent',
+      markerComposeDir: '/opt/docker/sencho',
+      markerAgentDir: '/opt/sencho-agent',
+    };
+    const ownContainer = [{ name: 'sencho-agent', workingDir: '/opt/sencho-agent', configFiles: null, image: 'saelix/sencho:latest', status: 'Up' }];
+    const owned = { nodeNameOwned: true, agentStarted: true };
+    const ownedCheck = (facts: BootstrapFacts, ownership = owned) => buildBootstrapEvidence({
+      facts, nodeNameTaken: true, targetName: 'media-server', owned: ownership,
+    });
+
+    it('reconciles its own Pilot container and volume instead of blocking', () => {
+      const facts = makeFacts({ agent: { projectContainers: ownContainer, dataVolumeExists: true }, agentDir: ownMarker });
+      const result = ownedCheck(facts);
+      expect(result.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('warn');
+      expect(result.checks.find((entry) => entry.id === 'node_name')?.status).toBe('pass');
+      const volumeOnly = ownedCheck(makeFacts({ agent: { dataVolumeExists: true }, agentDir: ownMarker }));
+      expect(volumeOnly.checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('warn');
+    });
+
+    it('still blocks a container running from another directory, a foreign marker, or an unstarted operation', () => {
+      const elsewhere = makeFacts({
+        agent: { projectContainers: [{ ...ownContainer[0], workingDir: '/srv/other' }] },
+        agentDir: ownMarker,
+      });
+      expect(ownedCheck(elsewhere).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+      const foreignMarker = makeFacts({ agent: { projectContainers: ownContainer }, agentDir: { ...ownMarker, markerComposeDir: '/srv/stacks' } });
+      expect(ownedCheck(foreignMarker).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+      const unstarted = makeFacts({ agent: { projectContainers: ownContainer, dataVolumeExists: true }, agentDir: ownMarker });
+      expect(ownedCheck(unstarted, { nodeNameOwned: true, agentStarted: false }).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+    });
+
+    it('does not trust an incomplete container inventory', () => {
+      const facts = makeFacts({
+        agent: { projectContainers: ownContainer },
+        agentDir: ownMarker,
+        containers: { complete: false, error: 'truncated' },
+      });
+      expect(ownedCheck(facts).checks.find((entry) => entry.id === 'agent_conflict')?.status).toBe('blocked');
+    });
+
+    it('keeps a name taken by another node blocked', () => {
+      const result = ownedCheck(makeFacts(), { nodeNameOwned: false, agentStarted: false });
+      expect(result.checks.find((entry) => entry.id === 'node_name')?.status).toBe('blocked');
+    });
   });
 
   it('blocks a non-root user without sudo when any planned stage needs it', () => {
@@ -383,7 +439,7 @@ describe('bootstrap evidence: working Docker and repository provenance', () => {
       agent: { dataVolumeExists: true, dataVolumeNames: ['sencho-agent_sencho-agent-data'] },
     }));
     const row = result.checks.find((entry) => entry.id === 'agent_conflict');
-    expect(row?.status).toBe('warn');
+    expect(row?.status).toBe('blocked');
     expect(row?.observed).toBe('sencho-agent_sencho-agent-data');
   });
 });
@@ -476,5 +532,105 @@ describe('bootstrap evidence: fresh hosts and repository probe completeness', ()
     const row = result.checks.find((entry) => entry.id === 'apt_source');
     expect(row?.status).toBe('pass');
     expect(row?.summary).not.toMatch(/candidate provenance/i);
+  });
+});
+
+describe('bootstrap evidence: a directory the host cannot identify cannot be bound to a plan', () => {
+  const cases: Array<[string, FactsOverrides, BootstrapCheck['id']]> = [
+    ['an existing Compose directory', { composeDir: { identity: null } }, 'compose_dir'],
+    ['an existing Agent directory', { agentDir: { exists: true, isDirectory: true, identity: null, entries: [], writableByUser: true } }, 'agent_dir'],
+    ['the ancestor a new Compose directory is created in', { composeDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'compose_dir'],
+    ['the ancestor a new Agent directory is created in', { agentDir: { exists: false, isDirectory: false, nearestExistingAncestorIdentity: null, parentWritableByUser: true } }, 'agent_dir'],
+  ];
+  it.each(cases)('is unknown, and offers no plan, for %s with no identity', (_label, overrides, id) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/identified/);
+    expect('remediation' in row && row.remediation).toMatch(/keeps creation times/);
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
+describe('bootstrap evidence: a directory whose creation time the host cannot give', () => {
+  it.each([
+    ['an existing Agent directory', 'agentDir', 'agent_dir', true],
+    ['an existing Compose directory', 'composeDir', 'compose_dir', true],
+    ['the ancestor a new Agent directory is created in', 'agentDir', 'agent_dir', false],
+    ['the ancestor a new Compose directory is created in', 'composeDir', 'compose_dir', false],
+  ] as const)('is read from the host as no identity, and withholds the plan: %s', (_label, key, id, exists) => {
+    const output = exists
+      ? 'P_EXISTS=1\nP_ISDIR=1\nP_REAL=/srv/x\nP_IDENT=2049:1001:1000:-'
+      : 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/srv/x\nP_NEAREST=/srv\nP_NEAREST_IDENT=2049:2002:1000:-';
+    const parsed = parsePathFacts(output, '/srv/x');
+    const facts = makeFacts({
+      [key]: exists
+        ? { exists: true, isDirectory: true, entries: [], writableByUser: true, identity: parsed.identity }
+        : { exists: false, isDirectory: false, parentWritableByUser: true, nearestExistingAncestorIdentity: parsed.nearestExistingAncestorIdentity },
+    } as FactsOverrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/identified/);
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
+describe('bootstrap evidence: an identity that carries no creation time is refused even when it reaches evidence unparsed', () => {
+  it.each([
+    ['agent_dir', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, identity: '2049:1001:1000:-' } }],
+    ['compose_dir', { composeDir: { identity: '2049:1001:1000:-' } }],
+  ] as Array<[BootstrapCheck['id'], FactsOverrides]>)('for %s', (id, overrides) => {
+    const facts = makeFacts(overrides);
+    expect(check(facts, id).status).toBe('unknown');
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+});
+
+describe('bootstrap evidence: Docker opens the compose file and the mounts by name, so a place anyone else can change is refused', () => {
+  const open = { state: 'open', at: '/srv/shared' } as const;
+  const unreadable = { state: 'unreadable', at: '/srv/closed' } as const;
+  const cases: Array<[string, FactsOverrides, BootstrapCheck['id'], 'blocked' | 'unknown']> = [
+    ['an Agent directory with an open ancestor', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: open } }, 'agent_dir', 'blocked'],
+    ['a new Agent directory below an open ancestor', { agentDir: { exists: false, isDirectory: false, parentWritableByUser: true, trustSelf: open } }, 'agent_dir', 'blocked'],
+    ['a Compose directory with an open ancestor', { composeDir: { trustAbove: open } }, 'compose_dir', 'blocked'],
+    ['a new Compose directory below an open ancestor', { composeDir: { exists: false, isDirectory: false, parentWritableByUser: true, trustAbove: open } }, 'compose_dir', 'blocked'],
+    ['an Agent directory whose ancestors cannot be inspected', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: unreadable } }, 'agent_dir', 'unknown'],
+    ['a Compose directory whose ancestors cannot be inspected', { composeDir: { trustAbove: unreadable } }, 'compose_dir', 'unknown'],
+  ];
+  it.each(cases)('%s', (_label, overrides, id, status) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe(status);
+    expect(row.summary).toMatch(/\/srv\/(shared|closed)/);
+    expect('remediation' in row && row.remediation).toBeTruthy();
+    // A blocked check stops the plan as a blocker, an unknown one withholds it.
+    if (status === 'blocked') expect(evidence(facts).blockers).toBeGreaterThan(0);
+    else expect(evidence(facts).planSuppressed).toBe(true);
+  });
+
+  it('does not ask for more where the chain is sealed', () => {
+    const facts = makeFacts({ agentDir: { trustSelf: { state: 'sealed' } }, composeDir: { trustAbove: { state: 'sealed' } } });
+    expect(check(facts, 'agent_dir').status).toBe('pass');
+    expect(check(facts, 'compose_dir').status).toBe('pass');
+    expect(evidence(facts).planSuppressed).toBe(false);
+  });
+
+  it.each([
+    ['the Agent directory', { agentDir: { exists: true, isDirectory: true, entries: [], writableByUser: true, trustSelf: undefined } }, 'agent_dir'],
+    ['the Compose directory', { composeDir: { trustAbove: undefined } }, 'compose_dir'],
+  ] as Array<[string, FactsOverrides, BootstrapCheck['id']]>)('withholds the plan where the host did not say who can change %s, instead of leaving it to the start step', (_label, overrides, id) => {
+    const facts = makeFacts(overrides);
+    const row = check(facts, id);
+    expect(row.status).toBe('unknown');
+    expect(row.summary).toMatch(/did not say who can change/);
+    expect(evidence(facts).planSuppressed).toBe(true);
+  });
+
+  it('takes the Agent directory from its own chain and the Compose directory from the chain above it', () => {
+    // A directory a stranger can change matters for the files in the Agent directory, never for the Compose directory's own mode.
+    const facts = makeFacts({ agentDir: { trustAbove: open }, composeDir: { trustSelf: open } });
+    expect(check(facts, 'agent_dir').status).toBe('pass');
+    expect(check(facts, 'compose_dir').status).toBe('pass');
+    expect(evidence(facts).blockers).toBe(0);
   });
 });

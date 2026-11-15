@@ -4,13 +4,17 @@ import {
   FALLBACK_CAPABILITIES,
   checkBootstrapHostKey,
   fetchBootstrapCapabilities,
+  retryBootstrapOperation,
   runBootstrapPreflight,
+  startBootstrapOperation,
 } from './bootstrapApi';
 import { invalidationForField, strongestInvalidation } from './invalidation';
 import { pathSeparationError, validateBootstrapPath, type BootstrapPathKind } from './pathValidation';
 import type {
   BootstrapCapabilities,
   BootstrapForm,
+  BootstrapOperation,
+  BootstrapOperationDetail,
   BootstrapHostKeyResult,
   BootstrapInvalidation,
   BootstrapPreflightResult,
@@ -25,7 +29,7 @@ import type {
  * what keeps a stale plan off the screen when a path changes.
  */
 
-type BusyKind = 'host-key' | 'preflight' | null;
+type BusyKind = 'host-key' | 'preflight' | 'approve' | null;
 
 export interface BootstrapFieldError {
   field: 'host' | 'port' | 'username' | 'targetName' | 'privateKey' | 'composeDir' | 'agentDir';
@@ -39,6 +43,8 @@ export interface UseNodeBootstrapOptions {
     capabilities: typeof fetchBootstrapCapabilities;
     hostKey: typeof checkBootstrapHostKey;
     preflight: typeof runBootstrapPreflight;
+    start?: typeof startBootstrapOperation;
+    retry?: typeof retryBootstrapOperation;
   };
 }
 
@@ -73,11 +79,14 @@ function stringDetail(error: BootstrapApiError, key: string): string | null {
 }
 
 export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
-  const client = api ?? {
+  const client = useMemo(() => ({
     capabilities: fetchBootstrapCapabilities,
     hostKey: checkBootstrapHostKey,
     preflight: runBootstrapPreflight,
-  };
+    start: startBootstrapOperation,
+    retry: retryBootstrapOperation,
+    ...api,
+  }), [api]);
   const [form, setForm] = useState<BootstrapForm>(EMPTY_FORM);
   const [capabilities, setCapabilities] = useState<BootstrapCapabilities>(FALLBACK_CAPABILITIES);
   const [step, setStep] = useState<BootstrapStep>('target');
@@ -96,6 +105,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const [resultRevision, setResultRevision] = useState<number | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [invalidations, setInvalidations] = useState<readonly BootstrapInvalidation[]>([]);
+  // The stopped operation this wizard is preparing a retry for, if any.
+  const [retryOf, setRetryOf] = useState<BootstrapOperation | null>(null);
   const invalidated = strongestInvalidation(invalidations);
   const abortRef = useRef<AbortController | null>(null);
   // The live preflight request, if any. A preflight reply is applied only while
@@ -109,6 +120,8 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
   const resultRef = useRef<BootstrapPreflightResult | null>(null);
   const hostKeyRef = useRef<BootstrapHostKeyResult | null>(null);
   const stepRef = useRef<BootstrapStep>('target');
+  // The approval in flight, read synchronously so a double click cannot send two.
+  const busyRef = useRef<BusyKind>(null);
 
   useEffect(() => {
     resultRef.current = result;
@@ -155,6 +168,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     setResultRevision(null);
     setAdvancedOpen(false);
     setInvalidations([]);
+    setRetryOf(null);
     dirtyFieldsRef.current.clear();
   }, [capabilities.defaults.agentDir, capabilities.defaults.composeDir]);
 
@@ -339,6 +353,7 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         targetName: form.targetName.trim(),
         composeDir: form.composeDir,
         agentDir: form.agentDir,
+        ...(retryOf ? { operationId: retryOf.id } : {}),
       }, controller.signal);
       if (!isCurrent()) return;
       setResult(response);
@@ -409,7 +424,81 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
         setBusy(null);
       }
     }
-  }, [client, configRevision, form, hostKey, replacing]);
+  }, [client, configRevision, form, hostKey, replacing, retryOf]);
+
+  /**
+   * Prepare a retry of a stopped operation: the server, node name and both
+   * directories come from the operation, and the key is entered again because
+   * the hub never stored it. The retry then runs the preflight and shows a new
+   * plan to approve, like a first run.
+   */
+  const startRetry = useCallback((operation: BootstrapOperation) => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    preflightRef.current = null;
+    targetGenerationRef.current += 1;
+    setForm((current) => ({
+      ...current,
+      targetName: operation.targetName,
+      host: operation.host,
+      port: String(operation.port),
+      username: operation.username,
+      privateKey: '',
+      passphrase: '',
+      composeDir: operation.composeDir,
+      agentDir: operation.agentDir,
+    }));
+    setAdvancedOpen(operation.agentDir !== capabilities.defaults.agentDir);
+    setHostKey(null);
+    setTrusted(false);
+    setReplacing(false);
+    setSupersededFingerprint(null);
+    setResult(null);
+    setResultRevision(null);
+    setInvalidations([]);
+    setFieldErrors([]);
+    setError(null);
+    setBusy(null);
+    setConfigRevision((revision) => revision + 1);
+    setRetryOf(operation);
+    setStep('target');
+  }, [capabilities.defaults.agentDir]);
+
+  /** Approve the shown plan: start a run, or retry the operation this wizard prepared. */
+  const approve = useCallback(async (): Promise<BootstrapOperationDetail | null> => {
+    const plan = resultIsCurrent ? result?.plan : null;
+    // One approval at a time: a second click while the first is in flight would be refused as already used.
+    if (!plan || !hostKey || busyRef.current === 'approve') return null;
+    busyRef.current = 'approve';
+    setBusy('approve');
+    setError(null);
+    const input = {
+      host: form.host.trim(),
+      port: Number(form.port),
+      username: form.username.trim(),
+      privateKey: form.privateKey,
+      passphrase: form.passphrase ? form.passphrase : null,
+      expectedFingerprint: plan.hostKeyFingerprint,
+      targetName: form.targetName.trim(),
+      composeDir: form.composeDir,
+      agentDir: form.agentDir,
+      planDigest: plan.digest,
+    };
+    try {
+      const operation = retryOf ? await client.retry(retryOf.id, input) : await client.start(input);
+      // The hub holds the key for the run; the form no longer needs it.
+      setForm((current) => ({ ...current, privateKey: '', passphrase: '' }));
+      setRetryOf(null);
+      setStep('run');
+      return operation;
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : 'The plan could not be started.');
+      return null;
+    } finally {
+      busyRef.current = null;
+      setBusy(null);
+    }
+  }, [client, form, hostKey, result, resultIsCurrent, retryOf]);
 
   const back = useCallback(() => {
     if (step === 'plan') {
@@ -461,6 +550,9 @@ export function useNodeBootstrap({ open, api }: UseNodeBootstrapOptions) {
     advancedOpen,
     setAdvancedOpen,
     resetAgentDir,
+    retryOf,
+    startRetry,
+    approve,
     pathKindLabel: (kind: BootstrapPathKind) => kind,
   };
 }

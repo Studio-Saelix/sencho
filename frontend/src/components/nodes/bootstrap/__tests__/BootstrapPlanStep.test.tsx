@@ -4,6 +4,7 @@ vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn(async () => {}) }));
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BootstrapPlanStep } from '../BootstrapPlanStep';
+import { BOOTSTRAP_READINESS_NOTE, BOOTSTRAP_SCOPE } from '../scope';
 import type { BootstrapInspection, BootstrapPlan } from '../types';
 
 const composeDir = {
@@ -59,7 +60,7 @@ const plan: BootstrapPlan = {
         rationale: 'The agent keeps its compose file in a dedicated directory.',
         effect: 'directory-create',
         privilege: 'user',
-        command: "install -d -m 0700 -o 'ubuntu' -g 'ubuntu' -- '/srv/sencho-agent'",
+        command: "sh -c 'set -eu ...' sencho-mkdir '/srv/sencho-agent' '0700' 'ubuntu' 'ubuntu' '0' '/srv/sencho-agent' '64768:2:1000:2026-01-01'",
         target: { path: '/srv/sencho-agent', mode: '0700', owner: 'ubuntu', group: 'ubuntu', preserveExisting: false },
         disruptive: false,
         reversible: 'yes',
@@ -131,7 +132,7 @@ describe('BootstrapPlanStep', () => {
       '2. Agent files',
       '3. Start the Pilot agent',
     ]);
-    expect(screen.getByText(/install -d -m 0700/)).toBeInTheDocument();
+    expect(screen.getByText(/sencho-mkdir '\/srv\/sencho-agent' '0700'/)).toBeInTheDocument();
     expect(screen.getByText(/mode 0700/)).toBeInTheDocument();
     expect(screen.getByText('user · mode 0700 · ubuntu:ubuntu')).toBeInTheDocument();
     expect(screen.getByText(/The Docker service is active and enabled at boot/)).toBeInTheDocument();
@@ -161,7 +162,8 @@ describe('BootstrapPlanStep', () => {
     render(<BootstrapPlanStep plan={plan} inspection={inspection} />);
     expect(screen.getByText('Expected after execution')).toBeInTheDocument();
     expect(screen.getByText('The sencho-agent project exists')).toBeInTheDocument();
-    expect(screen.getByText('S2')).toBeInTheDocument();
+    expect(screen.getByText('run')).toBeInTheDocument();
+    expect(screen.getByTestId('bootstrap-plan-scope')).toHaveTextContent(BOOTSTRAP_READINESS_NOTE);
   });
 
   it('copies the plan to the clipboard', async () => {
@@ -172,6 +174,8 @@ describe('BootstrapPlanStep', () => {
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
     const text = vi.mocked(copyToClipboard).mock.calls[0][0];
     expect(text).toContain(`Plan digest: sha256:${plan.digest}`);
+    expect(text).toContain(BOOTSTRAP_SCOPE);
+    expect(text).toContain(BOOTSTRAP_READINESS_NOTE);
     expect(text).toContain(`Evidence digest: sha256:${plan.evidenceDigest}`);
     expect(text).toContain('Not changed:');
     expect(text).toContain('The Docker service is active and enabled at boot.');

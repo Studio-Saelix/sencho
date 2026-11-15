@@ -47,6 +47,8 @@ import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
+import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { getErrorMessage } from '../utils/errors';
 
 function isPilotMode(): boolean {
   return process.env.SENCHO_MODE === 'pilot';
@@ -267,6 +269,15 @@ export async function startServer(server: Server): Promise<void> {
     throw err;
   }
   StackUpdateRecoveryService.getInstance().start();
+
+  // A node bootstrap run lives in this process and holds its SSH key in memory
+  // only, so a restart ends it. Record each one as interrupted before HTTP
+  // accepts requests, so no client sees it as still running.
+  try {
+    NodeBootstrapOperationService.getInstance().recoverOnStartup();
+  } catch (err) {
+    console.error('[Startup] Node bootstrap operation recovery failed:', sanitizeForLog(getErrorMessage(err, 'unknown error')));
+  }
 
   runRecoveryReconcile();
   // The engine's own boot (helper cleanup, restic locks, restore intents, first

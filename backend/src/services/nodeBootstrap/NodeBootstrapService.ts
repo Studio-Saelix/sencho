@@ -1,6 +1,8 @@
-import { loadNativeTlsMaterial } from '../../helpers/nativeTls';
-import { sanitizeForLog } from '../../utils/safeLog';
+import net from 'net';
+import { isDisallowedOutboundTargetAddress } from '../../utils/outboundTarget';
+import { pilotHubCaPem } from '../../helpers/pilotEnrollment';
 import { DatabaseService, type NodeBootstrapTrust } from '../DatabaseService';
+import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
 import { buildBootstrapEvidence } from './evidence';
 import {
   DEFAULT_AGENT_DIR,
@@ -37,6 +39,7 @@ import {
   type SshCommandResult,
 } from './sshProbeClient';
 import {
+  ownHostAddresses,
   resolveTargetAddresses,
   validateTarget,
   type BootstrapTargetInput,
@@ -63,7 +66,15 @@ export type BootstrapErrorCode =
   | 'HOST_KEY_MISMATCH'
   | 'HOST_KEY_UNTRUSTED'
   | 'BOOTSTRAP_IN_PROGRESS'
-  | 'PREFLIGHT_FAILED';
+  | 'TARGET_CHANGED'
+  | 'PREFLIGHT_FAILED'
+  | 'PLAN_NOT_CURRENT'
+  | 'BOOTSTRAP_OPERATION_ACTIVE'
+  | 'OPERATION_NOT_FOUND'
+  | 'OPERATION_NOT_RUNNING'
+  | 'OPERATION_NOT_RETRYABLE'
+  | 'OPERATION_NOT_RELEASABLE'
+  | 'INVALID_CURSOR';
 
 export class BootstrapError extends Error {
   public readonly status: number;
@@ -86,6 +97,10 @@ export class BootstrapError extends Error {
   }
 }
 
+function selfTargetBootstrapError(): BootstrapError {
+  return new BootstrapError(400, 'INVALID_TARGET', 'The target presents the SSH host key of the server running this Sencho instance.', { field: 'host' });
+}
+
 export interface BootstrapPreflightRequest {
   host: string;
   port?: number;
@@ -106,15 +121,13 @@ export interface BootstrapPreflightRequest {
   agentDir?: string;
 }
 
-interface AuditContext {
-  username: string;
-  ip: string;
-  method: string;
-  path: string;
-}
+type AuditContext = BootstrapAuditContext;
 
 /** `hubHost` is the host clients reach the hub on; a target resolving to it is refused as the hub itself. */
 type AddressResolver = (host: string, hubHost?: string | null) => Promise<string[]>;
+
+/** The longest one own-host key probe may take (less when the request budget is shorter); the probes run in parallel. */
+const OWN_HOST_KEY_PROBE_MS = 3_000;
 
 function hubHostOf(hubUrl: string | undefined): string | null {
   if (!hubUrl) return null;
@@ -131,6 +144,8 @@ interface BootstrapDeps {
   db: DatabaseService;
   now: () => number;
   resolveAddresses: AddressResolver;
+  /** Addresses the hub knows for itself or its host, probed for the host's SSH host key. */
+  ownHostAddresses: (hubHost: string | null) => Promise<string[]>;
   caPem: () => string | null;
   /** Preflight request budget, including DNS; default is the advertised 90 seconds. */
   requestBudgetMs: number;
@@ -145,7 +160,8 @@ const DEFAULT_DEPS: Omit<BootstrapDeps, 'db'> = {
   transport: sshProbeClient,
   now: () => Date.now(),
   resolveAddresses: (hostname, hubHost) => resolveTargetAddresses(hostname, undefined, hubHost),
-  caPem: () => (loadNativeTlsMaterial()?.caPem ?? null),
+  ownHostAddresses: (hubHost) => ownHostAddresses(hubHost),
+  caPem: () => pilotHubCaPem() ?? null,
   requestBudgetMs: SSH_TOTAL_TIMEOUT_MS,
 };
 
@@ -300,6 +316,11 @@ export class NodeBootstrapService {
       throw lastError ?? new Error('No address answered');
     });
 
+    // A container cannot list its host's other addresses, so a target is also the
+    // hub itself when it answers with the key of an address the hub does know.
+    const ownKeys = await this.ownHostKeys(addresses, port, hubHostOf(options.hubUrl), deadline, options.signal);
+    if (ownKeys.has(observation.fingerprint)) throw selfTargetBootstrapError();
+
     const pin = this.deps.db.getNodeBootstrapTrust(host, port);
     const trust = pin
       ? (pin.fingerprint === observation.fingerprint ? 'trusted' : 'changed')
@@ -319,7 +340,20 @@ export class NodeBootstrapService {
   /** Run the read-only inspection and, when unblocked, build the plan. */
   public async preflight(
     input: BootstrapPreflightRequest,
-    context: { hubUrl: string; audit: AuditContext; signal?: AbortSignal },
+    context: {
+      hubUrl: string;
+      audit: AuditContext;
+      signal?: AbortSignal;
+      /**
+       * Rebuild the plan as of this time. Execution passes the approved plan's
+       * generation time, so the same facts reproduce the approved digest.
+       */
+      planNow?: number;
+      /** Dial only this address, which must still be one the host resolves to. */
+      pinnedAddress?: string;
+      /** The operation this preflight rechecks or retries, if any. */
+      ownership?: { nodeId: number | null; agentStarted: boolean } | null;
+    },
   ): Promise<BootstrapPreflightResult> {
     const targetInput = this.validateTargetInput(input);
     const paths = validateInstallPaths(
@@ -351,8 +385,15 @@ export class NodeBootstrapService {
       pin = this.deps.db.getNodeBootstrapTrust(targetInput.host, targetInput.port);
       this.assertPinnedTrust(targetInput, pin, expectedFingerprint, replacement, context.audit);
 
-      const addresses = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
+      const resolved = await this.resolveOrThrow(targetInput.host, deadline, context.signal, hubHostOf(context.hubUrl));
+      const addresses = context.pinnedAddress
+        ? resolved.filter((address) => address === context.pinnedAddress)
+        : resolved;
+      if (addresses.length === 0) {
+        throw new BootstrapError(409, 'TARGET_CHANGED', 'The host no longer resolves to the address the plan was approved for. Run the preflight again.');
+      }
       dialed = addresses[0];
+      const ownKeys = await this.ownHostKeys(resolved, targetInput.port, hubHostOf(context.hubUrl), deadline, context.signal);
       let lastError: unknown = null;
       for (const address of addresses) {
         try {
@@ -369,6 +410,7 @@ export class NodeBootstrapService {
             paths,
             remaining,
             (observation) => { hostKey = observation; },
+            ownKeys,
             context.signal,
           );
           if (probeResults.some((result) => result.error === 'PREFLIGHT_TIMEOUT')
@@ -393,6 +435,7 @@ export class NodeBootstrapService {
           return probeResults;
         } catch (error: unknown) {
           if (error instanceof BootstrapError) throw error;
+          if (error instanceof SshTransportError && error.code === 'SELF_TARGET') throw selfTargetBootstrapError();
           if (error instanceof SshTransportError && error.code === 'HOST_KEY_UNTRUSTED') {
             // A live key that changes between capture and connection is a trust
             // event, not a generic transport failure. Keep both identities.
@@ -447,8 +490,16 @@ export class NodeBootstrapService {
       now,
     });
 
-    const nodeNameTaken = this.deps.db.getNodes().some((node) => node.name === targetInput.targetName);
-    const evidence = buildBootstrapEvidence({ facts, nodeNameTaken, targetName: targetInput.targetName });
+    const namedNode = this.deps.db.getNodes().find((node) => node.name === targetInput.targetName);
+    const ownership = context.ownership ?? null;
+    const evidence = buildBootstrapEvidence({
+      facts,
+      nodeNameTaken: namedNode !== undefined,
+      targetName: targetInput.targetName,
+      owned: ownership
+        ? { nodeNameOwned: namedNode !== undefined && namedNode.id === ownership.nodeId, agentStarted: ownership.agentStarted }
+        : null,
+    });
     const blocked = evidence.blockers > 0 || evidence.planSuppressed;
     const plan = blocked
       ? null
@@ -457,7 +508,7 @@ export class NodeBootstrapService {
         targetName: targetInput.targetName,
         hubUrl: context.hubUrl,
         caPem: this.deps.caPem(),
-        now,
+        now: context.planNow ?? now,
       });
 
     this.recordAudit(context.audit, 'bootstrap.preflight', {
@@ -517,6 +568,67 @@ export class NodeBootstrapService {
     );
   }
 
+  /**
+   * SSH host key fingerprints of the machine running this hub, read from the
+   * addresses the hub knows for itself or its host (see `ownHostAddresses`) on the
+   * target's port and on 22. Only addresses the outbound policy allows are
+   * dialed, because the hub host can come from the request's `Host` header. The
+   * target's own resolved addresses are skipped, so a host that is not the hub's
+   * never refuses itself.
+   *
+   * This catches a server that is the hub's own host through an address the hub
+   * cannot list, when its SSH server also answers on an address the hub knows.
+   * It is best effort: an address that does not answer, an own-address list that
+   * cannot be built, or an SSH server on a port other than the target's and 22
+   * leaves the set smaller and refuses nothing. An exhausted request budget or a
+   * cancelled request is not best effort: it stops the request, so a capture
+   * never returns a key that was not compared.
+   */
+  private async ownHostKeys(
+    targetAddresses: readonly string[],
+    port: number,
+    hubHost: string | null,
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<Set<string>> {
+    const fingerprints = new Set<string>();
+    if (signal?.aborted) throw cancelledError();
+    const timeoutMs = Math.min(OWN_HOST_KEY_PROBE_MS, deadline - this.deps.now());
+    if (timeoutMs <= 0) throw this.budgetError();
+    let candidates: string[];
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      // The list repeats the hub host's DNS lookup, so it gets the probes' own cap.
+      candidates = await Promise.race([
+        this.deps.ownHostAddresses(hubHost),
+        new Promise<string[]>((resolve) => { timer = setTimeout(() => resolve([]), timeoutMs); }),
+      ]);
+    } catch (error: unknown) {
+      console.warn(`[Bootstrap] Own-address list failed (${(error as { code?: string } | null)?.code ?? 'unknown'}); the own-host key check is skipped.`);
+      return fingerprints;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    const skip = new Set(targetAddresses);
+    const ports = port === 22 ? [22] : [port, 22];
+    await Promise.all(candidates
+      .filter((address) => net.isIP(address) === 4 && !skip.has(address) && !isDisallowedOutboundTargetAddress(address))
+      .flatMap((address) => ports.map(async (candidatePort) => {
+        try {
+          const observation = await this.deps.transport.captureHostKey(
+            { host: address, address, port: candidatePort },
+            { timeoutMs, signal },
+          );
+          fingerprints.add(observation.fingerprint);
+        } catch {
+          // No SSH server answered there in time, or the request was cancelled
+          // (the next check of the signal stops the request).
+        }
+      })));
+    if (signal?.aborted) throw cancelledError();
+    return fingerprints;
+  }
+
   private async resolveOrThrow(host: string, deadline: number, signal?: AbortSignal, hubHost: string | null = null): Promise<string[]> {
     const remaining = deadline - this.deps.now();
     if (remaining <= 0) throw this.budgetError();
@@ -565,6 +677,7 @@ export class NodeBootstrapService {
     paths: { composeDir: string; agentDir: string },
     totalMs: number,
     onHostKey: (observation: HostKeyObservation) => void,
+    refusedFingerprints: ReadonlySet<string>,
     signal?: AbortSignal,
   ): Promise<SshCommandResult[]> {
     const catalog = buildProbeCatalog({
@@ -582,7 +695,7 @@ export class NodeBootstrapService {
         passphrase,
       },
       catalog.map(({ id, command }) => ({ id, command })),
-      { expectedFingerprint, onHostKey, totalMs, signal },
+      { expectedFingerprint, onHostKey, refusedFingerprints, totalMs, signal },
     );
   }
 
@@ -710,23 +823,6 @@ export class NodeBootstrapService {
   }
 
   private recordAudit(context: AuditContext, action: string, facts: Record<string, unknown>, statusCode = 200): void {
-    const summary = `${action}: ${Object.entries(facts)
-      .filter(([, value]) => value !== null && value !== undefined)
-      .map(([key, value]) => `${key}=${sanitizeForLog(String(value))}`)
-      .join(' ')}`;
-    try {
-      this.deps.db.insertAuditLog({
-        timestamp: this.deps.now(),
-        username: context.username,
-        method: context.method,
-        path: context.path,
-        status_code: statusCode,
-        node_id: null,
-        ip_address: context.ip,
-        summary,
-      });
-    } catch (error: unknown) {
-      console.warn('[Bootstrap] Audit log write failed:', error instanceof Error ? error.message : 'unknown');
-    }
+    recordBootstrapAudit(this.deps.db, this.deps.now(), context, action, facts, statusCode);
   }
 }

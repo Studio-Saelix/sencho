@@ -1,5 +1,5 @@
 import net from 'net';
-import { DEFAULT_AGENT_DIR, RESERVED_PATH_PREFIXES, shellQuote } from './pathPolicy';
+import { DEFAULT_AGENT_DIR, RESERVED_PATH_PREFIXES, SEALED_DIRECTORY_SHELL, shellQuote } from './pathPolicy';
 import type {
   AgentDirObservation,
   AgentInstallObservation,
@@ -11,6 +11,7 @@ import type {
   HostKeyObservation,
   PathObservation,
   RepositoryObservation,
+  TrustChain,
 } from './types';
 import { isDockerReleaseKeyFile } from './openpgpKey';
 import type { SshCommand, SshCommandResult } from './sshProbeClient';
@@ -37,6 +38,9 @@ export const DEFAULT_DOCKER_ROOT = '/var/lib/docker';
 const KEY_READ_BYTES = 12_288;
 
 const COMPOSE_FILE_NAMES = `\\( -name 'compose.yaml' -o -name 'compose.yml' -o -name 'docker-compose.yaml' -o -name 'docker-compose.yml' \\)`;
+
+/** The candidate query for every Docker package, shared by the preflight and the run's pre-install check. */
+export const APT_POLICY_COMMAND = 'apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null';
 
 /**
  * Every Docker command runs against the host's own unix socket. The operator's
@@ -123,7 +127,20 @@ export const PATH_FACTS_SCRIPT = [
   `d="$p"`,
   `while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname -- "$d"); done`,
   `printf 'P_NEAREST=%s\\n' "$d"`,
+  // The identity of the directory a path resolves to (device, inode, owner and birth time, as the execution scripts take it, with the time zone pinned so it reads the same in any session): execution writes only into this very directory.
+  `if [ -d "$p" ]; then printf 'P_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$p" 2>/dev/null | tr -d ' ')"; fi`,
+  `if [ -d "$d" ]; then printf 'P_NEAREST_IDENT=%s\\n' "$(TZ=UTC0 stat -L -c '%d:%i:%u:%w' -- "$d" 2>/dev/null | tr -d ' ')"; fi`,
   `if [ -w "$d" ]; then printf 'P_PARENT_W=1\\n'; else printf 'P_PARENT_W=0\\n'; fi`,
+  // Who could change the directories the start step relies on (see SEALED_DIRECTORY_SHELL): the Agent directory and everything above it, and the places the Compose directory is looked up in, as the path is written (a link in it counts). A path that does not exist yet is judged by the nearest directory that does, which will hold an entry the SSH user owns.
+  SEALED_DIRECTORY_SHELL,
+  `trust_line() { n=$1; shift; "$@" && r=0 || r=$?; case $r in 0) printf 'P_%s=ok\\n' "$n" ;; 1) printf 'P_%s=open:%s\\n' "$n" "$bad" ;; *) printf 'P_%s=unreadable:%s\\n' "$n" "$bad" ;; esac; }`,
+  `if [ -d "$p" ] && [ ! -L "$p" ]; then`,
+  `  trust_line TRUST_SELF sealed_under "$p" ""`,
+  `  trust_line TRUST_ABOVE sealed_under "$(dirname -- "$p")" "$(stat -c %u -- "$p" 2>/dev/null)"`,
+  `elif [ -d "$d" ]; then`,
+  `  trust_line TRUST_SELF sealed_under "$d" "$trusted"`,
+  `  trust_line TRUST_ABOVE sealed_under "$d" "$trusted"`,
+  `fi`,
   `if sudo -n true 2>/dev/null; then`,
   `  if [ -e "$p" ] && sudo -n test -r "$p" 2>/dev/null && sudo -n test -x "$p" 2>/dev/null; then printf 'P_SUDO_R=1\\n'; else printf 'P_SUDO_R=0\\n'; fi`,
   `  if [ -e "$p" ] && sudo -n test -w "$p" 2>/dev/null; then printf 'P_SUDO_W=1\\n'; else printf 'P_SUDO_W=0\\n'; fi`,
@@ -344,7 +361,7 @@ export function buildProbeCatalog(input: ProbeCatalogInput): ProbeDefinition[] {
     { id: 'docker_repo', command: `sh -c ${shellQuote(DOCKER_REPO_SCRIPT)}` },
     {
       id: 'apt_policy',
-      command: `apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null`,
+      command: APT_POLICY_COMMAND,
     },
     { id: 'containers', command: `${DOCKER_LOCAL_COMMAND} ${DOCKER_PS_ARGS}` },
     { id: 'containers_sudo', command: `${DOCKER_LOCAL_SUDO_COMMAND} ${DOCKER_PS_ARGS}` },
@@ -533,7 +550,7 @@ export function parseSourceLocations(text: string): RepositoryObservation['sourc
   return main === DEFAULT_SOURCE_LIST && parts === DEFAULT_SOURCE_PARTS ? 'default' : 'custom';
 }
 
-const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
+export const OFFICIAL_DOCKER_URI = 'https://download.docker.com/linux/ubuntu';
 const DOCKER_HOST = 'download.docker.com';
 
 /** apt options that switch off or weaken signature checking for a source. */
@@ -1374,6 +1391,23 @@ export interface ParsedPathFacts extends PathObservation {
   raw: Map<string, string>;
 }
 
+/** A `<device>:<inode>:<owner uid>:<birth time>` identity, or null for anything else, including a `-` birth time (a filesystem that keeps none). */
+function parseIdentity(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? '';
+  // A directory whose creation time the host cannot give (`-`) cannot be told from another one that reused its inode, so it has no identity.
+  return /^\d+:\d+:\d+:\S+$/.test(trimmed) && !trimmed.endsWith(':-') ? trimmed : null;
+}
+
+function parseTrust(value: string | undefined): TrustChain | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === 'ok') return { state: 'sealed' };
+  const open = /^open:(\/.*)$/.exec(trimmed);
+  if (open) return { state: 'open', at: open[1] };
+  const unreadable = /^unreadable:(\/.*)$/.exec(trimmed);
+  return unreadable ? { state: 'unreadable', at: unreadable[1] } : { state: 'unreadable', at: trimmed };
+}
+
 export function parsePathFacts(text: string, input: string, kindLabel = 'path'): ParsedPathFacts {
   const raw = new Map<string, string>();
   for (const line of text.split('\n')) {
@@ -1411,6 +1445,10 @@ export function parsePathFacts(text: string, input: string, kindLabel = 'path'):
     writableBySudo: raw.get('SUDO_W') === '1',
     parentWritableByUser: raw.has('PARENT_W') ? raw.get('PARENT_W') === '1' : null,
     nearestExistingAncestor: exists ? null : nearest,
+    identity: parseIdentity(isDirectory ? raw.get('IDENT') : undefined),
+    nearestExistingAncestorIdentity: exists ? null : parseIdentity(raw.get('NEAREST_IDENT')),
+    trustSelf: parseTrust(raw.get('TRUST_SELF')),
+    trustAbove: parseTrust(raw.get('TRUST_ABOVE')),
     filesystem: fstype ? { type: fstype, source: fsSource, mountPoint: fsTarget } : null,
     freeBytes,
     mountInFstab: null,

@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
@@ -24,7 +24,9 @@ import {
   parsePathFacts,
   parseVolumeNames,
 } from '../services/nodeBootstrap/probes';
+import { SEALED_DIRECTORY_SHELL } from '../services/nodeBootstrap/pathPolicy';
 import { scrubCommandOutput, type SshCommandResult } from '../services/nodeBootstrap/sshProbeClient';
+import { identityOf } from './__helpers__/bootstrapCommands';
 import { DEFAULT_SOURCE_LOCATIONS, DOCKER_ASC_PATH, dockerAscBlock, keyBlock as keyBlockOf } from './__helpers__/dockerRepoFixtures';
 
 const PATH_SCRIPT_OUTPUT = [
@@ -32,7 +34,7 @@ const PATH_SCRIPT_OUTPUT = [
   'P_EXISTS=1',
   'P_ISDIR=1',
   'P_FINAL_LINK=0',
-  'P_REAL=/opt/docker/sencho',
+  'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01',
   'P_ANCESTOR_LINK=0',
   'P_OWNER=ubuntu',
   'P_GROUP=ubuntu',
@@ -112,8 +114,34 @@ describe('bootstrap probe parsers', () => {
     expect(facts.probeError).toBeNull();
   });
 
+  it('parses the identity of an existing directory, and of the ancestor a missing one is created in', () => {
+    const existing = parsePathFacts(PATH_SCRIPT_OUTPUT, '/opt/docker/sencho');
+    expect(existing.identity).toBe('2049:1001:1000:2026-01-01');
+    expect(existing.nearestExistingAncestorIdentity).toBeNull();
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    expect(missing.identity).toBeNull();
+    expect(missing.nearestExistingAncestorIdentity).toBe('2049:2002:1000:2026-01-01');
+    // Anything that is not a device, an inode, an owner and a creation time is no identity, and a file has none.
+    expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=garbage', '/a').identity).toBeNull();
+    expect(parsePathFacts('P_EXISTS=1\nP_ISDIR=0\nP_REAL=/a\nP_IDENT=1:2', '/a').identity).toBeNull();
+  });
+
+  it('gives no identity to a directory whose creation time the host cannot give (a successor that reuses the inode would look the same)', () => {
+    const existing = parsePathFacts('P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a\nP_IDENT=2049:1001:1000:-', '/a');
+    expect(existing.identity).toBeNull();
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/a/b\nP_NEAREST_IDENT=2049:2002:1000:-\nP_NEAREST=/a', '/a/b');
+    expect(missing.nearestExistingAncestorIdentity).toBeNull();
+  });
+
+  it('parses who can change the directories above a path', () => {
+    const base = 'P_EXISTS=1\nP_ISDIR=1\nP_REAL=/a';
+    expect(parsePathFacts(`${base}\nP_TRUST_SELF=ok\nP_TRUST_ABOVE=open:/srv/shared`, '/a')).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'open', at: '/srv/shared' } });
+    expect(parsePathFacts(`${base}\nP_TRUST_SELF=unreadable:/srv/closed`, '/a').trustSelf).toEqual({ state: 'unreadable', at: '/srv/closed' });
+    expect(parsePathFacts(base, '/a').trustSelf).toBeUndefined();
+  });
+
   it('distinguishes a missing path from a failed probe', () => {
-    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
+    const missing = parsePathFacts('P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:2026-01-01\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1', '/opt/sencho-agent');
     expect(missing.exists).toBe(false);
     expect(missing.probeError).toBeNull();
     expect(missing.nearestExistingAncestor).toBe('/opt');
@@ -260,7 +288,7 @@ describe('bootstrap fact assembly', () => {
         result('clock', String(Math.floor(Date.now() / 1000))),
         result('hub_health', '200'),
         result('path_compose', PATH_SCRIPT_OUTPUT),
-        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
+        result('path_agent', 'P_EXISTS=0\nP_ISDIR=0\nP_REAL=/opt/sencho-agent\nP_IDENT=2049:1001:1000:2026-01-01\nP_NEAREST_IDENT=2049:2002:1000:2026-01-01\nP_NEAREST=/opt\nP_PARENT_W=1\nP_FSTYPE=ext4\nP_FSTARGET=/'),
         result('compose_inventory', '/opt/docker/sencho/media/compose.yaml\0'),
         result('agent_inventory', ''),
         result('agent_marker', '', 1),
@@ -344,7 +372,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn a failed Compose inventory into an empty stacks root', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_DF=/dev/sda1 1 1 104857600 1% /',
     ].join('\n');
     const facts = minimalAssembly([
@@ -358,7 +386,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('uses a successful sudo inventory when the direct one is denied', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1', 'P_SUDO_R=1', 'P_SUDO_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -372,7 +400,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('treats partial and timed-out inventories as incomplete', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     for (const failure of [{ truncated: true }, { timedOut: true }]) {
@@ -387,7 +415,7 @@ describe('bootstrap inventory completeness', () => {
 
   it('does not turn an unreadable Agent directory into an empty one', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_MODE=300', 'P_USER_W=1',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/sencho-agent', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_MODE=300', 'P_USER_W=1',
       'P_FSTYPE=ext4', 'P_FSTARGET=/', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([
@@ -462,6 +490,313 @@ describe('bootstrap Docker endpoint pinning', () => {
     }
   });
 
+  it('reports the identity (device, inode, owner and creation time) of an existing directory, taken through a link', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
+    try {
+      const real = path.join(dir, 'real');
+      mkdirSync(real);
+      symlinkSync(real, path.join(dir, 'link'));
+      // The birth time is printed in the session's time zone unless the script pins it: the identity must not depend on it.
+      for (const input of [real, path.join(dir, 'link')]) {
+        for (const zone of ['JST-9', 'EST5EDT']) {
+          const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8', env: { ...process.env, TZ: zone } });
+          expect(parsePathFacts(output, input).identity).toBe(identityOf(real));
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe('who can change the directories above a path (run on a real shell and filesystem)', () => {
+    const factsOf = (input: string, env: NodeJS.ProcessEnv = {}) => {
+      const output = execFileSync('sh', ['-c', PATH_FACTS_SCRIPT, 'sencho-probe', input], { encoding: 'utf8', env: { ...process.env, ...env } });
+      return parsePathFacts(output, input);
+    };
+    let base: string;
+    beforeEach(() => { base = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-trust-')); chmodSync(base, 0o755); });
+    afterEach(() => { rmSync(base, { recursive: true, force: true }); });
+
+    it('reports a chain only this user can change as sealed, for an existing and for a missing directory', () => {
+      const dir = path.join(base, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      const missing = factsOf(path.join(base, 'missing', 'child'));
+      expect(missing).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('reports a world-writable directory above the path as open, and names it', () => {
+      const shared = path.join(base, 'shared');
+      mkdirSync(shared);
+      const dir = path.join(shared, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(shared, 0o777);
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'open', at: shared }, trustAbove: { state: 'open', at: shared } });
+      // A path that does not exist yet is judged by the directory it will be created in.
+      expect(factsOf(path.join(shared, 'new')).trustSelf).toEqual({ state: 'open', at: shared });
+    });
+
+    describe('a group-writable directory above the path', () => {
+      // `getent` answers from a shim, so a group can have any members: its answer is what the walk goes by. A lookup of one account goes to the real one.
+      const REAL_GETENT = execFileSync('sh', ['-c', 'command -v getent'], { encoding: 'utf8' }).trim();
+      const gid = process.getgid?.() ?? 0;
+      const REAL_ID = execFileSync('sh', ['-c', 'command -v id'], { encoding: 'utf8' }).trim();
+      const withGroup = (members: string, options: { passwd?: string; passwdFails?: boolean; groupFails?: number } = {}) => {
+        const shims = path.join(base, 'shims');
+        mkdirSync(shims, { recursive: true });
+        writeFileSync(path.join(shims, 'getent'), [
+          '#!/bin/sh',
+          options.groupFails ? `[ "$1" = group ] && exit ${options.groupFails}` : `[ "$1" = group ] && { echo "shared:x:${gid}:${members}"; exit 0; }`,
+          `if [ "$1" = passwd ] && [ -n "$2" ]; then exec "${REAL_GETENT}" passwd "$2"; fi`,
+          options.passwdFails ? '[ "$1" = passwd ] && exit 2' : `[ "$1" = passwd ] && { ${options.passwd ? `echo "${options.passwd}"` : 'true'}; echo "me:x:${process.getuid?.() ?? 0}:${gid}::/home/me:/bin/sh"; exit 0; }`,
+          'exit 0',
+        ].join('\n'), { mode: 0o755 });
+        // `stranger` is an account that is neither root nor this user, wherever the test runs; `ghost` is none at all.
+        writeFileSync(path.join(shims, 'id'), ['#!/bin/sh', '[ "$1 $2 $3" = "-u -- stranger" ] && { echo 54321; exit 0; }', '[ "$1 $2 $3" = "-u -- ghost" ] && exit 1', `exec "${REAL_ID}" "$@"`].join('\n'), { mode: 0o755 });
+        return { PATH: `${shims}:${process.env.PATH ?? ''}` };
+      };
+      const arrange = () => {
+        const shared = path.join(base, 'shared');
+        mkdirSync(shared);
+        const dir = path.join(shared, 'agent');
+        mkdirSync(dir, { mode: 0o700 });
+        chmodSync(shared, 0o775);
+        return { shared, dir };
+      };
+
+      it('is sealed when it is this user\'s own group and has no member but root and this user (a private group)', () => {
+        const { dir } = arrange();
+        expect(factsOf(dir, withGroup(os.userInfo().username)).trustSelf).toEqual({ state: 'sealed' });
+        expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'sealed' });
+      });
+
+      it('is open when its group has another member, by name or by primary group', () => {
+        const { dir, shared } = arrange();
+        expect(factsOf(dir, withGroup('stranger')).trustSelf).toEqual({ state: 'open', at: shared });
+        expect(factsOf(dir, withGroup('', { passwd: `someone:x:99999:${gid}::/nonexistent:/bin/false` })).trustSelf).toEqual({ state: 'open', at: shared });
+      });
+
+      it('is open when it is not this user\'s own group, whatever its members', () => {
+        const { dir, shared } = arrange();
+        const other = (process.getgroups?.() ?? []).find((candidate) => candidate !== gid);
+        if (other === undefined) return;
+        chmodSync(dir, 0o700);
+        chownSync(shared, process.getuid?.() ?? 0, other);
+        expect(factsOf(dir, withGroup('')).trustSelf).toEqual({ state: 'open', at: shared });
+      });
+
+      it('is open for a group nobody has a record of, and unreadable, never sealed, when a lookup fails', () => {
+        const { dir, shared } = arrange();
+        // getent exits 2 for a key it has no record of: nothing vouches for that group.
+        expect(factsOf(dir, withGroup('', { groupFails: 2 })).trustSelf).toEqual({ state: 'open', at: shared });
+        // Any other failure, a member the host cannot resolve, or the account's own record: the host did not say.
+        expect(factsOf(dir, withGroup('', { groupFails: 1 })).trustSelf).toEqual({ state: 'unreadable', at: shared });
+        expect(factsOf(dir, withGroup('ghost')).trustSelf).toEqual({ state: 'unreadable', at: shared });
+        expect(factsOf(dir, withGroup('', { passwdFails: true })).trustSelf).toEqual({ state: 'unreadable', at: shared });
+      });
+    });
+
+    it('judges a path that does not exist yet by the directory it will be made in, which holds an entry this user owns', () => {
+      const sticky = path.join(base, 'sticky');
+      mkdirSync(sticky);
+      chmodSync(sticky, 0o1777);
+      expect(factsOf(path.join(sticky, 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      const open = path.join(base, 'open');
+      mkdirSync(open);
+      chmodSync(open, 0o777);
+      expect(factsOf(path.join(open, 'new'))).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+    });
+
+    it('follows a link in the nearest existing ancestor to the directory it leads to, instead of reading the link\'s own mode', () => {
+      const real = path.join(base, 'real');
+      mkdirSync(path.join(real, 'data'), { recursive: true });
+      symlinkSync(path.join(real, 'data'), path.join(base, 'link'));
+      expect(factsOf(path.join(base, 'link', 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+      // The same path once it exists, as the preflight reads it.
+      mkdirSync(path.join(real, 'data', 'new'), { mode: 0o700 });
+      expect(factsOf(path.join(base, 'link', 'new'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('also checks the directory a link in the path is kept in, because Docker follows the name as written', () => {
+      // /<base>/holder/link -> /<base>/real/data: the target chain is closed, but anyone who can write in "holder" can repoint the link.
+      const holder = path.join(base, 'holder');
+      const real = path.join(base, 'real');
+      mkdirSync(path.join(real, 'data', 'stacks'), { recursive: true, mode: 0o755 });
+      mkdirSync(holder);
+      symlinkSync(path.join(real, 'data'), path.join(holder, 'link'));
+      const name = path.join(holder, 'link', 'stacks');
+      expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+      chmodSync(holder, 0o777);
+      expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: holder });
+    });
+
+    describe('a directory that only a link\'s target passes through', () => {
+      // base/safe/alias -> base/open/hop -> base/safe/real, with the stacks directory in real. The physical path and the name's own parents are all closed; "open", where "hop" is looked up, is on neither.
+      const nested = (targets: 'absolute' | 'relative') => {
+        const safe = path.join(base, 'safe');
+        const open = path.join(base, 'open');
+        mkdirSync(path.join(safe, 'real', 'stacks'), { recursive: true, mode: 0o755 });
+        mkdirSync(open, { mode: 0o755 });
+        symlinkSync(targets === 'absolute' ? path.join(safe, 'real') : path.join('..', 'safe', 'real'), path.join(open, 'hop'));
+        symlinkSync(targets === 'absolute' ? path.join(open, 'hop') : path.join('..', 'open', 'hop'), path.join(safe, 'alias'));
+        return { safe, open, name: path.join(safe, 'alias', 'stacks') };
+      };
+
+      it.each([['absolute'], ['relative']] as const)('reports both chains of an existing directory as open, naming the directory only a target passes through (%s targets)', (targets) => {
+        const { open, name } = nested(targets);
+        expect(factsOf(name)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+        chmodSync(open, 0o777);
+        expect(factsOf(name)).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+      });
+
+      it.each([['absolute'], ['relative']] as const)('reports it open for a directory that does not exist yet, judged by the nearest ancestor the link leads through (%s targets)', (targets) => {
+        const { open, safe } = nested(targets);
+        const missing = path.join(safe, 'alias', 'new');
+        expect(factsOf(missing)).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+        chmodSync(open, 0o777);
+        expect(factsOf(missing)).toMatchObject({ trustSelf: { state: 'open', at: open }, trustAbove: { state: 'open', at: open } });
+      });
+
+      it('follows a chain of links, each in another directory, and a link whose target climbs out with ..', () => {
+        const hops = path.join(base, 'hops');
+        const stash = path.join(base, 'stash');
+        mkdirSync(path.join(base, 'real', 'stacks'), { recursive: true, mode: 0o755 });
+        mkdirSync(hops, { mode: 0o755 });
+        mkdirSync(stash, { mode: 0o755 });
+        // base/hops/l1 -> ../stash/l2 ; base/stash/l2 -> ../real ; the name is base/hops/l1/stacks.
+        symlinkSync(path.join('..', 'real'), path.join(stash, 'l2'));
+        symlinkSync(path.join('..', 'stash', 'l2'), path.join(hops, 'l1'));
+        const name = path.join(hops, 'l1', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        chmodSync(stash, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: stash });
+        chmodSync(stash, 0o755);
+        chmodSync(hops, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: hops });
+      });
+
+      /** The shared walk on its own, for names the preflight never gets to (a loop has no nearest existing ancestor). */
+      const walk = (name: string, kid = String(process.getuid?.() ?? 0), env: NodeJS.ProcessEnv = {}, cwd?: string) => {
+        const out = execFileSync('sh', ['-c', `${SEALED_DIRECTORY_SHELL}\nsealed_under "$1" "$2"; r=$?; echo "$r:$bad"`, 'sencho-walk', name, kid], { encoding: 'utf8', cwd, env: { ...process.env, ...env } }).trim();
+        const [code, ...rest] = out.split(':');
+        return { code: Number(code), bad: rest.join(':') };
+      };
+
+      it('judges a sticky directory by the owner of the entry looked up in it, which is the link itself and not what it leads to', () => {
+        const { open, safe } = nested('absolute');
+        chmodSync(open, 0o1777);
+        const name = path.join(safe, 'alias', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        // The same directory when the link in it belongs to somebody else: that user can remove and replace it.
+        const REAL_STAT = execFileSync('sh', ['-c', 'command -v stat'], { encoding: 'utf8' }).trim();
+        const shims = path.join(base, 'stat-shim');
+        mkdirSync(shims);
+        writeFileSync(path.join(shims, 'stat'), `#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = %u ] && [ "$4" = "${path.join(open, 'hop')}" ]; then echo 54321; exit 0; fi\nexec "${REAL_STAT}" "$@"\n`, { mode: 0o755 });
+        expect(factsOf(name, { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustAbove).toEqual({ state: 'open', at: open });
+      });
+
+      it('names the directory nearest the end of the name when several can be changed', () => {
+        // base/safe/alias -> base/open1/hop1 -> base/open2/hop2 -> base/safe/real, and both open1 and open2 are writable.
+        const { open: open1, safe } = nested('absolute');
+        const open2 = path.join(base, 'open2');
+        mkdirSync(open2, { mode: 0o755 });
+        symlinkSync(path.join(safe, 'real'), path.join(open2, 'hop2'));
+        rmSync(path.join(open1, 'hop'));
+        symlinkSync(path.join(open2, 'hop2'), path.join(open1, 'hop'));
+        const name = path.join(safe, 'alias', 'stacks');
+        expect(factsOf(name).trustAbove).toEqual({ state: 'sealed' });
+        chmodSync(open1, 0o777);
+        chmodSync(open2, 0o777);
+        expect(factsOf(name).trustAbove).toEqual({ state: 'open', at: open2 });
+      });
+
+      it('applies . and .. in a name to the directory a link leads to, not to the name before it', () => {
+        const { open, safe } = nested('absolute');
+        // safe/alias/../x is safe/x (the parent of safe/real), not open/x.
+        mkdirSync(path.join(safe, 'x'), { mode: 0o755 });
+        expect(walk(`${safe}/./alias/../x`)).toEqual({ code: 0, bad: '' });
+        chmodSync(open, 0o777);
+        expect(walk(`${safe}/./alias/../x`)).toEqual({ code: 1, bad: open });
+        expect(walk(`${safe}/alias/../missing`)).toMatchObject({ code: 2 });
+      });
+
+      it('takes a name that is relative to the working directory, and a link in it that jumps to an absolute path', () => {
+        const { open, safe } = nested('absolute');
+        expect(walk('alias/stacks', undefined, {}, safe)).toEqual({ code: 0, bad: '' });
+        chmodSync(open, 0o777);
+        expect(walk('alias/stacks', undefined, {}, safe)).toEqual({ code: 1, bad: open });
+      });
+
+      it('reports a name it cannot follow to the end as not inspected, never as sealed', () => {
+        symlinkSync('b', path.join(base, 'a'));
+        symlinkSync('a', path.join(base, 'b'));
+        expect(walk(path.join(base, 'a'))).toMatchObject({ code: 2 });
+        // A dangling link, and a component that is a file.
+        symlinkSync(path.join(base, 'nowhere'), path.join(base, 'dangling'));
+        expect(walk(path.join(base, 'dangling'))).toMatchObject({ code: 2 });
+        writeFileSync(path.join(base, 'file'), '');
+        expect(walk(path.join(base, 'file', 'x'))).toMatchObject({ code: 2 });
+        // A link target that ends in a line break cannot be read back exactly.
+        mkdirSync(path.join(base, 'real'));
+        symlinkSync('real\n', path.join(base, 'nl'));
+        expect(walk(path.join(base, 'nl'))).toMatchObject({ code: 2 });
+      });
+
+      it('follows a chain of 40 links, and refuses one of 41, as the kernel does', () => {
+        mkdirSync(path.join(base, 'end'));
+        let previous = 'end';
+        for (let i = 0; i < 41; i++) { symlinkSync(previous, path.join(base, `n${i}`)); previous = `n${i}`; }
+        expect(walk(path.join(base, 'n39'))).toEqual({ code: 0, bad: '' });
+        expect(walk(path.join(base, 'n40'))).toMatchObject({ code: 2 });
+      });
+    });
+
+    it('treats a directory with an access control list that grants write through its group bits as writable by others', () => {
+      // `ls -ld` marks a directory that has an ACL with a `+`; with the group bits writable the mask lets a named user write, whatever the group is.
+      const shared = path.join(base, 'acl');
+      mkdirSync(path.join(shared, 'agent'), { recursive: true, mode: 0o700 });
+      chmodSync(shared, 0o775);
+      expect(factsOf(path.join(shared, 'agent')).trustSelf).toEqual({ state: 'sealed' });
+      const shims = path.join(base, 'ls-shim');
+      mkdirSync(shims);
+      writeFileSync(path.join(shims, 'ls'), [
+        '#!/bin/sh',
+        `if [ "$1" = -ld ] && [ "$3" = "${shared}" ]; then echo "drwxrwxr-x+ 3 me me 4096 Jan  1 00:00 ${shared}"; exit 0; fi`,
+        `exec "${execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim()}" "$@"`,
+      ].join('\n'), { mode: 0o755 });
+      expect(factsOf(path.join(shared, 'agent'), { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'open', at: shared });
+      // An ACL under group bits that cannot write grants nothing: the mask caps it.
+      chmodSync(shared, 0o755);
+      expect(factsOf(path.join(shared, 'agent'), { PATH: `${shims}:${process.env.PATH ?? ''}` }).trustSelf).toEqual({ state: 'sealed' });
+    });
+
+    it('still reports a chain for a final name that is a link, judged by the directory it leads to (an absent report would withhold the plan)', () => {
+      const real = path.join(base, 'real-agent');
+      mkdirSync(real, { mode: 0o700 });
+      symlinkSync(real, path.join(base, 'agent-link'));
+      expect(factsOf(path.join(base, 'agent-link'))).toMatchObject({ trustSelf: { state: 'sealed' }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('leaves the directory\'s own mode out of the chain above it, and counts it in its own chain', () => {
+      const dir = path.join(base, 'stacks');
+      mkdirSync(dir);
+      chmodSync(dir, 0o777);
+      expect(factsOf(dir)).toMatchObject({ trustSelf: { state: 'open', at: dir }, trustAbove: { state: 'sealed' } });
+    });
+
+    it('accepts a sticky world-writable parent only for a child this user owns', () => {
+      const sticky = path.join(base, 'sticky');
+      mkdirSync(sticky);
+      chmodSync(sticky, 0o1777);
+      const dir = path.join(sticky, 'agent');
+      mkdirSync(dir, { mode: 0o700 });
+      expect(factsOf(dir).trustSelf).toEqual({ state: 'sealed' });
+      // The directory itself is judged without the exemption: nothing sticky protects what it holds.
+      chmodSync(dir, 0o1777);
+      expect(factsOf(dir).trustSelf).toEqual({ state: 'open', at: dir });
+    });
+  });
+
   it('reads filesystem facts from the nearest existing ancestor for a missing path', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'sencho-bootstrap-path-'));
     try {
@@ -470,6 +805,8 @@ describe('bootstrap Docker endpoint pinning', () => {
       expect(output).toContain('P_EXISTS=0');
       expect(output).toContain(`P_NEAREST=${dir}`);
       expect(parsePathFacts(output, missing).probeError).toBeNull();
+      // The identity the execution scripts compare against is the nearest ancestor's own, not the missing path's.
+      expect(parsePathFacts(output, missing)).toMatchObject({ identity: null, nearestExistingAncestorIdentity: identityOf(dir) });
       expect(output).toMatch(/P_FSTYPE=\S+/);
       expect(output).toMatch(/P_FSTARGET=\S+/);
       expect(output).toMatch(/P_DF=\S+\s+\d+\s+\d+\s+\d+/);
@@ -511,7 +848,7 @@ describe('bootstrap volume and no-Docker facts', () => {
 
   it('marks an absent inventory probe as not run', () => {
     const pathFacts = [
-      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
+      'P_EXISTS=1', 'P_ISDIR=1', 'P_REAL=/opt/docker/sencho', 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_FSTYPE=ext4', 'P_FSTARGET=/',
       'P_USER_R=1', 'P_USER_W=1', 'P_PARENT_W=1',
     ].join('\n');
     const facts = minimalAssembly([probe('path_compose', pathFacts)]);

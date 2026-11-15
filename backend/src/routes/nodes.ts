@@ -1,6 +1,4 @@
 import { Router, type Request, type Response } from 'express';
-import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import path from 'path';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
@@ -29,8 +27,7 @@ import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } from '../utils/outboundTarget';
-import { isNativeTlsEnabled, loadNativeTlsMaterial } from '../helpers/nativeTls';
-import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
+import { mintPilotEnrollment as mintPilotEnrollmentForNode } from '../helpers/pilotEnrollment';
 import { resolvePrimaryUrl } from '../helpers/primaryUrl';
 import { isArchiveStorableName } from '../services/cloudBackupArchive';
 
@@ -60,43 +57,12 @@ function normalizePilotComposeDir(value: unknown): string | null {
   return normalized.slice(0, end);
 }
 
-function mintPilotEnrollment(nodeId: number, req: Request): {
-  token: string;
-  expiresAt: number;
-  composeYaml: string;
-  caPem?: string;
-} {
-  const db = DatabaseService.getInstance();
-  const node = db.getNode(nodeId);
+function mintPilotEnrollment(nodeId: number, req: Request): ReturnType<typeof mintPilotEnrollmentForNode> {
+  const node = DatabaseService.getInstance().getNode(nodeId);
   if (!node) throw new Error('Node not found');
   const composeDir = normalizePilotComposeDir(node.compose_dir);
   if (!composeDir) throw new Error('Pilot compose directory must be an absolute path');
-  const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
-  if (!jwtSecret) throw new Error('JWT secret not configured');
-
-  const ttlSeconds = 15 * 60;
-  const expiresAt = Date.now() + ttlSeconds * 1000;
-  const enrollNonce = crypto.randomUUID();
-  const token = jwt.sign(
-    { scope: 'pilot_enroll', nodeId, enrollNonce },
-    jwtSecret,
-    { expiresIn: ttlSeconds },
-  );
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  db.createPilotEnrollment(nodeId, tokenHash, expiresAt);
-
-  const primaryUrl = resolvePrimaryUrl(req);
-  const caPem = isNativeTlsEnabled() ? loadNativeTlsMaterial()?.caPem : undefined;
-  const composeYaml = buildPilotEnrollmentCompose({
-    primaryUrl,
-    token,
-    composeDir,
-    caPem,
-  });
-
-  return caPem
-    ? { token, expiresAt, composeYaml, caPem }
-    : { token, expiresAt, composeYaml };
+  return mintPilotEnrollmentForNode(nodeId, resolvePrimaryUrl(req), composeDir);
 }
 
 export const nodesRouter = Router();

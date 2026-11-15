@@ -47,6 +47,8 @@ interface FixtureOptions {
 interface Fixture {
   port: number;
   commands: string[];
+  /** Authentication attempts the server saw. */
+  authAttempts: string[];
   close: () => Promise<void>;
 }
 
@@ -54,12 +56,14 @@ const servers: Server[] = [];
 
 async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
   const commands: string[] = [];
+  const authAttempts: string[] = [];
   const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
     // A keyscan aborts the handshake on purpose, which surfaces here as a
     // key-exchange failure. Swallow fixture-side errors: the client behavior is
     // what this suite asserts.
     client.on('error', () => {});
     client.on('authentication', (ctx) => {
+      authAttempts.push(ctx.method);
       if (options.rejectAuth) ctx.reject();
       else ctx.accept();
     });
@@ -126,6 +130,7 @@ async function startServer(options: FixtureOptions = {}): Promise<Fixture> {
   return {
     port: address.port,
     commands,
+    authAttempts,
     close: () => new Promise<void>((resolve) => { server.close(() => resolve()); }),
   };
 }
@@ -188,6 +193,33 @@ describe('bootstrap SSH transport', () => {
     expect(results[0].stdout).toContain('x86_64');
     expect(results[0].exitCode).toBe(0);
     expect(fixture.commands[0]).toBe('LC_ALL=C uname -m; uname -r');
+  });
+
+  it('stops at the key exchange when the host key is one the caller refused', async () => {
+    const fixture = await startServer();
+    const capture = await client.captureHostKey({ host: 'fixture.local', address: '127.0.0.1', port: fixture.port });
+    const reported = vi.fn();
+    const attempt = client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m' }],
+      // The key is also the expected one: the refusal must win over the trust match.
+      { expectedFingerprint: capture.fingerprint, refusedFingerprints: new Set([capture.fingerprint]), onHostKey: reported },
+    );
+    await expect(attempt).rejects.toMatchObject({ code: 'SELF_TARGET', status: 400 });
+    expect(fixture.authAttempts).toEqual([]);
+    expect(fixture.commands).toEqual([]);
+    expect(reported).not.toHaveBeenCalled();
+  });
+
+  it('connects normally when the refused set holds only other keys', async () => {
+    const fixture = await startServer({ responses: { 'uname -m': 'x86_64\n' } });
+    const capture = await client.captureHostKey({ host: 'fixture.local', address: '127.0.0.1', port: fixture.port });
+    const results = await client.runCommands(
+      { host: 'fixture.local', address: '127.0.0.1', port: fixture.port, username: 'ubuntu', privateKey: USER_KEY },
+      [{ id: 'uname', command: 'uname -m' }],
+      { expectedFingerprint: capture.fingerprint, refusedFingerprints: new Set(['SHA256:some-other-host']) },
+    );
+    expect(results[0].exitCode).toBe(0);
   });
 
   it('refuses to authenticate when no fingerprint was supplied', async () => {
@@ -316,7 +348,7 @@ describe('bootstrap SSH transport', () => {
           'P_EXISTS=1',
           'P_ISDIR=1',
           'P_FINAL_LINK=0',
-          `P_REAL=${path}`,
+          `P_REAL=${path}`, 'P_IDENT=2049:1001:1000:2026-01-01', 'P_NEAREST_IDENT=2049:2002:1000:2026-01-01', 'P_TRUST_SELF=ok', 'P_TRUST_ABOVE=ok',
           'P_ANCESTOR_LINK=0',
           'P_OWNER=ubuntu',
           'P_GROUP=ubuntu',

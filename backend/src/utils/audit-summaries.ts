@@ -49,6 +49,10 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /nodes': 'Added node',
   'POST /nodes/bootstrap/host-key': 'Checked bootstrap host key',
   'POST /nodes/bootstrap/preflight': 'Ran bootstrap preflight',
+  'POST /nodes/bootstrap/operations': 'Approved bootstrap plan',
+  'POST /nodes/bootstrap/operations/*/retry': 'Approved bootstrap retry',
+  'POST /nodes/bootstrap/operations/*/cancel': 'Cancelled bootstrap run',
+  'POST /nodes/bootstrap/operations/*/release': 'Released bootstrap server',
   'PUT /nodes': 'Updated node',
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
@@ -283,6 +287,10 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
     if (method === 'POST' && normalized.startsWith('nodes/bootstrap/')) {
       if (normalized.startsWith('nodes/bootstrap/host-key')) return `Bootstrap host key check failed (${statusCode})`;
       if (normalized.startsWith('nodes/bootstrap/preflight')) return `Bootstrap preflight failed (${statusCode})`;
+      if (/^nodes\/bootstrap\/operations\/[^/]+\/retry/.test(normalized)) return `Bootstrap retry refused (${statusCode})`;
+      if (/^nodes\/bootstrap\/operations\/[^/]+\/cancel/.test(normalized)) return `Bootstrap cancel refused (${statusCode})`;
+      if (/^nodes\/bootstrap\/operations\/[^/]+\/release/.test(normalized)) return `Bootstrap release refused (${statusCode})`;
+      if (normalized.startsWith('nodes/bootstrap/operations')) return `Bootstrap plan approval refused (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;

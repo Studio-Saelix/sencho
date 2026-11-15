@@ -143,6 +143,8 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/users/42/mfa/reset')).not.toBe('Created user: 42');
   });
 
+  const OPERATION_ID = '11111111-1111-4111-8111-111111111111';
+
   it('labels node bootstrap requests as bootstrap actions, never as a node being added', () => {
     expect(getAuditSummary('POST', '/nodes/bootstrap/host-key', 200)).toBe('Checked bootstrap host key');
     expect(getAuditSummary('POST', '/nodes/bootstrap/preflight', 200)).toBe('Ran bootstrap preflight');
@@ -154,6 +156,17 @@ describe('getAuditSummary()', () => {
   it.each([400, 403, 409, 422, 429, 500])('does not claim a bootstrap action when the request failed with %i', (status) => {
     expect(getAuditSummary('POST', '/nodes/bootstrap/host-key', status)).toBe(`Bootstrap host key check failed (${status})`);
     expect(getAuditSummary('POST', '/nodes/bootstrap/preflight', status)).toBe(`Bootstrap preflight failed (${status})`);
+    expect(getAuditSummary('POST', '/nodes/bootstrap/operations', status)).toBe(`Bootstrap plan approval refused (${status})`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/retry`, status)).toBe(`Bootstrap retry refused (${status})`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/cancel`, status)).toBe(`Bootstrap cancel refused (${status})`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/release`, status)).toBe(`Bootstrap release refused (${status})`);
+  });
+
+  it('labels bootstrap run requests as run actions, never as a node being added', () => {
+    expect(getAuditSummary('POST', '/nodes/bootstrap/operations', 202)).toBe('Approved bootstrap plan');
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/retry`, 202)).toBe(`Approved bootstrap retry: ${OPERATION_ID}`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/cancel`, 200)).toBe(`Cancelled bootstrap run: ${OPERATION_ID}`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/release`, 200)).toBe(`Released bootstrap server: ${OPERATION_ID}`);
   });
 
   it('does not claim prune success on 409/400 responses', () => {

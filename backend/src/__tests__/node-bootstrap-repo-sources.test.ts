@@ -213,7 +213,8 @@ describe('a source that cannot supply the host architecture', () => {
       expect(step?.file?.content).toContain('arch=amd64');
       expect(step?.file?.path).toBe(LIST_FILE);
       const key = planFor(facts).stages.flatMap((stage) => stage.steps).find((entry) => entry.id === 'docker-key');
-      expect(key?.command).toContain(DOCKER_ASC_PATH);
+      expect(key?.target?.path).toBe(DOCKER_ASC_PATH);
+      expect(key?.command).not.toContain(' -o ');
       const written = parse('amd64', block(step!.file!.path, step!.file!.content.trim()), dockerAscBlock());
       expect(written.sourceVerified).toBe(true);
       expect(written.dockerSourceConfigured).toBe(true);

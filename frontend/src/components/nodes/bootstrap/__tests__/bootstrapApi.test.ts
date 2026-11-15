@@ -8,6 +8,7 @@ import {
   FALLBACK_CAPABILITIES,
   checkBootstrapHostKey,
   fetchBootstrapCapabilities,
+  listBootstrapOperations,
   runBootstrapPreflight,
 } from '../bootstrapApi';
 
@@ -112,5 +113,16 @@ describe('bootstrapApi', () => {
     expect(body.agentDir).toBe('/srv/agent');
     expect(body.replacePinnedFingerprint).toBe('SHA256:def');
     expect(body.reviewedPinnedFingerprint).toBe('SHA256:old');
+  });
+  it('reads the first page without a cursor and the next one with it, URL-encoded', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse({ operations: [{ id: 'a' }], nextCursor: 'c+/=' }))
+      .mockResolvedValueOnce(jsonResponse({ operations: [{ id: 'b' }] }));
+    const first = await listBootstrapOperations();
+    expect(first).toEqual({ operations: [{ id: 'a' }], nextCursor: 'c+/=' });
+    const second = await listBootstrapOperations(undefined, first.nextCursor);
+    expect(second).toEqual({ operations: [{ id: 'b' }], nextCursor: null });
+    expect(vi.mocked(apiFetch).mock.calls[0][0]).toBe('/nodes/bootstrap/operations');
+    expect(vi.mocked(apiFetch).mock.calls[1][0]).toBe('/nodes/bootstrap/operations?cursor=c%2B%2F%3D');
   });
 });
