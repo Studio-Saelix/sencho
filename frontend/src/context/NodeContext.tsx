@@ -139,9 +139,12 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Readiness announcements can start refetches close together; only the newest one may write the list,
-  // so a slow earlier response cannot bring back a verdict a later one already replaced.
+  // Refetches can overlap (mount, node-not-found, readiness announcements, a manual refresh). A response
+  // older than the one already applied is dropped, so a slow earlier answer cannot bring back a list (and a
+  // readiness verdict) that a later answer replaced. An older answer still applies when the newer request
+  // fails or has not answered yet.
   const nodesRequestSeqRef = useRef(0);
+  const nodesAppliedSeqRef = useRef(0);
 
   const refreshNodes = useCallback(async () => {
     const seq = ++nodesRequestSeqRef.current;
@@ -149,7 +152,8 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       const res = await apiFetch('/nodes');
       if (res.ok) {
         const data = await res.json();
-        if (seq !== nodesRequestSeqRef.current) return;
+        if (seq < nodesAppliedSeqRef.current) return;
+        nodesAppliedSeqRef.current = seq;
         setNodes(data);
 
         const currentActive = activeNodeRef.current;

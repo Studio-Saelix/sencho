@@ -125,9 +125,9 @@ export function effectiveReadinessState(row: Pick<NodeReadinessRow, 'state' | 'g
 
 export function readinessView(row: NodeReadinessRow): NodeReadinessView {
   const gates = parseGates(row.gates_json);
-  // Only a ready verdict changes meaning when its gates cannot be read. The node list does not come
-  // through here, but every run view does, so this repeats on each run-view read until the next check
-  // rewrites the row.
+  // Only a ready verdict changes meaning when its gates cannot be read. The node list reads rows
+  // directly and does not come through here, but get() does (run views, Verify), so this repeats on
+  // each such read until the next check rewrites the row.
   if (gates === null && row.state === 'ready') {
     console.warn(`[Readiness] Node ${row.node_id} has a ready verdict whose stored gates cannot be read; it reads as not ready.`);
   }
