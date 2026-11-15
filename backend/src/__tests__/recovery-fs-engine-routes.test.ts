@@ -698,6 +698,8 @@ describe('overwriting a host directory', () => {
     const res = await preview(pointId);
     expect(res.status).toBe(409);
     expect(res.body.errorClass).toBe('identity_unknown');
+    // Refused before the caller is authorized against its stack, so it names no container.
+    expect(JSON.stringify(res.body)).not.toContain('maybe');
     // The same container proven clear of it is no part of the overwrite.
     vi.mocked(fs.promises.stat).mockRestore();
     const clear = await preview(pointId);

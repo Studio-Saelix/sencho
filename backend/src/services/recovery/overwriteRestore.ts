@@ -415,10 +415,13 @@ async function listMountingContainers(deps: OverwriteDeps, target: OverwriteTarg
       // writing it under another spelling: the overwrite cannot say which
       // workloads to stop, so it is refused rather than run beside one.
       if (match.unproven) {
-        throw new RecoveryError('identity_unknown', {
-          detail: `Sencho cannot prove that the container ${containerName(container) || container.Id} stays clear of this directory: `
-            + 'the identity of a directory it binds, or of this one, could not be read.',
-        });
+        // The container is named in the log only: this runs before the caller is
+        // authorized against its stack, so the answer carries no name.
+        console.warn(
+          '[Recovery] Cannot prove that container %s stays clear of the directory; refusing the overwrite.',
+          sanitizeForLog(containerName(container) || container.Id),
+        );
+        throw new RecoveryError('identity_unknown');
       }
       if (!match.depends) continue;
     }

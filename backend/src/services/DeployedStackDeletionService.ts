@@ -365,7 +365,13 @@ export class DeployedStackDeletionService {
         await FileSystemService.getInstance(nodeId).deleteStack(stackName);
       } catch (fsErr) {
         db.updateCleanupPendingStatus(intentId, 'cancelled');
-        if (isDataRestoreFenceError(fsErr)) return { ok: false, code: 'data_restore', error: fsErr.message };
+        if (isDataRestoreFenceError(fsErr)) {
+          return {
+            ok: false,
+            code: 'data_restore',
+            error: `${fsErr.message} The stack's containers may already have been stopped; its files are untouched.`,
+          };
+        }
         return {
           ok: false,
           code: 'fs_failed',
