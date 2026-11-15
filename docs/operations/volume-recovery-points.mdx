@@ -75,6 +75,8 @@ Every directory a stack declares is listed, and one Sencho will not protect is l
 | Any directory, while Docker does not say where its data root is (a socket proxy that refuses system info, for example) | `docker_root_unknown` |
 | A stack directory that resolves outside the compose directory, through a symlink | `outside_compose_base` |
 
+A capture of a refused directory answers `400 invalid_request` with the reason's sentence, except `docker_root_unknown`, which is a question to ask again: it answers `409 identity_unknown` with `reason: "path_mapping_unproven"`.
+
 A bind directory inside the stack's own directory, such as `./data`, is its own root and is not refused for overlapping the compose directory.
 
 ### The host path is proven, not assumed
@@ -83,7 +85,7 @@ When Sencho runs in a container, the path it sees for a directory and the path t
 
 A proof that does not match, or that cannot run, answers `409 identity_unknown` with `reason: "path_mapping_unproven"`, records nothing, and the directory never reads Protected. If Sencho cannot read its own container mounts at that moment, the same answer says to try again shortly.
 
-Every later step proves the directory again and requires it to be the directory the capture or overwrite was admitted for, by its generation, and every helper that reads or writes it checks the same device and inode again inside its own container before the capture or the swap runs. A directory or symlink swapped in after admission is refused with `identity_unknown`, and nothing is read or written.
+Every later step proves the directory again and requires it to be the directory the capture or overwrite was admitted for, by its generation, and every helper that reads or writes it checks the same device and inode again inside its own container before the capture or the swap runs. A directory or symlink swapped in after admission is refused with `identity_unknown`, and nothing is read or written. The check compares the generation and the device and inode, so a filesystem snapshot or clone mounted in the directory's place that keeps its inode and birth time cannot be told apart from it.
 
 ### What a point of a directory holds
 
@@ -250,7 +252,7 @@ The request answers `202` with an operation. The result is appended as a verific
 
 ## Browse or download a point's contents
 
-You can open a saved point before you restore it. List what it holds, one directory at a time, and download a single file, all without writing anything to a volume. This reads the data of one volume at one moment. It is not an archive export of the whole point, and it is not a [Fleet Snapshot](/features/fleet-backups), which holds compose files and no application data.
+You can open a saved point before you restore it. List what it holds, one directory at a time, and download a single file, all without writing anything to a volume. This reads the data of one volume or directory at one moment. It is not an archive export of the whole point, and it is not a [Fleet Snapshot](/features/fleet-backups), which holds compose files and no application data.
 
 Each entry carries its name, path, type, size, permission bits, owner and modification time, so you can confirm a point holds the data you expect. The answer also carries the point's own facts: its status, the consistency label the capture observed, the capture counts, whether it is complete, its latest integrity check, and what the capture skipped inside the directory you are looking at. A `partial` point can be browsed, because it holds the bytes it captured, and it is never reported complete. Browsing never changes a point's integrity state: run a [verification](#verify-a-point) for that.
 
@@ -454,9 +456,10 @@ Both actions need the same access as the overwrite itself, held to every stack t
 
 A bind directory goes through every step above, with these differences:
 
-- The directory must be one a stack declares now as a bind it may write. The preview answers `eligible: false` with the reason, and the confirm answers `409 precondition_failed` with the same `reason`: `root_not_authorized` when no stack declares it any more or every stack declares it read-only, `nested_mount` when a mount sits below it, and `path_mapping_unproven` when its host path cannot be proven. A stack source directory is refused with `400 invalid_request` and `reason: "unsupported_target"`.
-- The host path is proven at the preview and the admission, and again before each step that touches the directory, including a `retry` and the reconciliation at startup, and each proof must find the directory the operator confirmed. A proof that cannot run, or that finds a different or recreated directory (an empty mount point after a reboot, for example), leaves the fence held and the restore `completion_unknown`; `retry` proves it again.
+- The directory must be one a stack declares now as a bind it may write. The preview answers `eligible: false` with the reason, and the confirm answers `409 precondition_failed` with the same `reason`: `root_not_authorized` when no stack declares it any more or every stack declares it read-only, `nested_mount` when a mount sits below it, and `path_mapping_unproven` when its host path cannot be proven or Docker does not say where its data root is. A stack source directory is refused with `400 invalid_request` and `reason: "unsupported_target"`.
+- The host path is proven at the preview and the admission, and again before each step that touches the directory, including a `retry` and the reconciliation at startup, and each proof must find the directory the operator confirmed. A proof that cannot run, or that finds a different or recreated directory (an empty mount point after a reboot, for example), leaves the fence held and the restore `completion_unknown`; `retry` proves it again. On a filesystem with no birth time whose device number changes when it is mounted again (some network filesystems), the directory can no longer prove to be the one confirmed after a remount, so `retry` keeps ending unknown and `release_fence` is the way out; the work directory stays in the directory.
 - The preview's `target` carries `kind: "bind_root"` and the `hostPath`, and `volumeName` is null. `dependents.observers` names the containers that only read the directory through a read-only ancestor, and `nestedMounts` lists any mount below it. The confirmation token also binds the dependent stacks, the host path, the declared spellings and the mounts below it, so a stack that starts declaring the directory between the preview and the confirm answers `409 precondition_failed`, and a caller who may not restore that stack is refused with `403`.
+- A work directory that an earlier overwrite of a directory inside this one left behind (one settled with `release_fence`) refuses the overwrite, as one at the top level does. It can hold that restore's originals, a point of this directory does not include it, and the swap would remove it. The reason names its path relative to the directory.
 - The confirmation types back the host path: send `confirmHostPath` instead of `confirmVolumeName`. It is compared with the directory Sencho derived; it never chooses what is written.
 - The fence also refuses a container start that would write the directory (a bind of it, of a path inside it, or of a writable ancestor), and the Files & Volumes routes refuse reading or writing a stack directory that overlaps it with `409` and `code: "data_restore"`.
 - The operation result names the target as `{ "kind": "bind_root", "hostPath": "..." }`.
@@ -680,7 +683,7 @@ curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
 }
 ```
 
-With `?stack=`, the stack's source directory and every directory it binds are listed with `kind: "bind_root"`. When the stack's Compose model cannot be rendered, its binds are not known: the source directory is listed, and one more entry with coverage `identity_unknown` keeps the stack from reading Protected. Each directory carries a `role` (`stack_source` or `bind`), the `rootId` a capture names, the `hostPath`, and any other declared spelling of the directory in `aliases`. Listing never starts a helper and never renders another stack.
+With `?stack=`, the stack's source directory and every directory it binds are listed with `kind: "bind_root"`. When the stack's Compose model cannot be rendered, its binds are not known: the source directory is listed, and one more entry with coverage `identity_unknown` keeps the stack from reading Protected. Each directory carries a `role` (`stack_source` or `bind`), the `rootId` a capture names, the `hostPath`, and any other declared spelling of the directory in `aliases`. Listing never starts a helper and never renders any stack but the one asked for.
 
 Without `?stack=`, every volume on the node is considered, and only the directories that already have a recorded identity are listed, with `fsRootsScope: "recorded_only"`, because finding the rest would render every stack. Their `rootId`, `role` and `stackName` are null there. `stack` is one stack name: a stack that does not exist lists nothing, and a repeated parameter or a name that is not a valid stack name answers `400 invalid_request`. A root the caller may not read appears as `{ "kind": "named_volume", "access": "inaccessible" }` (or `bind_root`) with no name or path, and it still counts against the verdict: an unreadable root must never make a partly protected stack read as protected. A root's `storageId` is null until the volume has been observed, which happens when its first point is captured.
 

@@ -97,10 +97,13 @@ const LIVE_FENCE_STATE = "('held','release_failed')";
 
 /** One log line for an unreadable store, not one per request. */
 let warnedUnreadable = false;
+/** Fenced restores whose directory paths could not be read, each logged once. */
+const warnedUnreadableFsTargets = new Set<string>();
 
-/** Test seam: allow the warning again. */
+/** Test seam: allow the warnings again. */
 export function resetRestoreFenceWarningForTests(): void {
   warnedUnreadable = false;
+  warnedUnreadableFsTargets.clear();
 }
 
 function warnStoreUnreadable(err: unknown): void {
@@ -221,7 +224,10 @@ export class RestoreFenceStore {
         // A fenced directory whose record cannot be read is still fenced. It
         // stands for every host path, so nothing that binds one starts and no
         // file route touches one until the restore is resolved.
-        console.warn('[Recovery] The paths of fenced restore %s cannot be read; refusing every host directory until it is resolved', sanitizeForLog(row.id));
+        if (!warnedUnreadableFsTargets.has(row.id)) {
+          warnedUnreadableFsTargets.add(row.id);
+          console.warn('[Recovery] The paths of fenced restore %s cannot be read; refusing every host directory until it is resolved', sanitizeForLog(row.id));
+        }
         return { senchoPath: '/', hostPath: '/', aliases: [] };
       });
     } catch (err) {
@@ -562,7 +568,7 @@ export async function startContainerUnderFence<T>(
   const recheck = (): DataRestoreFenceError | null => {
     if (!bindsHostPath) return null;
     const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets().find((target) => !checked.has(target.hostPath));
-    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'container', 'directory', true) : null;
+    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'recheck', 'directory') : null;
   };
   return startUnderFence(names, start, 'container', recheck);
 }

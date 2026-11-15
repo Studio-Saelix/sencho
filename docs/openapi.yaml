@@ -2295,7 +2295,9 @@ components:
         with no name or path, and still counts against the verdict. A host directory is a
         stack's own source directory or a directory it binds; `rootId` is what a capture
         names. In a node-wide listing only directories with a recorded identity appear, and
-        their `rootId`, `role` and `stackName` are null.
+        their `rootId`, `role` and `stackName` are null. A stack listing for a stack whose
+        Compose model cannot be rendered adds one entry with `rootId` and `label` null and
+        coverage `identity_unknown`, standing for the binds that cannot be listed.
       properties:
         kind:
           type: string
@@ -6972,7 +6974,9 @@ paths:
         against them. Every stack that depends on the directory is authorized, then the
         directory's eligibility is checked, then the host path the Docker daemon uses is
         proven to be the directory Sencho sees (device and inode), and only then is anything
-        recorded. A proof that fails answers `409 identity_unknown` with
+        recorded. A refused directory answers `400 invalid_request` with its reason's
+        sentence. A proof that fails, and a directory refused only because Docker does not
+        say where its data root is, answer `409 identity_unknown` with
         `reason: path_mapping_unproven`. A directory inside or around one another operation
         holds answers `409 lock_held`. Mounts below the directory are recorded as
         `nested_mount` exclusions, so such a point is `partial`. A node that predates this

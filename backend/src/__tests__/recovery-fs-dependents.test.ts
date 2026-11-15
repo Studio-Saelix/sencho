@@ -9,6 +9,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { FsRootListing, FsRootDeclaration } from '../services/StackFileRootsService';
@@ -135,6 +138,46 @@ describe('dependent stacks', () => {
     });
     const resolution = await resolve({ known: ['child', 'parent', 'reader', 'sibling'] });
     expect(resolution.dependents.map((d) => d.stackName).sort()).toEqual(['child', 'parent']);
+  });
+
+  it('makes a stack that declares the directory under a second spelling a dependent, by device and inode', async () => {
+    // Sencho reaches one directory through two of its own mounts: the spellings
+    // share no prefix, so only the identity ties them together.
+    const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fsdeps-identity-')));
+    try {
+      const realStat = await fs.promises.stat(real, { bigint: true });
+      const originalStat = fs.promises.stat.bind(fs.promises);
+      vi.spyOn(fs.promises, 'stat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => (
+        target === '/mnt/second/data' ? realStat : originalStat(target, options)
+      )) as unknown as typeof fs.promises.stat);
+      stackRoots({
+        web: { outcome: 'rendered', roots: [source('web'), bind('/mnt/second/data')] },
+        other: { outcome: 'rendered', roots: [source('other'), bind('/mnt/second/other')] },
+      });
+      const root = { senchoPath: real, hostPath: real, aliases: [] as string[] };
+      const resolution = await resolve({ known: ['web', 'other'], root });
+      expect(resolution.dependents.map((d) => d.stackName)).toEqual(['web']);
+      const bindOf = (Source: string) => ({ Mounts: [{ Type: 'bind', Source, Destination: '/x', RW: true }] });
+      expect((await roots.matchContainerToRoot(bindOf('/mnt/second/data'), root, null)).depends).toBe(true);
+      expect((await roots.matchContainerToRoot(bindOf('/mnt/second/other'), root, null)).depends).toBe(false);
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true });
+    }
+  });
+
+  it('names the stacks that declare the directory when renders finish out of order', async () => {
+    const names = Array.from({ length: 9 }, (_, i) => `s${i}`);
+    vi.spyOn(StackFileRoots.StackFileRootsService.prototype, 'listFsRoots')
+      .mockImplementation(async function (this: unknown, stackName: string) {
+        const index = Number(stackName.slice(1));
+        // Later stacks answer first.
+        await new Promise((resolve) => setTimeout(resolve, (names.length - index) * 3));
+        const declares = stackName === 's2' || stackName === 's7';
+        return { outcome: 'rendered', roots: [source(stackName), ...(declares ? [bind('/srv/data')] : [bind(`/srv/${stackName}`)])] };
+      });
+    const resolution = await resolve({ known: names });
+    expect(resolution.kind).toBe('resolved');
+    expect(resolution.dependents.map((d) => d.stackName).sort()).toEqual(['s2', 's7']);
   });
 
   it('makes a stack whose model would not render leave the set unknown', async () => {
@@ -273,6 +316,12 @@ describe('overlapping work', () => {
     expect(() => roots.assertNoOverlappingFsWork('/srv/other', 'k')).not.toThrow();
   });
 
+  it('treats an unsettled directory overwrite whose paths cannot be read as overlapping every directory', () => {
+    const intentId = fencedDirectory({ senchoPath: '/srv/data', hostPath: '/srv/data' }, 'none');
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_paths_json = '{broken' WHERE id = ?").run(intentId);
+    expect(() => roots.assertNoOverlappingFsWork('/srv/elsewhere', 'k')).toThrow(expect.objectContaining({ errorClass: 'lock_held' }));
+  });
+
   it('records a host directory intent only with its paths', () => {
     const store = intents.RestoreIntentStore.getInstance();
     expect(() => store.recordOverwrite({
@@ -312,8 +361,9 @@ describe('the fence on a host directory', () => {
       return null;
     });
     const start = vi.fn(async () => 'started');
+    // The refusal says the start was caught mid-check, not that the container mounts it.
     await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: '/srv/data' }]), 'c1', start))
-      .rejects.toMatchObject({ code: 'data_restore' });
+      .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/while Sencho was checking what this container mounts/) });
     expect(start).not.toHaveBeenCalled();
   });
 
@@ -339,7 +389,7 @@ describe('the fence on a host directory', () => {
 });
 
 describe('the fence when nothing was fenced at the match', () => {
-  it('refuses a start when the first directory fence lands while the container is inspected', async () => {
+  it('matches a directory fenced while the container is inspected, when only a volume was fenced before', async () => {
     vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
     // A volume fence keeps the fast path off; no directory is fenced at the match.
     const docker = {

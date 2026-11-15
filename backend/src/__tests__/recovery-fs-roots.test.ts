@@ -333,6 +333,10 @@ describe('the generation token', () => {
       expect(await roots.fsGenerationChanged(`fs|${stat.ino}|${btime}`, real)).toBe(false);
       // The same inode with another birth time is a directory made again on a reused inode.
       expect(await roots.fsGenerationChanged(`fs|${stat.ino}|1700000000.000000001`, real)).toBe(true);
+    } else {
+      // Without a birth time in Sencho's own stat, a token that carries one is
+      // compared by inode alone, so it never reads as a false change.
+      expect(await roots.fsGenerationChanged(`fs|${stat.ino}|1700000000.000000001`, real)).toBe(false);
     }
     expect(await roots.fsGenerationChanged(`fs|${stat.dev}:${stat.ino}`, real)).toBe(false);
     expect(await roots.fsGenerationChanged(`fs|${stat.dev}:${stat.ino + 1n}`, real)).toBe(true);
@@ -410,6 +414,22 @@ describe('overlap', () => {
     expect(roots.pathsOverlap('/srv/app', '/srv/app/data')).toBe(true);
     expect(roots.pathsOverlap('/srv/app/data/db', '/srv/app/data')).toBe(true);
     expect(roots.pathsOverlap('/srv/app/data', '/srv/app/database')).toBe(false);
+  });
+});
+
+describe('a freshly derived root swapped for a symlink', () => {
+  it('is refused by the proof, though the daemon and a followed stat would agree on the target', async () => {
+    const parent = dir('fresh-swap');
+    const data = path.join(parent, 'data');
+    const foreign = dir('fresh-swap-foreign');
+    fs.symlinkSync(foreign, data);
+    // The daemon follows the symlink to the foreign directory, as Docker does.
+    const helper = fakeHelper({ daemonView: { [data]: foreign } });
+    await expect(roots.proveHostRoot({ runner: helper.runner, operationId: 'op', senchoPath: data, hostPath: data }))
+      .rejects.toMatchObject({ errorClass: 'identity_unknown' });
+    // A recorded spelling may be a symlink: it is followed, and its caller pins the token.
+    await expect(roots.proveHostRoot({ runner: helper.runner, operationId: 'op', senchoPath: data, hostPath: data, followSenchoPath: true }))
+      .resolves.toMatchObject({ root: expect.anything() });
   });
 });
 

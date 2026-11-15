@@ -198,13 +198,13 @@ export class StorageIdentityStore {
    * the second spelling resolves to the identity the first one created: one
    * lock, one set of points, one dependent set.
    */
-  findCurrentByGenerationToken(ownerNodeKey: string, kind: StorageKind, token: string): StorageIdentity | null {
-    const row = recoveryDb().prepare(`
+  listCurrentByGenerationToken(ownerNodeKey: string, kind: StorageKind, token: string, limit: number): StorageIdentity[] {
+    const rows = recoveryDb().prepare(`
       SELECT * FROM recovery_storage_identities
       WHERE authority_id = ? AND owner_node_key = ? AND kind = ? AND generation_token = ? AND state = 'current'
-      ORDER BY first_seen_at LIMIT 1
-    `).get(getRecoveryAuthorityId(), ownerNodeKey, kind, token) as IdentityRow | undefined;
-    return row ? toIdentity(row) : null;
+      ORDER BY first_seen_at LIMIT ?
+    `).all(getRecoveryAuthorityId(), ownerNodeKey, kind, token, limit) as IdentityRow[];
+    return rows.map(toIdentity);
   }
 
   /** Every current identity of a kind on this engine, for a node-wide listing. */

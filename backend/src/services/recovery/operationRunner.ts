@@ -137,6 +137,13 @@ interface RunningWork {
 
 /** How stale the cached health may be before a read refreshes it in the background. */
 const HEALTH_TTL_MS = 60_000;
+/**
+ * At most this many recorded spellings sharing a directory's token are proven
+ * for an alias merge, each one helper probe. Several current identities with one
+ * token are rare (a directory moved, a second Sencho mount); this bounds the
+ * probes a capture can start.
+ */
+const MAX_ALIAS_IDENTITIES = 8;
 
 export interface AdmissionResult {
   operation: RecoveryOperation;
@@ -740,6 +747,14 @@ export class RecoveryEngineService {
         detail: 'Sencho could not read its own container mounts, so it cannot tell which host path holds this directory. Try again shortly.',
       });
     }
+    // Docker not saying where its data root is is a question to ask again, so it
+    // answers as an unproven mapping rather than as a directory never offered.
+    if (candidate.status === 'ineligible' && candidate.ineligibleReason === 'docker_root_unknown') {
+      throw new RecoveryError('identity_unknown', {
+        reason: 'path_mapping_unproven',
+        detail: describeFsIneligible(candidate.ineligibleReason) ?? undefined,
+      });
+    }
     if (candidate.status === 'ineligible') {
       throw new RecoveryError('invalid_request', { detail: describeFsIneligible(candidate.ineligibleReason) ?? undefined });
     }
@@ -757,14 +772,21 @@ export class RecoveryEngineService {
     // with this token under another locator is the one this point belongs to,
     // and its recorded dependents join the access check.
     const store = StorageIdentityStore.getInstance();
-    const tokenMatch = store.findCurrentByGenerationToken(ownerNodeKey, 'bind_root', proven.generationToken);
+    const tokenMatches = store.listCurrentByGenerationToken(ownerNodeKey, 'bind_root', proven.generationToken, MAX_ALIAS_IDENTITIES);
     // An equal token is a candidate, not proof: a moved directory keeps its
-    // token, and a clone can share inode and birth time with its origin. The
-    // recorded spelling is proven now and must be this very directory.
-    const alias = tokenMatch && tokenMatch.locator !== hostPath
-      && await this.isSameDirectory(tokenMatch.locator, proven.root.identity())
-      ? tokenMatch
-      : null;
+    // token, and a clone can share inode and birth time with its origin. Each
+    // recorded spelling is proven now, oldest first, and must be this very
+    // directory; one that cannot be proven (a mount since removed) is passed
+    // over, so a directory recorded under it can still join a later spelling.
+    let alias: StorageIdentity | null = null;
+    if (!tokenMatches.some((match) => match.locator === hostPath)) {
+      for (const match of tokenMatches) {
+        if (await this.isSameDirectory(match.locator, proven.root.identity())) {
+          alias = match;
+          break;
+        }
+      }
+    }
     const locator = alias ? alias.locator : hostPath;
     if (alias && alias.locator !== hostPath) {
       if (!input.authorize({ storageKey: keyForCheck === null ? null : alias.storageKey, dependents: resolution.dependents })) {

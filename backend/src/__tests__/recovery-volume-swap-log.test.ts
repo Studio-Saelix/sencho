@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { format } from 'util';
 import { scriptedHelper } from './__helpers__/overwriteFixture';
 import { runSwapStep } from '../services/recovery/volumeSwap';
+import { ProvenHostRoot } from '../services/recovery/hostRoots';
+import type { RecoveryHelperRunner } from '../services/recovery/restic/helperRunner';
 
 const INTENT_ID = '4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d';
 
@@ -61,5 +63,17 @@ describe('a swap step that exits non-zero', () => {
     const { ok, lines } = await stepLogs({ swapAnswers: [{ action: 'prepare', exitCode: 0, status: 'planned' }] });
     expect(ok).toBe(true);
     expect(lines).toEqual([]);
+  });
+});
+
+describe('a swap step with a target that does not pair', () => {
+  it('refuses a directory key without its proven root, and a proven root beside a volume name, before any helper runs', async () => {
+    const run = vi.fn();
+    const runner = { run } as unknown as RecoveryHelperRunner;
+    const root = ProvenHostRoot.mint('/srv/data', '1', '2');
+    const base = { runner, operationId: 'op-1', intentId: INTENT_ID, action: 'prepare' as const };
+    expect(await runSwapStep({ ...base, volumeName: 'fs:abc' })).toEqual({ ok: false, report: null, errorClass: 'identity_unknown' });
+    expect(await runSwapStep({ ...base, volumeName: 'live-volume', hostRoot: root })).toEqual({ ok: false, report: null, errorClass: 'identity_unknown' });
+    expect(run).not.toHaveBeenCalled();
   });
 });

@@ -66,6 +66,10 @@ let daemonView: Record<string, string> = {};
 let nestedMounts: string[] = [];
 let helperRuns: HelperRunSpec[] = [];
 let containers: Array<Record<string, unknown>> = [];
+/** Names the work-directory probe reports at a root's top level. */
+let topWorkDirs: string[] = [];
+/** What the daemon says its data root is; undefined when it does not say. */
+let dockerRootDir: string | undefined = '/var/lib/docker';
 
 function fakeHelper() {
   return {
@@ -86,7 +90,7 @@ function fakeHelper() {
         dev_s: stat.dev.toString(), ino_s: stat.ino.toString(), btime: '1700000000.000000001',
       };
       if (spec.cmd.includes('--mounts')) report.mounts = nestedMounts;
-      if (spec.cmd.includes('--work-dirs')) report.work_dirs = [];
+      if (spec.cmd.includes('--work-dirs')) report.work_dirs = topWorkDirs;
       spec.onStdoutLine?.(JSON.stringify(report));
       return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
     },
@@ -124,7 +128,7 @@ function service() {
 async function stubDocker(): Promise<void> {
   const DockerController = (await import('../services/DockerController')).default;
   vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
-    info: async () => ({ ID: 'engine-fs', DockerRootDir: '/var/lib/docker' }),
+    info: async () => ({ ID: 'engine-fs', ...(dockerRootDir === undefined ? {} : { DockerRootDir: dockerRootDir }) }),
     listVolumes: async () => ({ Volumes: [] }),
     listContainers: async () => containers,
     getVolume: () => ({ inspect: async () => { throw Object.assign(new Error('no such volume'), { statusCode: 404 }); } }),
@@ -232,6 +236,7 @@ beforeAll(async () => {
   recoveryDbModule = await import('../services/recovery/recoveryDb');
   capability = await import('../services/recovery/capability');
   StackFileRoots = await import('../services/StackFileRootsService');
+  intentsModule = await import('../services/recovery/restoreIntents');
   nodeId = DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
   adminCookie = await loginAsTestAdmin(app);
 });
@@ -263,6 +268,8 @@ beforeEach(async () => {
   nestedMounts = [];
   helperRuns = [];
   containers = [];
+  topWorkDirs = [];
+  dockerRootDir = '/var/lib/docker';
   await stubDocker();
   const SelfIdentityService = (await import('../services/SelfIdentityService')).default;
   vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
@@ -478,6 +485,40 @@ describe('capturing a host directory', () => {
     expect(identityStore.StorageIdentityStore.getInstance().getById(res.body.operation.storageId)?.locator).toBe(data);
   });
 
+  it('merges onto a later recorded spelling when the oldest one with the same token no longer proves', async () => {
+    const data = dataDir('web');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const stat = fs.statSync(data, { bigint: true });
+    const token = `fs|${stat.ino}|1700000000.000000001`;
+    const store = identityStore.StorageIdentityStore.getInstance();
+    const gone = store.observe({
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: path.join(shared, 'gone-away'), generationToken: token, dependents: [],
+    });
+    const spelling = path.join(shared, `spelling-${randomUUID().slice(0, 8)}`);
+    fs.symlinkSync(data, spelling);
+    const later = store.observe({
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: spelling, generationToken: token, dependents: [],
+    });
+    // The unprovable spelling is the oldest, so it is the one looked at first.
+    recoveryDbModule.recoveryDb().prepare('UPDATE recovery_storage_identities SET first_seen_at = 1 WHERE id = ?').run(gone.id);
+    const res = await capture('web', await rootIdOf('web'));
+    expect(res.status).toBe(202);
+    expect(res.body.operation.storageId).toBe(later.id);
+  });
+
+  it('answers a capture as retryable while Docker does not say where its data root is', async () => {
+    dataDir('web');
+    models.byStack.web = [{ source: path.join(stackDir('web'), 'data'), target: '/data' }];
+    dockerRootDir = undefined;
+    const rootId = (await listing('web')).roots.find((r) => r.ineligibleReason === 'docker_root_unknown')?.rootId as string;
+    expect(rootId).toBeTruthy();
+    const res = await capture('web', rootId);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ errorClass: 'identity_unknown', reason: 'path_mapping_unproven' });
+    expect(res.body.error).toMatch(/data root/);
+    expect(operationCount()).toBe(0);
+  });
+
   it('answers a replay with the same operation and refuses the key for a different request', async () => {
     const data = dataDir('web');
     models.byStack.web = [{ source: data, target: '/data' }];
@@ -652,6 +693,54 @@ describe('overwriting a host directory', () => {
     expect(undeclared.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'root_not_authorized' });
   });
 
+  it('refuses a directory with a work directory left at its top level, worded for a directory', async () => {
+    const { pointId } = await capturedPoint();
+    topWorkDirs = ['.sencho-restore-4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d'];
+    const res = await preview(pointId);
+    expect(res.body.target.eligible).toBe(false);
+    expect(res.body.target.ineligibleReason).toMatch(/left a work directory \(\.sencho-restore-4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d\) in this directory/);
+    expect(res.body.confirmation.token).toBeNull();
+  });
+
+  it('refuses a parent while a directory inside it keeps the work directory of a restore whose fence was released', async () => {
+    const { pointId, data } = await capturedPoint();
+    const inner = path.join(data, 'inner');
+    fs.mkdirSync(inner);
+    const intentId = fencedOverwriteOf(fs.realpathSync(inner));
+    // Settled by release_fence: no longer an overlap, but its work directory stays.
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET phase = 'completion_unknown', fence_state = 'released' WHERE id = ?").run(intentId);
+    const workDir = path.join(inner, `.sencho-restore-${intentId}`);
+    fs.mkdirSync(path.join(workDir, 'original'), { recursive: true });
+    const refused = await preview(pointId);
+    expect(refused.body.target.eligible).toBe(false);
+    expect(refused.body.target.ineligibleReason).toContain(`inner/.sencho-restore-${intentId}`);
+    const confirmed = await request(app).post(`/api/recovery/points/${pointId}/overwrite`).set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: 'a'.repeat(64), confirmHostPath: data });
+    expect(confirmed.status).toBe(400);
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get()).toEqual({ n: 1 });
+    fs.rmSync(workDir, { recursive: true });
+    expect((await preview(pointId)).body.target.eligible).toBe(true);
+  });
+
+  it('says a directory made again since the point was captured, and that Docker\'s unknown data root is a question to ask again', async () => {
+    const { pointId, data } = await capturedPoint();
+    dockerRootDir = undefined;
+    const unknownRoot = await preview(pointId);
+    expect(unknownRoot.body.target.eligible).toBe(false);
+    expect(unknownRoot.body.target.ineligibleReason).toMatch(/data root/);
+    const unknownConfirm = await request(app).post(`/api/recovery/points/${pointId}/overwrite`).set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: 'a'.repeat(64), confirmHostPath: data });
+    expect(unknownConfirm.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'path_mapping_unproven' });
+    dockerRootDir = '/var/lib/docker';
+    const replacement = path.join(shared, `remade-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(replacement);
+    fs.rmSync(data, { recursive: true });
+    fs.renameSync(replacement, data);
+    const remade = await preview(pointId);
+    expect(remade.body.target.eligible).toBe(false);
+    expect(remade.body.target.ineligibleReason).toMatch(/removed and made again after this point was captured/);
+  });
+
   it('answers precondition_failed when another stack starts declaring the directory after the preview', async () => {
     const dir = path.join(shared, 'grows');
     fs.mkdirSync(dir, { recursive: true });
@@ -716,10 +805,6 @@ function intentsStore() {
 }
 
 describe('the fence on a host directory, at the routes', () => {
-  beforeAll(async () => {
-    intentsModule = await import('../services/recovery/restoreIntents');
-  });
-
   it('refuses file reads and writes that overlap a fenced directory, for the stack source and a bind root', async () => {
     const data = dataDir('web');
     fs.writeFileSync(path.join(data, 'a.txt'), 'x');
@@ -790,6 +875,20 @@ describe('a directory overwrite confirmed against a state that moved', () => {
     const res = await confirm(pointId, token, data);
     expect(res.status).toBe(409);
     expect(res.body.errorClass).toBe('precondition_failed');
+    expect(intentCount()).toEqual({ n: 0 });
+  });
+
+  it('gives the sentence of the reason it answers with when the directory was made again and a mount appeared', async () => {
+    const { pointId, data, token } = await previewed();
+    nestedMounts = ['cache'];
+    const replacement = path.join(shared, `replacement-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(replacement);
+    fs.rmSync(data, { recursive: true });
+    fs.renameSync(replacement, data);
+    const res = await confirm(pointId, token, data);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'generation_changed' });
+    expect(res.body.error).toMatch(/removed and made again/);
     expect(intentCount()).toEqual({ n: 0 });
   });
 

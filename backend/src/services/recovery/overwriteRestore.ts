@@ -33,11 +33,13 @@ import {
 } from './volumeSources';
 import { runSwapStep, swapIncomingDir, swapWorkDir, type SwapRunResult, type SwapStatus } from './volumeSwap';
 import {
+  describeFsIneligible,
   findDeclaredFsRoot,
   fsTargetKey,
   isFsTargetKey,
   locateStoredFsRoot,
   matchContainerToRoot,
+  nestedLeftoverWorkDirs,
   nestedMountExclusions,
   probeProvenRoot,
   proveHostRoot,
@@ -682,7 +684,14 @@ async function observeFsTarget(
     && candidate.writable && candidate.ineligibleReason === null && candidate.hostPath === storage.locator);
   const writableAnySpelling = declared.candidates.some((candidate) => candidate.role === 'bind'
     && candidate.writable && candidate.ineligibleReason === null);
-  if (!writable && !writableAnySpelling) refuse('root_not_authorized', FS_NOT_DECLARED_REASON);
+  // Docker not saying where its data root is withholds every directory, but that
+  // is a question to ask again, not a stack that stopped declaring this one.
+  const dockerRootUnknown = declared.candidates.some((candidate) => candidate.role === 'bind'
+    && candidate.writable && candidate.ineligibleReason === 'docker_root_unknown');
+  if (!writable && !writableAnySpelling) {
+    if (dockerRootUnknown) refuse('path_mapping_unproven', describeFsIneligible('docker_root_unknown') ?? FS_UNPROVEN_REASON);
+    else refuse('root_not_authorized', FS_NOT_DECLARED_REASON);
+  }
 
   let liveGenerationToken: string | null = null;
   let freeBytes: number | null = null;
@@ -720,6 +729,9 @@ async function observeFsTarget(
           .filter((name) => isRecoveryWorkDirName(name))
           .filter((name) => name !== (live ? swapWorkDir(live) : null));
       }
+      // A directory inside this one that was overwritten keeps its own work
+      // directory, below the top level the probe lists.
+      leftoverWorkDirs.push(...await nestedLeftoverWorkDirs(location));
     } catch (err) {
       console.warn('[Recovery] Could not prove the directory %s for an overwrite:', sanitizeForLog(storage.locator), errorMessageForLog(err));
       refuse('path_mapping_unproven', FS_UNPROVEN_REASON);
@@ -931,9 +943,12 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
     // A recreated volume is a moved precondition, not a malformed request: the
     // caller's token was valid for the point, and the repair is a new point.
     if (observed.generationChanged) {
+      // Another refusal may have been found first; the sentence follows the reason.
       throw new RecoveryError('precondition_failed', {
         reason: 'generation_changed',
-        detail: observed.ineligibleReason ?? GENERATION_CHANGED_REASON,
+        detail: observed.storage.kind === 'bind_root'
+          ? FS_GENERATION_CHANGED_REASON
+          : (observed.ineligibleReason ?? GENERATION_CHANGED_REASON),
       });
     }
     // For a host directory, a mount that appeared below it, a stack that stopped

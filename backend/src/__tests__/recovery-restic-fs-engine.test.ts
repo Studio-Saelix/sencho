@@ -199,4 +199,12 @@ describe('an overwrite of a host directory', () => {
     const { engine } = engineWith(() => ({ ...OK, exitCode: 86, guardRefused: true }));
     expect(await engine.restore(intent(STAGED), context())).toEqual({ ok: false, errorClass: 'identity_unknown' });
   });
+
+  it('refuses a directory key without its proven root, and a proven root beside a volume name, before any helper runs', async () => {
+    const { engine, specs } = engineWith(() => OK);
+    const withoutRoot = { ...STAGED, hostRoot: undefined };
+    expect(await engine.restore(intent(withoutRoot), context())).toEqual({ ok: false, errorClass: 'identity_unknown' });
+    expect(await engine.restore(intent({ ...STAGED, volumeName: 'live-volume' }), context())).toEqual({ ok: false, errorClass: 'identity_unknown' });
+    expect(specs).toHaveLength(0);
+  });
 });

@@ -20,6 +20,7 @@ import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import { HELPER_SOURCE_MOUNT, type RecoveryHelperRunner } from './restic/helperRunner';
 import { StorageIdentityStore } from './storageIdentity';
 import { parseFsTargetPaths } from './fsTargets';
+import { RECOVERY_WORK_DIR_PREFIX } from './restoreIntents';
 import { mapLimited, RENDER_CONCURRENCY, type DependentResolution, type InUseObservation } from './volumeSources';
 import type { PointExclusion, StorageDependent } from './types';
 
@@ -177,8 +178,11 @@ async function identityOf(target: string): Promise<string | null> {
   try {
     const stat = await fsPromises.stat(target, { bigint: true });
     return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
-  } catch {
+  } catch (err) {
     // An unreadable path is matched by its spelling alone.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('[Recovery] Could not read the identity of %s:', sanitizeForLog(target), errorMessageForLog(err));
+    }
     return null;
   }
 }
@@ -920,13 +924,50 @@ export function assertNoOverlappingFsWork(hostPath: string, ownStorageKey: strin
   const intents = db.prepare(`
     SELECT target_paths_json AS paths FROM recovery_restore_intents
     WHERE target_mode = 'staged_overwrite'
-      AND target_paths_json IS NOT NULL
+      AND target_volume LIKE 'fs:%'
       AND (phase NOT IN ('committed','rolled_back','completion_unknown') OR fence_state IN ('held','release_failed'))
-  `).all() as Array<{ paths: string }>;
+  `).all() as Array<{ paths: string | null }>;
   for (const row of intents) {
+    // An unsettled directory overwrite whose paths cannot be read could be
+    // anywhere, as the fence also reads it, so it overlaps every directory.
     const paths = parseFsTargetPaths(row.paths);
-    if (paths && pathsOverlap(paths.hostPath, hostPath)) throw overlapRefusal();
+    if (!paths || pathsOverlap(paths.hostPath, hostPath)) throw overlapRefusal();
   }
+}
+
+/**
+ * Work directories that overwrites of directories strictly inside `parent` may
+ * have left behind, as paths relative to the parent. An overwrite settled with
+ * `release_fence` keeps its work directory, which can hold the originals it had
+ * already moved out. An overwrite of the parent would move that directory into
+ * its own work directory and delete it at cleanup, and the parent's pre-restore
+ * point leaves work directories out at any depth, so each one found refuses the
+ * parent overwrite. A path Sencho cannot stat counts as present.
+ */
+export async function nestedLeftoverWorkDirs(parent: { senchoPath: string; hostPath: string }): Promise<string[]> {
+  const rows = recoveryDb().prepare(`
+    SELECT id, target_paths_json AS paths FROM recovery_restore_intents
+    WHERE target_mode = 'staged_overwrite' AND target_volume LIKE 'fs:%'
+  `).all() as Array<{ id: string; paths: string | null }>;
+  const found: string[] = [];
+  for (const row of rows) {
+    const paths = parseFsTargetPaths(row.paths);
+    if (!paths) {
+      console.warn('[Recovery] The paths of restore %s cannot be read; its work directory is not looked for', sanitizeForLog(row.id));
+      continue;
+    }
+    if (relatePath(paths.hostPath, parent.hostPath) !== 'inside') continue;
+    const relative = path.posix.join(path.posix.relative(parent.hostPath, paths.hostPath), `${RECOVERY_WORK_DIR_PREFIX}${row.id}`);
+    try {
+      await fsPromises.lstat(path.join(parent.senchoPath, relative));
+      found.push(relative);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      console.warn('[Recovery] Could not look for the work directory %s:', sanitizeForLog(relative), errorMessageForLog(err));
+      found.push(relative);
+    }
+  }
+  return found;
 }
 
 function overlapRefusal(): RecoveryError {
