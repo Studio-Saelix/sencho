@@ -5,7 +5,7 @@
  * file is read literally.
  */
 import { describe, expect, it } from 'vitest';
-import { ComposeEnvFileError, ComposeEnvFiles } from '../utils/composeDotenv';
+import { ComposeEnvFileError, ComposeEnvFiles, ComposeEnvLimitError, templateNestingDepth, type ComposeEnvLimits } from '../utils/composeDotenv';
 
 const none = () => undefined;
 
@@ -121,5 +121,75 @@ describe('service env_file assigned names', () => {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
       }
     });
+  });
+});
+
+describe('ComposeEnvFiles limits', () => {
+  const limits = (overrides: Partial<ComposeEnvLimits> = {}): ComposeEnvLimits => ({
+    maxRawValue: 100,
+    maxStatementReads: 50,
+    maxTemplateDepth: 5,
+    shared: { remaining: 1_000 },
+    ...overrides,
+  });
+  const reader = (l?: ComposeEnvLimits) => new ComposeEnvFiles(() => undefined, l);
+
+  it('reads the same values with or without limits when nothing passes a bound', () => {
+    const text = 'A=one\nB="${A}-two"\nC=${B}-three # note\n';
+    const bounded = reader(limits());
+    bounded.read(text);
+    const free = reader();
+    free.read(text);
+    expect(bounded.assigned('C')).toBe(free.assigned('C'));
+    expect(bounded.assigned('C')).toBe('one-two-three');
+  });
+
+  it('refuses a value longer than the raw bound, quoted or not', () => {
+    expect(() => reader(limits()).read(`A=${'x'.repeat(101)}\n`)).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read(`A="${'x'.repeat(101)}"\n`)).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read(`A='${'x'.repeat(101)}'\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses a statement that copies more than the per-statement bound out of variables', () => {
+    const env = reader(limits());
+    env.read(`A=${'x'.repeat(40)}\n`);
+    expect(() => env.read('B="${A}${A}"\n')).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses text copied past the shared budget, across readers that share it', () => {
+    const shared = { remaining: 100 };
+    reader(limits({ shared })).read(`A=${'x'.repeat(60)}\n`);
+    expect(shared.remaining).toBe(40);
+    expect(() => reader(limits({ shared })).read(`B=${'y'.repeat(60)}\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('refuses a value nested deeper than the template bound, and counts nesting by braces', () => {
+    expect(templateNestingDepth('a${B:-${C:-${D}}}e')).toBe(3);
+    expect(templateNestingDepth('${A}${B}${C}')).toBe(1);
+    expect(templateNestingDepth('plain $A and $$ {not}')).toBe(1);
+    expect(() => reader(limits()).read('A=${B:-${C:-${D:-${E:-${F:-${G}}}}}}\n')).toThrow(ComposeEnvLimitError);
+    expect(() => reader(limits()).read('A=${B:-${C:-${D}}}\n')).not.toThrow();
+  });
+
+  it('counts every brace the expander counts, and reads nesting from decoded escapes', () => {
+    expect(templateNestingDepth('${a:-{}'.repeat(10))).toBe(11);
+    expect(() => reader(limits()).read(`A=${'${a:-{}'.repeat(6)}\n`)).toThrow(ComposeEnvLimitError);
+    // `\0044` decodes to `$` and `\0173` to `{`, which the raw text does not show.
+    expect(() => reader(limits()).read(`A="${'\\0044\\0173a:-'.repeat(6)}x"\n`)).toThrow(ComposeEnvLimitError);
+  });
+
+  it('seeds values later files interpolate, and counts them against the shared budget', () => {
+    const shared = { remaining: 100 };
+    const env = reader(limits({ shared }));
+    env.seed([['A', 'one']]);
+    env.read('B=${A}-two\n');
+    expect(env.assigned('B')).toBe('one-two');
+    expect(() => env.seed([['C', 'x'.repeat(200)]])).toThrow(ComposeEnvLimitError);
+  });
+
+  it('is not a syntax error, so a caller cannot read it as a file Compose rejects too', () => {
+    const error = (() => { try { reader(limits()).read(`A=${'x'.repeat(101)}\n`); } catch (err) { return err; } return null; })();
+    expect(error).toBeInstanceOf(ComposeEnvLimitError);
+    expect(error).not.toBeInstanceOf(ComposeEnvFileError);
   });
 });

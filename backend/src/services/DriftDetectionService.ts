@@ -592,6 +592,7 @@ async function renderDeclaredCompose(nodeId: number, stackName: string): Promise
     const { ComposeService } = await import('./ComposeService');
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered === null) {
+      if (result.refusal) return { ok: false, parseError: result.refusal };
       const missing = parseMissingRequiredVars(result.stderr);
       return {
         ok: false,

@@ -119,6 +119,21 @@ describe('effective-anatomy route', () => {
     expect(JSON.stringify(res.body)).not.toContain(ENV_SECRET);
   });
 
+  it('names Sencho\'s own refusal instead of sending the operator to look for a YAML syntax error', async () => {
+    const refusal = 'Compose file "bomb.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({ rendered: null, stderr: '', code: null, timedOut: false, refusal }),
+    } as unknown as ComposeService);
+
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.renderable).toBe(false);
+    expect(res.body.renderError).toBe(refusal);
+    expect(res.body.renderError).not.toContain('YAML syntax error');
+    expect(res.body.services).toEqual([]);
+  });
+
   it('falls back to a structural error when the render is not valid JSON', async () => {
     stubRender('this is not json {');
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);

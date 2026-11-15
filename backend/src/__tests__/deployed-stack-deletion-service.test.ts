@@ -311,4 +311,40 @@ describe('DeployedStackDeletionService when the Docker endpoint guard refuses th
     expect(fs.existsSync(dir)).toBe(false);
     down.mockRestore();
   });
+
+  it('warns about a failed teardown with line breaks and credentials removed', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const stackName = 'warn-stack';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    // Compose quotes the stack's own files and stderr, so a forged log line and
+    // a credential can both reach this warn.
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new Error('compose down failed\npassword=hunter2'),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+        nodeId: NODE,
+        stackName,
+        pruneVolumes: false,
+        actor: 'tester',
+      });
+
+      expect(result.ok).toBe(true);
+      const call = warn.mock.calls.find(
+        (args) => args[0] === '[DeployedStackDeletion] Compose down failed or no-op for %s:',
+      );
+      expect(call).toBeDefined();
+      const logged = String(call?.[2]);
+      expect(logged).toContain('compose down failed');
+      expect(logged).not.toContain('\n');
+      expect(logged).not.toContain('hunter2');
+    } finally {
+      warn.mockRestore();
+      down.mockRestore();
+    }
+  });
 });

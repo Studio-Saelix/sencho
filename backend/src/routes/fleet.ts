@@ -112,6 +112,7 @@ import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { safeRemoteFetch } from '../utils/outboundTarget';
+import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../helpers/composeRefusalRoute';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
 /** Sync lock for remote reapply while meta is fetched (before the pollable tracker exists). */
@@ -1264,6 +1265,14 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
         headers: target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {},
         signal: AbortSignal.timeout(10000),
       }, target.trustedLoopback);
+      if (response.status === 409) {
+        // The node refused the stack's inputs: carry its reason, not a bare 502.
+        const body = await response.json().catch(() => null) as { error?: unknown; code?: unknown } | null;
+        if (body?.code === COMPOSE_INPUTS_REFUSED_CODE && typeof body.error === 'string') {
+          res.status(409).json({ error: body.error, code: COMPOSE_INPUTS_REFUSED_CODE });
+          return;
+        }
+      }
       if (!response.ok) {
         res.status(502).json({ error: 'Failed to fetch containers from remote node' });
         return;
@@ -1279,6 +1288,7 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
     res.json(containers);
   } catch (error) {
     console.error('[Fleet] Node stack containers error:', error);
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to fetch stack containers' });
   }
 });

@@ -155,6 +155,8 @@ export async function buildStorageInventory(nodeId: number, stackName: string): 
           sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
         renderError = 'Sencho could not parse the rendered Compose model.';
       }
+    } else if (result.refusal) {
+      renderError = result.refusal;
     } else if (result.timedOut) {
       // A timeout is a Sencho-generated condition, not a Compose error; name it so
       // the operator does not hunt for a syntax error that is not there.

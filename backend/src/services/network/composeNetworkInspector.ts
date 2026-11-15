@@ -165,6 +165,8 @@ export async function buildStackNetworkFacts(
           sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
         renderError = 'Sencho could not parse the rendered Compose model.';
       }
+    } else if (result.refusal) {
+      renderError = result.refusal;
     } else {
       const missing = parseMissingRequiredVars(result.stderr);
       renderError = missing.length
