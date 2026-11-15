@@ -872,12 +872,12 @@ export class NodeBootstrapOperationService {
       return new StepFailure('failed', 'PILOT_CREDENTIAL_EXPIRED',
         'The Pilot reached the hub with a saved credential that had expired (kept in the sencho-agent-data volume by an earlier enrollment). Retry, which mints a new enrollment for the Pilot to fall back to; if it still does not connect, `docker logs sencho-agent` on the server says why.');
     }
-    // The wait ends on a timer set to the expiry, which can fire a moment before it.
-    const ranOut = expiresAt !== null && this.deps.now() >= expiresAt - ENROLLMENT_EXPIRY_TOLERANCE_MS;
     if (refusal?.reason === 'enrollment_expired') {
       return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
         'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.');
     }
+    // The wait ends on a timer set to the expiry, which can fire a moment before it.
+    const ranOut = expiresAt !== null && this.deps.now() >= expiresAt - ENROLLMENT_EXPIRY_TOLERANCE_MS;
     if (ranOut) {
       return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
         'The enrollment expired (it is valid for 15 minutes) before any Pilot used it, and no connection attempt reached the hub. If the host was slow to start the Pilot, retry, which mints a new enrollment; if it keeps happening, `docker logs sencho-agent` on the server names why the Pilot cannot reach the hub.');
