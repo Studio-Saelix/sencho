@@ -588,9 +588,15 @@ export function fsFenceRefusalFor(senchoPath: string): DataRestoreFenceError | n
   return null;
 }
 
+function withoutTrailingSlashes(p: string): string {
+  let end = p.length;
+  while (end > 0 && p[end - 1] === '/') end -= 1;
+  return p.slice(0, end) || '/';
+}
+
 function pathsOverlapLexically(a: string, b: string): boolean {
-  const left = a.replace(/\/+$/, '') || '/';
-  const right = b.replace(/\/+$/, '') || '/';
+  const left = withoutTrailingSlashes(a);
+  const right = withoutTrailingSlashes(b);
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`) || left === '/' || right === '/';
 }
 

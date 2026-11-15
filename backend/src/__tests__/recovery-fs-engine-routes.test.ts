@@ -845,6 +845,38 @@ describe('the fence on a host directory, at the routes', () => {
     expect((await request(app).get('/api/stacks/other/files').set('Cookie', adminCookie)).status).toBe(200);
   });
 
+  it('compares a symlinked stack directory by the directory it resolves to', async () => {
+    const real = path.join(shared, `web-real-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(path.join(real, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(real, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+    fs.symlinkSync(real, path.join(process.env.COMPOSE_DIR as string, 'web'));
+    fencedOverwriteOf(fs.realpathSync(path.join(real, 'data')), ['web']);
+    const res = await request(app).get('/api/stacks/web/files').set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+  });
+
+  it('does not read a bind root through a listing cached before its directory was swapped for a link into a fenced one', async () => {
+    const swapped = path.join(shared, `swapped-${randomUUID().slice(0, 8)}`);
+    const fenced = path.join(shared, `fenced-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(swapped);
+    fs.mkdirSync(fenced);
+    fs.writeFileSync(path.join(fenced, 'secret.txt'), 'mid-restore');
+    stackDir('web');
+    models.byStack.web = [{ source: swapped, target: '/data' }];
+    const listed = await request(app).get('/api/stacks/web/file-roots').set('Cookie', adminCookie);
+    const bindId = (listed.body as Array<{ id: string; kind: string }>).find((r) => r.kind === 'bind')?.id as string;
+    expect(bindId).toBeTruthy();
+    // The explorer's listing above is cached; the directory is then replaced by a link.
+    fs.rmSync(swapped, { recursive: true });
+    fs.symlinkSync(fenced, swapped);
+    fencedOverwriteOf(fs.realpathSync(fenced), ['web']);
+    const res = await request(app).get(`/api/stacks/web/files?rootId=${encodeURIComponent(bindId)}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('SYMLINK_ESCAPE');
+    expect(JSON.stringify(res.body)).not.toContain('secret.txt');
+  });
+
   it('refuses a Compose lifecycle on a stack the fenced directory recorded', async () => {
     const data = dataDir('web');
     fencedOverwriteOf(data, ['web']);

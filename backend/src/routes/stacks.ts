@@ -3910,15 +3910,23 @@ async function resolveRootForOp(
   // legacy behaviour. Return a synthetic stack-source root without touching the
   // roots service, so plain stack-source ops never trigger a compose render.
   if (rootId === STACK_SOURCE_ROOT_ID) {
-    // The stackName param check already refuses an escaping name; refusing it
-    // again here keeps the fence lookup from resolving a path outside the base.
-    const base = path.resolve(FileSystemService.getInstance(req.nodeId).getBaseDir());
-    const stackDir = path.resolve(base, stackName);
-    if (!stackDir.startsWith(base + path.sep)) {
-      res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
-      return null;
+    if (await directoryRestoreLive()) {
+      // The stackName param check already refuses an escaping name; refusing it
+      // again here keeps an escaping name from reaching the realpath below.
+      const base = path.resolve(FileSystemService.getInstance(req.nodeId).getBaseDir());
+      const stackDir = path.resolve(base, stackName);
+      if (!stackDir.startsWith(base + path.sep)) {
+        res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
+        return null;
+      }
+      let canonical = stackDir;
+      try {
+        canonical = await fsp.realpath(stackDir);
+      } catch {
+        // A directory that cannot be resolved is compared as written.
+      }
+      if (await refuseUnderDirectoryRestore(res, canonical)) return null;
     }
-    if (await refuseUnderDirectoryRestore(res, stackDir)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3944,26 +3952,29 @@ async function resolveRootForOp(
     res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
     return null;
   }
+  // A browsable or writable bind root's path is already canonical: the roots
+  // service resolved it with realpath when it listed the root, and the file
+  // gateway refuses a root swapped for a link since then (SYMLINK_ESCAPE).
   if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName)) return null;
   return root;
+}
+
+/** Whether any data restore holds a host directory fence right now. One query. */
+async function directoryRestoreLive(): Promise<boolean> {
+  const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
+  return RestoreFenceStore.getInstance().liveFencedFsTargets().length > 0;
 }
 
 /**
  * Refuse a file operation on a directory that overlaps one a data restore is
  * overwriting: reading it would show a half-swapped tree, and writing it would
  * change data the restore is replacing. One query when no such restore is live.
- * The caller passes a directory it has already admitted.
+ * The caller passes the directory's canonical path, already admitted.
  */
-async function refuseUnderDirectoryRestore(res: Response, dir: string): Promise<boolean> {
+async function refuseUnderDirectoryRestore(res: Response, canonicalDir: string): Promise<boolean> {
   const { RestoreFenceStore, fsFenceRefusalFor } = await import('../services/recovery/restoreFence');
   if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return false;
-  let canonical = path.resolve(dir);
-  try {
-    canonical = await fsp.realpath(dir);
-  } catch {
-    // A directory that cannot be resolved is compared as written.
-  }
-  const refusal = fsFenceRefusalFor(canonical);
+  const refusal = fsFenceRefusalFor(canonicalDir);
   if (!refusal) return false;
   res.status(409).json({ error: refusal.message, code: DATA_RESTORE_FENCE_CODE });
   return true;

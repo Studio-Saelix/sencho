@@ -440,6 +440,10 @@ describe('the fence on a host directory', () => {
     expect(refusal?.message).toContain('directory');
     expect(fence.fsFenceRefusalFor('/srv/compose/web/data/db')).not.toBeNull();
     expect(fence.fsFenceRefusalFor('/srv/compose/other')).toBeNull();
+    // Trailing slashes do not change the comparison.
+    expect(fence.fsFenceRefusalFor('/srv/compose/web//')).not.toBeNull();
+    expect(fence.fsFenceRefusalFor('/srv/compose/web/dat/')).toBeNull();
+    expect(fence.fsFenceRefusalFor('/srv/compose/other//')).toBeNull();
   });
 
   it('closes a fenced directory\'s recorded stacks to a Compose lifecycle like a volume\'s', async () => {
