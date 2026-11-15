@@ -157,6 +157,8 @@ describe('PreflightPanel', () => {
     const status = await screen.findByTestId('preflight-status');
     expect(status).toHaveTextContent('partial check');
     expect(status).toHaveTextContent('No issues in the checks that ran. 1 check could not run.');
+    expect(screen.queryByTestId('preflight-run-btn')).not.toBeInTheDocument();
+    expect(screen.getByTestId('preflight-run-answer-btn')).toBeInTheDocument();
   });
 
   it('does not claim all clear on a partial run whose skipped list names no verdict check', async () => {
@@ -177,6 +179,8 @@ describe('PreflightPanel', () => {
     const status = await screen.findByTestId('preflight-status');
     expect(status).toHaveTextContent('pass · coverage not recorded');
     expect(status).toHaveTextContent('This run did not record which checks ran.');
+    expect(screen.queryByTestId('preflight-run-btn')).not.toBeInTheDocument();
+    expect(screen.getByTestId('preflight-run-answer-btn')).toBeInTheDocument();
     expect(within(status).getByRole('button', { name: 'Run preflight' })).toBeInTheDocument();
     expect(status).not.toHaveTextContent(/all clear/i);
   });
@@ -449,12 +453,54 @@ describe('PreflightPanel', () => {
     expect(toast.error).toHaveBeenCalled();
   });
 
+  it('locks the Answer verb and shows the run time while a run is in flight', async () => {
+    let release: (r: Response) => void = () => {};
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({ status: 'never-run', ranAt: null })))
+      .mockReturnValueOnce(new Promise<Response>(r => { release = r; }));
+    render(<PreflightPanel stackName="web" />);
+    const verb = await screen.findByTestId('preflight-run-answer-btn');
+    fireEvent.click(verb);
+    await waitFor(() => expect(screen.getByTestId('preflight-run-answer-btn')).toBeDisabled());
+    release(jsonRes(report({ status: 'pass', ranBy: 'alice' })));
+    expect(await screen.findByTestId('preflight-status')).toHaveTextContent(/Ran .* by alice/);
+  });
+
+  it('pluralizes the active total and keeps per-severity counts in the group headers', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'blocker', highestSeverity: 'blocker',
+      findings: [
+        { ruleId: 'port-conflict-node', severity: 'blocker', title: 'Port taken', message: 'taken', service: 'web' },
+        { ruleId: 'image-latest', severity: 'warning', title: 'Moving tag', message: 'latest', service: 'web' },
+      ],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveTextContent('2 active findings');
+    expect(status).not.toHaveTextContent(/1 blocker|1 warning/);
+    expect(screen.getByText('blocker · 1')).toBeInTheDocument();
+    expect(screen.getByText('warning · 1')).toBeInTheDocument();
+  });
+
+  it('keeps the header run button beside the load-error Answer', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(null, false));
+    render(<PreflightPanel stackName="web" />);
+    await screen.findByTestId('preflight-retry-btn');
+    expect(screen.getByTestId('preflight-run-btn')).toBeInTheDocument();
+  });
+
   it('retries a failed load from the error Answer', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonRes(null, false))
       .mockResolvedValueOnce(jsonRes(report({ status: 'pass' })));
     render(<PreflightPanel stackName="web" />);
+    let release: (r: Response) => void = () => {};
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockReturnValueOnce(new Promise<Response>(r => { release = r; }));
     fireEvent.click(await screen.findByTestId('preflight-retry-btn'));
+    // The error Answer stays, with Retry locked, until the retry resolves.
+    expect(screen.getByTestId('preflight-retry-btn')).toBeDisabled();
+    release(jsonRes(report({ status: 'pass' })));
     expect(await screen.findByTestId('preflight-status')).toHaveTextContent('all clear');
   });
 

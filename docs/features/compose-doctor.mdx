@@ -57,12 +57,12 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 |--------|-----------------|--------------|
 | **No run yet** | Preflight has never been triggered for this stack on this node | Muted card with "no preflight yet" and a **Run preflight** button |
 | **All clear** | Model rendered; no findings | Green card with "No issues found in the effective model." |
-| **Cannot render** | `docker compose config` failed, or Sencho refused the Compose file before Compose read it | Red card with the (redacted) render error message |
+| **Cannot render** | `docker compose config` failed, or Sencho refused the Compose file before Compose read it | Red card saying the model could not render; the (redacted) render error is in the blocker listed below it |
 | **Blocker** | Highest active finding is a blocker | Red card with the number of active findings |
 | **High risk** | Highest active finding is high risk | Amber card with the number of active findings |
 | **Warning** | Highest active finding is a warning | Accent-colored card with the number of active findings |
 | **Info** | All active findings are informational | Muted card with the number of active findings |
-| **Partial check** | Model rendered; no active findings, but one or more checks that affect the result could not run | Muted card with "partial check" "No issues in the checks that ran. 2 checks could not run: env files unreadable." and a **Run preflight** button |
+| **Partial check** | Model rendered; no active findings, but one or more checks that affect the result could not run | Muted card with "partial check", "No issues in the checks that ran. 2 checks could not run: env files unreadable." and a **Run preflight** button |
 | **Coverage not recorded** | The stored run was made before Sencho recorded which checks ran, or came from a node running an older version | Muted card with "pass · coverage not recorded", "This run did not record which checks ran." and a **Run preflight** button |
 | **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain." The acknowledged findings are listed under the **acknowledged** heading. |
 
@@ -248,13 +248,13 @@ Other signals (current container health, the pending image change, the rollback 
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-never-run.png"
-    alt="The Doctor tab in the never-run state, showing the 'no preflight yet' card with a Run preflight button, and the run preflight button in the top-right corner"
+    alt="The Doctor tab in the never-run state, showing the 'no preflight yet' card with a Run preflight button"
   />
 </Frame>
 
 1. Click any stack in the left sidebar to open it.
 2. Switch to the **Doctor** tab in the Anatomy panel header.
-3. Press **run preflight**. Sencho renders the effective model, runs all checks, and updates the tab with the result.
+3. Press **Run preflight** in the card. Sencho renders the effective model, runs all checks, and updates the tab with the result.
 4. Fix anything that matters, then run it again to confirm the findings clear.
 
 Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.

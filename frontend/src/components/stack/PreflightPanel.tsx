@@ -127,7 +127,7 @@ interface SummaryMeta {
   icon: LucideIcon;
   tone: StatusTone;
   line: string;
-  /** The run itself is the fix: the Answer carries the Run preflight verb. */
+  /** Re-running is the next step, so the Answer carries the Run preflight verb. */
   rerun: boolean;
 }
 
@@ -137,8 +137,8 @@ function summaryMeta(report: PreflightReport): SummaryMeta {
       label: 'cannot render',
       icon: ShieldAlert,
       tone: 'destructive',
-      // The render-failed finding below already carries the error text; say it once.
-      line: report.renderError && !report.findings.some(f => f.message === report.renderError)
+      // When a finding below already carries the error text, say it once.
+      line: report.renderError && !report.findings.some(f => !f.acknowledged && f.message === report.renderError)
         ? report.renderError
         : 'Sencho could not render the effective Compose model. The cause is listed below.',
       rerun: false,
@@ -410,8 +410,9 @@ export default function PreflightPanel({
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
+      // loadError stays up while a retry is in flight, so Retry shows as locked
+      // instead of the Answer vanishing; a successful read clears it below.
       setLoading(true);
-      setLoadError(false);
       try {
         const res = await apiFetch(`/stacks/${stackName}/preflight`);
         if (cancelled) return;
