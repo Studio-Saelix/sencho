@@ -46,6 +46,7 @@ function expected(overrides: Partial<ReadinessExpectation> = {}): ReadinessExpec
     hubUrl: 'https://hub.example.com',
     composeDir: '/opt/docker/sencho',
     tunnelAgentVersion: '0.98.2',
+    hubVersion: '0.98.2',
     tunnelConfidential: true,
     requestedAt: NOW - 100,
     receivedAt: NOW + 100,
@@ -97,7 +98,7 @@ describe('readiness gates', () => {
     expect(result.verdict).toBe('ready');
     expect(result.gates.every((entry) => entry.status === 'pass')).toBe(true);
     expect(result.gates.map((entry) => entry.id)).toEqual([
-      'tunnel', 'contract', 'identity', 'hub_url', 'transport', 'clock', 'agent_version',
+      'tunnel', 'contract', 'identity', 'hub_url', 'transport', 'clock', 'agent_version', 'release_match',
       'docker_daemon', 'docker_compose', 'compose_dir', 'path_mapping', 'self_stack_location', 'disk_space', 'inventory',
     ]);
   });
@@ -153,6 +154,12 @@ describe('readiness gates', () => {
     expect(httpResult.verdict).toBe('ready');
     expect(gate(httpResult.gates, 'transport')).toMatchObject({ status: 'warn' });
     expect(gate(httpResult.gates, 'disk_space')).toMatchObject({ status: 'warn', remediation: 'fix disk_space' });
+  });
+
+  it('warns, without blocking, when the Pilot runs another release than the hub', () => {
+    const result = evaluateReadiness(report(), expected({ hubVersion: '0.99.0' }));
+    expect(gate(result.gates, 'release_match')).toMatchObject({ status: 'warn', summary: expect.stringMatching(/0\.98\.2.*0\.99\.0/) });
+    expect(result.verdict).toBe('ready');
   });
 
   it('compares hub URLs by origin and path', () => {

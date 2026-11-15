@@ -554,7 +554,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       { id: 'compose-mount', title: 'The Compose directory is mounted at the same path', expected: `bind source and target both equal ${composeDir.input}`, slice: 'S3' },
       { id: 'compose-writable-in-agent', title: 'The agent can read and write the Compose directory', expected: 'the Pilot reports the directory present and writable', slice: 'S3' },
       { id: 'agent-compose-version', title: 'docker compose works inside the agent', expected: 'docker compose version succeeds', slice: 'S3' },
-      { id: 'agent-docker-inventory', title: 'A read-only Docker inventory works inside the agent', expected: 'docker ps succeeds', slice: 'S3' },
+      { id: 'agent-docker-inventory', title: 'A read-only Docker inventory works inside the agent', expected: 'listing containers through Docker succeeds', slice: 'S3' },
       { id: 'tunnel-connected', title: 'The tunnel is connected with the expected identity', expected: 'the Pilot holds this node\'s credential and dials the hub URL', slice: 'S3' },
       { id: 'capability-match', title: 'The Pilot answers the hub\'s readiness check', expected: 'a fresh report from the version its tunnel announced', slice: 'S3' },
     ],

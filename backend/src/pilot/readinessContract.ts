@@ -8,7 +8,9 @@
  * (see `services/nodeBootstrap/readinessGates.ts`); the agent never decides
  * that it is ready. This module holds the shape both sides share and the
  * parser the hub applies to an answer it did not produce, so a missing,
- * extra-typed or truncated field is refused instead of trusted.
+ * mistyped, over-long or duplicated field is refused instead of trusted. Keys
+ * it does not know are ignored, and a check the report leaves out is judged
+ * unknown by the hub.
  */
 
 export const READINESS_CONTRACT_VERSION = 1;
@@ -109,7 +111,7 @@ function parseCheck(value: unknown): ReportedCheck | null {
   return { id: id as ReadinessCheckId, status, detail, remediation };
 }
 
-/** Parse an agent's answer. Returns null for anything that is not exactly a report of this contract. */
+/** Parse an agent's answer. Returns null for anything missing a required field, mistyped, over-long or duplicated. */
 export function parseReadinessReport(value: unknown): PilotReadinessReport | null {
   if (!isRecord(value)) return null;
   if (value.contract !== READINESS_CONTRACT_VERSION) return null;

@@ -18,6 +18,7 @@ export type ReadinessGateId =
   | 'transport'
   | 'clock'
   | 'agent_version'
+  | 'release_match'
   | 'docker_daemon'
   | 'docker_compose'
   | 'compose_dir'
@@ -56,6 +57,8 @@ export interface ReadinessExpectation {
   composeDir: string;
   /** The agent version the tunnel's handshake announced. */
   tunnelAgentVersion: string | null;
+  /** This hub's own release. */
+  hubVersion: string;
   tunnelConfidential: boolean;
   /** Hub clock when the request was sent and when the answer arrived. */
   requestedAt: number;
@@ -78,6 +81,7 @@ const LABELS: Record<ReadinessGateId, string> = {
   transport: 'Tunnel transport',
   clock: 'Clock skew',
   agent_version: 'Agent version',
+  release_match: 'Hub and Pilot release',
   docker_daemon: 'Docker engine',
   docker_compose: 'Docker Compose',
   compose_dir: 'Compose directory',
@@ -120,13 +124,13 @@ export function readinessWithoutReport(failure: ReadinessFailure): ReadinessResu
           'Check that the sencho-agent container is running on the host and can reach the hub URL, then verify again.');
       case 'unsupported':
         return notPass('contract', 'fail', `The Pilot answered ${failure.status}: its image does not provide the readiness report this hub needs.`,
-          'Update the Pilot to the same Sencho release as the hub (pull the image and recreate the sencho-agent project), then verify again.');
+          'Run the same Sencho release on the hub and the Pilot (pull the image and recreate the sencho-agent project, or update the hub if it is the older one), then verify again.');
       case 'refused':
         return notPass('contract', 'fail', `The Pilot refused the readiness request (${failure.status}).`,
           'Re-enroll the node so the Pilot and the hub share a current credential, then verify again.');
       case 'malformed':
         return notPass('contract', 'unknown', 'The Pilot\'s answer was not a readiness report this hub can read.',
-          'Update the Pilot to the same Sencho release as the hub, then verify again.');
+          'Run the same Sencho release on the hub and the Pilot (update whichever is older), then verify again.');
       case 'unreachable':
         return notPass('tunnel', 'unknown', `The readiness request did not complete: ${failure.message}`,
           'Check the tunnel in Fleet and the hub logs, then verify again.');
@@ -204,6 +208,11 @@ export function evaluateReadiness(report: PilotReadinessReport, expected: Readin
       ? 'The tunnel did not announce an agent version, so the answering agent cannot be matched to it.'
       : `The report came from Pilot ${version}, but the tunnel announced ${expected.tunnelAgentVersion}.`,
     'The agent may have restarted or updated during the check. Verify again once it has reconnected.'));
+
+  gates.push(version === expected.hubVersion
+    ? pass('release_match', `The Pilot runs the hub's release (${version}).`)
+    : notPass('release_match', 'warn', `The Pilot runs ${version} and the hub runs ${expected.hubVersion}. Features newer than the older side may not work on this node.`,
+      'Run the same Sencho release on the hub and the Pilot.'));
 
   const socket = reported(report, 'docker_socket');
   const daemonWorks = socket?.status === 'pass' && report.docker.serverVersion !== null && report.docker.apiVersion !== null;

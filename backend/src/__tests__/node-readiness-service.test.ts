@@ -39,6 +39,10 @@ class FakeTunnels extends EventEmitter {
     this.up.add(nodeId);
     this.emit('tunnel-up', nodeId);
   }
+  public disconnect(nodeId: number): void {
+    this.up.delete(nodeId);
+    this.emit('tunnel-down', nodeId);
+  }
 }
 
 function environment(overrides: Partial<EnvironmentProbes> = {}): EnvironmentProbes {
@@ -67,8 +71,8 @@ function agentProbes(model: AgentModel): ReadinessProbes {
     environment: () => environment(model.env),
     dockerVersion: async () => ({ Version: '28.1.1', ApiVersion: '1.49' }),
     listContainers: async () => [
-      { Labels: { 'com.docker.compose.project': 'sencho-agent' }, Mounts: [{ Type: 'volume', Name: 'sencho-agent_sencho-agent-data', Destination: '/app/data' }] },
-      { Labels: { 'com.docker.compose.project': 'media' }, Mounts: [] },
+      { State: 'running', Labels: { 'com.docker.compose.project': 'sencho-agent' }, Mounts: [{ Type: 'volume', Name: 'sencho-agent_sencho-agent-data', Destination: '/app/data' }] },
+      { State: 'running', Labels: { 'com.docker.compose.project': 'media' }, Mounts: [] },
     ],
     persistedToken: () => jwt.sign({ scope: 'pilot_tunnel', nodeId: model.nodeId }, 'hub-secret-the-agent-cannot-verify'),
     now: () => Date.now(),
@@ -105,9 +109,10 @@ function setup(options: { fetch?: ReadinessFetch; bootstrapped?: boolean; timeou
   const model: AgentModel = { nodeId, probes: {}, env: {} };
   const tunnels = new FakeTunnels();
   const fetch = vi.fn(options.fetch ?? agentFetch(model));
-  const service = new NodeReadinessService({ db, tunnels, fetch, timeoutMs: options.timeoutMs ?? 2_000 });
+  const changed = vi.fn();
+  const service = new NodeReadinessService({ db, tunnels, fetch, changed, timeoutMs: options.timeoutMs ?? 2_000 });
   services.push(service);
-  return { nodeId, operationId, model, tunnels, fetch, service };
+  return { nodeId, operationId, model, tunnels, fetch, service, changed };
 }
 
 /** The report builder reads the app version; the tests' tunnel announces the same one. */
@@ -138,7 +143,6 @@ describe('node readiness', () => {
     const view = service.get(nodeId);
     expect(view).toMatchObject({ state: 'ready', agentVersion: version });
     expect(view?.gates.every((gate) => gate.status === 'pass')).toBe(true);
-    expect(service.summaries().get(nodeId)).toMatchObject({ state: 'ready' });
   });
 
   it('never checks a node that was not bootstrapped', async () => {
@@ -309,8 +313,9 @@ describe('node readiness', () => {
 
   it('settles a check a hub restart cut short as not ready', () => {
     const { nodeId } = setup();
-    db.setNodeReadinessState(nodeId, 'verifying', Date.now());
-    const restarted = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn() });
+    const { operationId } = { operationId: db.getNodeReadiness(nodeId)?.operation_id ?? null };
+    db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+    const restarted = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn(), changed: vi.fn() });
     services.push(restarted);
     restarted.start();
     expect(restarted.get(nodeId)).toMatchObject({ state: 'not_ready', gates: expect.arrayContaining([expect.objectContaining({ summary: expect.stringMatching(/hub restarted/) })]) });
@@ -329,6 +334,132 @@ describe('node readiness', () => {
     expect(audits()).toBe(1);
     await service.verify(nodeId, AUDIT);
     expect(audits()).toBe(2);
+  });
+
+  it('drops a late answer when a retry re-enrolled the node while the Pilot answered', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder: { model?: AgentModel } = {};
+    const { nodeId, model, tunnels, service, changed } = setup({
+      fetch: async (url, signal) => { await gate; return agentFetch(holder.model as AgentModel)(url, signal); },
+    });
+    holder.model = model;
+    announce(nodeId, (await buildReadinessReport('e'.repeat(32), agentProbes(model))).agent.version);
+    tunnels.up.add(nodeId);
+    const audits = () => db.getAuditLogs({ page: 1, limit: 500 }).entries.filter((row) => row.summary.includes(`node=${nodeId} `)).length;
+    const check = service.verify(nodeId, AUDIT);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.get(nodeId)?.state).toBe('verifying');
+    // The retry mints a new enrollment for the same node under a new run.
+    db.markNodeReadinessProvisional(nodeId, 'retry-operation', HUB_URL, Date.now());
+    release();
+    await check;
+    expect(service.get(nodeId)).toMatchObject({ state: 'provisional', operationId: 'retry-operation', gates: [] });
+    expect(audits()).toBe(0);
+    expect(changed).toHaveBeenCalledTimes(1); // only the verifying transition; the dropped answer announces nothing
+  });
+
+  it('writes nothing when the node is removed while its Pilot answers', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder: { model?: AgentModel } = {};
+    const { nodeId, model, tunnels, service } = setup({
+      fetch: async (url, signal) => { await gate; return agentFetch(holder.model as AgentModel)(url, signal); },
+    });
+    holder.model = model;
+    tunnels.up.add(nodeId);
+    const audits = () => db.getAuditLogs({ page: 1, limit: 500 }).entries.filter((row) => row.summary.includes(`node=${nodeId} `)).length;
+    const check = service.verify(nodeId, AUDIT);
+    await new Promise((resolve) => setImmediate(resolve));
+    db.deleteNode(nodeId);
+    release();
+    await expect(check).resolves.toBeNull();
+    expect(db.getNodeReadiness(nodeId)).toBeUndefined();
+    expect(audits()).toBe(0);
+  });
+
+  it('records a check that broke on the hub as not ready instead of leaving it verifying', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    announce(nodeId, (await buildReadinessReport('f'.repeat(32), agentProbes(model))).agent.version);
+    tunnels.up.add(nodeId);
+    tunnels.isTunnelConfidential = () => { throw new Error('bridge state unavailable'); };
+    const view = await service.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('not_ready');
+    expect(view?.gates.find((gate) => gate.id === 'tunnel')).toMatchObject({ status: 'unknown', summary: expect.stringContaining('could not finish the check') });
+  });
+
+  it('stops calling a ready node ready once its tunnel drops, and checks it again on reconnect', async () => {
+    const { nodeId, model, tunnels, service, fetch, changed } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    service.start();
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(service.get(nodeId)?.state).toBe('ready');
+    changed.mockClear();
+    tunnels.disconnect(nodeId);
+    expect(service.get(nodeId)?.state).toBe('provisional');
+    expect(changed).toHaveBeenCalledWith(nodeId);
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(service.get(nodeId)?.state).toBe('ready');
+  });
+
+  it('keeps a not-ready verdict and its reasons when the tunnel drops', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    model.env = { composeVersion: async () => { throw new Error('compose missing'); } };
+    service.start();
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(service.get(nodeId)?.state).toBe('not_ready');
+    tunnels.disconnect(nodeId);
+    expect(service.get(nodeId)?.state).toBe('not_ready');
+  });
+
+  it('records an administrator who asks while a reconnect check runs as the one who asked', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder: { model?: AgentModel; first: boolean } = { first: true };
+    const { nodeId, model, tunnels, service } = setup({
+      fetch: async (url, signal) => {
+        if (holder.first) { holder.first = false; await gate; }
+        return agentFetch(holder.model as AgentModel)(url, signal);
+      },
+    });
+    holder.model = model;
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    service.start();
+    tunnels.connect(nodeId);
+    await new Promise((resolve) => setImmediate(resolve));
+    const asked = service.verify(nodeId, AUDIT);
+    release();
+    await asked;
+    const rows = db.getAuditLogs({ page: 1, limit: 500 }).entries.filter((row) => row.summary.includes(`node=${nodeId} `));
+    expect(rows.some((row) => row.username === TEST_USERNAME)).toBe(true);
+  });
+
+  it('does not count a stopped leftover of the Pilot project as the answering agent', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    model.probes = {
+      listContainers: async () => [
+        { State: 'exited', Labels: { 'com.docker.compose.project': 'sencho-agent' }, Mounts: [{ Type: 'volume', Name: 'sencho-agent-data', Destination: '/app/data' }] },
+      ],
+    };
+    tunnels.up.add(nodeId);
+    const view = await service.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('not_ready');
+    expect(view?.gates.find((gate) => gate.id === 'inventory')?.status).toBe('fail');
+  });
+
+  it('does not read a ready verdict whose stored evidence cannot be read back as ready', () => {
+    const { nodeId, operationId, service } = setup();
+    db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+    db.recordNodeReadinessResult(nodeId, operationId, { state: 'ready', gatesJson: '{"not":"gates"}', agentVersion: '1.0.0', checkedAt: Date.now() });
+    expect(service.get(nodeId)).toMatchObject({ state: 'not_ready', gates: [] });
+    db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+    db.recordNodeReadinessResult(nodeId, operationId, { state: 'ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: Date.now() });
+    expect(service.get(nodeId)?.state).toBe('not_ready');
   });
 
   it('keeps the agent credential out of the report', async () => {

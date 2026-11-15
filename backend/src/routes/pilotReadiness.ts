@@ -39,7 +39,7 @@ const NONCE_PATTERN = /^[a-f0-9]{32,64}$/;
 export interface ReadinessProbes {
   environment: () => EnvironmentProbes;
   dockerVersion: () => Promise<{ Version?: string; ApiVersion?: string }>;
-  listContainers: () => Promise<Array<{ Labels?: Record<string, string>; Mounts?: Array<{ Type?: string; Name?: string; Destination?: string }> }>>;
+  listContainers: () => Promise<Array<{ State?: string; Labels?: Record<string, string>; Mounts?: Array<{ Type?: string; Name?: string; Destination?: string }> }>>;
   persistedToken: () => string | null;
   now: () => number;
 }
@@ -92,7 +92,9 @@ export async function buildReadinessReport(nonce: string, probes: ReadinessProbe
       detail: check.detail,
       remediation: check.status === 'pass' ? null : check.remediation,
     }));
-  const agent = containers?.find((container) => container.Labels?.['com.docker.compose.project'] === PILOT_PROJECT_NAME) ?? null;
+  // A stopped leftover of the project does not count: the answering agent must be the running Pilot.
+  const agent = containers?.find((container) => container.State === 'running'
+    && container.Labels?.['com.docker.compose.project'] === PILOT_PROJECT_NAME) ?? null;
   const dataVolume = agent
     ? (agent.Mounts ?? []).some((mount) => mount.Type === 'volume'
       && mount.Destination === PILOT_DATA_MOUNT

@@ -81,7 +81,8 @@ function OperationProof({ operation }: { operation: BootstrapOperationDetail }) 
         <Fact label="Host key" value={operation.hostKeyFingerprint} />
         {operation.nodeId !== null && <Fact label="Node" value={`#${operation.nodeId}`} />}
       </dl>
-      {operation.readiness && <ReadinessChecks readiness={operation.readiness} />}
+      {/* Gates describe a finished check; while one is pending they would be the previous check's. */}
+      {(operation.readiness?.state === 'ready' || operation.readiness?.state === 'not_ready') && <ReadinessChecks readiness={operation.readiness} />}
       <ol className="space-y-1.5" aria-label="Activity">
         {operation.events.map((event, index) => (
           <li key={`${event.at}-${index}`} className="text-xs" data-testid="bootstrap-event">

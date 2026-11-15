@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { apiFetch } from '@/lib/api';
 import { beginNodeSession, markMilestone } from '@/lib/hydrationTiming';
 import type { Capability } from '@/lib/capabilities';
+import type { BootstrapOperationState, NodeReadinessState } from '@/components/nodes/bootstrap/types';
 
 export type NodeMode = 'proxy' | 'pilot_agent';
 
@@ -28,10 +29,10 @@ export interface Node {
    * other node, whose status keeps its usual meaning.
    */
   readiness?: {
-    state: 'provisional' | 'verifying' | 'ready' | 'not_ready';
+    state: NodeReadinessState;
     checkedAt: number | null;
     operationId: string | null;
-    operationState: string | null;
+    operationState: BootstrapOperationState | null;
   } | null;
 }
 
@@ -194,8 +195,18 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       refreshNodes();
     };
 
+    // The hub announces a changed readiness verdict, so badges in Fleet, the switcher and Settings do not go stale.
+    const handleStateInvalidate = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
+      if (detail?.scope === 'node-readiness') refreshNodes();
+    };
+
     window.addEventListener('node-not-found', handleNodeNotFound);
-    return () => window.removeEventListener('node-not-found', handleNodeNotFound);
+    window.addEventListener('sencho:state-invalidate', handleStateInvalidate);
+    return () => {
+      window.removeEventListener('node-not-found', handleNodeNotFound);
+      window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
+    };
   }, [refreshNodes]);
 
   // One-shot boot milestone: nodes have finished loading and an active node is

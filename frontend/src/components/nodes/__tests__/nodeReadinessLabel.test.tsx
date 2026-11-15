@@ -3,10 +3,11 @@ import { render, screen } from '@testing-library/react';
 import { NodeReadinessBadge } from '../NodeReadinessBadge';
 import { nodeReadinessLabel } from '../nodeReadinessLabel';
 import type { Node } from '@/context/NodeContext';
+import type { BootstrapOperationState } from '../bootstrap/types';
 
 type Readiness = NonNullable<Node['readiness']>;
 
-function readiness(state: Readiness['state'], operationState: string | null = 'enrolled'): Readiness {
+function readiness(state: Readiness['state'], operationState: BootstrapOperationState | null = 'enrolled'): Readiness {
   return { state, checkedAt: null, operationId: 'op-1', operationState };
 }
 

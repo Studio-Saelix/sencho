@@ -144,6 +144,11 @@ export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAn
   };
 }
 
+function warningNote(readiness: Pick<NodeReadiness, 'gates'>): string {
+  const warnings = readiness.gates.filter((gate) => gate.status === 'warn').length;
+  return warnings === 0 ? '' : `, with ${warnings} warning${warnings === 1 ? '' : 's'}`;
+}
+
 function checkedAt(at: number | null): string {
   return at === null ? '' : ` at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
@@ -161,7 +166,7 @@ function readinessAnswer(op: BootstrapOperationDetail): Omit<StatusPathAnswer, '
   }
   switch (readiness.state) {
     case 'provisional':
-      return { tone: 'brand', title: 'Connected, unverified', status: 'provisional', line: `The Pilot on ${op.targetName} is enrolled. The hub checks it for readiness once its tunnel is up.` };
+      return { tone: 'brand', title: 'Unverified', status: 'provisional', line: `The Pilot on ${op.targetName} is enrolled. The hub checks it for readiness once its tunnel is up.` };
     case 'verifying':
       return { tone: 'brand', title: 'Verifying', status: 'verifying', line: `Checking the Pilot on ${op.targetName}: identity, Docker, Compose and the Compose directory.` };
     case 'ready':
@@ -169,13 +174,14 @@ function readinessAnswer(op: BootstrapOperationDetail): Omit<StatusPathAnswer, '
         tone: 'success',
         title: 'Ready',
         status: 'ready',
-        line: `${op.targetName} passed every readiness check${checkedAt(readiness.checkedAt)}. It is ready for deployments.`,
+        line: `${op.targetName} passed the readiness check${checkedAt(readiness.checkedAt)}${warningNote(readiness)}. It is ready for deployments.`,
       };
     case 'not_ready': {
       const [first, ...rest] = blockingGates(readiness);
       return {
         tone: 'warning',
-        title: 'Connected, unverified',
+        // A Pilot that could not be reached is not connected; any other failure is a connected node that is not ready.
+        title: first?.id === 'tunnel' ? 'Not connected' : 'Not ready',
         status: 'not_ready',
         line: first ? `${first.label}: ${first.summary}` : `${op.targetName} did not pass the readiness check.`,
         detail: [first?.remediation, rest.length > 0 ? `${rest.length} more check${rest.length === 1 ? '' : 's'} failed.` : null].filter(Boolean).join(' ') || null,

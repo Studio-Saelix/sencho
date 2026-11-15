@@ -6922,17 +6922,43 @@ stmt.run('gitops_schema_version', '1');
         return this.db.prepare('SELECT * FROM node_readiness').all() as NodeReadinessRow[];
     }
 
-    public setNodeReadinessState(nodeId: number, state: NodeReadinessState, now: number): boolean {
-        return this.db.prepare('UPDATE node_readiness SET state = ?, updated_at = ? WHERE node_id = ?').run(state, now, nodeId).changes > 0;
+    /**
+     * Start a check for the enrollment `operationId` recorded. False when the row
+     * is gone or a newer enrollment replaced it, so a check never claims a row it
+     * did not start on.
+     */
+    public markNodeReadinessVerifying(nodeId: number, operationId: string | null, now: number): boolean {
+        return this.db.prepare('UPDATE node_readiness SET state = \'verifying\', updated_at = ? WHERE node_id = ? AND operation_id IS ?')
+            .run(now, nodeId, operationId).changes > 0;
     }
 
+    /** A verified node whose tunnel dropped is no longer known to be ready; the next tunnel-up checks it again. */
+    public demoteNodeReadinessOnDisconnect(nodeId: number, now: number): boolean {
+        return this.db.prepare('UPDATE node_readiness SET state = \'provisional\', updated_at = ? WHERE node_id = ? AND state = \'ready\'')
+            .run(now, nodeId).changes > 0;
+    }
+
+    /**
+     * Store the verdict of a check started by `markNodeReadinessVerifying`. Only
+     * lands while the row is still that check's: a newer enrollment (which resets
+     * the row to provisional under a new operation) or a removed node makes it a
+     * no-op, so a late answer never overwrites a newer state.
+     */
     public recordNodeReadinessResult(
         nodeId: number,
+        operationId: string | null,
         result: { state: 'ready' | 'not_ready'; gatesJson: string; agentVersion: string | null; checkedAt: number },
     ): boolean {
         return this.db.prepare(
-            'UPDATE node_readiness SET state = ?, gates_json = ?, agent_version = ?, checked_at = ?, updated_at = ? WHERE node_id = ?'
-        ).run(result.state, result.gatesJson, result.agentVersion, result.checkedAt, result.checkedAt, nodeId).changes > 0;
+            `UPDATE node_readiness SET state = ?, gates_json = ?, agent_version = ?, checked_at = ?, updated_at = ?
+             WHERE node_id = ? AND operation_id IS ? AND state = 'verifying'`
+        ).run(result.state, result.gatesJson, result.agentVersion, result.checkedAt, result.checkedAt, nodeId, operationId).changes > 0;
+    }
+
+    /** Just the state of a bootstrap operation, for the node list (the full row carries the plan). */
+    public getNodeBootstrapOperationState(id: string): NodeBootstrapOperationState | undefined {
+        const row = this.db.prepare('SELECT state FROM node_bootstrap_operations WHERE id = ?').get(id) as { state: NodeBootstrapOperationState } | undefined;
+        return row?.state;
     }
 
     public listNodeBootstrapEvents(operationId: string): NodeBootstrapEvent[] {

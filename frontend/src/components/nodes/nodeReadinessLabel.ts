@@ -1,5 +1,6 @@
 import type { StatusTone } from '@/lib/statusTone';
 import type { Node } from '@/context/NodeContext';
+import type { BootstrapOperationState } from './bootstrap/types';
 
 /**
  * Where a node the bootstrap registered stands, wherever the node is listed
@@ -15,7 +16,7 @@ export interface ReadinessLabel {
   title: string;
 }
 
-const STOPPED: Record<string, ReadinessLabel> = {
+const STOPPED: Partial<Record<BootstrapOperationState, ReadinessLabel>> = {
   blocked: { tone: 'warning', word: 'Bootstrap blocked', title: 'The bootstrap was blocked before it changed this host. Open it from Fleet to retry or release it.' },
   failed: { tone: 'destructive', word: 'Bootstrap failed', title: 'The bootstrap failed. Open it from Fleet to see why, then retry or release it.' },
   partial: { tone: 'warning', word: 'Stopped partway', title: 'The bootstrap stopped partway. Steps that ran stay on the host.' },
@@ -24,7 +25,7 @@ const STOPPED: Record<string, ReadinessLabel> = {
   recovery_required: { tone: 'destructive', word: 'Needs recovery', title: 'The bootstrap needs recovery on the host before it can continue.' },
 };
 
-const RUNNING = new Set(['rechecking', 'running', 'enrolling']);
+const RUNNING: ReadonlySet<BootstrapOperationState> = new Set(['rechecking', 'running', 'enrolling']);
 
 export function nodeReadinessLabel(readiness: Node['readiness']): ReadinessLabel | null {
   if (!readiness || readiness.state === 'ready') return null;
@@ -34,6 +35,7 @@ export function nodeReadinessLabel(readiness: Node['readiness']): ReadinessLabel
   }
   const op = readiness.operationState;
   if (op && RUNNING.has(op)) return { tone: 'brand', word: 'Provisioning', title: 'A bootstrap is preparing this node.' };
-  if (op && STOPPED[op]) return STOPPED[op];
+  const stopped = op ? STOPPED[op] : undefined;
+  if (stopped) return stopped;
   return { tone: 'brand', word: 'Unverified', title: 'The Pilot is enrolled. The hub checks it for readiness once its tunnel is up.' };
 }

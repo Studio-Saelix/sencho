@@ -160,6 +160,7 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/retry`, status)).toBe(`Bootstrap retry refused (${status})`);
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/cancel`, status)).toBe(`Bootstrap cancel refused (${status})`);
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/release`, status)).toBe(`Bootstrap release refused (${status})`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/verify`, status)).toBe(`Bootstrap readiness check refused (${status})`);
   });
 
   it('labels bootstrap run requests as run actions, never as a node being added', () => {
@@ -167,6 +168,7 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/retry`, 202)).toBe(`Approved bootstrap retry: ${OPERATION_ID}`);
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/cancel`, 200)).toBe(`Cancelled bootstrap run: ${OPERATION_ID}`);
     expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/release`, 200)).toBe(`Released bootstrap server: ${OPERATION_ID}`);
+    expect(getAuditSummary('POST', `/nodes/bootstrap/operations/${OPERATION_ID}/verify`, 200)).toBe(`Checked bootstrapped node readiness: ${OPERATION_ID}`);
   });
 
   it('does not claim prune success on 409/400 responses', () => {

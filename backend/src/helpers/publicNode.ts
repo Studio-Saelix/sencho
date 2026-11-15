@@ -31,7 +31,7 @@ export function toPublicNode(node: Node): PublicNode {
   const db = DatabaseService.getInstance();
   const pin = db.getNodeSealingKey(node.id);
   const readiness = db.getNodeReadiness(node.id);
-  const operation = readiness?.operation_id ? db.getNodeBootstrapOperation(readiness.operation_id) : undefined;
+  const operationState = readiness?.operation_id ? db.getNodeBootstrapOperationState(readiness.operation_id) : undefined;
   return {
     ...rest,
     has_token: typeof api_token === 'string' && api_token.length > 0,
@@ -40,7 +40,7 @@ export function toPublicNode(node: Node): PublicNode {
       state: readiness.state,
       checkedAt: readiness.checked_at,
       operationId: readiness.operation_id,
-      operationState: operation?.state ?? null,
+      operationState: operationState ?? null,
     } : null,
   };
 }

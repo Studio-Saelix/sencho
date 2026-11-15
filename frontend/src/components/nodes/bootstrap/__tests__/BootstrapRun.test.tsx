@@ -216,7 +216,7 @@ describe('operation status mapping', () => {
 
   it('says an enrolled node is not verified yet, and a stopped run that changed things undid nothing', () => {
     const enrolled = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('provisional') });
-    expect(operationAnswer(enrolled)).toMatchObject({ title: 'Connected, unverified', status: 'provisional' });
+    expect(operationAnswer(enrolled)).toMatchObject({ title: 'Unverified', status: 'provisional' });
     expect(operationAnswer(enrolled).line).toContain('checks it for readiness once its tunnel is up');
     const stages = operationStages(enrolled);
     expect(stages.filter((stage) => stage.id !== 'verify').every((stage) => stage.tone === 'success')).toBe(true);
@@ -252,12 +252,36 @@ describe('readiness of an enrolled run', () => {
     const op = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('not_ready', FAILED_GATES) });
     expect(operationAnswer(op)).toMatchObject({
       tone: 'warning',
-      title: 'Connected, unverified',
+      title: 'Not ready',
       line: 'Compose directory: The Pilot manages /srv/other.',
       detail: 'Set COMPOSE_DIR in the sencho-agent project. 1 more check failed.',
     });
     expect(operationStages(op).find((stage) => stage.id === 'verify')).toMatchObject({ word: 'unverified', tone: 'warning' });
     expect(operationStateWord(op)).toEqual({ tone: 'warning', word: 'Unverified' });
+  });
+
+  it('titles a Pilot that could not be reached as not connected, and names warnings on a ready node', () => {
+    const offline = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('not_ready', [
+      { id: 'tunnel', label: 'Pilot tunnel', status: 'fail', summary: 'The Pilot is not connected to the hub.', remediation: 'Check the sencho-agent container.' },
+    ]) });
+    expect(operationAnswer(offline)).toMatchObject({ title: 'Not connected', line: 'Pilot tunnel: The Pilot is not connected to the hub.' });
+    const warned = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('ready', [
+      { id: 'tunnel', label: 'Pilot tunnel', status: 'pass', summary: 'Connected.' },
+      { id: 'transport', label: 'Tunnel transport', status: 'warn', summary: 'Plain HTTP.', remediation: 'Serve the hub over HTTPS.' },
+    ]) });
+    expect(operationAnswer(warned).line).toMatch(/passed the readiness check.*, with 1 warning\. It is ready for deployments\./);
+  });
+
+  it('does not show the previous check\'s gates while a new check is pending', async () => {
+    const op = operation({
+      state: 'enrolled', stage: 'enroll', active: false, finishedAt: Date.now(),
+      readiness: readiness('verifying', FAILED_GATES),
+      actions: { cancel: false, retry: false, release: false, verify: false },
+    });
+    const user = userEvent.setup();
+    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Activity/ }));
+    expect(screen.queryAllByTestId('bootstrap-readiness-gate')).toHaveLength(0);
   });
 
   it('says so when this run no longer speaks for the node', () => {

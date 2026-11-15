@@ -507,7 +507,13 @@ describe('bootstrap operations: a clean run', () => {
     await h.service.settled();
     const nodeId = h.service.get(op.id).nodeId as number;
     const verify = vi.fn(async () => {
-      db.recordNodeReadinessResult(nodeId, { state: 'ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: Date.now() });
+      db.markNodeReadinessVerifying(nodeId, op.id, Date.now());
+      db.recordNodeReadinessResult(nodeId, op.id, {
+        state: 'ready',
+        gatesJson: JSON.stringify([{ id: 'tunnel', label: 'Pilot tunnel', status: 'pass', summary: 'Connected.' }]),
+        agentVersion: '1.0.0',
+        checkedAt: Date.now(),
+      });
       return null;
     });
     const checked = new NodeBootstrapOperationService({

@@ -39,7 +39,8 @@ describe('public node readiness', () => {
     const node = db.getNode(id);
     if (!node) throw new Error('node missing');
     expect(toPublicNode(node).readiness).toEqual({ state: 'provisional', checkedAt: null, operationId: 'op-1', operationState: null });
-    db.recordNodeReadinessResult(id, { state: 'not_ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: 2000 });
+    db.markNodeReadinessVerifying(id, 'op-1', 1500);
+    db.recordNodeReadinessResult(id, 'op-1', { state: 'not_ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: 2000 });
     expect(toPublicNode(node).readiness).toMatchObject({ state: 'not_ready', checkedAt: 2000 });
     expect(JSON.stringify(toPublicNode(node))).not.toContain('gates');
   });
