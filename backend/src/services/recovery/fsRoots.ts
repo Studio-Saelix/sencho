@@ -144,8 +144,9 @@ export function hostToSenchoPath(hostPath: string, mounts: OwnMounts): string | 
 /** POSIX-normalized absolute path without a trailing slash, or null for anything else. */
 export function normalizeAbsolute(value: string): string | null {
   if (typeof value !== 'string' || !value.startsWith('/') || value.includes('\0')) return null;
+  // `normalize` already folds repeated slashes, so at most one trails.
   const normalized = path.posix.normalize(value);
-  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+  return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
 }
 
 // --- Path relations ----------------------------------------------------------

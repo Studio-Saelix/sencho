@@ -3921,7 +3921,13 @@ async function resolveRootForOp(
       res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
       return null;
     }
-    if (await refuseUnderDirectoryRestore(res, stackDir, mode === 'read' || options.cutOffable === true)) return null;
+    // The fence compares the directory by its identity, so it is named from the
+    // compose base's own listing rather than from the request. A stack whose
+    // directory is not there yet is registered as the whole base, which overlaps
+    // everything a fence can hold below it.
+    const entry = (await fsp.readdir(base).catch(() => [] as string[])).find((name) => name === stackName);
+    const fenceDir = entry === undefined ? base : path.join(base, entry);
+    if (await refuseUnderDirectoryRestore(res, fenceDir, mode === 'read' || options.cutOffable === true)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
