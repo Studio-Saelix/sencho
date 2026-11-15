@@ -288,7 +288,8 @@ function PortabilityAnswer({ portability }: { portability: StorageInventory['por
 
 function StorageSkeleton() {
   return (
-    <div data-testid="storage-skeleton" className="flex flex-col gap-4" aria-hidden>
+    <div data-testid="storage-skeleton" role="status" className="flex flex-col gap-4">
+      <span className="sr-only">Loading storage</span>
       <Skeleton className="h-14 w-full" />
       <div className="flex flex-col gap-1.5">
         <Skeleton className="h-3 w-24" />

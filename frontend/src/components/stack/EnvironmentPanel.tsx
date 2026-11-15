@@ -49,7 +49,7 @@ interface EnvAnswerModel {
  */
 function envAnswer(inventory: EnvInventory): EnvAnswerModel | null {
   const { missing, duplicate, unpersisted } = inventory.summary;
-  const missingFiles = inventory.envFiles.filter(f => f.existence === 'missing').length;
+  const missingFiles = inventory.envFiles.filter(f => f.existence === 'missing' && f.required).length;
   const unverifiableFiles = inventory.envFiles.filter(f => f.existence === 'unverifiable').length;
   if (missing > 0) {
     return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: `${missing} missing`,
@@ -71,13 +71,18 @@ function envAnswer(inventory: EnvInventory): EnvAnswerModel | null {
     return { tone: 'warning', icon: TriangleAlert, fixable: false, title: unverifiableFiles === 1 ? 'env file unverifiable' : `${unverifiableFiles} env files unverifiable`,
       line: 'Sencho cannot read a declared env file to check it.' };
   }
+  if (!inventory.renderable) {
+    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: 'partial view',
+      line: 'Sencho could not render the effective Compose model, so this inventory covers the authored env files only.' };
+  }
   if (inventory.items.length === 0) return null;
   return { tone: 'success', icon: CircleCheck, fixable: false, title: 'resolved', line: 'Every referenced variable is set, and no variable is defined twice.' };
 }
 
 function EnvironmentSkeleton() {
   return (
-    <div data-testid="environment-skeleton" className="flex flex-col gap-4" aria-hidden>
+    <div data-testid="environment-skeleton" role="status" className="flex flex-col gap-4">
+      <span className="sr-only">Loading environment</span>
       <Skeleton className="h-14 w-full" />
       <div className="flex flex-col gap-1.5">
         <Skeleton className="h-3 w-24" />
@@ -381,13 +386,13 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
             title: 'could not load',
             line: 'Could not load the environment inventory.',
             action: (
-              <Button type="button" size="sm" variant="outline" data-testid="env-retry-btn" className="h-7 rounded-lg max-md:h-11" onClick={() => void fetchInventory()}>
+              <Button type="button" size="sm" variant="outline" data-testid="env-retry-btn" disabled={loading} className="h-7 rounded-lg max-md:h-11" onClick={() => void fetchInventory()}>
                 Retry
               </Button>
             ),
           }}
         />
-      ) : loading || !inventory ? (
+      ) : !inventory ? (
         showBusy ? <EnvironmentSkeleton /> : null
       ) : (
         <>
@@ -403,7 +408,7 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
                   icon: answer.icon,
                   title: answer.title,
                   line: answer.line,
-                  marker: inventory.renderable ? undefined : 'effective model unavailable, authored env only',
+                  marker: inventory.renderable ? undefined : 'effective model unavailable',
                   action: answer.fixable && onOpenFiles ? (
                     <Button type="button" size="sm" variant="outline" className="h-7 rounded-lg max-md:h-11" onClick={onOpenFiles}>
                       Edit env files
@@ -449,8 +454,8 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
               const items = inventory.items.filter(i => i.status === status);
               if (items.length === 0) return null;
               return (
-                <section key={status}>
-                  <div className={cn(LABEL_CLASS, 'mb-1.5')}>{label} · {items.length}</div>
+                <section key={status} aria-labelledby={`env-group-${status}`}>
+                  <div id={`env-group-${status}`} className={cn(LABEL_CLASS, 'mb-1.5')}>{label} · {items.length}</div>
                   <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                     {items.map(item => <ItemRow key={item.key} item={item} />)}
                   </div>

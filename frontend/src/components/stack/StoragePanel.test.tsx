@@ -66,6 +66,32 @@ describe('StoragePanel', () => {
     expect(await screen.findByText(/mounts the Docker socket/)).toBeInTheDocument();
   });
 
+  it.each([
+    ['portable', 'success', /stays inside the stack directory/],
+    ['partially-portable', 'neutral', /volume holds data on this node/],
+    ['node-bound', 'warning', /exist only on this node/],
+    ['unknown', 'neutral', /could not work out/],
+  ])('with no reasons, %s reads its own line and tone, with no disclosure', async (status, tone, line) => {
+    route({ storage: jsonRes(inventory({ portability: { status, reasons: [] } })) });
+    render(<StoragePanel stackName="app" />);
+    const verdict = await screen.findByTestId('storage-portability');
+    expect(verdict).toHaveAttribute('data-tone', tone);
+    expect(verdict).toHaveTextContent(line);
+    expect(screen.queryByRole('button', { name: /all reasons/i })).toBeNull();
+  });
+
+  it('a single reason has no count and no disclosure; two reasons say "1 more reason"', async () => {
+    route({ storage: jsonRes(inventory({ portability: { status: 'node-bound', reasons: ['bind /mnt/media'] } })) });
+    const { unmount } = render(<StoragePanel stackName="app" />);
+    const one = await screen.findByTestId('storage-portability');
+    expect(one).not.toHaveTextContent(/more reason/);
+    expect(screen.queryByRole('button', { name: /all reasons/i })).toBeNull();
+    unmount();
+    route({ storage: jsonRes(inventory({ portability: { status: 'node-bound', reasons: ['a', 'b'] } })) });
+    render(<StoragePanel stackName="app" />);
+    expect(await screen.findByText('1 more reason')).toBeInTheDocument();
+  });
+
   it('keeps the verdict the only toned block even when the snapshot gap shows', async () => {
     auth.isAdmin = true;
     route({ storage: jsonRes(inventory({ portability: { status: 'node-bound', reasons: ['bind /mnt/media'] } })), coverage: jsonRes({ latestAt: null }) });
