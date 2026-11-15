@@ -107,7 +107,7 @@ describe('readiness gates', () => {
     ['a replayed or relayed report', report({ nonce: 'b'.repeat(32) }), {}, 'contract', /nonce differs/],
     ['a Pilot enrolled as another node', report({ agent: { ...report().agent, enrolledNodeId: 9 } }), {}, 'identity', /enrolled as node 9, not node 7/],
     ['a Pilot with no saved credential', report({ agent: { ...report().agent, enrolledNodeId: null } }), {}, 'identity', /no saved hub credential/],
-    ['a Pilot dialling another hub', report({ agent: { ...report().agent, primaryUrl: 'https://other.example.com' } }), {}, 'hub_url', /other\.example\.com/],
+    ['a Pilot dialling another hub', report({ agent: { ...report().agent, primaryUrl: 'https://other.example.com' } }), {}, 'hub_url', /^The Pilot dials https:\/\/other\.example\.com, not the hub URL/],
     ['a Pilot with no hub URL', report({ agent: { ...report().agent, primaryUrl: null } }), {}, 'hub_url', /no hub URL/],
     ['an HTTPS hub reached without TLS', report(), { tunnelConfidential: false }, 'transport', /did not arrive over TLS/],
     ['a clock far off the hub', report({ generatedAt: NOW + MAX_CLOCK_SKEW_MS + 60_000 }), {}, 'clock', /off the hub/],
