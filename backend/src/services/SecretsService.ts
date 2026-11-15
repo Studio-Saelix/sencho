@@ -516,8 +516,9 @@ async function remoteFenceRefusal(res: Response): Promise<SecretSourceRefusedErr
     if (res.status !== 409) return null;
     const body = await res.clone().json().catch(() => null) as { error?: unknown; code?: unknown } | null;
     if (body?.code !== DATA_RESTORE_FENCE_CODE) return null;
+    // The remote's sentence is shown to the operator; bound it like other remote text.
     return new SecretSourceRefusedError(typeof body.error === 'string' && body.error
-        ? body.error
+        ? body.error.slice(0, 500)
         : 'A data restore is overwriting the directory this env file is in.');
 }
 

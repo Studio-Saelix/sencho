@@ -691,10 +691,11 @@ export class FileSystemService {
    * until `work` settles, so a fence recorded meanwhile waits for it before it
    * captures or swaps anything. Used by the single-file sinks the Compose and
    * env editors and the local Secrets read and write go through
-   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged and
-   * the conflict read it answers with, writeFileIfUnchanged, createFileExclusive, readFile, writeFile,
-   * saveEnvContent) and by deleteStack; the Files routes have their own
-   * admission. One query when nothing is fenced.
+   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged
+   * and the conflict read it answers with, writeFileIfUnchanged,
+   * createFileExclusive, readFile, writeFile, saveEnvContent) and by
+   * deleteStack; the Files routes have their own admission. One query when
+   * nothing is fenced.
    */
   private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
     const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');

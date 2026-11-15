@@ -720,7 +720,7 @@ async function observeFsTarget(
     // A declaration whose identity could not be read may be this directory under
     // another spelling: the answer is unknown, the same refusal a container that
     // cannot be placed gets, never "no stack declares it".
-    else if (declared.unplaced) throw new RecoveryError('identity_unknown');
+    else if (declared.unplaced && refusalReason === undefined) throw new RecoveryError('identity_unknown');
     else refuse('root_not_authorized', FS_NOT_DECLARED_REASON);
   }
 
@@ -1363,7 +1363,7 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   // A container whose bind became unreadable since admission throws here; it
   // settles the restore like any other refusal instead of leaving the intent
   // open, which would hold the directory until a restart reconciled it.
-  if (!await recheckDependentsOrSettle(ctx, state, { requireStopped: false }, 'Rechecking the dependents')) return false;
+  if (!await recheckDependentsOrSettle(ctx, state, { requireStopped: false }, 'Re-checking the dependents before the fence')) return false;
   deps.intents.advance(state.intent.id, 'fenced');
   // From here the workloads are being stopped, so the fence is live: every
   // Sencho path that could start or browse one is refused from this record.

@@ -451,12 +451,20 @@ describe('SecretsService.executePush (remote node)', () => {
     let afterWrite: (() => void) | null = null;
     /** The remote routes that answer as a node whose env directory a data restore is overwriting. */
     let remoteFenced = new Set<'envs' | 'env' | 'put'>();
+    /** The remote env read answers a 409 that is not a data restore. */
+    let remoteOther409 = false;
     const FENCE_MESSAGE = 'A data restore is overwriting the directory "/srv/app", and Sencho cannot prove this stays clear of it.';
 
     beforeAll(async () => {
         server = http.createServer((req, res) => {
             const url = new URL(req.url ?? '/', 'http://127.0.0.1');
             const route = req.method === 'PUT' ? 'put' : url.pathname.endsWith('/envs') ? 'envs' : 'env';
+            if (remoteOther409 && route === 'env') {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: "app's env file path is a directory" }));
+                return;
+            }
             if (remoteFenced.has(route)) {
                 res.statusCode = 409;
                 res.setHeader('Content-Type', 'application/json');
@@ -518,6 +526,7 @@ describe('SecretsService.executePush (remote node)', () => {
         remoteReadFails = false;
         afterWrite = null;
         remoteFenced = new Set();
+        remoteOther409 = false;
     });
 
     it('refuses an import from a remote node under a data restore the way a local one is refused', async () => {
@@ -536,6 +545,15 @@ describe('SecretsService.executePush (remote node)', () => {
             .send({ nodeId: remoteId, stackName: 'app', envFileBasename: '.env' });
         expect(preview.status).toBe(400);
         expect(preview.body).toMatchObject({ code: 'IMPORT_SOURCE_REFUSED', error: FENCE_MESSAGE });
+    });
+
+    it('keeps a remote 409 that is not a data restore a plain failure', async () => {
+        const svc = SecretsService.getInstance();
+        const { SecretSourceRefusedError } = await import('../services/SecretsService');
+        remoteOther409 = true;
+        const failed = svc.readImportOverlay(remoteId, 'app', '.env');
+        await expect(failed).rejects.toThrow(/HTTP 409/);
+        await expect(failed).rejects.not.toBeInstanceOf(SecretSourceRefusedError);
     });
 
     it('refuses a remote push under a data restore: as a whole when its preview read the target, per target when the write is refused', async () => {

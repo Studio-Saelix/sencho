@@ -736,6 +736,31 @@ describe('overwriting a host directory', () => {
     expect(undeclared.body.target.ineligibleReason).toMatch(/No stack on this node declares this directory/);
   });
 
+  it('keeps a stack source directory\'s own refusal when another stack\'s declaration cannot be placed', async () => {
+    stackDir('web');
+    const res = await capture('web', 'stack-source');
+    await service().whenIdleForTests();
+    const point = points.RecoveryPointStore.getInstance().findBySourceOperation(res.body.operation.id)!;
+    const unreadable = path.join(shared, `other-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(unreadable);
+    stackDir('other');
+    models.byStack.other = [{ source: unreadable, target: '/data' }];
+    StackFileRoots.StackFileRootsService.invalidateNode(nodeId);
+    const original = fs.promises.stat.bind(fs.promises);
+    vi.spyOn(fs.promises, 'stat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
+      if (path.resolve(String(target)) === unreadable) throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+      return original(target, options);
+    }) as typeof fs.promises.stat);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const previewed = await preview(point.id);
+    expect(previewed.status).toBe(200);
+    expect(previewed.body.target.eligible).toBe(false);
+    const admitted = await request(app).post(`/api/recovery/points/${point.id}/overwrite`).set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: 'a'.repeat(64), confirmHostPath: stackDir('web') });
+    expect(admitted.status).toBe(400);
+    expect(admitted.body.reason).toBe('unsupported_target');
+  });
+
   it('refuses to overwrite a stack source directory', async () => {
     stackDir('web');
     const res = await capture('web', 'stack-source');
@@ -1427,7 +1452,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
   });
 
-  it('refuses a Secrets import and push whose env file the fenced compose file declares', async () => {
+  it('refuses a Secrets import whose env file the fenced compose file declares', async () => {
     const { data } = linkedComposeStack();
     const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
     const secrets = SecretsService.getInstance();
@@ -1435,6 +1460,56 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const refused = secrets.readImportOverlay(nodeId, 'web', 'app.env');
     await expect(refused).rejects.toBeInstanceOf(SecretSourceRefusedError);
     await expect(refused).rejects.toThrow(/data restore is overwriting/);
+  });
+
+  it('refuses the env routes when a declared env file is missing from the fenced directory mid-swap, and lists one that is there', async () => {
+    const { dir, data, envFile } = envStack();
+    fencedOverwriteOf(data, ['web']);
+    // Present under the fence, the file is only listed: its bytes are read by the refused editor alone.
+    const present = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
+    expect(present.status).toBe(200);
+    expect(present.body.envFiles).toEqual([envFile]);
+    // Moved aside by the swap, it is not known to be missing.
+    fs.renameSync(envFile, `${envFile}.aside`);
+    const variants = {
+      list: await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie),
+      read: await request(app).get('/api/stacks/web/env').set('Cookie', adminCookie),
+      create: await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=9\n' }),
+    };
+    for (const [name, res] of Object.entries(variants)) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+    }
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses the env routes when the compose file links into the fenced directory and is missing from it mid-swap', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const variants = {
+      list: await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie),
+      read: await request(app).get('/api/stacks/web/env').set('Cookie', adminCookie),
+      create: await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=9\n' }),
+    };
+    for (const [name, res] of Object.entries(variants)) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+    }
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('answers a stack with no env file and no fence as before', async () => {
+    const dir = stackDir('plain');
+    const fence = fencedOverwriteOf(dataDir('web'), ['web']);
+    expect(fence).toBeTruthy();
+    const listed = await request(app).get('/api/stacks/plain/envs').set('Cookie', adminCookie);
+    expect(listed.status).toBe(200);
+    expect(listed.body.envFiles).toEqual([]);
+    const read = await request(app).get('/api/stacks/plain/env').set('Cookie', adminCookie);
+    expect(read.status).toBe(200);
+    expect(read.headers['x-env-exists']).toBe('false');
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
   });
 
   it('refuses a Secrets push into the fenced directory: as a whole when its preview read the target, per target when it did not', async () => {
