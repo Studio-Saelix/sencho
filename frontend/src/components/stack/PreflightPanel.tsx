@@ -439,7 +439,7 @@ export default function PreflightPanel({
     };
     void run();
     return () => { cancelled = true; };
-  }, [stackName, nodeId, reloadKey]);
+  }, [stackName, nodeId, reloadKey, scopeKey]);
 
   const runPreflight = async () => {
     setRunning(true);
