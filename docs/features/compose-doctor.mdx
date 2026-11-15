@@ -55,20 +55,20 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 
 | Status | When it appears | Summary card |
 |--------|-----------------|--------------|
-| **No run yet** | Preflight has never been triggered for this stack on this node | Placeholder with "no preflight yet" and a Stethoscope icon |
+| **No run yet** | Preflight has never been triggered for this stack on this node | Muted card with "no preflight yet" and a **Run preflight** button |
 | **All clear** | Model rendered; no findings | Green card with "No issues found in the effective model." |
 | **Cannot render** | `docker compose config` failed, or Sencho refused the Compose file before Compose read it | Red card with the (redacted) render error message |
-| **Blocker** | Highest active finding is a blocker | Red card with a count of active findings by severity |
-| **High risk** | Highest active finding is high risk | Amber card with a count of active findings by severity |
-| **Warning** | Highest active finding is a warning | Blue card with a count of active findings by severity |
-| **Info** | All active findings are informational | Muted card with a count of active findings by severity |
-| **Partial check** | Model rendered; no active findings, but one or more checks that affect the result could not run | Muted card with "partial check" and "No issues in the checks that ran. 2 checks could not run: env files unreadable." |
-| **Coverage not recorded** | The stored run was made before Sencho recorded which checks ran, or came from a node running an older version | Muted card with "pass · coverage not recorded" and "Run preflight again to confirm every check ran." |
-| **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator." |
+| **Blocker** | Highest active finding is a blocker | Red card with the number of active findings |
+| **High risk** | Highest active finding is high risk | Amber card with the number of active findings |
+| **Warning** | Highest active finding is a warning | Accent-colored card with the number of active findings |
+| **Info** | All active findings are informational | Muted card with the number of active findings |
+| **Partial check** | Model rendered; no active findings, but one or more checks that affect the result could not run | Muted card with "partial check" "No issues in the checks that ran. 2 checks could not run: env files unreadable." and a **Run preflight** button |
+| **Coverage not recorded** | The stored run was made before Sencho recorded which checks ran, or came from a node running an older version | Muted card with "pass · coverage not recorded", "This run did not record which checks ran." and a **Run preflight** button |
+| **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain." The acknowledged findings are listed under the **acknowledged** heading. |
 
 **All clear** appears only when every check that affects the result ran. A `.env` or `env_file` that Sencho tries to read and cannot (for example, a directory where the file should be, or a file it lacks permission to open) counts as a check that could not run, and the env checks are reported as "env files unreadable". An `env_file` path built from a variable, or one that points outside the stack folder, is not read, and does not by itself make the run a partial check. A project env file you configured on the stack that lies outside the compose folder, however, is checked and does. A run that skipped a check reports a **partial check** instead, and a run stored before coverage was recorded reports **coverage not recorded**. Both still list any findings they did produce; the difference is that a clean result from an incomplete run is not presented as a clean bill of health.
 
-The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". When active findings remain alongside acknowledgements, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
+The summary card also shows when the run happened and who triggered it: "Ran 5 minutes ago by admin". Its line gives the number of active findings ("3 active findings"); the count for each severity is in the group headings below it, and the count of acknowledged findings is in the **acknowledged** heading.
 
 A small colored dot appears on the **Doctor** tab label when the last run's active findings include a blocker (red) or a high-risk finding (amber). Click the **X** on the summary card to dismiss it; this also clears the tab dot. The dismissal is remembered per stack and node, and clears itself automatically the moment the finding set changes (a rule clearing, a new rule firing, or a severity change), so a stale dismissal can never hide a genuinely new problem. It never clears just by opening the tab or re-running preflight to the same result, and it does not sync across browsers or teammates: it is stored in your browser only.
 
@@ -248,7 +248,7 @@ Other signals (current container health, the pending image change, the rollback 
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-never-run.png"
-    alt="The Doctor tab in the never-run state, showing the 'no preflight yet' placeholder with a Stethoscope icon and the run preflight button in the top-right corner"
+    alt="The Doctor tab in the never-run state, showing the 'no preflight yet' card with a Run preflight button, and the run preflight button in the top-right corner"
   />
 </Frame>
 
@@ -296,7 +296,7 @@ Acknowledgements are stored per node, stack, rule, and service. They do not sync
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-findings.png"
-    alt="The Doctor tab showing an amber high-risk summary card with a dismiss X button, run time, and counts for high-risk and warning findings, followed by grouped finding rows each showing a service tag, title, explanation, suggested fix, and an acknowledge button, grouped under HIGH RISK and WARNING section headers"
+    alt="The Doctor tab showing an amber high-risk summary card with a dismiss X button, the run time, and the number of active findings, followed by grouped finding rows each showing a service tag, title, explanation, suggested fix, and an acknowledge button, grouped under HIGH RISK and WARNING section headers"
   />
 </Frame>
 
@@ -365,7 +365,7 @@ There is no tier gate: Compose Doctor is available on all plans.
     Compose treats unescaped `$` in environment values as variable references. Bcrypt hashes and other secrets often contain `$` characters, so an unquoted value in Compose YAML or a double-quoted `.env` line can be partially blanked out at runtime. Doctor flags this as **Literal dollar in value** and names the env key when it can, without showing part of the secret. Fix it by escaping each literal `$` as `$$` in Compose YAML, or by single-quoting the value in an env file.
   </Accordion>
   <Accordion title="I want to see who ran preflight last">
-    The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
+    The summary card shows the username and relative time: "Ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
   </Accordion>
   <Accordion title="The report warns that this stack is the running Sencho instance">
     Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node management -> Node updates** instead. See [Self-management](#self-management).

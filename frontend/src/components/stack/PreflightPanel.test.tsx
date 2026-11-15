@@ -87,14 +87,40 @@ describe('PreflightPanel', () => {
   it('shows the never-run empty state', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'never-run', ranAt: null })));
     render(<PreflightPanel stackName="web" />);
-    expect(await screen.findByText(/Run preflight to render the effective model/i)).toBeInTheDocument();
+    const answer = await screen.findByTestId('preflight-never-run');
+    expect(answer).toHaveTextContent(/Render the effective model/i);
+    // The resolving verb sits on the Answer, one click, and runs the same handler as the header button.
+    expect(within(answer).getByRole('button', { name: 'Run preflight' })).toBeInTheDocument();
+  });
+
+  it('offers Run preflight once: on the Answer when the run is the fix, in the header otherwise', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonRes(report({ status: 'never-run', ranAt: null })));
+    const first = render(<PreflightPanel stackName="web" />);
+    await screen.findByTestId('preflight-never-run');
+    expect(screen.queryByTestId('preflight-run-btn')).not.toBeInTheDocument();
+    first.unmount();
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonRes(report({ status: 'pass' })));
+    render(<PreflightPanel stackName="web" />);
+    await screen.findByTestId('preflight-status');
+    expect(screen.getByTestId('preflight-run-btn')).toBeInTheDocument();
+    expect(screen.queryByTestId('preflight-run-answer-btn')).not.toBeInTheDocument();
+  });
+
+  it('runs preflight from the never-run Answer', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(report({ status: 'never-run', ranAt: null })))
+      .mockResolvedValueOnce(jsonRes(report({ status: 'pass' })));
+    render(<PreflightPanel stackName="web" />);
+    fireEvent.click(await screen.findByTestId('preflight-run-answer-btn'));
+    expect(await screen.findByTestId('preflight-status')).toHaveTextContent('all clear');
+    expect(vi.mocked(apiFetch).mock.calls.some(([url, opts]) => String(url).includes('/preflight/run') && (opts as RequestInit | undefined)?.method === 'POST')).toBe(true);
   });
 
   it('renders the all-clear summary when there are no findings', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'pass' })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent('all clear');
     expect(status).not.toHaveTextContent(/findings acknowledged/i);
     expect(status).toHaveTextContent('No issues found in the effective model.');
@@ -150,7 +176,8 @@ describe('PreflightPanel', () => {
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
     expect(status).toHaveTextContent('pass · coverage not recorded');
-    expect(status).toHaveTextContent('Run preflight again to confirm every check ran.');
+    expect(status).toHaveTextContent('This run did not record which checks ran.');
+    expect(within(status).getByRole('button', { name: 'Run preflight' })).toBeInTheDocument();
     expect(status).not.toHaveTextContent(/all clear/i);
   });
 
@@ -176,10 +203,13 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'high');
+    expect(status).toHaveAttribute('data-state', 'high');
     expect(status).toHaveTextContent('high risk');
     expect(status).not.toHaveTextContent(/partial check/i);
-    expect(status).toHaveTextContent('1 high risk');
+    expect(status).toHaveTextContent('1 active finding');
+    // The severity count lives in the group header only.
+    expect(status).not.toHaveTextContent('1 high risk');
+    expect(screen.getByText('high risk · 1')).toBeInTheDocument();
   });
 
   it('renders all-clear · findings acknowledged when every finding is acknowledged', async () => {
@@ -197,11 +227,9 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent('all clear · findings acknowledged');
-    expect(status).toHaveTextContent(
-      'No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator.',
-    );
+    expect(status).toHaveTextContent('No active findings remain.');
     expect(status.className).toContain('border-success/40');
     expect(status.className).toContain('bg-success/[0.06]');
     expect(status.className).toContain('text-success');
@@ -229,11 +257,13 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'high');
+    expect(status).toHaveAttribute('data-state', 'high');
     expect(status).toHaveTextContent('high risk');
     expect(status).not.toHaveTextContent(/all clear/i);
-    expect(status).toHaveTextContent('1 active');
-    expect(status).toHaveTextContent('1 acknowledged');
+    expect(status).toHaveTextContent('1 active finding');
+    // The acknowledged count lives in its section header, not in the Answer.
+    expect(status).not.toHaveTextContent(/acknowledged/i);
+    expect(screen.getByTestId('preflight-acknowledged-section')).toHaveTextContent('acknowledged · 1');
     expect(screen.getByText('Privileged container')).toBeInTheDocument();
     expect(screen.getByTestId('preflight-acknowledged-section')).toBeInTheDocument();
   });
@@ -253,7 +283,7 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" canEdit />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent(/all clear/i);
     expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Healthcheck inherited from image/i);
     expect(screen.queryByTestId('preflight-ack-btn-healthcheck-inherited-web')).not.toBeInTheDocument();
@@ -274,7 +304,7 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" canEdit />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent(/all clear/i);
     expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Cloudflare Tunnel connector/);
     expect(screen.queryByTestId('preflight-ack-btn-tunnel-exposure-cloudflared')).not.toBeInTheDocument();
@@ -295,7 +325,7 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" canEdit />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent(/all clear/i);
     expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Docker API access routed through socket proxy/i);
     expect(screen.queryByTestId('preflight-ack-btn-docker-socket-proxy-client-app')).not.toBeInTheDocument();
@@ -317,7 +347,7 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" canEdit />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveAttribute('data-state', 'pass');
     expect(status).toHaveTextContent(/all clear/i);
     expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Created by another Docker Compose version/i);
     expect(screen.queryByTestId('preflight-ack-btn-compose-version-mismatch-web')).not.toBeInTheDocument();
@@ -350,8 +380,8 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" canEdit />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'warning');
-    expect(status).toHaveTextContent(/1 warning/i);
+    expect(status).toHaveAttribute('data-state', 'warning');
+    expect(status).toHaveTextContent('1 active finding');
     expect(status).not.toHaveTextContent(/info/i);
     expect(screen.getByTestId('preflight-notes-section')).toBeInTheDocument();
     expect(screen.queryByTestId('preflight-ack-btn-healthcheck-inherited-web')).not.toBeInTheDocument();
@@ -369,7 +399,7 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'high');
+    expect(status).toHaveAttribute('data-state', 'high');
     expect(screen.getByText('Privileged container')).toBeInTheDocument();
     expect(screen.getByText('Image uses a moving tag')).toBeInTheDocument();
   });
@@ -395,8 +425,21 @@ describe('PreflightPanel', () => {
     })));
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
-    expect(status).toHaveAttribute('data-status', 'unrenderable');
+    expect(status).toHaveAttribute('data-state', 'unrenderable');
     expect(status).toHaveTextContent(/cannot render/i);
+    // The error text is stated once, in the finding row, not again in the Answer.
+    expect(screen.getAllByText('Sencho could not render the effective Compose model.')).toHaveLength(1);
+    expect(status).toHaveTextContent('The cause is listed below.');
+  });
+
+  it('shows the render error in the Answer when no finding carries it', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      renderable: false, status: 'unrenderable', highestSeverity: 'blocker',
+      renderError: 'yaml: line 3: bad indent',
+      findings: [],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    expect(await screen.findByTestId('preflight-status')).toHaveTextContent('yaml: line 3: bad indent');
   });
 
   it('shows a retry state and toasts when the load fails', async () => {
@@ -404,6 +447,24 @@ describe('PreflightPanel', () => {
     render(<PreflightPanel stackName="web" />);
     expect(await screen.findByText(/Could not load the preflight report/i)).toBeInTheDocument();
     expect(toast.error).toHaveBeenCalled();
+  });
+
+  it('retries a failed load from the error Answer', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(null, false))
+      .mockResolvedValueOnce(jsonRes(report({ status: 'pass' })));
+    render(<PreflightPanel stackName="web" />);
+    fireEvent.click(await screen.findByTestId('preflight-retry-btn'));
+    expect(await screen.findByTestId('preflight-status')).toHaveTextContent('all clear');
+  });
+
+  it('shows a layout-matched skeleton only once the first load is slow', async () => {
+    vi.mocked(apiFetch).mockReturnValue(new Promise<Response>(() => {}));
+    render(<PreflightPanel stackName="web" />);
+    // A fast load never flashes placeholder chrome.
+    expect(screen.queryByTestId('preflight-skeleton')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('preflight-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText(/Loading preflight…/)).not.toBeInTheDocument();
   });
 
   it('renders a location link in place of the sourcePath line and calls the handler', async () => {
@@ -898,7 +959,7 @@ describe('PreflightPanel', () => {
         findings: [{ ruleId: 'port-conflict-node', severity: 'blocker', title: 'Host port 8080 is already in use', message: 'taken', service: 'web' }],
       })));
     render(<PreflightPanel stackName="web" />);
-    fireEvent.click(await screen.findByTestId('preflight-run-btn'));
+    fireEvent.click(await screen.findByTestId('preflight-run-answer-btn'));
     expect(await screen.findByText('Host port 8080 is already in use')).toBeInTheDocument();
     await waitFor(() => {
       const calls = vi.mocked(apiFetch).mock.calls;

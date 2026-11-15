@@ -11,6 +11,11 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { preflightFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { StatusPath } from '@/components/ui/status-path';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import type { StatusTone } from '@/lib/statusTone';
 import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
@@ -98,13 +103,12 @@ const MODAL_FIELD_LABEL = LABEL_CLASS;
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
 const ACTION_BUTTON_CLASS = cn(ACTION_CLASS, 'h-auto rounded-none p-0 font-normal hover:bg-transparent [&_svg]:size-3');
-const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
-const SEVERITY_META: Record<PreflightSeverity, { label: string; icon: LucideIcon; tone: string }> = {
-  blocker: { label: 'blocker', icon: ShieldAlert, tone: 'border-destructive/40 bg-destructive/[0.06] text-destructive' },
-  high: { label: 'high risk', icon: TriangleAlert, tone: 'border-warning/40 bg-warning/[0.06] text-warning' },
-  warning: { label: 'warning', icon: Info, tone: 'border-info/40 bg-info/[0.06] text-info' },
-  info: { label: 'info', icon: Info, tone: 'border-muted bg-card/40 text-stat-subtitle' },
+const SEVERITY_META: Record<PreflightSeverity, { label: string; icon: LucideIcon; tone: StatusTone }> = {
+  blocker: { label: 'blocker', icon: ShieldAlert, tone: 'destructive' },
+  high: { label: 'high risk', icon: TriangleAlert, tone: 'warning' },
+  warning: { label: 'warning', icon: Info, tone: 'brand' },
+  info: { label: 'info', icon: Info, tone: 'neutral' },
 };
 
 const GROUP_ORDER: PreflightSeverity[] = ['blocker', 'high', 'warning', 'info'];
@@ -116,21 +120,28 @@ const EXPIRY_LABELS: Record<PreflightAckExpiryMode, string> = {
   until_image_change: 'Until image changes',
 };
 
-const NEUTRAL_SUMMARY = {
-  icon: Info,
-  tone: 'border-muted bg-card/40 text-stat-subtitle',
-} as const;
+const NEUTRAL_SUMMARY = { icon: Info, tone: 'neutral' } as const;
 
-function summaryMeta(
-  report: PreflightReport,
-  activeFindings: PreflightFinding[],
-): { label: string; icon: LucideIcon; tone: string; line: string } {
+interface SummaryMeta {
+  label: string;
+  icon: LucideIcon;
+  tone: StatusTone;
+  line: string;
+  /** The run itself is the fix: the Answer carries the Run preflight verb. */
+  rerun: boolean;
+}
+
+function summaryMeta(report: PreflightReport): SummaryMeta {
   if (!report.renderable) {
     return {
       label: 'cannot render',
       icon: ShieldAlert,
-      tone: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
-      line: report.renderError ?? 'Sencho could not render the effective Compose model.',
+      tone: 'destructive',
+      // The render-failed finding below already carries the error text; say it once.
+      line: report.renderError && !report.findings.some(f => f.message === report.renderError)
+        ? report.renderError
+        : 'Sencho could not render the effective Compose model. The cause is listed below.',
+      rerun: false,
     };
   }
   if (report.activeCount === 0) {
@@ -142,7 +153,8 @@ function summaryMeta(
         label: `${report.activeStatus} · coverage not recorded`,
         icon: NEUTRAL_SUMMARY.icon,
         tone: NEUTRAL_SUMMARY.tone,
-        line: 'Run preflight again to confirm every check ran.',
+        line: 'This run did not record which checks ran.',
+        rerun: true,
       };
     }
     const gap = coverageGapLine(report.coverage);
@@ -152,28 +164,24 @@ function summaryMeta(
         icon: NEUTRAL_SUMMARY.icon,
         tone: NEUTRAL_SUMMARY.tone,
         line: `No issues in the checks that ran. ${gap}`,
+        rerun: true,
       };
     }
     const acknowledgedOnly = report.acknowledgedCount > 0;
     return {
       label: acknowledgedOnly ? 'all clear · findings acknowledged' : 'all clear',
       icon: Check,
-      tone: 'border-success/40 bg-success/[0.06] text-success',
+      tone: 'success',
       line: acknowledgedOnly
-        ? 'No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator.'
+        ? 'No active findings remain.'
         : 'No issues found in the effective model.',
+      rerun: false,
     };
   }
   const meta = SEVERITY_META[report.activeHighestSeverity ?? 'info'];
-  const activeParts = GROUP_ORDER
-    .map(sev => ({ sev, n: activeFindings.filter(f => f.severity === sev).length }))
-    .filter(c => c.n > 0)
-    .map(c => `${c.n} ${SEVERITY_META[c.sev].label}`)
-    .join(' · ');
-  const line = report.acknowledgedCount > 0
-    ? `${report.activeCount} active${activeParts ? ` (${activeParts})` : ''} · ${report.acknowledgedCount} acknowledged`
-    : (activeParts || `${report.activeCount} active`);
-  return { label: meta.label, icon: meta.icon, tone: meta.tone, line };
+  // Per-severity and acknowledged counts live in the group headers below.
+  const line = `${report.activeCount} active ${report.activeCount === 1 ? 'finding' : 'findings'}`;
+  return { label: meta.label, icon: meta.icon, tone: meta.tone, line, rerun: false };
 }
 
 function expiryComboboxOptions(finding: PreflightFinding): ComboboxOption[] {
@@ -276,6 +284,35 @@ function AcknowledgedRow({
         )}
       </div>
     </div>
+  );
+}
+
+function PreflightSkeleton() {
+  return (
+    <div data-testid="preflight-skeleton" role="status" className="flex flex-col gap-4">
+      <span className="sr-only">Loading preflight</span>
+      <Skeleton className="h-14 w-full" />
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+    </div>
+  );
+}
+
+function RunPreflightButton({ pending, onRun }: { pending: boolean; onRun: () => void }) {
+  return (
+    <BusyButton
+      size="sm"
+      variant="outline"
+      data-testid="preflight-run-answer-btn"
+      pending={pending}
+      busyLabel="Running…"
+      className="h-7 rounded-lg max-md:h-11"
+      onClick={onRun}
+    >
+      Run preflight
+    </BusyButton>
   );
 }
 
@@ -427,9 +464,12 @@ export default function PreflightPanel({
     return { activeFindings: active, noteFindings: notes, acknowledgedFindings: acknowledged };
   }, [report?.findings]);
 
-  const summary = report && report.status !== 'never-run' ? summaryMeta(report, activeFindings) : null;
-  const SummaryIcon = summary?.icon;
+  const summary = report && report.status !== 'never-run' ? summaryMeta(report) : null;
   const busy = loading || running;
+  // The Answer carries its own Run preflight verb when the run is the fix, so the
+  // header button would be the same action twice on one surface.
+  const answerRuns = !loadError && !!report && (report.status === 'never-run' || !!summary?.rerun);
+  const { showBusy: showSkeleton } = useVisualBusy(loading && !report);
 
   const activeFingerprint = useMemo(() => preflightFingerprint(activeFindings), [activeFindings]);
   const { dismissed, dismiss } = useStackDismiss('doctor', stackName, nodeId, activeFingerprint);
@@ -501,73 +541,91 @@ export default function PreflightPanel({
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>compose doctor</span>
-        <IconBusyButton
-          data-testid="preflight-run-btn"
-          variant="ghost"
-          icon={RefreshCw}
-          label="run preflight"
-          pending={busy}
-          onClick={runPreflight}
-          className={ACTION_BUTTON_CLASS}
-        />
+        {!answerRuns && (
+          <IconBusyButton
+            data-testid="preflight-run-btn"
+            variant="ghost"
+            icon={RefreshCw}
+            label="run preflight"
+            pending={busy}
+            onClick={runPreflight}
+            className={ACTION_BUTTON_CLASS}
+          />
+        )}
       </div>
 
       {loadError ? (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3">
-          <span className="font-mono text-[11px] text-destructive">Could not load the preflight report.</span>
-          <button
-            type="button"
-            onClick={() => setReloadKey(k => k + 1)}
-            className="font-mono text-[10px] uppercase tracking-wide text-destructive hover:underline"
-          >
-            retry
-          </button>
-        </div>
+        <StatusPath
+          stages={[]}
+          answer={{
+            tone: 'destructive',
+            icon: ShieldAlert,
+            title: 'could not load',
+            line: 'Could not load the preflight report.',
+            action: (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-testid="preflight-retry-btn"
+                disabled={loading}
+                className="h-7 rounded-lg max-md:h-11"
+                onClick={() => setReloadKey(k => k + 1)}
+              >
+                Retry
+              </Button>
+            ),
+          }}
+        />
       ) : !report ? (
-        <div className="py-3 font-mono text-[11px] text-stat-subtitle">Loading preflight…</div>
+        showSkeleton ? <PreflightSkeleton /> : null
       ) : report.status === 'never-run' ? (
-        <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col items-start gap-2')}>
-          <div className="flex items-center gap-2 text-stat-subtitle">
-            <Stethoscope className="h-4 w-4" strokeWidth={1.5} />
-            <span className="font-mono text-[11px] uppercase tracking-wide">no preflight yet</span>
-          </div>
-          <p className="text-[12px] leading-relaxed text-foreground/80">
-            Run preflight to render the effective model and check this stack for common deploy problems before you apply it.
-          </p>
-        </div>
+        <StatusPath
+          stages={[]}
+          data-testid="preflight-never-run"
+          answer={{
+            tone: 'neutral',
+            icon: Stethoscope,
+            title: 'no preflight yet',
+            line: 'Render the effective model and check this stack for common deploy problems before you apply it.',
+            action: <RunPreflightButton pending={busy} onRun={runPreflight} />,
+          }}
+        />
       ) : (
         <>
-          {summary && SummaryIcon && !dismissed && (
-            <div data-testid="preflight-status" data-status={report.activeStatus} className={cn(CARD_CLASS, summary.tone, 'relative')}>
-              {hasActiveFindings && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={dismiss}
-                        data-testid="preflight-dismiss-btn"
-                        aria-label="Dismiss until findings change"
-                        className="absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded text-current/70 hover:bg-current/10 hover:text-current"
-                      >
-                        <X className="h-3.5 w-3.5" strokeWidth={1.5} />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Dismiss until findings change</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-              <div className="flex items-center gap-2 pr-6">
-                <SummaryIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-                <span className="font-mono text-[11px] uppercase tracking-wide">{summary.label}</span>
-                {report.ranAt && (
-                  <span className="font-mono text-[10px] text-stat-subtitle">
-                    · ran {formatTimeAgo(report.ranAt)}{report.ranBy ? ` by ${report.ranBy}` : ''}
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{summary.line}</div>
-            </div>
+          {summary && !dismissed && (
+            <StatusPath
+              stages={[]}
+              answer={{
+                'data-testid': 'preflight-status',
+                tone: summary.tone,
+                icon: summary.icon,
+                title: summary.label,
+                line: summary.line,
+                status: report.activeStatus,
+                detail: report.ranAt ? `Ran ${formatTimeAgo(report.ranAt)}${report.ranBy ? ` by ${report.ranBy}` : ''}` : null,
+                action: summary.rerun ? (
+                  <RunPreflightButton pending={busy} onRun={runPreflight} />
+                ) : hasActiveFindings ? (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={dismiss}
+                          data-testid="preflight-dismiss-btn"
+                          aria-label="Dismiss until findings change"
+                          className="inline-flex h-5 w-5 items-center justify-center rounded text-current/70 hover:bg-current/10 hover:text-current max-md:h-11 max-md:w-11"
+                        >
+                          <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Dismiss until findings change</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : undefined,
+              }}
+            />
           )}
 
           {noteFindings.length > 0 && (
