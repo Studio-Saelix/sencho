@@ -416,6 +416,25 @@ describe('progress polling', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps reading an enrolled run until the readiness verdict lands, then stops', async () => {
+    vi.useFakeTimers();
+    const pending = operation({ state: 'enrolled', stage: 'enroll', active: false, nodeId: 4, readiness: readiness('verifying') });
+    vi.mocked(fetchBootstrapOperation)
+      .mockResolvedValueOnce({ ...pending })
+      .mockResolvedValueOnce({ ...pending, readiness: readiness('not_ready', [{ id: 'docker_compose', label: 'Docker Compose', status: 'fail', summary: 'Compose v2 is missing.', remediation: 'Install it.' }]) });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(pending));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+    expect(result.current.operation?.readiness?.state).toBe('not_ready');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS * 5); });
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['a failed run', { state: 'failed' as const, nodeId: 4 }],
     ['a blocked run', { state: 'blocked' as const, nodeId: 4 }],
