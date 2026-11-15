@@ -190,9 +190,11 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   // or operation id, never a path, a key or captured data)
   'POST /recovery/repository': 'Provisioned recovery repository',
   'POST /recovery/storage/points': 'Created a recovery point',
+  'POST /recovery/storage/roots/points': 'Created a recovery point of a directory',
   'POST /recovery/points/*/verify': 'Verified recovery point',
   'POST /recovery/points/*/restore': 'Restored recovery point',
-  // The three routes of a restore over an existing volume are worded by
+  'POST /recovery/points/*/restore/path': 'Restored one path of a recovery point',
+  // The three routes of a restore over existing data (a volume or a directory) are worded by
   // `overwriteRouteSummary`, which reads the status and the body.
   'POST /recovery/operations/*/cancel': 'Cancelled recovery operation',
   'POST /recovery/locks/release': 'Released a stale recovery lock',
@@ -202,17 +204,17 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
   .sort((a, b) => b[0].split('/').length - a[0].split('/').length);
 
-/** What a restore over an existing volume's routes are called, by what the request did. */
+/** What the routes of a restore over existing data are called, by what the request did. */
 const OVERWRITE_ROUTE_WORDING = {
-  preview: { done: 'Previewed a restore over the existing volume', not: 'Preview of a restore over the existing volume' },
-  overwrite: { done: 'Started a restore over the existing volume', not: 'Restore over the existing volume' },
+  preview: { done: 'Previewed a restore over the existing data', not: 'Preview of a restore over the existing data' },
+  overwrite: { done: 'Started a restore over the existing data', not: 'Restore over the existing data' },
   // A resolve is worded by its action, because `release_fence` accepts an
   // unproven volume and the log is how that is reviewed; it must not read like a
   // retry. An action the body does not carry (a refused request, or one a hub
   // forwarded to a remote node without reading it) gets the neutral wording.
-  retry: { done: 'Retried a restore over the existing volume', not: 'Retry of a restore over the existing volume' },
-  release_fence: { done: 'Released the fence of a restore over the existing volume', not: 'Release of a restore fence' },
-  resolve: { done: 'Resolved a restore over the existing volume', not: 'Resolve of a restore over the existing volume' },
+  retry: { done: 'Retried a restore over the existing data', not: 'Retry of a restore over the existing data' },
+  release_fence: { done: 'Released the fence of a restore over the existing data', not: 'Release of a restore fence' },
+  resolve: { done: 'Resolved a restore over the existing data', not: 'Resolve of a restore over the existing data' },
 } as const;
 
 function safeDecode(segment: string): string {
@@ -224,7 +226,7 @@ function safeDecode(segment: string): string {
 }
 
 /**
- * The three routes of a restore over an existing volume, worded by what the
+ * The three routes of a restore over existing data, worded by what the
  * request did: a preview changes nothing, an admitted overwrite has started but
  * not finished, and a request that was not served says so with its status
  * (`refused` for a 4xx, `failed` for a 5xx) instead of claiming the action. A
@@ -259,7 +261,7 @@ function overwriteRouteSummary(normalized: string, statusCode: number | undefine
 /**
  * Resolve a human-readable summary for an audit log entry.
  *
- * The routes of a restore over an existing volume are worded first, from the
+ * The routes of a restore over existing data are worded first, from the
  * status and the request body (`overwriteRouteSummary`). Every other route tries
  * wildcard patterns (most specific by segment count), then falls back to prefix
  * matching, and returns a generic method+path string if nothing matches. `body`
