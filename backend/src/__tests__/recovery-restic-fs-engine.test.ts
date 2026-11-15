@@ -139,7 +139,19 @@ describe('a path restore', () => {
     const cmd = specs[0].cmd as string[];
     expect(cmd).toContain('--include');
     expect(cmd[cmd.indexOf('--include') + 1]).toBe('/logs/\\[2026\\]\\*.log');
+    // restic refuses an include beside an exclude, so a path restore carries the include alone.
+    expect(cmd).not.toContain('--exclude');
     expect(escapeResticPattern('a?b\\c')).toBe('a\\?b\\\\c');
+  });
+
+  it('refuses a path inside a restore work directory instead of excluding it', async () => {
+    const { engine, specs } = engineWith(() => OK);
+    const result = await engine.restore(
+      intent({ mode: 'new_volume', volumeName: 'restored' }, '.sencho-restore-4f3a2b1c-0d9e-4a8b-9c7d-6e5f4a3b2c1d/original'),
+      context(),
+    );
+    expect(result).toEqual({ ok: false, errorClass: 'invalid_request' });
+    expect(specs).toHaveLength(0);
   });
 
   it('never restores one path over a live target', async () => {

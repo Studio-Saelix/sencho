@@ -434,6 +434,12 @@ export async function proveHostRoot(input: {
   hostPath: string;
   aliases?: readonly string[];
   signal?: AbortSignal;
+  /**
+   * Test seam: how Sencho's own view is read. Production stats the path in this
+   * process; the different-namespace fixture stats it inside the container that
+   * plays Sencho.
+   */
+  statView?: (senchoPath: string) => Promise<{ dev: string; ino: string }>;
 }): Promise<ProvenFsRoot> {
   const aliases = input.aliases ?? [];
   if (aliases.length > MAX_DECLARED_ALIASES) {
@@ -442,7 +448,7 @@ export async function proveHostRoot(input: {
       detail: `This directory is declared under more than ${MAX_DECLARED_ALIASES} different paths, which is more than Sencho proves. Declare it under fewer paths.`,
     });
   }
-  const view = await statSenchoView(input.senchoPath);
+  const view = await (input.statView ?? statSenchoView)(input.senchoPath);
   const report = await probeHostPath({
     runner: input.runner,
     operationId: input.operationId,

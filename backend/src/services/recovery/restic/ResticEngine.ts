@@ -20,7 +20,7 @@ import { classifyRecoveryError } from '../redaction';
 import type { HelperMountSource, ProvenHostRoot } from '../hostRoots';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
-import { RECOVERY_WORK_DIR_GLOB } from '../restoreIntents';
+import { RECOVERY_WORK_DIR_GLOB, isRecoveryWorkDirName } from '../restoreIntents';
 import {
   classifyContentRun,
   contentSnapshotPath,
@@ -257,12 +257,20 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       // which is the right shape for a volume Sencho created.
       // A point captured before the capture excluded work directories can carry one
       // at its root, which would make the new volume refuse its first overwrite.
-      args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_GLOB}`];
-      // A path restore brings back that path at its own place in the tree and
-      // nothing else. The pattern is relative to the point root, the same root
-      // the exclude above is anchored at, and its glob characters are escaped
-      // so a file named `[a]` restores itself and not `a`.
-      if (intent.pathScope !== null) args.push('--include', `/${escapeResticPattern(intent.pathScope)}`);
+      if (intent.pathScope === null) {
+        args = ['restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT, '--exclude', `/${RECOVERY_WORK_DIR_GLOB}`];
+      } else {
+        // A path restore brings back that path at its own place in the tree and
+        // nothing else. restic refuses an include beside an exclude, so a path
+        // inside a restore work directory is refused here instead of excluded.
+        // The pattern is relative to the point root and its glob characters are
+        // escaped, so a file named `[a]` restores itself and not `a`.
+        if (isRecoveryWorkDirName(intent.pathScope.split('/')[0] ?? '')) return { ok: false, errorClass: 'invalid_request' };
+        args = [
+          'restore', `${intent.snapshotId}:/data`, '--target', HELPER_RESTORE_MOUNT,
+          '--include', `/${escapeResticPattern(intent.pathScope)}`,
+        ];
+      }
     } else if (intent.target.mode === 'staged_overwrite') {
       // The whole snapshot, into a work directory inside the live volume. That
       // gives `.../incoming/data/...`, so the captured root's own owner and mode

@@ -22,7 +22,7 @@ import { RecoveryPointStore } from './recoveryPoints';
 import { RecoveryRepositoryStore } from './repositories';
 import { classifyRecoveryError, RecoveryError } from './redaction';
 import { getRecoveryAuthorityId } from './recoveryDb';
-import { RestoreIntentStore, reconcileRestoreIntentsAtStartup } from './restoreIntents';
+import { RestoreIntentStore, isRecoveryWorkDirName, reconcileRestoreIntentsAtStartup } from './restoreIntents';
 import { StorageIdentityStore, canonicalizeLocator, deriveStorageKey } from './storageIdentity';
 import SelfIdentityService from '../SelfIdentityService';
 import {
@@ -965,6 +965,11 @@ export class RecoveryEngineService {
       throw new RecoveryError('invalid_request', {
         detail: pointPath === '/' ? 'Restore the whole point on the restore route.' : undefined,
       });
+    }
+    // A restore work directory a point carries is never restored on its own: it
+    // holds the data an earlier overwrite replaced, not the root's own content.
+    if (isRecoveryWorkDirName(pointPath.split('/')[1] ?? '')) {
+      throw new RecoveryError('invalid_request', { reason: 'unsupported_entry_type' });
     }
     const release = acquirePointReadSlot(repository.id);
     if (!release) {
