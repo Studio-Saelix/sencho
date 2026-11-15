@@ -24,10 +24,10 @@ import type { RestoreFenceState } from './restoreIntents';
  * lifecycle through `StackOpLockService`, a single container start or restart
  * through `DockerController`, and the Files & Volumes browser. The stack file
  * routes register each operation on a host directory here as well, so a fence
- * on a directory waits for (or cuts off) the file work already running on it. The fence matches
- * containers by what they mount, never by comparing a Compose project label to a
- * stack name: the two can differ (a `name:` key, or case), and an old container
- * from an earlier project would be missed.
+ * on a directory waits for (or cuts off) the file work already running on it.
+ * The fence matches containers by what they mount, never by comparing a Compose
+ * project label to a stack name: the two can differ (a `name:` key, or case),
+ * and an old container from an earlier project would be missed.
  *
  * A store this build cannot read (schema `newer`, or a failed migration) makes
  * the checks fail open with one log line. The Docker-level restart policy fence
@@ -570,10 +570,8 @@ export async function startContainerUnderFence<T>(
     // Mounts that cannot be read are not that: without them a symlinked or
     // second spelling of the fenced directory cannot be recognised, so a start
     // that binds any host path is refused until they can be read again.
-    let ownMounts: Awaited<ReturnType<typeof readOwnMounts>>;
-    try {
-      ownMounts = await readOwnMounts();
-    } catch {
+    const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+    if (ownMounts === 'unreadable') {
       return Promise.reject(new DataRestoreFenceError(fsTargets[0].hostPath, 'unproven', 'directory'));
     }
     for (const target of fsTargets) {

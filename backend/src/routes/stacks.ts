@@ -3905,6 +3905,8 @@ async function resolveRootForOp(
   res: Response,
   stackName: string,
   mode: 'read' | 'write',
+  /** A write that writes nothing yet (an upload before its body), which a fence may cut off. */
+  options: { cutOffable?: boolean } = {},
 ): Promise<StackFileRoot | null> {
   const rootId = readRootId(req);
   // Back-compat fast path: no rootId (or the stack-source root) is exactly the
@@ -3919,7 +3921,7 @@ async function resolveRootForOp(
       res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
       return null;
     }
-    if (await refuseUnderDirectoryRestore(res, stackDir, mode)) return null;
+    if (await refuseUnderDirectoryRestore(res, stackDir, mode === 'read' || options.cutOffable === true)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3948,7 +3950,7 @@ async function resolveRootForOp(
   // A browsable or writable bind root's path is already canonical: the roots
   // service resolved it with realpath when it listed the root, and the file
   // gateway refuses a root swapped for a link since then (SYMLINK_ESCAPE).
-  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName, mode)) return null;
+  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName, mode === 'read' || options.cutOffable === true)) return null;
   return root;
 }
 
@@ -3961,12 +3963,13 @@ async function resolveRootForOp(
  * for it before it captures or swaps anything. One query when no such restore
  * is live.
  */
-async function refuseUnderDirectoryRestore(res: Response, dir: string, mode: 'read' | 'write'): Promise<boolean> {
+async function refuseUnderDirectoryRestore(res: Response, dir: string, cutOffable: boolean): Promise<boolean> {
   const { matchFsWorkToFences, admitFsWork } = await import('../services/recovery/restoreFence');
   const match = await matchFsWorkToFences(dir);
-  // A read is cut off when a fence lands rather than waited for, so a slow
-  // reader cannot hold a restore off; a write is waited for.
-  const admitted = match.refusal ?? admitFsWork(dir, match.checked, mode === 'read' ? () => cutOffFileOp(res) : null);
+  // A read (or an upload whose body is still to come) is cut off when a fence
+  // lands rather than waited for, so a slow client cannot hold a restore off; a
+  // write is waited for.
+  const admitted = match.refusal ?? admitFsWork(dir, match.checked, cutOffable ? () => cutOffFileOp(res) : null);
   if (isDataRestoreFenceError(admitted)) {
     res.status(409).json({ error: admitted.message, code: DATA_RESTORE_FENCE_CODE });
     return true;
@@ -4034,13 +4037,9 @@ function cutOffFileOp(res: Response): void {
   res.destroy();
 }
 
-/**
- * Whether the fence may cut this request's file operation off instead of
- * waiting for it: true while it writes nothing yet (an upload receiving its
- * body), false once its write is under way.
- */
-function setFileOpAbortable(res: Response, abortable: boolean): void {
-  for (const lease of fileOpScopes.get(res)?.leases ?? []) lease.setAbort(abortable ? () => cutOffFileOp(res) : null);
+/** From here the fence waits for this request's file operation instead of cutting it off: its write is under way. */
+function stopCuttingOffFileOp(res: Response): void {
+  for (const lease of fileOpScopes.get(res)?.leases ?? []) lease.setAbort(null);
 }
 
 /** Run a stack file route handler inside its request's file operation scope. */
@@ -4324,12 +4323,11 @@ stacksRouter.post(
   fileOp(async (req: Request, res: Response, next: NextFunction) => {
     const stackName = req.params.stackName as string;
     if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
-    const root = await resolveRootForOp(req, res, stackName, 'write');
-    if (!root) return;
-    (req as UploadStartedReq)._fileUploadRoot = root;
     // Until the body has arrived the upload writes nothing in the directory, so a
     // fence cuts it off instead of waiting on a slow client.
-    setFileOpAbortable(res, true);
+    const root = await resolveRootForOp(req, res, stackName, 'write', { cutOffable: true });
+    if (!root) return;
+    (req as UploadStartedReq)._fileUploadRoot = root;
     next();
   }),
   (req: Request, res: Response, next: NextFunction) => {
@@ -4405,7 +4403,7 @@ stacksRouter.post(
     // the body was arriving is refused here instead of written under. A response
     // that has already closed (a fence cut the upload off, or the client went
     // away) has released its fence registration, so nothing is written for it.
-    setFileOpAbortable(res, false);
+    stopCuttingOffFileOp(res);
     if (fileOpScopes.get(res)?.closed) {
       recordFileOp(req.nodeId, 'upload', startedAt, false);
       await cleanupUploadTemp(req);
