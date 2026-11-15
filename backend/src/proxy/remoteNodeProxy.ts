@@ -88,7 +88,7 @@ import {
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
-import type { PointReadKind, RestoreMode } from '../services/recovery/types';
+import type { PointReadKind, RestoreMode, RestoreScope, StorageKind } from '../services/recovery/types';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -822,6 +822,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           req.nodeId,
           requiredRestoreModeFor(req.method, req.path),
           requiredPointReadFor(req.method, req.path),
+          requiredRecoveryScopeFor(req.method, req.path),
         );
         if (!preflight.ok) {
           res.status(preflight.httpStatus).json({
@@ -1453,6 +1454,24 @@ export function requiredPointReadFor(method: string, path: string): PointReadKin
   const match = /^\/recovery\/points\/[^/]+\/(browse|download)\/?(?:\?|$)/i.exec(path);
   if (!match) return undefined;
   return match[1].toLowerCase() === 'browse' ? 'list' : 'download';
+}
+
+/**
+ * The storage kind or restore scope a recovery request needs the node to
+ * advertise. Capturing a host directory and restoring one path of a point are
+ * the only routes an older node lacks while still answering a neighbour: its
+ * whole-point restore would bring back more than the path asked for. Every other
+ * directory call is addressed by a storage, point or intent id an older node
+ * cannot hold.
+ */
+export function requiredRecoveryScopeFor(
+  method: string,
+  path: string,
+): { storageKind?: StorageKind; restoreScope?: RestoreScope } {
+  if (method.toUpperCase() !== 'POST') return {};
+  if (/^\/recovery\/storage\/roots\/points\/?(?:\?|$)/i.test(path)) return { storageKind: 'bind_root' };
+  if (/^\/recovery\/points\/[^/]+\/restore\/path\/?(?:\?|$)/i.test(path)) return { restoreScope: 'path' };
+  return {};
 }
 
 /** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */

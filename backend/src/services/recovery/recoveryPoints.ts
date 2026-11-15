@@ -153,7 +153,7 @@ export type PointFinalization =
   | { status: 'completion_unknown' };
 
 const EXCLUSION_REASONS: ReadonlySet<ExclusionReason> = new Set<ExclusionReason>([
-  'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type',
+  'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type', 'nested_mount',
 ]);
 
 const CONSISTENCY_CLASSES: ReadonlySet<ConsistencyClass> = new Set<ConsistencyClass>([

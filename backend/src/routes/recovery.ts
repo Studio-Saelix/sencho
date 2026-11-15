@@ -29,10 +29,27 @@ import { RecoveryRepositoryStore } from '../services/recovery/repositories';
 import { RestoreIntentStore } from '../services/recovery/restoreIntents';
 import { RestoreFenceStore } from '../services/recovery/restoreFence';
 import { overwriteIntentScope } from '../services/recovery/overwriteRestore';
-import { StorageIdentityStore, deriveStorageKey, isDockerVolumeName } from '../services/recovery/storageIdentity';
+import {
+  StorageIdentityStore,
+  canonicalizeLocator,
+  deriveStorageKey,
+  isDockerVolumeName,
+} from '../services/recovery/storageIdentity';
+import {
+  describeFsIneligible,
+  fsGenerationChanged,
+  isFsTargetKey,
+  listStackFsRootCandidates,
+  readFsRootEnvironment,
+  resolveFsRootDependents,
+  statSenchoView,
+  storedFsRootSenchoPath,
+  type FsRootCandidate,
+  type FsRootEnvironment,
+} from '../services/recovery/fsRoots';
+import { requiresNodeWideCheck, storageAdapterFor } from '../services/recovery/storageAdapters';
 import {
   describeIneligible,
-  describeStoredLocator,
   generationTokenMatchesVolume,
   inspectVolumeSource,
   knownStacksFor,
@@ -60,6 +77,7 @@ import type {
   RecoveryOperation,
   RootCoverageReason,
   StorageDependent,
+  StorageIdentity,
 } from '../services/recovery/types';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import DockerController from '../services/DockerController';
@@ -203,6 +221,22 @@ const volumeNameField = z.string().trim().min(1).max(255).refine(isDockerVolumeN
 
 const createPointBody = idempotencyBody.extend({
   volumeName: volumeNameField,
+});
+
+/**
+ * A host directory capture names the stack and the root id the storage listing
+ * returned, never a path. The id grammar is the one `StackFileRootsService`
+ * mints, so anything else is refused before a render.
+ */
+const createFsPointBody = idempotencyBody.extend({
+  stackName: z.string().trim().min(1).max(255).refine(isValidStackName),
+  rootId: z.string().trim().regex(/^(?:stack-source|bind:[0-9a-f]{16})$/),
+});
+
+/** One path of a point, in the browse grammar, restored alone into a new volume. */
+const restorePathBody = idempotencyBody.extend({
+  targetVolumeName: volumeNameField,
+  path: z.string().min(1).max(4096),
 });
 
 const verifyBody = idempotencyBody.extend({
@@ -425,12 +459,13 @@ recoveryRouter.get('/storage', handle(async (req, res) => {
       resolution.kind === 'unrenderable' ? null : { storageKey, liveDependents: resolution.dependents },
     ).allowed;
     if (!authorized) {
-      roots.push({ access: 'inaccessible' });
+      roots.push({ kind: 'named_volume', access: 'inaccessible' });
       coverageInputs.push({ storage: null, access: 'inaccessible', points: [], verifications: new Map() });
       continue;
     }
     if (!source.eligible) {
       roots.push({
+        kind: 'named_volume',
         volumeName: name,
         eligible: false,
         ineligibleReason: source.ineligibleReason,
@@ -464,6 +499,7 @@ recoveryRouter.get('/storage', handle(async (req, res) => {
     const evaluated = evaluateRootCoverage(input, now, ROOT_COVERAGE_FRESHNESS_MS);
     coverageInputs.push(input);
     roots.push({
+      kind: 'named_volume',
       volumeName: name,
       storageId: current?.id ?? null,
       eligible: true,
@@ -473,9 +509,198 @@ recoveryRouter.get('/storage', handle(async (req, res) => {
     });
   }
 
+  // Host directories: a stack's declared bind sources and its own source
+  // directory with `?stack=`; node-wide, only the directories that already have
+  // a recorded identity, because finding the rest would render every stack.
+  const fs = await listFsRootEntries(req, {
+    stackName: stackName && knownStackNames.includes(stackName) ? stackName : null,
+    nodeWide: !stackName,
+    docker,
+    ownerNodeKey,
+    knownStackNames,
+    now,
+  });
+  roots.push(...fs.roots);
+  coverageInputs.push(...fs.coverageInputs);
+
   const verdict = evaluateCoverage({ volumeProtection: status.state, roots: coverageInputs, now });
-  res.json({ roots, verdict, capability: status });
+  res.json({ roots, verdict, capability: status, ...(stackName ? {} : { fsRootsScope: 'recorded_only' }) });
 }));
+
+/**
+ * The host-directory half of the storage listing. Starts no helper: a recreated
+ * directory is seen from Sencho's own `stat` against the stored token. Each root
+ * is authorized against its own dependents (recorded, containers, and the
+ * listed stack's cached roots, with no render), and a root the caller may not
+ * read is listed as `inaccessible` with its path withheld.
+ */
+async function listFsRootEntries(req: Request, input: {
+  stackName: string | null;
+  nodeWide: boolean;
+  docker: ReturnType<ReturnType<typeof DockerController.getInstance>['getDocker']>;
+  ownerNodeKey: string;
+  knownStackNames: string[];
+  now: number;
+}): Promise<{ roots: unknown[]; coverageInputs: RootCoverageInput[] }> {
+  const roots: unknown[] = [];
+  const coverageInputs: RootCoverageInput[] = [];
+  const store = StorageIdentityStore.getInstance();
+  const recorded = input.nodeWide ? store.listCurrent(input.ownerNodeKey, 'bind_root') : [];
+  if (!input.stackName && recorded.length === 0) return { roots, coverageInputs };
+  const environment = await readFsRootEnvironment(req.nodeId, input.docker);
+  const activeRepositoryId = RecoveryRepositoryStore.getInstance().getActive()?.id ?? null;
+
+  const describe = async (entry: {
+    identity: StorageIdentity | null;
+    storageKey: string | null;
+    location: { senchoPath: string; hostPath: string; aliases: string[] } | null;
+    candidate: FsRootCandidate | null;
+  }): Promise<void> => {
+    const base = {
+      kind: 'bind_root' as const,
+      rootId: entry.candidate?.rootId ?? null,
+      role: entry.candidate?.role ?? null,
+      stackName: entry.candidate?.stackName ?? null,
+    };
+    const resolution = entry.location
+      ? await resolveFsRootDependents({
+        nodeId: req.nodeId,
+        storageKey: entry.storageKey,
+        knownStackNames: input.knownStackNames,
+        root: entry.location,
+        render: false,
+        onlyStacks: input.stackName ? [input.stackName] : [],
+        docker: input.docker,
+        environment,
+      })
+      : null;
+    const dependents = resolution?.dependents
+      ?? (entry.candidate ? [{ stackName: entry.candidate.stackName, serviceName: null }] : []);
+    const authorized = authorizeStorageAccess(
+      req,
+      'read',
+      resolution && requiresNodeWideCheck(resolution)
+        ? null
+        : { storageKey: entry.storageKey ?? `unmapped:${entry.candidate?.senchoPath ?? ''}`, liveDependents: dependents },
+    ).allowed;
+    if (!authorized) {
+      roots.push({ ...base, rootId: null, role: null, stackName: null, access: 'inaccessible' });
+      coverageInputs.push({ storage: null, access: 'inaccessible', points: [], verifications: new Map() });
+      return;
+    }
+    const label = entry.candidate?.label ?? entry.identity?.locator ?? null;
+    const hostPath = entry.location?.hostPath ?? entry.candidate?.hostPath ?? null;
+    const aliases = entry.location?.aliases ?? [];
+    if (entry.candidate?.mappingUnreadable) {
+      roots.push({
+        ...base, label, hostPath: null, aliases, storageId: null, eligible: false, ineligibleReason: null,
+        reason: 'Sencho could not read its own container mounts just now, so this directory\'s host path is unknown.',
+        coverage: 'identity_unknown' satisfies RootCoverageReason, coveringPointId: null,
+      });
+      coverageInputs.push({ storage: null, access: 'unknown', points: [], verifications: new Map() });
+      return;
+    }
+    if (entry.candidate && entry.candidate.ineligibleReason !== null) {
+      roots.push({
+        ...base, label, hostPath, aliases, storageId: null, eligible: false,
+        ineligibleReason: entry.candidate.ineligibleReason,
+        reason: describeFsIneligible(entry.candidate.ineligibleReason),
+        coverage: 'unsupported' satisfies RootCoverageReason, coveringPointId: null,
+      });
+      coverageInputs.push({ storage: null, access: 'unsupported', points: [], verifications: new Map() });
+      return;
+    }
+    const identity = entry.identity;
+    const points = identity
+      ? RecoveryPointStore.getInstance().listForStorageKey(identity.storageKey)
+        .filter((point) => activeRepositoryId !== null && point.repositoryId === activeRepositoryId)
+      : [];
+    const verifications = RecoveryPointStore.getInstance().verificationsForPoints(points.map((p) => p.id));
+    const senchoPath = entry.location?.senchoPath ?? null;
+    const coverageInput: RootCoverageInput = {
+      storage: identity,
+      access: 'supported',
+      points,
+      verifications,
+      liveGenerationChanged: identity !== null
+        && (senchoPath === null || await fsGenerationChanged(identity.generationToken, senchoPath)),
+    };
+    const evaluated = evaluateRootCoverage(coverageInput, input.now, ROOT_COVERAGE_FRESHNESS_MS);
+    coverageInputs.push(coverageInput);
+    roots.push({
+      ...base, label, hostPath, aliases, storageId: identity?.id ?? null, eligible: true, ineligibleReason: null,
+      reason: null, coverage: evaluated.reason, coveringPointId: evaluated.coveringPointId,
+    });
+  };
+
+  if (input.stackName) {
+    const listed = await listStackFsRootCandidates({
+      nodeId: req.nodeId,
+      stackName: input.stackName,
+      fresh: false,
+      environment,
+    });
+    const current = store.listCurrent(input.ownerNodeKey, 'bind_root');
+    for (const candidate of listed.candidates) {
+      const hostPath = candidate.hostPath;
+      const storageKey = hostPath
+        ? deriveStorageKey(getRecoveryAuthorityId(), input.ownerNodeKey, 'bind_root', canonicalizeLocator('bind_root', hostPath))
+        : null;
+      const identity = storageKey ? store.getCurrent(storageKey) ?? await identityByView(current, candidate.senchoPath, environment) : null;
+      await describe({
+        identity,
+        storageKey: identity?.storageKey ?? storageKey,
+        location: hostPath ? { senchoPath: candidate.senchoPath, hostPath, aliases: candidate.aliases } : null,
+        candidate,
+      });
+    }
+  } else {
+    for (const identity of recorded) {
+      const senchoPath = await storedFsRootSenchoPath(identity.locator, environment);
+      await describe({
+        identity,
+        storageKey: identity.storageKey,
+        location: { senchoPath: senchoPath ?? identity.locator, hostPath: identity.locator, aliases: [] },
+        candidate: null,
+      });
+    }
+  }
+  return { roots, coverageInputs };
+}
+
+/**
+ * The recorded identity of a directory reached under another host spelling: one
+ * whose stored root is, by Sencho's own `stat`, the same directory. Matched on
+ * device and inode, so a listing finds the identity a second spelling resolved
+ * to without starting a helper.
+ */
+async function identityByView(
+  identities: readonly StorageIdentity[],
+  senchoPath: string,
+  environment: FsRootEnvironment,
+): Promise<StorageIdentity | null> {
+  if (identities.length === 0) return null;
+  let view: { dev: string; ino: string };
+  try {
+    view = await statSenchoView(senchoPath);
+  } catch {
+    return null;
+  }
+  for (const identity of identities) {
+    // Only an identity whose token names this inode can be this directory.
+    const token = identity.generationToken;
+    if (!token.startsWith(`fs|${view.ino}|`) && token !== `fs|${view.dev}:${view.ino}`) continue;
+    const storedPath = await storedFsRootSenchoPath(identity.locator, environment);
+    if (!storedPath) continue;
+    try {
+      const stored = await statSenchoView(storedPath);
+      if (stored.dev === view.dev && stored.ino === view.ino) return identity;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
 
 /** The volume names a stack's rendered model declares. */
 async function declaredVolumeNames(nodeId: number, stackName: string): Promise<string[]> {
@@ -500,22 +725,10 @@ recoveryRouter.get('/storage/:storageId/points', handle(async (req, res) => {
     }
     throw new RecoveryError('invalid_request');
   }
-  const nodeId = req.nodeId;
-  const docker = DockerController.getInstance(nodeId).getDocker();
-  const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);
-  const knownStackNames = await knownStacksFor(nodeId);
-  // The volume may be gone (`down -v`, a prune): its points are still listable.
-  const described = await describeStoredLocator({ docker, ownerNodeKey, locator: storage.locator });
-  const resolution = await resolveVolumeDependents({
-    nodeId,
-    ownerNodeKey,
-    knownStackNames,
-    volumeName: storage.locator,
-    volumeLabels: described.labels,
-    render: false,
-    docker,
-  });
-  const target = resolution.kind === 'unrenderable'
+  // The volume may be gone (`down -v`, a prune): its points are still listable,
+  // and the read of history does not pay for a render of every stack.
+  const resolution = await (await adapterForRequest(req, storage)).dependents(storage, { render: false });
+  const target = requiresNodeWideCheck(resolution)
     ? null
     : { storageKey: storage.storageKey, liveDependents: resolution.dependents };
   if (!authorizeStorageAccess(req, 'read', target).allowed) {
@@ -527,6 +740,7 @@ recoveryRouter.get('/storage/:storageId/points', handle(async (req, res) => {
   res.json({
     storage: {
       id: storage.id,
+      kind: storage.kind,
       locator: storage.locator,
       generation: storage.generation,
       state: storage.state,
@@ -562,6 +776,42 @@ recoveryRouter.post('/storage/points', handle(async (req, res) => {
     warning: SAME_FAILURE_DOMAIN_WARNING,
   });
 }));
+
+/**
+ * Create a root point of a host directory a stack declares: a bind source or
+ * the stack's own source directory, named by the root id the listing returned.
+ * The same admission as a volume, plus the proof that the daemon's host path is
+ * the directory Sencho authorized.
+ */
+recoveryRouter.post('/storage/roots/points', handle(async (req, res) => {
+  const body = parseBody(createFsPointBody, req.body);
+  const result = await engineService(req).admitCreateFsPoint({
+    stackName: body.stackName,
+    rootId: body.rootId,
+    actor: actorOf(req),
+    idempotencyKey: body.idempotencyKey,
+    requestDigest: sha256Digest(['create_fs_point', body.stackName, body.rootId]),
+    transport: req.machineAuthScope ?? 'local',
+    authorize: (context) => authorizeWith(req, 'protect')(context),
+    authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.protect, 'stack', stackName),
+  });
+  res.status(result.replayed ? 200 : 202).json({
+    operation: result.operation,
+    failureDomain: RECOVERY_FAILURE_DOMAIN,
+    warning: SAME_FAILURE_DOMAIN_WARNING,
+  });
+}));
+
+/** The adapter for a stored identity, built for this request's node. */
+async function adapterForRequest(req: Request, storage: StorageIdentity) {
+  const docker = DockerController.getInstance(req.nodeId).getDocker();
+  return storageAdapterFor(storage.kind, {
+    nodeId: req.nodeId,
+    docker,
+    ownerNodeKey: await ownerNodeKeyFor(req.nodeId, docker),
+    knownStackNames: await knownStacksFor(req.nodeId),
+  });
+}
 
 // --- Points -----------------------------------------------------------------
 
@@ -604,13 +854,48 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     });
   }
   const pointId = paramOf(req, 'pointId');
-  const digest = sha256Digest(['restore', pointId, body.targetVolumeName, 'new_volume']);
+  await restoreIntoNewVolume(req, res, {
+    pointId,
+    targetVolumeName: body.targetVolumeName,
+    idempotencyKey: body.idempotencyKey,
+    digest: sha256Digest(['restore', pointId, body.targetVolumeName, 'new_volume']),
+  });
+}));
+
+/**
+ * Restore one path of a point into a new volume, at its own place in the tree.
+ * `path` uses the browse grammar and must be in the point. A separate route, so
+ * a hub refuses a node that predates it instead of that node restoring the whole
+ * point.
+ */
+recoveryRouter.post('/points/:pointId/restore/path', handle(async (req, res) => {
+  const body = parseBody(restorePathBody, req.body);
+  const pointPath = parsePointPath(body.path);
+  const pointId = paramOf(req, 'pointId');
+  await restoreIntoNewVolume(req, res, {
+    pointId,
+    targetVolumeName: body.targetVolumeName,
+    idempotencyKey: body.idempotencyKey,
+    digest: sha256Digest(['restore_path', pointId, body.targetVolumeName, pointPath]),
+    path: pointPath,
+  });
+}));
+
+/** The one new-volume restore admission, for the whole point or one path of it. */
+async function restoreIntoNewVolume(req: Request, res: Response, input: {
+  pointId: string;
+  targetVolumeName: string;
+  idempotencyKey: string;
+  digest: string;
+  path?: string;
+}): Promise<void> {
+  const { pointId, digest } = input;
   // A retry after a lost response has to reach this answer before the target
   // check below: by then the first attempt has created the volume it is about to
   // restore into, and reporting that as a new invalid request would leave the
   // caller with no way to find the operation that is actually running.
   const replay = RecoveryOperationStore.getInstance().findReplay({
-    idempotencyKey: body.idempotencyKey,
+    idempotencyKey: input.idempotencyKey,
     kind: 'restore',
     actor: actorOf(req),
     transport: req.machineAuthScope ?? 'local',
@@ -623,16 +908,16 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
   }
   // A reserved name would let a restore overwrite Sencho's own infrastructure,
   // and a name it never created is not a target it may write.
-  if (body.targetVolumeName.startsWith(RECOVERY_RESERVED_PREFIX)
-    || body.targetVolumeName.startsWith(RECOVERY_RESERVED_TARGET_PREFIX)) {
+  if (input.targetVolumeName.startsWith(RECOVERY_RESERVED_PREFIX)
+    || input.targetVolumeName.startsWith(RECOVERY_RESERVED_TARGET_PREFIX)) {
     throw new RecoveryError('invalid_request');
   }
   const result = await engineService(req).admitRestore({
     nodeId: req.nodeId,
     pointId,
-    targetVolumeName: body.targetVolumeName,
+    targetVolumeName: input.targetVolumeName,
     actor: actorOf(req),
-    idempotencyKey: body.idempotencyKey,
+    idempotencyKey: input.idempotencyKey,
     requestDigest: digest,
     transport: req.machineAuthScope ?? 'local',
     authorize: (context) => authorizeWith(req, 'restore')(context),
@@ -640,12 +925,13 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
       checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
     assertTargetAvailable: async () => {
       const docker = DockerController.getInstance(req.nodeId).getDocker();
-      const existing = await inspectVolumeSource(docker, body.targetVolumeName).catch(() => null);
+      const existing = await inspectVolumeSource(docker, input.targetVolumeName).catch(() => null);
       if (existing) throw new RecoveryError('invalid_request');
     },
+    path: input.path,
   });
   res.status(result.replayed ? 200 : 202).json({ operation: result.operation });
-}));
+}
 
 // --- Browsing a saved point -------------------------------------------------
 
@@ -914,7 +1200,7 @@ recoveryRouter.get('/operations/:id', handle(async (req, res) => {
     }
     throw new RecoveryError('invalid_request');
   }
-  if (!authorizeOperation(req, operation, 'read')) {
+  if (!await authorizeOperation(req, operation, 'read')) {
     sendRecoveryError(res, 'permission_denied');
     return;
   }
@@ -936,7 +1222,7 @@ recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
   // Access first: the state of an operation is not reported to a caller who may not
   // touch it. A repository operation is held to `configure` by `authorizeOperation`.
   const access: RecoveryAccess = operation.kind === 'restore' ? 'restore' : 'protect';
-  if (!authorizeOperation(req, operation, access)) {
+  if (!await authorizeOperation(req, operation, access)) {
     sendRecoveryError(res, 'permission_denied');
     return;
   }
@@ -981,7 +1267,11 @@ function operationResult(operation: RecoveryOperation): unknown {
         intent: intent
           ? {
               phase: intent.phase,
-              targetVolume: intent.targetVolume,
+              // A host directory's overwrite records an internal key here; the
+              // answer names the directory instead, never the raw key.
+              targetVolume: isFsTargetKey(intent.targetVolume) ? null : intent.targetVolume,
+              target: restoreTargetOf(intent),
+              pathScope: intent.pathScope,
               filesRestored: intent.filesRestored,
               bytesRestored: intent.bytesRestored,
               verified: intent.verified,
@@ -1020,15 +1310,30 @@ function operationResult(operation: RecoveryOperation): unknown {
   }
 }
 
+/** What a restore wrote into, as a client may see it: a volume by name, a directory by its host path. */
+function restoreTargetOf(intent: { targetVolume: string | null; targetPaths: { hostPath: string } | null }): unknown {
+  if (isFsTargetKey(intent.targetVolume)) {
+    return { kind: 'bind_root', hostPath: intent.targetPaths?.hostPath ?? null };
+  }
+  return intent.targetVolume ? { kind: 'named_volume', volumeName: intent.targetVolume } : null;
+}
+
 /** The access an operation's kind requires, checked against its storage. */
-function authorizeOperation(req: Request, operation: RecoveryOperation, access: RecoveryAccess): boolean {
+async function authorizeOperation(req: Request, operation: RecoveryOperation, access: RecoveryAccess): Promise<boolean> {
   if (operation.kind === 'repository_init') return authorizeStorageAccess(req, 'configure', null).allowed;
   if (!operation.storageId) return authorizeStorageAccess(req, access, null).allowed;
   const storage = StorageIdentityStore.getInstance().getById(operation.storageId);
   if (!storage) return authorizeStorageAccess(req, access, null).allowed;
   // The stored dependent set, without a Compose render: this is a read of work
-  // already recorded, not a decision to change data.
+  // already recorded, not a decision to change data. A host directory adds the
+  // containers that bind it and the cached stack roots that declare it, because
+  // a directory several stacks share has no project label to fall back on.
   const dependents = [...StorageIdentityStore.getInstance().listDependents(storage.storageKey)];
+  if (storage.kind === 'bind_root') {
+    const resolution = await (await adapterForRequest(req, storage)).dependents(storage, { render: false });
+    if (requiresNodeWideCheck(resolution) && !authorizeNodeWide(req, access)) return false;
+    dependents.push(...resolution.dependents);
+  }
   // An overwrite is also held to the stacks its fence stopped: cancelling it
   // rolls back and starts those containers, and a stack that has since dropped
   // the volume is no longer in the stored set.
@@ -1068,21 +1373,11 @@ recoveryRouter.post('/locks/release', handle(async (req, res) => {
       }
       throw new RecoveryError('invalid_request');
     }
-    const nodeId = req.nodeId;
-    const docker = DockerController.getInstance(nodeId).getDocker();
-    const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);
-    const knownStackNames = await knownStacksFor(nodeId);
-    const described = await describeStoredLocator({ docker, ownerNodeKey, locator: current.locator });
-    const resolution = await resolveVolumeDependents({
-      nodeId,
-      ownerNodeKey,
-      knownStackNames,
-      volumeName: current.locator,
-      volumeLabels: described.labels,
-      render: true,
-      docker,
-    });
-    const target = resolution.kind === 'unrenderable'
+    // A volume is resolved with a render, as it always was; a host directory
+    // from the recorded dependents, the containers and the cached stack roots.
+    const resolution = await (await adapterForRequest(req, current))
+      .dependents(current, { render: current.kind === 'named_volume' });
+    const target = requiresNodeWideCheck(resolution)
       ? null
       : { storageKey: current.storageKey, liveDependents: resolution.dependents };
     if (!authorizeStorageAccess(req, 'restore', target).allowed) {

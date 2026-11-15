@@ -11,6 +11,8 @@
  * artifact by id, never merge with one.
  */
 
+import type { ProvenHostRoot } from './hostRoots';
+
 /** Version of the recovery contract a node speaks. Bumped only on a breaking change. */
 export const RECOVERY_CONTRACT_VERSION = 1;
 
@@ -133,8 +135,19 @@ export type RecoveryPointStatus = 'pending' | 'succeeded' | 'partial' | 'failed'
  */
 export type ConsistencyClass = 'crash_consistent_live' | 'crash_consistent_stopped' | 'unknown';
 
-/** Why a path was left out of a point. Only `policy_excluded` keeps a point complete. */
-export type ExclusionReason = 'policy_excluded' | 'permission_denied' | 'unreadable' | 'vanished' | 'unsupported_type';
+/**
+ * Why a path was left out of a point. Only `policy_excluded` keeps a point
+ * complete. `nested_mount` is a mount point below a host directory root: the
+ * capture reads the root without following mounts, so what is mounted there is
+ * not in the point.
+ */
+export type ExclusionReason =
+  | 'policy_excluded'
+  | 'permission_denied'
+  | 'unreadable'
+  | 'vanished'
+  | 'unsupported_type'
+  | 'nested_mount';
 
 export interface PointExclusion {
   /** Path relative to the storage root. */
@@ -225,6 +238,18 @@ export const RECOVERY_REFUSAL_REASONS = [
   'unsupported_entry_type',
   /** The node is already running as many point reads as it allows at once. */
   'read_capacity',
+  /**
+   * The host path the Docker daemon resolves for a directory is not proven to
+   * be the directory Sencho authorized (its device and inode differ, or the
+   * proof could not run).
+   */
+  'path_mapping_unproven',
+  /** A mount below the directory makes an overwrite unsafe, so it is refused. */
+  'nested_mount',
+  /** The point's root cannot be the target of this restore (a stack source directory is never overwritten). */
+  'unsupported_target',
+  /** The directory is not currently a root any stack on this node declares and Sencho may write. */
+  'root_not_authorized',
 ] as const;
 export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
@@ -372,10 +397,25 @@ export interface RecoveryNodeDescriptor {
    * instead of sending it to a node that has no such route.
    */
   pointReads: PointReadKind[];
+  /**
+   * The storage kinds this node can capture. A node that predates the field is
+   * read as `['named_volume']`, so the hub refuses a host directory capture with
+   * `update_required` instead of sending it to a node with no such route.
+   */
+  storageKinds: StorageKind[];
+  /**
+   * How much of a point a restore can bring back: the whole root, or one path of
+   * it. A node that predates the field is read as `['root']`, so the hub never
+   * sends a path restore to a node that would restore the whole point instead.
+   */
+  restoreScopes: RestoreScope[];
 }
 
 /** A read of a saved point's contents: one directory page, or one file body. */
 export type PointReadKind = 'list' | 'download';
+
+/** A restore of the whole point, or of one path inside it. */
+export type RestoreScope = 'root' | 'path';
 
 // --- Operations and locks ---------------------------------------------------
 
@@ -485,7 +525,16 @@ export type CreatePointRequest = {
 export type RestoreTarget =
   | { mode: 'new_volume'; volumeName: string }
   | { mode: 'new_path'; hostPath: string }
-  | { mode: 'staged_overwrite'; storageId: string; expectedGenerationToken: string; workDir: string; volumeName: string };
+  | {
+    mode: 'staged_overwrite';
+    storageId: string;
+    expectedGenerationToken: string;
+    workDir: string;
+    /** The volume, or for a host directory the intent's `fs:` key (see `fsTargetKey`). */
+    volumeName: string;
+    /** The proven host directory a bind-root overwrite writes into; absent for a volume. */
+    hostRoot?: ProvenHostRoot;
+  };
 
 /** The restore shapes a node can execute. */
 export type RestoreMode = RestoreTarget['mode'];

@@ -69,6 +69,10 @@ const descriptor = (state = 'unavailable', reason = 'engine_not_installed', cont
   volumeProtection: { capability: 'volume-protection-v1', version, state, reason },
   restoreModes: ['new_volume', 'staged_overwrite'] as string[],
   pointReads: ['list', 'download'] as string[],
+  // A node with no engine registered captures what a node that predates the
+  // field is read as.
+  storageKinds: ['named_volume'] as string[],
+  restoreScopes: ['root', 'path'] as string[],
 });
 
 /** The same answer from a node that predates the restore-mode and point-read fields. */
@@ -180,6 +184,9 @@ describe('resolveRemoteVolumeProtection', () => {
         status: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' },
         restoreModes: ['new_volume'],
         pointReads: [],
+        // A node that predates the fields captures named volumes and restores whole points.
+        storageKinds: ['named_volume'],
+        restoreScopes: ['root'],
       });
   });
 

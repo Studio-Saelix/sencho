@@ -354,6 +354,8 @@ export type DependentResolution =
       current: StorageDependent[];
       /** True when a container currently mounts the volume, whatever its state. */
       mountedByContainer: boolean;
+      /** A host directory only: a container no known stack owns depends on it. */
+      unownedContainer?: boolean;
     }
   /** A stack's model could not be rendered, so the full set is unknown. */
   | {
@@ -364,6 +366,7 @@ export type DependentResolution =
       /** The dependents found now, as in the resolved kind, up to the model that failed. */
       current: StorageDependent[];
       mountedByContainer: boolean;
+      unownedContainer?: boolean;
     };
 
 /** How many stack models to render at once. Rendering shells out to Compose. */
@@ -466,14 +469,14 @@ export async function resolveVolumeDependents(input: {
   return { kind: 'resolved', dependents: [...found.values()], current: [...current.values()], mountedByContainer };
 }
 
-type RenderResult = ReturnType<typeof parseEffectiveModel> | 'unrenderable' | null;
+export type RenderResult = ReturnType<typeof parseEffectiveModel> | 'unrenderable' | null;
 
 /**
  * One stack's effective model, or `unrenderable` when Compose could not produce
  * it and `null` when the stack has no readable Compose file at all (which is not
  * a claim about this volume).
  */
-async function renderStackModel(nodeId: number, stackName: string): Promise<RenderResult> {
+export async function renderStackModel(nodeId: number, stackName: string): Promise<RenderResult> {
   try {
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered === null) {
