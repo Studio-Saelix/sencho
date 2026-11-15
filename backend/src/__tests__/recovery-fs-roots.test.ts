@@ -294,10 +294,11 @@ describe('the identity proof', () => {
   });
 
   it('compares identities as exact strings, so an inode past 2^53 is not rounded', () => {
-    const report = roots.parseFsProbeReport(JSON.stringify({
-      dev: 64768, ino: 18446744073709551557, uid: 0, gid: 0, mode: 16877, free: 1,
-      dev_s: '64768', ino_s: '18446744073709551557',
-    }));
+    // The probe writes the inode as a JSON number too; past 2^53 that number is
+    // rounded by JSON.parse, so only the string field may be compared.
+    const report = roots.parseFsProbeReport(
+      '{"dev":64768,"ino":18446744073709551557,"uid":0,"gid":0,"mode":16877,"free":1,"dev_s":"64768","ino_s":"18446744073709551557"}',
+    );
     expect(report?.ino).toBe('18446744073709551557');
     expect(roots.parseFsProbeReport('{"dev_s":"1"}')).toBeNull();
     expect(roots.parseFsProbeReport('{"dev_s":"1","ino_s":"x"}')).toBeNull();
