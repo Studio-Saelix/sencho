@@ -365,6 +365,10 @@ export function BootstrapServerDialog({ open, onOpenChange }: { open: boolean; o
         description={`Inspect a host over SSH, review the plan, then approve it to prepare Docker and enroll a Pilot. ${BOOTSTRAP_SCOPE}`}
       />
       <StepRail step={wizard.step} reachablePlan={reachablePlan} />
+      {/* ModalHeader renders its description for screen readers only, so the scope is also written here, in view on every step. */}
+      <p className="border-b border-card-border/60 px-6 py-2 text-xs text-muted-foreground" data-testid="bootstrap-scope-note">
+        {BOOTSTRAP_SCOPE}
+      </p>
       <DialogBody wizard={wizard} run={run} />
       <FooterActions wizard={wizard} run={run} onClose={close} onApprove={() => setConfirmOpen(true)} />
       <ApproveConfirm

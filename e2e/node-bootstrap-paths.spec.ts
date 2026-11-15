@@ -255,6 +255,7 @@ test.describe('Node bootstrap wizard', () => {
 
     await expect(page.getByText('1. Pilot Agent installation directory')).toBeVisible();
     await expect(page.getByText('Not changed')).toBeVisible();
+    await expect(page.getByTestId('bootstrap-scope-note')).toContainText('execution and enrollment only');
     await expect(page.getByText('/srv/sencho-stacks').first()).toBeVisible();
     await expect(page.getByText('/srv/sencho-agent').first()).toBeVisible();
     await expect(page.getByText(/sencho-mkdir .* '0700'/)).toBeVisible();

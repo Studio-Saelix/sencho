@@ -85,9 +85,22 @@ beforeEach(() => {
 });
 
 describe('BootstrapServerDialog scope', () => {
-  it('states on the first screen that a run executes and enrolls only', () => {
+  it('pins the wording of the scope sentence the docs repeat', () => {
+    expect(BOOTSTRAP_SCOPE).toBe(
+      'Bootstrap is execution and enrollment only: it runs the plan and enrolls the Pilot. It is not a complete, verified provisioning, and it does not check that the node is ready for deployments.',
+    );
+  });
+
+  it('shows in view, on the first screen and after the host key check, that a run executes and enrolls only', async () => {
     render(<BootstrapServerDialog open onOpenChange={() => {}} />);
-    expect(screen.getByRole('dialog')).toHaveTextContent(BOOTSTRAP_SCOPE);
+    // The header description is screen-reader only, so the sighted reader needs this line.
+    const note = screen.getByTestId('bootstrap-scope-note');
+    expect(note).toHaveTextContent(BOOTSTRAP_SCOPE);
+    expect(note.closest('.sr-only')).toBeNull();
+    const user = await fillTarget();
+    await user.click(screen.getByRole('button', { name: 'Check host key' }));
+    await screen.findByLabelText(/I understand this replaces the pinned key/);
+    expect(screen.getByTestId('bootstrap-scope-note')).toHaveTextContent(BOOTSTRAP_SCOPE);
   });
 });
 

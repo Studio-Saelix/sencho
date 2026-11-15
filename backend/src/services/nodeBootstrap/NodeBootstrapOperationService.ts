@@ -823,7 +823,7 @@ export class NodeBootstrapOperationService {
         'The Pilot started but did not connect before the wait ended. Check that the host can reach the hub URL, then retry; a retry mints a new enrollment.',
       );
     }
-    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; its readiness has not been verified yet.');
+    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled. The run does not verify that the node is ready for deployments.');
   }
 
   // --- state ----------------------------------------------------------------
@@ -930,7 +930,7 @@ export class NodeBootstrapOperationService {
     }, now)) {
       return this.requireOperation(op.id);
     }
-    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled; its readiness has not been verified yet.', 'enroll', null);
+    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled. The run does not verify that the node is ready for deployments.', 'enroll', null);
     this.audit(SYSTEM_AUDIT, 'bootstrap.execute.finished', op, { state: 'enrolled', code: null, attempt: op.attempt, nodeId: op.node_id });
     return this.requireOperation(op.id);
   }

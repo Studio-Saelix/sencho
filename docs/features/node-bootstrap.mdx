@@ -1,6 +1,6 @@
 ---
 title: Node Bootstrap
-description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve. It executes the plan and enrolls the Pilot; it does not verify the server is ready for deployments.
+description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve. Execution and enrollment only: it does not verify that the node is ready for deployments.
 ---
 
 Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pilot node. It works in two halves:
@@ -8,7 +8,7 @@ Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pi
 - **Preflight.** Sencho connects to the host, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks. Its output is an ordered plan with exact commands, which you can read, copy and download. **The preflight changes nothing on the server.**
 - **Run.** When you approve that plan, Sencho inspects the server again, runs the plan's steps in order, installs only the Docker components that are missing, writes the Pilot files, starts the Pilot and waits for it to enroll. The run belongs to Sencho, not to your browser: closing the window does not stop it.
 
-**What a run does not do.** Bootstrap is execution and enrollment only. A run executes the plan and enrolls the Pilot, nothing more; it does not verify that the server is ready for deployments. The dialog says this in its header, on the plan and in the approval step, and a finished run repeats it. A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not verify that the node is ready for deployments (Docker, Compose and the stacks directory as seen from inside the Pilot). Treat a freshly enrolled node as unverified until you have checked it.
+**What a run does not do.** Bootstrap is execution and enrollment only: a run executes the plan, checks each step's result, and enrolls the Pilot. It is not a complete, verified provisioning. The dialog says so on every step and in the approval step, and the status of an enrolled run repeats it. A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not check the node from inside the Pilot, so it does not verify that the node is ready for deployments (the Compose directory mount, Docker and Compose access, and capabilities). Treat a freshly enrolled node as unverified until you have checked it.
 
 The preflight answers questions a manual enrollment cannot:
 
@@ -105,7 +105,7 @@ When there are no blockers and every fact the plan depends on was established, S
 - File writes for `compose.yaml` (`0600`), the bootstrap marker (`0600`) and, when the hub uses native TLS, `sencho-hub-ca.pem` (`0644`), all under the chosen Agent directory.
 - The Docker repository, package and service steps, or an explicit no-change row when they already apply.
 - The exact `docker compose` start command, with the project name pinned to `sencho-agent`, an explicit project directory and file, and the environment variables that could otherwise change which project runs cleared.
-- An **Expected after execution** section. Items marked **run** are checked by the run itself; items marked **readiness** describe a readiness check that a run does not perform.
+- An **Expected after execution** section. Items marked **run** are checked by the run itself; items marked **readiness** are not checked by the run, except that the Pilot connects.
 - A SHA-256 digest over the plan, and a digest over the evidence it was built from.
 
 <Frame>
@@ -219,7 +219,7 @@ The plan keeps the contracts later steps depend on:
 - **Self-update:** the container's Compose labels locate the compose file and service, so a custom Agent directory remains self-updateable. The generated project and container are named `sencho-agent` and the Compose service is `agent`; the preflight uses those names to recognize an existing Pilot.
 - **Reboot:** both directories must be on persistent local storage, Docker is enabled at boot, and the agent uses `restart: unless-stopped`.
 - **Restart and recovery:** the project is idempotent, the volume survives container recreation, and the bootstrap marker distinguishes a previous attempt from an unrelated installation.
-- **Readiness:** a tunnel connection alone is not proof that the node is ready. A later readiness check inspects the running container, requires a bind mount whose source and destination both equal the chosen Compose directory, and verifies the agent can read and write it.
+- **Readiness:** a tunnel connection alone is not proof that the node is ready, and bootstrap does not go further. A readiness check, which this workflow does not perform, would inspect the running container, require a bind mount whose source and destination both equal the chosen Compose directory, and verify the agent can read and write it.
 
 ## Changing a directory later
 

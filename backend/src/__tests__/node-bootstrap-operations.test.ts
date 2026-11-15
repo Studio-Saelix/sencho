@@ -489,7 +489,7 @@ describe('bootstrap operations: a clean run', () => {
     const node = db.getNode(op.nodeId as number);
     expect(node).toMatchObject({ name: h.name, type: 'remote', mode: 'pilot_agent', compose_dir: '/opt/docker/sencho' });
     expect(h.minted).toEqual([op.nodeId]);
-    expect(op.events.at(-1)?.message).toMatch(/readiness has not been verified/);
+    expect(op.events.at(-1)?.message).toMatch(/does not verify that the node is ready for deployments/);
     db.deleteNode(op.nodeId as number);
   });
 
