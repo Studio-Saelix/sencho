@@ -695,9 +695,9 @@ describe('node readiness: capabilities', () => {
 
 describe('node readiness: why a tunnel is down', () => {
   it.each([
-    ['enrollment_expired', /enrollment that had expired/],
+    ['enrollment_expired', /enrollment had expired/],
     ['enrollment_used', /already used or replaced/],
-    ['credential_expired', /saved credential that had expired/],
+    ['credential_expired', /saved credential had expired/],
   ] as const)('names a refused Pilot (%s) instead of a generic disconnect, and says how to recover', async (reason, summary) => {
     const attempts = new PilotEnrollmentAttempts();
     const { nodeId, operationId } = setup();
@@ -709,6 +709,19 @@ describe('node readiness: why a tunnel is down', () => {
     expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(summary) });
     expect(gate && gate.status !== 'pass' ? gate.remediation : '').toMatch(/Regenerate enrollment token/);
     expect(gate && gate.status !== 'pass' ? gate.remediation : '').not.toMatch(/Retry/);
+  });
+
+  it('reads the refusals the tunnel handler records, through the services\' default wiring', async () => {
+    const { nodeId } = setup();
+    // No `attempts` injected: the readiness service and the handler must share the hub's one record.
+    const wired = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn(), changed: vi.fn() });
+    PilotEnrollmentAttempts.getInstance().recordRefusal(nodeId, 'enrollment_used');
+    try {
+      const view = await wired.verify(nodeId, AUDIT);
+      expect(view?.gates.at(-1)).toMatchObject({ id: 'tunnel', summary: expect.stringMatching(/already used or replaced/) });
+    } finally {
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+    }
   });
 
   it('says it cannot tell why when nothing refused reached the hub, and where to look', async () => {

@@ -371,5 +371,7 @@ describe('collectEnvironmentReport', () => {
         expect(byId(checks, 'compose_dir').status).toBe('fail');
         expect(byId(checks, 'path_mapping').status).toBe('warn');
         expect(byId(checks, 'disk_space').status).toBe('warn');
+        // Each of the three rows that could not take a reading says so, apart from a measured warning.
+        for (const id of ['path_mapping', 'disk_space'] as const) expect(byId(checks, id)).toMatchObject({ status: 'warn', unmeasured: true });
     });
 });

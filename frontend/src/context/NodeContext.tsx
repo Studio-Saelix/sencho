@@ -166,7 +166,7 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         const before = appliedNodesRef.current;
         appliedNodesRef.current = data;
         setNodes(data);
-        // A node that just became ready is usable now: what the hub cached about it while it was provisional (a failed
+        // A node that just became ready is usable now: what the dashboard cached about it while it was provisional (a failed
         // read, no capabilities, an older release) is stale, so its metadata is read again without waiting out the cache.
         for (const node of data as Node[]) {
           if (node.readiness?.state !== 'ready') continue;
@@ -240,11 +240,24 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       }, READINESS_REFRESH_DELAY_MS);
     };
 
+    // Announcements sent while the notification socket was down are lost, so its return reads the list once.
+    let socketWasDown = false;
+    const handleConnection = (event: Event) => {
+      const connected = (event as CustomEvent<{ connected?: unknown }>).detail?.connected;
+      if (connected === false) socketWasDown = true;
+      else if (connected === true && socketWasDown) {
+        socketWasDown = false;
+        refreshNodes();
+      }
+    };
+
     window.addEventListener('node-not-found', handleNodeNotFound);
     window.addEventListener('sencho:state-invalidate', handleStateInvalidate);
+    window.addEventListener('sencho:notifications-connection', handleConnection);
     return () => {
       window.removeEventListener('node-not-found', handleNodeNotFound);
       window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
+      window.removeEventListener('sencho:notifications-connection', handleConnection);
       if (readinessTimer !== null) clearTimeout(readinessTimer);
     };
   }, [refreshNodes]);

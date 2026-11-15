@@ -6,8 +6,8 @@
  * sees nothing: a name that does not resolve, a TLS or CA failure, a proxy that
  * does not pass the WebSocket upgrade. The hub only learns of a Pilot that
  * reached it and was refused with a credential the hub itself signed: an
- * enrollment that had expired, one that was already used, or an expired tunnel
- * credential. Those three are recorded here, per node and in memory (a restart
+ * enrollment that had expired, one that was already used or replaced by a newer
+ * one, or an expired tunnel credential. Those three are recorded here, per node and in memory (a restart
  * forgets them, and the next attempt records them again), so the bootstrap and
  * the readiness check can name the cause instead of reporting a timeout.
  *

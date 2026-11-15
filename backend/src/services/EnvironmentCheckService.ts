@@ -13,9 +13,10 @@
  * is unit-testable without a live Docker daemon or filesystem. No probe failure
  * throws out of the report: it degrades to a non-throwing row whose status fits
  * the check. The Docker socket and compose-directory probes surface a `fail`;
- * an unreadable disk degrades to a `warn` (marked `unmeasured`, so a caller that
- * decides readiness can tell no reading from a measured warning) rather than a
- * false `pass`. Path
+ * a probe that gives no reading (an unreadable disk, unreadable mounts, an
+ * unverifiable Sencho location) degrades to a `warn` marked `unmeasured`, so a
+ * caller that decides readiness can tell no reading from a measured warning,
+ * rather than a false `pass`. Path
  * mapping distinguishes "not containerized" (a `pass`, the dev / bare-metal
  * case) from "containerized but mounts unreadable" (a `warn`), so an
  * unverifiable mapping never reads as healthy.

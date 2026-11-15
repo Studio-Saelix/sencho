@@ -716,7 +716,7 @@ describe('readiness announcements reach the open dialog', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves what is shown alone for a run that is not enrolled, and for another node\'s announcement that changes nothing', async () => {
+  it('adds no read for a run that is not enrolled, and reads an enrolled one once for an announcement that changes nothing on screen', async () => {
     vi.useFakeTimers();
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     act(() => result.current.show({ ...STOPPED, nodeId: 4 }));
@@ -731,7 +731,26 @@ describe('readiness announcements reach the open dialog', () => {
     vi.mocked(fetchBootstrapOperation).mockResolvedValue({ ...ready });
     announce();
     await settle();
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
     expect(result.current.operation).toMatchObject({ nodeId: 9, readiness: { state: 'ready' } });
+  });
+
+  it('reads the shown run again when the notification socket comes back, because announcements sent while it was down are lost', async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(enrolled('ready')));
+    const connection = (connected: boolean) => act(() => { window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected } })); });
+    // A first connection, or one that never dropped, is not a reconnect.
+    connection(true);
+    await settle();
+    expect(fetchBootstrapOperation).not.toHaveBeenCalled();
+
+    vi.mocked(fetchBootstrapOperation).mockResolvedValueOnce(enrolled('provisional'));
+    connection(false);
+    connection(true);
+    await settle(0);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.operation?.readiness?.state).toBe('provisional');
   });
 
   it('drops an older read that answers after a newer one, so it cannot bring an earlier verdict back', async () => {
@@ -773,7 +792,6 @@ describe('readiness announcements reach the open dialog', () => {
 
   describe('listed runs', () => {
     const row = (id: string, state: NodeReadiness['state'], extra: Partial<BootstrapOperationDetail> = {}) => enrolled(state, { id, targetName: id, ...extra });
-    const noActions = { ...NO_ACTIONS };
 
     it('reads a listed enrolled run again until its first verdict lands, then stops', async () => {
       vi.useFakeTimers();
@@ -846,7 +864,47 @@ describe('readiness announcements reach the open dialog', () => {
       expect(result.current.operations.map((entry) => `${entry.id}:${operationStateWord(entry).word}`)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Unverified']);
       expect(fetchBootstrapOperation).toHaveBeenCalledWith('later', expect.anything());
       expect(fetchBootstrapOperation).not.toHaveBeenCalledWith('held-1', expect.anything());
-      expect(noActions).toEqual(NO_ACTIONS);
+    });
+
+    it('reads the list again when the announcement read failed, until one applies', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce({ operations: [row('a', 'provisional')], nextCursor: null })
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      announce();
+      await settle();
+      // The read failed: the row still says Ready, and nothing but the retry can correct it.
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Ready');
+      await settle(SETTLE_POLL_MS);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      await settle(SETTLE_POLL_MS);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Ready');
+      await settle(SETTLE_POLL_MS * 3);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(4);
+      warn.mockRestore();
+    });
+
+    it('drops a full list read that answers after a newer settle read', async () => {
+      vi.useFakeTimers();
+      const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'verifying')], nextCursor: null })
+        .mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      // A full read (after an action elsewhere) starts first and is slow; the settle read starts after it and answers first.
+      act(() => { void result.current.refreshList(); });
+      await settle(SETTLE_POLL_MS);
+      expect(answers).toHaveLength(2);
+      await act(async () => { answers[1]({ operations: [row('a', 'provisional')], nextCursor: null }); });
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      await act(async () => { answers[0]({ operations: [row('a', 'verifying')], nextCursor: null }); });
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
     });
 
     it('drops a list read that answers after a newer one', async () => {

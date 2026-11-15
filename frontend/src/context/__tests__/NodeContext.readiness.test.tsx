@@ -179,6 +179,32 @@ describe('NodeContext readiness refresh', () => {
       expect(result.current.hasCapability('stacks')).toBe(true);
     });
 
+    it('reads the metadata of an already ready selected node once on the first load, and the list again when the socket comes back', async () => {
+      localStorage.setItem('sencho-active-node', '2');
+      let state: 'provisional' | 'ready' = 'ready';
+      let metaCalls = 0;
+      apiFetch.mockImplementation((path: string) => {
+        if (path === '/nodes') return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+        if (path === '/nodes/2/meta') { metaCalls += 1; return online(); }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      });
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(result.current.activeNodeMeta?.capabilities).toEqual(['stacks', 'containers']));
+      expect(metaCalls).toBe(1);
+
+      const connection = (connected: boolean) => act(() => { window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected } })); });
+      const lists = () => apiFetch.mock.calls.filter(([path]) => path === '/nodes').length;
+      const before = lists();
+      connection(true);
+      expect(lists()).toBe(before);
+      // Announcements sent while the socket was down are lost; its return reads the list, so a verdict that changed shows.
+      state = 'provisional';
+      connection(false);
+      connection(true);
+      await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'));
+      expect(lists()).toBe(before + 1);
+    });
+
     it('leaves the metadata of a node that has none cached and is not selected alone', async () => {
       const h = hub(() => online());
       const { result } = renderHook(() => useNodes(), { wrapper });

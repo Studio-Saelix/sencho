@@ -25,8 +25,9 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * verdict appears without a reload, and so is a listed one. A verdict that was
  * already in is not final: the hub announces every change of a node's readiness
  * (a dropped tunnel, a new check), and the open dialog then reads the shown
- * enrolled run, or the listed enrolled runs, once more, so a node that stopped
- * being ready is not still called ready. Nothing polls while the dialog is closed.
+ * enrolled run, or the listed enrolled runs, once more, and so does the
+ * notification socket coming back after a drop (announcements sent while it was
+ * down are lost), so a node that stopped being ready is not still called ready. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -91,6 +92,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const operationRef = useRef<BootstrapOperationDetail | null>(null);
   // A readiness read of the shown run failed: what is on screen may be stale, so it is read again until one answers.
   const [readinessReadFailed, setReadinessReadFailed] = useState(false);
+  // The same for the list: a readiness read of it failed or was overtaken, so its rows are read again until one applies.
+  const [listReadPending, setListReadPending] = useState(false);
 
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
     viewEpoch.current += 1;
@@ -109,8 +112,13 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   const refreshList = useCallback(async (signal?: AbortSignal) => {
     listGeneration.current += 1;
+    const seq = ++listReadSeq.current;
     try {
       const page = await client.list(signal);
+      // A settle read that started after this one and already answered is newer than this answer.
+      if (seq < listAppliedSeq.current) return;
+      listAppliedSeq.current = seq;
+      setListReadPending(false);
       listGeneration.current += 1;
       firstPageIds.current = new Set(page.operations.map((operation) => operation.id));
       extraPages.current = 0;
@@ -167,7 +175,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
    * released) and a run on a later page that may still settle are read one by one. An answer that a page load or another
    * read of the list overtook is dropped (the next tick tries again); the read itself never invalidates a page load in flight.
    */
-  const refreshSettling = useCallback(async (signal: AbortSignal, readinessChanged = false) => {
+  const refreshSettling = useCallback(async (signal: AbortSignal, readinessChanged = false): Promise<boolean> => {
     const pages = extraPages.current;
     const generation = listGeneration.current;
     const seq = ++listReadSeq.current;
@@ -191,7 +199,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       }));
       // Another read of the list (open, release, cancel) overtook this one, a page was loaded meanwhile, or a newer read of
       // these rows already answered.
-      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current || seq < listAppliedSeq.current) return;
+      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current || seq < listAppliedSeq.current) return false;
       listAppliedSeq.current = seq;
       firstPageIds.current = firstIds;
       const kept = tail
@@ -201,10 +209,12 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       setOperations([...page.operations, ...kept]);
       if (pages === 0) setNextCursor(page.nextCursor);
       setListFailed(false);
+      return true;
     } catch (error: unknown) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof DOMException && error.name === 'AbortError') return false;
       console.warn('Bootstrap operations could not be listed:', error);
       setListFailed(true);
+      return false;
     }
     // client.* is stable module API unless a test injects it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -277,7 +287,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // The list is the other place a stopped run is shown. While no run is open and one of its rows may still be
   // settled by a late Pilot, it is read again, so a row does not keep offering Retry for a node that is enrolled.
   useEffect(() => { operationsRef.current = operations; }, [operations]);
-  const listSettling = operation === null && operations.some((entry) => canSettleOnRead(entry) || awaitsReadiness(entry));
+  const listSettling = operation === null && (listReadPending || operations.some((entry) => canSettleOnRead(entry) || awaitsReadiness(entry)));
   const [listTick, setListTick] = useState(0);
   useEffect(() => {
     if (!open || !listSettling) return;
@@ -287,7 +297,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         setListTick((tick) => tick + 1);
         return;
       }
-      void refreshSettling(controller.signal).finally(() => {
+      void refreshSettling(controller.signal, listReadPending).then((applied) => {
+        if (applied && listReadPending) setListReadPending(false);
+      }).finally(() => {
         if (!controller.signal.aborted) setListTick((tick) => tick + 1);
       });
     }, SETTLE_POLL_MS);
@@ -297,7 +309,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     };
     // refreshSettling is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, listSettling, listTick]);
+  }, [open, listSettling, listTick, listReadPending]);
 
   // The hub announces every change of a node's readiness. A verdict already on screen is then read again: the shown
   // enrolled run once, and, when no run is shown, the listed enrolled runs (and loaded later pages' enrolled rows) once.
@@ -328,7 +340,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         }
         return;
       }
-      if (operationsRef.current.some((entry) => entry.state === 'enrolled')) await refreshSettling(controller.signal, true);
+      if (operationsRef.current.some((entry) => entry.state === 'enrolled')) {
+        // A read that failed or was overtaken is read again on the slower pace until one applies.
+        const applied = await refreshSettling(controller.signal, true);
+        if (!applied && !controller.signal.aborted) setListReadPending(true);
+      }
     };
     const onInvalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
@@ -338,9 +354,23 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         void readNow();
       }, READINESS_REFRESH_DELAY_MS);
     };
+    // Announcements sent while the notification socket was down are lost (a hub restart puts every ready node back to
+    // unverified without any socket to say so), so the socket coming back reads the same views once.
+    let socketWasDown = false;
+    const onConnection = (event: Event) => {
+      const connected = (event as CustomEvent<{ connected?: unknown }>).detail?.connected;
+      if (connected === false) {
+        socketWasDown = true;
+      } else if (connected === true && socketWasDown) {
+        socketWasDown = false;
+        void readNow();
+      }
+    };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
+    window.addEventListener('sencho:notifications-connection', onConnection);
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      window.removeEventListener('sencho:notifications-connection', onConnection);
       if (timer !== null) clearTimeout(timer);
       controller.abort();
     };

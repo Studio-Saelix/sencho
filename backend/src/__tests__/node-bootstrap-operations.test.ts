@@ -7,6 +7,7 @@ import {
   stablePlanDigest,
   type ExecuteRequest,
 } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import { SshTransportError } from '../services/nodeBootstrap/sshProbeClient';
 import { NodeBootstrapService as RealPreflightService } from '../services/nodeBootstrap/NodeBootstrapService';
@@ -801,7 +802,9 @@ describe('bootstrap operations: enrollment and retry', () => {
   it.each([
     ['a Pilot that was refused for an expired enrollment', { reason: 'enrollment_expired' as const, at: 1 }, 'ENROLLMENT_EXPIRED', /its enrollment had already expired/, 20_000],
     ['a Pilot that was refused for a used or replaced enrollment', { reason: 'enrollment_used' as const, at: 1 }, 'ENROLLMENT_USED', /already used, or a newer enrollment replaced it/, 20_000],
-    ['an enrollment that ran out before any Pilot used it', null, 'ENROLLMENT_EXPIRED', /expired before any Pilot used it[\s\S]*no connection attempt reached the hub/, 1],
+    ['a Pilot that was refused for an expired saved credential', { reason: 'credential_expired' as const, at: 1 }, 'PILOT_CREDENTIAL_EXPIRED', /saved credential that had expired[\s\S]*docker logs sencho-agent/, 20_000],
+    ['a used enrollment on a token that has also run out', { reason: 'enrollment_used' as const, at: 1 }, 'ENROLLMENT_USED', /already used, or a newer enrollment replaced it/, 1],
+    ['an enrollment that ran out before any Pilot used it', null, 'ENROLLMENT_EXPIRED', /expired[\s\S]*before any Pilot used it, and no connection attempt reached the hub[\s\S]*docker logs sencho-agent/, 1],
     ['nothing reaching the hub at all', null, 'ENROLLMENT_NOT_CONNECTED', /no connection attempt from it reached the hub[\s\S]*docker logs sencho-agent[\s\S]*WebSocket upgrade/, 20_000],
   ])('names the cause of a Pilot that never connected: %s', async (_label, refusal, code, message, tokenTtlMs) => {
     const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs, attempts: { lastRefusal: () => refusal } });
@@ -813,6 +816,25 @@ describe('bootstrap operations: enrollment and retry', () => {
     expect(stopped.error?.message).toMatch(message);
     // Every one is still a stopped run the operator can Retry, which mints a new enrollment.
     expect(stopped.actions).toMatchObject({ retry: true });
+    db.deleteNode(stopped.nodeId as number);
+  });
+
+  it('reads a refusal the tunnel handler recorded in the hub\'s own record, through the default wiring', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    h.host.override = (command) => {
+      if (command.includes('up -d')) {
+        const row = allOperations().find((entry) => entry.host === h.facts.current.target.host);
+        // The Pilot reaches the hub and is refused while the run waits for it.
+        if (row?.node_id) PilotEnrollmentAttempts.getInstance().recordRefusal(row.node_id, 'enrollment_expired');
+      }
+      return undefined;
+    };
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_EXPIRED', message: expect.stringMatching(/its enrollment had already expired/) });
+    PilotEnrollmentAttempts.getInstance().clear(stopped.nodeId as number);
     db.deleteNode(stopped.nodeId as number);
   });
 

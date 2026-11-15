@@ -218,6 +218,9 @@ function holdsLock(state: NodeBootstrapOperationState, changesMade: boolean): bo
   return changesMade;
 }
 
+/** How early the wait's timer may fire before the enrollment's recorded expiry and still count as the enrollment having run out. */
+const ENROLLMENT_EXPIRY_TOLERANCE_MS = 1_000;
+
 /** Effects a step can leave behind partly even when it exits with an error. */
 const PARTIAL_EFFECTS: ReadonlySet<string> = new Set(['package-install', 'service-change', 'container-start']);
 
@@ -865,10 +868,19 @@ export class NodeBootstrapOperationService {
       return new StepFailure('failed', 'ENROLLMENT_USED',
         'The Pilot reached the hub, but the enrollment it presented was no longer valid: it was already used, or a newer enrollment replaced it (a compose file started earlier keeps its old token). Retry, which mints a new enrollment and rewrites the file.');
     }
-    if (refusal?.reason === 'enrollment_expired' || (expiresAt !== null && this.deps.now() >= expiresAt)) {
-      return new StepFailure('failed', 'ENROLLMENT_EXPIRED', refusal
-        ? 'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.'
-        : 'The enrollment expired before any Pilot used it (an enrollment is valid for 15 minutes), and no connection attempt reached the hub. Retry, which mints a new enrollment.');
+    if (refusal?.reason === 'credential_expired') {
+      return new StepFailure('failed', 'PILOT_CREDENTIAL_EXPIRED',
+        'The Pilot reached the hub with a saved credential that had expired (kept in the sencho-agent-data volume by an earlier enrollment). Retry, which mints a new enrollment for the Pilot to fall back to; if it still does not connect, `docker logs sencho-agent` on the server says why.');
+    }
+    // The wait ends on a timer set to the expiry, which can fire a moment before it.
+    const ranOut = expiresAt !== null && this.deps.now() >= expiresAt - ENROLLMENT_EXPIRY_TOLERANCE_MS;
+    if (refusal?.reason === 'enrollment_expired') {
+      return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.');
+    }
+    if (ranOut) {
+      return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        'The enrollment expired (it is valid for 15 minutes) before any Pilot used it, and no connection attempt reached the hub. If the host was slow to start the Pilot, retry, which mints a new enrollment; if it keeps happening, `docker logs sencho-agent` on the server names why the Pilot cannot reach the hub.');
     }
     return new StepFailure('failed', 'ENROLLMENT_NOT_CONNECTED',
       'The Pilot started, but no connection attempt from it reached the hub before the wait ended, so the hub cannot tell why. '

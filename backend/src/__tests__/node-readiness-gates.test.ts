@@ -191,9 +191,9 @@ describe('readiness gates', () => {
   it('names its own cause when the Pilot could not be asked', () => {
     const cases = [
       [readinessWithoutReport({ kind: 'not_connected' }), 'tunnel', 'fail', /no refused attempt from it reached the hub/],
-      [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_expired' }), 'tunnel', 'fail', /enrollment that had expired/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_expired' }), 'tunnel', 'fail', /refused, because its enrollment had expired/],
       [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_used' }), 'tunnel', 'fail', /already used or replaced/],
-      [readinessWithoutReport({ kind: 'not_connected', refusal: 'credential_expired' }), 'tunnel', 'fail', /saved credential that had expired/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'credential_expired' }), 'tunnel', 'fail', /refused, because its saved credential had expired/],
       [readinessWithoutReport({ kind: 'unsupported', status: 404 }), 'contract', 'fail', /does not provide the readiness report/],
       [readinessWithoutReport({ kind: 'refused', status: 403 }), 'contract', 'fail', /refused/],
       [readinessWithoutReport({ kind: 'malformed' }), 'contract', 'unknown', /not a readiness report/],

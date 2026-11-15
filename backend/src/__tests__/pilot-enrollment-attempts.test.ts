@@ -4,7 +4,7 @@
  * signed is believed: an expired token still carries signed claims, a forged
  * one carries nothing the hub trusts.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
@@ -14,6 +14,7 @@ import { WebSocketServer } from 'ws';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { handlePilotTunnel } from '../websocket/pilotTunnel';
 import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
+import { PilotTunnelCapacityError, PilotTunnelManager } from '../services/PilotTunnelManager';
 import { mintPilotEnrollmentToken } from '../helpers/pilotEnrollment';
 
 let tmpDir: string;
@@ -104,6 +105,11 @@ describe('hub record of refused Pilot attempts', () => {
   it('does not record an expired token for a node that is not a Pilot node', async () => {
     await connect(expired({ scope: 'pilot_enroll', nodeId: 987654 }));
     expect(attempts().lastRefusal(987654)).toBeNull();
+    const proxyNode = DatabaseService.getInstance().addNode({
+      name: `attempts-proxy-${Date.now()}`, type: 'remote', mode: 'proxy', compose_dir: '/tmp/x', is_default: false, api_url: 'http://192.168.1.50:1852', api_token: 'x',
+    });
+    await connect(expired({ scope: 'pilot_enroll', nodeId: proxyNode }));
+    expect(attempts().lastRefusal(proxyNode)).toBeNull();
   });
 
   it('forgets a refusal when a new enrollment is minted for the node', async () => {
@@ -113,13 +119,49 @@ describe('hub record of refused Pilot attempts', () => {
     expect(attempts().lastRefusal(nodeId)).toBeNull();
   });
 
-  it('forgets a refusal once the hub accepts a connection from the node', async () => {
-    attempts().recordRefusal(nodeId, 'enrollment_used');
+  describe('accepting a connection', () => {
     const accepting = { handleUpgrade: (_req: unknown, _socket: unknown, _head: unknown, done: (ws: unknown) => void) => done({ send: () => undefined, close: () => undefined }) };
-    const valid = jwt.sign({ scope: 'pilot_tunnel', nodeId }, secret(), { expiresIn: 60 });
-    const req = { headers: { authorization: `Bearer ${valid}` }, socket: {} } as unknown as IncomingMessage;
-    await handlePilotTunnel(req, stubSocket() as unknown as Duplex, Buffer.alloc(0), accepting as unknown as WebSocketServer);
-    expect(attempts().lastRefusal(nodeId)).toBeNull();
+    const upgrade = () => {
+      const valid = jwt.sign({ scope: 'pilot_tunnel', nodeId }, secret(), { expiresIn: 60 });
+      const req = { headers: { authorization: `Bearer ${valid}` }, socket: {} } as unknown as IncomingMessage;
+      return handlePilotTunnel(req, stubSocket() as unknown as Duplex, Buffer.alloc(0), accepting as unknown as WebSocketServer);
+    };
+
+    it('forgets a refusal once the hub has registered the node\'s tunnel', async () => {
+      const register = vi.spyOn(PilotTunnelManager.getInstance(), 'registerTunnel').mockResolvedValue(undefined);
+      try {
+        attempts().recordRefusal(nodeId, 'enrollment_used');
+        await upgrade();
+        expect(register).toHaveBeenCalledTimes(1);
+        expect(attempts().lastRefusal(nodeId)).toBeNull();
+      } finally {
+        register.mockRestore();
+      }
+    });
+
+    it('keeps a refusal when the tunnel was not registered (the gateway is at its limit)', async () => {
+      const register = vi.spyOn(PilotTunnelManager.getInstance(), 'registerTunnel').mockRejectedValue(new PilotTunnelCapacityError(1));
+      try {
+        attempts().recordRefusal(nodeId, 'enrollment_used');
+        await upgrade();
+        expect(attempts().lastRefusal(nodeId)?.reason).toBe('enrollment_used');
+      } finally {
+        register.mockRestore();
+      }
+    });
+  });
+
+  it('does not record a refusal while the node\'s own tunnel is up, since it is a stale or duplicate agent knocking', async () => {
+    const active = vi.spyOn(PilotTunnelManager.getInstance(), 'hasActiveTunnel').mockReturnValue(true);
+    try {
+      await connect(expired({ scope: 'pilot_tunnel', nodeId }));
+      const { token } = mintPilotEnrollmentToken(nodeId);
+      DatabaseService.getInstance().consumePilotEnrollment(crypto.createHash('sha256').update(token).digest('hex'));
+      await connect(token);
+      expect(attempts().lastRefusal(nodeId)).toBeNull();
+    } finally {
+      active.mockRestore();
+    }
   });
 
   it('keeps the newest refusal per node and a bounded number of nodes', () => {

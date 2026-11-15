@@ -129,11 +129,11 @@ const REGENERATE_ENROLLMENT = 'Regenerate the enrollment (Settings → Nodes →
 function notConnected(refusal: PilotRefusal | undefined): ReadinessGate {
   switch (refusal) {
     case 'enrollment_expired':
-      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with an enrollment that had expired.', REGENERATE_ENROLLMENT);
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its enrollment had expired.', REGENERATE_ENROLLMENT);
     case 'enrollment_used':
-      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with an enrollment that was already used or replaced by a newer one.', REGENERATE_ENROLLMENT);
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its enrollment was already used or replaced by a newer one.', REGENERATE_ENROLLMENT);
     case 'credential_expired':
-      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with a saved credential that had expired.', REGENERATE_ENROLLMENT);
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its saved credential had expired.', REGENERATE_ENROLLMENT);
     default:
       return notPass('tunnel', 'fail', 'The Pilot is not connected to the hub, and no refused attempt from it reached the hub, so the hub cannot tell why.',
         'On the host, run `docker logs sencho-agent`: it names a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade. Fix that, then verify again.');
@@ -151,7 +151,7 @@ export function readinessWithoutReport(failure: ReadinessFailure): ReadinessResu
           'Run the same Sencho release on the hub and the Pilot (pull the image and recreate the sencho-agent project, or update the hub if it is the older one), then verify again.');
       case 'refused':
         return notPass('contract', 'fail', `The Pilot refused the readiness request (${failure.status}).`,
-          'Re-enroll the node so the Pilot and the hub share a current credential, then verify again.');
+          REGENERATE_ENROLLMENT);
       case 'malformed':
         return notPass('contract', 'unknown', 'The Pilot\'s answer was not a readiness report this hub can read.',
           'Run the same Sencho release on the hub and the Pilot (update whichever is older), then verify again.');
@@ -193,7 +193,7 @@ export function evaluateReadiness(report: PilotReadinessReport, expected: Readin
   gates.push(report.nonce === expected.nonce
     ? pass('contract', 'The report answers this request.')
     : notPass('contract', 'fail', 'The report does not answer this request (its nonce differs), so it may be stale or relayed.',
-      'Verify again. If it repeats, re-enroll the node.'));
+      'Verify again. If it repeats, regenerate the enrollment for this node (Settings → Nodes → Edit node).'));
 
   const enrolled = report.agent.enrolledNodeId;
   gates.push(enrolled === expected.nodeId
@@ -202,7 +202,7 @@ export function evaluateReadiness(report: PilotReadinessReport, expected: Readin
       ? notPass('identity', 'fail', 'The Pilot holds no saved hub credential, so its enrollment did not complete.',
         'Regenerate the enrollment for this node and restart the sencho-agent project with the new token.')
       : notPass('identity', 'fail', `The Pilot is enrolled as node ${enrolled}, not node ${expected.nodeId}.`,
-        'This host belongs to another node record. Remove the duplicate node, or re-enroll this host for this node.'));
+        'This host belongs to another node record. Remove the duplicate node record, or remove the sencho-agent-data volume on this host and regenerate the enrollment for this node.'));
 
   const primaryUrl = report.agent.primaryUrl;
   gates.push(primaryUrl !== null && sameHubUrl(primaryUrl, expected.hubUrl)
@@ -219,7 +219,7 @@ export function evaluateReadiness(report: PilotReadinessReport, expected: Readin
       ? notPass('transport', 'fail', 'The hub URL is HTTPS, but this tunnel did not arrive over TLS.',
         'Check the reverse proxy in front of the hub: it must pass the TLS connection or set the forwarded protocol header, then verify again.')
       : notPass('transport', 'warn', 'The tunnel runs over plain HTTP, so its traffic is not encrypted.',
-        'Serve the hub over HTTPS and re-enroll the node to encrypt the tunnel.'));
+        'Serve the hub over HTTPS, then regenerate the enrollment and recreate the Pilot so its tunnel is encrypted.'));
 
   const midpoint = (expected.requestedAt + expected.receivedAt) / 2;
   const skew = Math.abs(report.generatedAt - midpoint);
