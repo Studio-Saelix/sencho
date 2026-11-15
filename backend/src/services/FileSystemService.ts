@@ -49,6 +49,7 @@ function getBackupBaseDir(): string {
 }
 
 import { isDebugEnabled } from '../utils/debug';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 /**
  * Identity of a file as it was published: the inode and mtime a staged file
@@ -681,6 +682,29 @@ export class FileSystemService {
     return this.listStacksRaw();
   }
 
+  /**
+   * Run `work`, which reads or writes `target` (a file or directory under the
+   * compose root), as file work the directory fences of a data restore know
+   * about: refused with a `DataRestoreFenceError` when `target` is equal to,
+   * inside, or around a directory a restore is overwriting (by any spelling,
+   * a link included), or cannot be proven clear of one; otherwise registered
+   * until `work` settles, so a fence recorded meanwhile waits for it before it
+   * captures or swaps anything. The editors, the Secrets push and every other
+   * caller of these sinks go through here, as the Files routes do through their
+   * own admission. One query when nothing is fenced.
+   */
+  private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
+    const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');
+    const match = await matchFsWorkToFences(target);
+    const admitted = match.refusal ?? admitFsWork(target, match.checked);
+    if (isDataRestoreFenceError(admitted)) throw admitted;
+    try {
+      return await work();
+    } finally {
+      admitted.release();
+    }
+  }
+
   async getStackContent(stackName: string): Promise<string> {
     try {
       const filePath = await this.getComposeFilePath(stackName);
@@ -716,15 +740,17 @@ export class FileSystemService {
     // the check/open gap gives this call a descriptor to inspect instead of
     // sleeping until a writer appears. The descriptor's own type is authoritative,
     // so the read still only ever returns a regular compose file.
-    const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-    try {
-      const stat = await fh.stat();
-      if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
-      const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
-    } finally {
-      await fh.close();
-    }
+    return this.underDirectoryFences(safePath, async () => {
+      const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      try {
+        const stat = await fh.stat();
+        if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
+        const content = await fh.readFile('utf-8');
+        return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
+      } finally {
+        await fh.close();
+      }
+    });
   }
 
   /**
@@ -774,8 +800,9 @@ export class FileSystemService {
       // for Buffers); string input keeps the utf-8 write. Byte-exactness
       // matters to the Git materializer, whose content hashes are computed
       // over raw bytes.
-      await this.publishManagedFile(filePath, content);
+      await this.underDirectoryFences(filePath, () => this.publishManagedFile(filePath, content));
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       console.error('Error writing file:', error);
       throw new Error(`Failed to save stack: ${stackName}`);
     }
@@ -834,45 +861,50 @@ export class FileSystemService {
     // rather than followed into another stack's file.
     await this.assertRealWithinStack(stackName, safePath);
 
-    if (expectedMtimeMs !== null && resolved) {
-      let fh: import('fs/promises').FileHandle | null = null;
-      try {
-        fh = await fsPromises.open(safePath, 'r');
-        const stat = await fh.stat();
-        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fh.readFile('utf-8');
-          return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
+    // The comparison and the write are one piece of file work: a fence on the
+    // directory the file sits in (through a link into a bind, too) refuses it
+    // or waits for it.
+    return this.underDirectoryFences(safePath, async () => {
+      if (expectedMtimeMs !== null && resolved) {
+        let fh: import('fs/promises').FileHandle | null = null;
+        try {
+          fh = await fsPromises.open(safePath, 'r');
+          const stat = await fh.stat();
+          if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await fh.readFile('utf-8');
+            return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          if (expectedFilename !== null) {
+            return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+          }
+        } finally {
+          if (fh) await fh.close();
         }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        if (expectedFilename !== null) {
-          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
-        }
-      } finally {
-        if (fh) await fh.close();
       }
-    }
 
-    if (expectedFilename !== null) {
-      const latest = await this.resolveComposeFile(stackName, 'write');
-      if (!latest || latest.filename !== expectedFilename) {
-        if (!latest) {
-          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+      if (expectedFilename !== null) {
+        const latest = await this.resolveComposeFile(stackName, 'write');
+        if (!latest || latest.filename !== expectedFilename) {
+          if (!latest) {
+            return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+          }
+          const current = await this.readContainedCompose(latest.absolute);
+          return {
+            ok: false,
+            reason: 'source',
+            currentMtimeMs: current.mtimeMs,
+            currentContent: current.content,
+            filename: latest.filename,
+          };
         }
-        const current = await this.readContainedCompose(latest.absolute);
-        return {
-          ok: false,
-          reason: 'source',
-          currentMtimeMs: current.mtimeMs,
-          currentContent: current.content,
-          filename: latest.filename,
-        };
       }
-    }
 
-    await this.publishManagedFile(safePath, content);
-    const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+      await this.publishManagedFile(safePath, content);
+      const newStat = await fsPromises.stat(safePath);
+      return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+    });
   }
 
   private async readContainedCompose(untrustedFilePath: string): Promise<{ content: string; mtimeMs: number }> {
@@ -1012,25 +1044,27 @@ export class FileSystemService {
     await this.assertRealWithinBase(safePath);
     await this.assertRealWithinStack(stackName, safePath);
 
-    if (expectedMtimeMs !== null) {
-      let fh: import('fs/promises').FileHandle | null = null;
-      try {
-        fh = await fsPromises.open(safePath, 'r');
-        const stat = await fh.stat();
-        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fh.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+    return this.underDirectoryFences(safePath, async () => {
+      if (expectedMtimeMs !== null) {
+        let fh: import('fs/promises').FileHandle | null = null;
+        try {
+          fh = await fsPromises.open(safePath, 'r');
+          const stat = await fh.stat();
+          if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await fh.readFile('utf-8');
+            return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        } finally {
+          if (fh) await fh.close();
         }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      } finally {
-        if (fh) await fh.close();
       }
-    }
 
-    await fsPromises.writeFile(safePath, content, 'utf-8');
-    const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs };
+      await fsPromises.writeFile(safePath, content, 'utf-8');
+      const newStat = await fsPromises.stat(safePath);
+      return { ok: true, mtimeMs: newStat.mtimeMs };
+    });
   }
 
   /**
@@ -1053,6 +1087,16 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    return this.underDirectoryFences(safePath, () => this.createContainedFileExclusive(safePath, content));
+  }
+
+  private async createContainedFileExclusive(
+    safePath: string,
+    content: string,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
 
     let fh: import('fs/promises').FileHandle | null = null;
     try {
@@ -1180,7 +1224,7 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
-    return fsPromises.readFile(safePath, encoding);
+    return this.underDirectoryFences(safePath, () => fsPromises.readFile(safePath, encoding));
   }
 
   /**
@@ -1235,7 +1279,7 @@ export class FileSystemService {
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
-    return fsPromises.writeFile(filePath, content, encoding);
+    return this.underDirectoryFences(filePath, () => fsPromises.writeFile(filePath, content, encoding));
   }
 
   async access(filePath: string): Promise<void> {
@@ -1278,8 +1322,9 @@ export class FileSystemService {
     // that links into another stack is refused rather than overwritten.
     await this.assertRealWithinStack(stackName, envPath);
     try {
-      await fsPromises.writeFile(envPath, content, 'utf-8');
+      await this.underDirectoryFences(envPath, () => fsPromises.writeFile(envPath, content, 'utf-8'));
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       console.error('Error writing env file:', error);
       throw new Error(`Failed to save env file for stack: ${stackName}`);
     }
@@ -1381,8 +1426,11 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
     try {
-      await fsPromises.rm(stackDir, { recursive: true, force: true });
+      // Removing the stack directory removes every directory inside it, so it
+      // is refused while a restore overwrites one of them.
+      await this.underDirectoryFences(stackDir, () => fsPromises.rm(stackDir, { recursive: true, force: true }));
     } catch (error: unknown) {
+      if (isDataRestoreFenceError(error)) throw error;
       const fsError = error as NodeJS.ErrnoException;
       if (fsError.code === 'ENOENT') return;
       console.error('Error deleting stack directory:', fsError.message);

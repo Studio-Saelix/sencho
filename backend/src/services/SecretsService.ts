@@ -11,6 +11,7 @@ import { isPathWithinBase } from '../utils/validation';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -544,6 +545,9 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
     try {
         return await fsService.readFile(resolved, 'utf-8');
     } catch (err) {
+        // A data restore is overwriting the directory the env file is in: the
+        // read is refused with the fence's reason, like the env editor's.
+        if (isDataRestoreFenceError(err)) throw new SecretSourceRefusedError(err.message);
         const code = (err as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT') {
             if (missingAsEmpty) return '';

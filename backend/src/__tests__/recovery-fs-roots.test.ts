@@ -389,10 +389,10 @@ describe('container matching', () => {
   });
 
   it('makes a read-only ancestor an observer and a sibling with a shared prefix nothing', async () => {
-    expect(await roots.matchContainerToRoot(bind('/', false), root, null)).toEqual({ depends: false, observes: true });
-    expect(await roots.matchContainerToRoot(bind('/srv/app/database'), root, null)).toEqual({ depends: false, observes: false });
+    expect(await roots.matchContainerToRoot(bind('/', false), root, null)).toEqual({ depends: false, observes: true, unproven: false });
+    expect(await roots.matchContainerToRoot(bind('/srv/app/database'), root, null)).toEqual({ depends: false, observes: false, unproven: false });
     expect(await roots.matchContainerToRoot({ Mounts: [{ Type: 'volume', Source: '/srv/app/data' }] }, root, null))
-      .toEqual({ depends: false, observes: false });
+      .toEqual({ depends: false, observes: false, unproven: false });
   });
 
   it('catches a symlinked spelling by mapping the container source into Sencho\'s namespace', async () => {

@@ -898,6 +898,9 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
     res.setHeader('X-Compose-File', filename);
     res.send(content);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
       return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
@@ -944,6 +947,9 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
     res.setHeader('X-Compose-File', result.filename);
     res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs, filename: result.filename });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE') {
       return res.status(409).json({ error: COMPOSE_LINK_SAVE_ERROR });
@@ -1028,6 +1034,9 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       throw e;
     }
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     console.error('Failed to read env file:', error);
     res.status(500).json({ error: 'Failed to read env file' });
   }
@@ -1129,6 +1138,9 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Env file saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'EISDIR') {
       return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
@@ -4043,6 +4055,16 @@ function cutOffFileOp(res: Response): void {
   res.destroy();
 }
 
+/**
+ * Whether this request's response is gone: closed by the client, or cut off by
+ * a restore fence while the handler was still waiting on a source. A source
+ * opened after that has no one to stream to, and the response's close event has
+ * already fired, so the handler checks this after each wait and ends itself.
+ */
+function fileOpResponseGone(res: Response): boolean {
+  return res.destroyed || fileOpScopes.get(res)?.closed === true;
+}
+
 /** From here the fence waits for this request's file operation instead of cutting it off: its write is under way. */
 function stopCuttingOffFileOp(res: Response): void {
   for (const lease of fileOpScopes.get(res)?.leases ?? []) lease.setAbort(null);
@@ -4238,6 +4260,13 @@ stacksRouter.get('/:stackName/files/download', fileOp(async (req: Request, res: 
   logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
     const result = await FileRootGateway.getInstance(req.nodeId).download(root, stackName, relPath);
+    // The response closed (a client gone, or a restore fence's cut-off) while
+    // the source was being opened: nothing will read it, so it is closed here.
+    if (fileOpResponseGone(res)) {
+      if (result.kind !== 'buffer') result.stream.destroy();
+      recordFileOp(req.nodeId, 'download', startedAt, false);
+      return;
+    }
     const setDownloadHeaders = (filename: string, size: number, mime: string): void => {
       res.setHeader('Content-Type', mime);
       res.setHeader('Content-Length', size);
@@ -4966,6 +4995,12 @@ stacksRouter.get('/:stackName/files/bulk-download', fileOp(async (req: Request, 
     recordFileOp(req.nodeId, 'download', startedAt, false);
     return res.status(404).json({ error: 'Nothing to download', code: 'NOT_FOUND' satisfies FsErrorCode });
   }
+  // The response closed during the prewalk (a client gone, or a restore
+  // fence's cut-off): its close event has fired, so no archive is started.
+  if (fileOpResponseGone(res)) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    return;
+  }
 
   res.setHeader('Content-Type', 'application/gzip');
   res.setHeader('Content-Disposition', `attachment; filename="${stackName}-files.tar.gz"`);
@@ -4977,13 +5012,18 @@ stacksRouter.get('/:stackName/files/bulk-download', fileOp(async (req: Request, 
   };
   pack.on('error', onStreamError);
   gzip.on('error', onStreamError);
-  // If the client aborts mid-download, stop fetching the remaining files (each
-  // helper-volume read is a container exec) instead of streaming into a dead pipe.
+  // If the client aborts mid-download, or a restore fence cuts the request off,
+  // stop fetching the remaining files (each helper-volume read is a container
+  // exec) instead of streaming into a dead pipe. An entry being written when it
+  // happens is settled here, because a destroyed pack never calls it back, and
+  // its source is closed.
   let aborted = false;
+  let abortEntry: (() => void) | null = null;
   res.on('close', () => {
     if (!res.writableEnded) {
       aborted = true;
       pack.destroy();
+      abortEntry?.();
     }
   });
   pack.pipe(gzip).pipe(res);
@@ -4992,18 +5032,28 @@ stacksRouter.get('/:stackName/files/bulk-download', fileOp(async (req: Request, 
     for (const relPath of files) {
       if (aborted) break;
       const dl = await gateway.download(root, stackName, relPath);
-      if (dl.kind === 'buffer') {
-        await new Promise<void>((resolve, reject) => {
+      if (aborted) {
+        if (dl.kind !== 'buffer') dl.stream.destroy();
+        break;
+      }
+      await new Promise<void>((resolve, reject) => {
+        abortEntry = () => {
+          if (dl.kind !== 'buffer') dl.stream.destroy();
+          resolve();
+        };
+        if (dl.kind === 'buffer') {
           pack.entry({ name: relPath }, dl.buffer, (err) => (err ? reject(err) : resolve()));
-        });
-      } else {
-        await new Promise<void>((resolve, reject) => {
+        } else {
           const entry = pack.entry({ name: relPath, size: dl.size }, (err) => (err ? reject(err) : resolve()));
           dl.stream.on('error', reject);
           entry.on('error', reject);
           dl.stream.pipe(entry);
-        });
-      }
+        }
+      }).finally(() => { abortEntry = null; });
+    }
+    if (aborted) {
+      recordFileOp(req.nodeId, 'download', startedAt, false);
+      return;
     }
     pack.finalize();
     recordFileOp(req.nodeId, 'download', startedAt, true);

@@ -683,6 +683,28 @@ describe('overwriting a host directory', () => {
     expect(operation.body.result.intent.targetVolume).toBeNull();
   });
 
+  it('refuses to overwrite a directory beside a container whose bind it cannot prove clear of it', async () => {
+    const { pointId, data } = await capturedPoint();
+    // Another spelling of a directory that cannot be read: it could be this one.
+    const unreadable = path.join(shared, `unreadable-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(unreadable);
+    const original = fs.promises.stat.bind(fs.promises);
+    vi.spyOn(fs.promises, 'stat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
+      if (path.resolve(String(target)) === unreadable) throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+      return original(target, options);
+    }) as typeof fs.promises.stat);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    containers = [{ Id: 'maybe', Names: ['/maybe'], State: 'running', Labels: {}, Mounts: [{ Type: 'bind', Source: unreadable, RW: true }] }];
+    const res = await preview(pointId);
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('identity_unknown');
+    // The same container proven clear of it is no part of the overwrite.
+    vi.mocked(fs.promises.stat).mockRestore();
+    const clear = await preview(pointId);
+    expect(clear.status).toBe(200);
+    expect(clear.body.target).toMatchObject({ hostPath: data, eligible: true });
+  });
+
   it('refuses to overwrite a stack source directory', async () => {
     stackDir('web');
     const res = await capture('web', 'stack-source');
@@ -1200,6 +1222,214 @@ describe('file work already running when a directory is fenced', () => {
     expect(write.status).toBe(409);
     stackDir('other');
     expect((await request(app).get('/api/stacks/other/files').set('Cookie', adminCookie)).status).toBe(200);
+  });
+});
+
+describe('the Compose and env editors and the Secrets file sinks under a directory fence', () => {
+  /** A stack whose env file lives in its `data` bind, the directory a restore overwrites. */
+  function envStack(): { dir: string; data: string; envFile: string } {
+    // dataDir writes the stack's plain compose file, so the env_file one goes after it.
+    const data = dataDir('web');
+    const dir = stackDir('web');
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n    env_file: data/app.env\n');
+    const envFile = path.join(data, 'app.env');
+    fs.writeFileSync(envFile, 'A=1\n');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    return { dir, data, envFile };
+  }
+  const putEnv = (file: string, query = '', ifMatch?: string) => {
+    const req = request(app).put(`/api/stacks/web/env?file=${encodeURIComponent(file)}${query}`).set('Cookie', adminCookie);
+    return (ifMatch ? req.set('If-Match', ifMatch) : req).send({ content: 'A=2\n' });
+  };
+
+  it('refuses an env read and every kind of env save of a file in the fenced directory, and leaves its bytes alone', async () => {
+    const { data, envFile } = envStack();
+    const opened = await request(app).get(`/api/stacks/web/env?file=${encodeURIComponent(envFile)}`).set('Cookie', adminCookie);
+    expect(opened.status).toBe(200);
+    const etag = opened.headers.etag as string;
+    fencedOverwriteOf(data, ['web']);
+    const variants = {
+      read: await request(app).get(`/api/stacks/web/env?file=${encodeURIComponent(envFile)}`).set('Cookie', adminCookie),
+      save: await putEnv(envFile),
+      conditional: await putEnv(envFile, '', etag),
+      forced: await putEnv(envFile, '&create=1&force=1'),
+    };
+    for (const [name, res] of Object.entries(variants)) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+    }
+    expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
+  });
+
+  it('refuses creating an env file in a fenced directory', async () => {
+    const dir = stackDir('web');
+    fencedOverwriteOf(dir, ['web']);
+    const res = await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=1\n' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses a Compose read and save through a link into the fenced directory', async () => {
+    const { dir, data } = envStack();
+    fs.writeFileSync(path.join(data, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(data, ['web']);
+    const read = await request(app).get('/api/stacks/web').set('Cookie', adminCookie);
+    expect(read.status).toBe(409);
+    expect(read.body.code).toBe('data_restore');
+    const save = await request(app).put('/api/stacks/web').set('Cookie', adminCookie).send({ content: 'services: {}\n' });
+    expect(save.status).toBe(409);
+    expect(save.body.code).toBe('data_restore');
+    expect(fs.readFileSync(path.join(data, 'compose.yaml'), 'utf-8')).toBe('services:\n  app:\n    image: nginx\n');
+  });
+
+  it('refuses the local Secrets read and write of an env file in the fenced directory, and an import with the fence\'s reason', async () => {
+    const { data, envFile } = envStack();
+    fencedOverwriteOf(data, ['web']);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const files = FileSystemService.getInstance(nodeId);
+    await expect(files.writeFile(envFile, 'A=2\n')).rejects.toMatchObject({ code: 'data_restore' });
+    await expect(files.readFile(envFile)).rejects.toMatchObject({ code: 'data_restore' });
+    expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
+    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+    await expect(SecretsService.getInstance().readImportOverlay(nodeId, 'web', 'app.env'))
+      .rejects.toBeInstanceOf(SecretSourceRefusedError);
+  });
+
+  it('leaves the editors of a stack clear of the fenced directory alone', async () => {
+    const { data } = envStack();
+    fencedOverwriteOf(data, ['web']);
+    const other = stackDir('other');
+    fs.writeFileSync(path.join(other, '.env'), 'B=1\n');
+    const res = await request(app).put('/api/stacks/other/env').set('Cookie', adminCookie).send({ content: 'B=2\n' });
+    expect(res.status).toBe(200);
+    expect((await request(app).put('/api/stacks/other').set('Cookie', adminCookie).send({ content: 'services: {}\n' })).status).toBe(200);
+  });
+
+  it('makes a fence recorded while an env save is writing wait for it', async () => {
+    const { data, envFile } = envStack();
+    const fence = await import('../services/recovery/restoreFence');
+    const original = fs.promises.writeFile.bind(fs.promises);
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(fs.promises, 'writeFile').mockImplementation((async (...args: Parameters<typeof fs.promises.writeFile>) => {
+      if (String(args[0]) === envFile) {
+        entered();
+        await held;
+      }
+      return original(...args);
+    }) as typeof fs.promises.writeFile);
+    const saving = putEnv(envFile).then((res) => res.status);
+    await inside;
+    fencedOverwriteOf(data, ['web']);
+    const target = { senchoPath: data, hostPath: data, aliases: [] };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await fence.waitForFsWorkOn(target, 50)).toBe(false);
+    const drained = fence.waitForFsWorkOn(target, 5_000);
+    finish();
+    expect(await saving).toBe(200);
+    expect(await drained).toBe(true);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+});
+
+describe('a download whose response a directory fence cut off before its source was open', () => {
+  async function gatewayProto() {
+    return (await import('../services/FileRootGateway')).FileRootGateway.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  }
+
+  /** Hold `method` on its way in until the test lets it go, keeping what it returned. */
+  function holdOn(proto: Record<string, (...args: unknown[]) => Promise<unknown>>, method: string) {
+    const original = proto[method];
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    const returned: unknown[] = [];
+    let calls = 0;
+    vi.spyOn(proto, method).mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      calls += 1;
+      entered();
+      await held;
+      const result = await original.apply(this, args);
+      returned.push(result);
+      return result;
+    });
+    return { inside, finish, returned, calls: () => calls };
+  }
+
+  async function settled(fence: typeof import('../services/recovery/restoreFence')): Promise<void> {
+    for (let i = 0; i < 200 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  }
+
+  function bigFile(data: string): void {
+    fs.writeFileSync(path.join(data, 'big.bin'), Buffer.alloc(8 * 1024 * 1024, 7));
+  }
+
+  it('closes the file a single download opened after the cut-off, and lets the fence go', async () => {
+    const data = dataDir('web');
+    bigFile(data);
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const query = `rootId=${encodeURIComponent(await rootIdOf('web'))}`;
+    const hold = holdOn(await gatewayProto(), 'download');
+    const pending = request(app).get(`/api/stacks/web/files/download?${query}&path=big.bin`).set('Cookie', adminCookie)
+      .then(() => 'answered', () => 'cut off');
+    await hold.inside;
+    const fence = await import('../services/recovery/restoreFence');
+    fencedOverwriteOf(data, ['web']);
+    expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+    hold.finish();
+    expect(await pending).toBe('cut off');
+    await settled(fence);
+    const opened = hold.returned[0] as { kind: string; stream: import('stream').Readable };
+    expect(opened.kind).not.toBe('buffer');
+    for (let i = 0; i < 100 && !opened.stream.destroyed; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(opened.stream.destroyed).toBe(true);
+  });
+
+  it('closes the file a bulk download opened after the cut-off, and finishes its handler', async () => {
+    const data = dataDir('web');
+    bigFile(data);
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const query = `rootId=${encodeURIComponent(await rootIdOf('web'))}`;
+    const hold = holdOn(await gatewayProto(), 'download');
+    const pending = request(app).get(`/api/stacks/web/files/bulk-download?${query}&path=big.bin`).set('Cookie', adminCookie)
+      .then(() => 'answered', () => 'cut off');
+    await hold.inside;
+    const fence = await import('../services/recovery/restoreFence');
+    fencedOverwriteOf(data, ['web']);
+    expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+    hold.finish();
+    expect(await pending).toBe('cut off');
+    await settled(fence);
+    const opened = hold.returned[0] as { kind: string; stream: import('stream').Readable };
+    for (let i = 0; i < 100 && !opened.stream.destroyed; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(opened.stream.destroyed).toBe(true);
+  });
+
+  it('opens nothing for a bulk download cut off during its prewalk', async () => {
+    const data = dataDir('web');
+    bigFile(data);
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const query = `rootId=${encodeURIComponent(await rootIdOf('web'))}`;
+    const proto = await gatewayProto();
+    const hold = holdOn(proto, 'stat');
+    const download = vi.spyOn(proto, 'download');
+    const pending = request(app).get(`/api/stacks/web/files/bulk-download?${query}&path=big.bin`).set('Cookie', adminCookie)
+      .then(() => 'answered', () => 'cut off');
+    await hold.inside;
+    const fence = await import('../services/recovery/restoreFence');
+    fencedOverwriteOf(data, ['web']);
+    expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+    hold.finish();
+    expect(await pending).toBe('cut off');
+    await settled(fence);
+    expect(download).not.toHaveBeenCalled();
   });
 });
 

@@ -407,7 +407,12 @@ async function listMountingContainers(deps: OverwriteDeps, target: OverwriteTarg
       if (!(container.Mounts ?? []).some((m) => m.Type === 'volume' && m.Name === resolved.volumeName)) continue;
     } else {
       if (SelfIdentityService.getInstance().isOwnContainer(container.Id)) continue;
-      if (!(await matchContainerToRoot(container, resolved.location, ownMounts)).depends) continue;
+      const match = await matchContainerToRoot(container, resolved.location, ownMounts);
+      // A container whose binds cannot be proven clear of the directory could be
+      // writing it under another spelling: the overwrite cannot say which
+      // workloads to stop, so it is refused rather than run beside one.
+      if (match.unproven) throw new RecoveryError('identity_unknown');
+      if (!match.depends) continue;
     }
     const inspect = await inspectContainer(deps, container.Id);
     if (!inspect) continue;

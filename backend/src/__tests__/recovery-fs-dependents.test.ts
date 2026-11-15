@@ -600,6 +600,156 @@ describe('the fence through another spelling of the fenced directory', () => {
   });
 });
 
+/**
+ * A failed identity read is never evidence that two paths are unrelated. The
+ * fixture is the one above: `second` is another spelling of `real`, and
+ * `parentLink` of its parent. `stat` fails with EIO on the paths a case names,
+ * as a dying disk or a stale network mount would.
+ */
+describe('another spelling of a directory whose identity cannot be read', () => {
+  let tree: string;
+  let real: string;
+  let second: string;
+  let parentLink: string;
+  let unrelated: string;
+
+  beforeEach(() => {
+    tree = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'unreadable-')));
+    real = path.join(tree, 'host', 'data');
+    fs.mkdirSync(path.join(real, 'db'), { recursive: true });
+    second = path.join(tree, 'second-destination');
+    fs.symlinkSync(real, second);
+    parentLink = path.join(tree, 'parent-destination');
+    fs.symlinkSync(path.join(tree, 'host'), parentLink);
+    unrelated = path.join(tree, 'elsewhere');
+    fs.mkdirSync(unrelated);
+    vi.spyOn(fs.promises, 'realpath').mockImplementation((async (target: fs.PathLike) => path.resolve(String(target))) as unknown as typeof fs.promises.realpath);
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tree, { recursive: true, force: true });
+  });
+
+  /** `stat` fails with EIO on exactly these paths. */
+  function unreadable(...paths: string[]): void {
+    const original = fs.promises.stat.bind(fs.promises);
+    vi.spyOn(fs.promises, 'stat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
+      if (paths.includes(path.resolve(String(target)))) throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+      return original(target, options);
+    }) as typeof fs.promises.stat);
+  }
+
+  function inspectable(mounts: Array<{ Type: string; Source?: string; RW?: boolean }>) {
+    return { getContainer: () => ({ inspect: async () => ({ Mounts: mounts }) }) } as unknown as Pick<Docker, 'getContainer'>;
+  }
+
+  const spellings = () => [
+    { label: 'equal', source: second, writable: true },
+    { label: 'child', source: path.join(second, 'db'), writable: true },
+    { label: 'writable ancestor', source: parentLink, writable: true },
+    { label: 'read-only child', source: path.join(second, 'db'), writable: false },
+  ];
+
+  it('refuses a start through any spelling when the fenced directory cannot be read, and never runs it', async () => {
+    fencedDirectory({ senchoPath: real, hostPath: real });
+    unreadable(real);
+    const start = vi.fn(async () => 'started');
+    for (const { label, source, writable } of spellings()) {
+      await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: source, RW: writable }]), label, start), label)
+        .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/cannot prove/) });
+    }
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('refuses a start when the container\'s own source, or an ancestor the comparison rests on, cannot be read', async () => {
+    fencedDirectory({ senchoPath: real, hostPath: real });
+    const start = vi.fn(async () => 'started');
+    // The candidate itself.
+    unreadable(second);
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: second, RW: true }]), 'candidate', start))
+      .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/cannot prove/) });
+    vi.mocked(fs.promises.stat).mockRestore();
+    // An ancestor of the fenced directory: the candidate could be that ancestor.
+    unreadable(path.join(tree, 'host'));
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: parentLink, RW: true }]), 'ancestor', start))
+      .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/cannot prove/) });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('still starts a container proven clear, and one whose fenced directory is gone', async () => {
+    fencedDirectory({ senchoPath: real, hostPath: real });
+    const start = vi.fn(async () => 'started');
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: unrelated, RW: true }]), 'clear', start)).resolves.toBe('started');
+    // A read-only ancestor only observes.
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: parentLink, RW: false }]), 'ro', start)).resolves.toBe('started');
+    fs.rmSync(path.join(tree, 'host'), { recursive: true });
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: unrelated, RW: true }]), 'gone', start)).resolves.toBe('started');
+  });
+
+  it('refuses file work through another spelling when either side cannot be read', async () => {
+    fencedDirectory({ senchoPath: real, hostPath: '/srv/host/data' });
+    unreadable(real);
+    expect((await fence.matchFsWorkToFences(second)).refusal?.message).toMatch(/cannot prove/);
+    expect((await fence.matchFsWorkToFences(unrelated)).refusal?.message).toMatch(/cannot prove/);
+    vi.mocked(fs.promises.stat).mockRestore();
+    unreadable(second);
+    expect((await fence.matchFsWorkToFences(second)).refusal?.message).toMatch(/cannot prove/);
+    expect((await fence.matchFsWorkToFences(unrelated)).refusal).toBeNull();
+  });
+
+  it('keeps admitted work whose spelling cannot be read in the drain, and refuses its next step', async () => {
+    const target = { senchoPath: real, hostPath: real, aliases: [] };
+    const lease = fence.admitFsWork(second, new Set());
+    if (!('release' in lease)) throw new Error('not admitted');
+    fencedDirectory(target);
+    unreadable(second);
+    expect(await fence.waitForFsWorkOn(target, 30)).toBe(false);
+    expect(lease.recheck()?.code).toBe('data_restore');
+    const drained = fence.waitForFsWorkOn(target, 5_000);
+    lease.release();
+    expect(await drained).toBe(true);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('counts a container or declaration it cannot prove clear as a dependent, and a live one as in use', async () => {
+    const root = { senchoPath: real, hostPath: real, aliases: [] as string[] };
+    unreadable(real);
+    stackRoots({ api: { outcome: 'rendered', roots: [source('api'), bind(second)] } });
+    const resolution = await resolve({
+      known: ['web', 'api'],
+      root,
+      docker: containers([
+        { Id: 'web-1', project: 'web', Mounts: [{ Source: path.join(second, 'db') }] },
+        { Id: 'manual', Mounts: [{ Source: parentLink, RW: false }] },
+      ]),
+    });
+    // With the root unreadable no other spelling can be proven clear of it, so
+    // every stack joins the check (web through its container and its source).
+    expect([...new Set(resolution.dependents.map((d) => d.stackName))].sort()).toEqual(['api', 'web']);
+    expect(resolution.mountedByContainer).toBe(true);
+    // An unowned container it cannot place holds the caller to the node-wide check,
+    // and is not shown as a mere observer.
+    expect(resolution.unownedContainer).toBe(true);
+    expect(resolution.observers).toEqual([]);
+    const live = containers([{ Id: 'writer', Mounts: [{ Source: second }] }]);
+    expect(await roots.observeFsRootInUse({ docker: live, root, ownMounts: null })).toEqual({ inUse: true, liveContainers: ['writer'] });
+  });
+
+  it('marks a candidate whose own directory cannot be read as unproven, and leaves a proven nonmatch alone', async () => {
+    const root = { senchoPath: real, hostPath: real, aliases: [] as string[] };
+    unreadable(second);
+    const bindOf = (Source: string, RW = true) => ({ Mounts: [{ Type: 'bind', Source, Destination: '/x', RW }] });
+    expect(await roots.matchContainerToRoot(bindOf(second), root, null)).toEqual({ depends: false, observes: false, unproven: true });
+    expect(await roots.matchContainerToRoot(bindOf(unrelated), root, null)).toEqual({ depends: false, observes: false, unproven: false });
+    // A proven dependency wins over an unproven one.
+    expect(await roots.matchContainerToRoot({ Mounts: [...bindOf(second).Mounts, ...bindOf(real).Mounts] }, root, null))
+      .toEqual({ depends: true, observes: false, unproven: false });
+  });
+});
+
 describe('file work admitted before a directory fence', () => {
   let dir: string;
 

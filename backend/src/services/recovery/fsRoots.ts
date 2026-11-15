@@ -177,26 +177,34 @@ export function dependsOnRoot(relation: PathRelation, writable: boolean): boolea
 /** Paths whose identity could not be read, logged once each (bounded). */
 const warnedIdentityPaths = new Set<string>();
 
-/** A directory's device and inode as Sencho sees it, or null when it cannot be read. */
-async function identityOf(target: string): Promise<string | null> {
+/**
+ * A directory's device and inode as Sencho sees it; `absent` when nothing is
+ * there or it is not a directory (it cannot be a directory under another
+ * spelling); `unreadable` when the read failed any other way, so nothing can be
+ * said about which directory it is.
+ */
+type DirectoryIdentity = string | 'absent' | 'unreadable';
+
+async function identityOf(target: string): Promise<DirectoryIdentity> {
   try {
     const stat = await fsPromises.stat(target, { bigint: true });
-    return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+    return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : 'absent';
   } catch (err) {
-    // An unreadable path is matched by its spelling alone.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && !warnedIdentityPaths.has(target)) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'absent';
+    if (!warnedIdentityPaths.has(target)) {
       // Matching runs on every check, so a path that stays unreadable is logged once.
       if (warnedIdentityPaths.size >= 256) warnedIdentityPaths.clear();
       warnedIdentityPaths.add(target);
       console.warn('[Recovery] Could not read the identity of %s:', sanitizeForLog(target), errorMessageForLog(err));
     }
-    return null;
+    return 'unreadable';
   }
 }
 
-/** The identities of `target` and of each of its ancestors, nearest first; null for one that cannot be read. */
-async function identityChain(target: string): Promise<Array<string | null>> {
-  const chain: Array<string | null> = [];
+/** The identities of `target` and of each of its ancestors, nearest first. */
+async function identityChain(target: string): Promise<DirectoryIdentity[]> {
+  const chain: DirectoryIdentity[] = [];
   let current = normalizeAbsolute(target);
   while (current !== null) {
     chain.push(await identityOf(current));
@@ -206,6 +214,9 @@ async function identityChain(target: string): Promise<Array<string | null>> {
   return chain;
 }
 
+/** A path relation, or `unknown` when an identity it rests on could not be read. */
+export type ProvenPathRelation = PathRelation | 'unknown';
+
 /**
  * `relatePath`, plus identity: two spellings of one directory (a directory
  * Sencho reaches through two of its own mounts, say) are lexically unrelated, so
@@ -213,18 +224,27 @@ async function identityChain(target: string): Promise<Array<string | null>> {
  * ancestors. A candidate that is the root, or has the root as an ancestor
  * under another spelling, is equal to it or inside it; a candidate that is an
  * ancestor of the root under another spelling contains it.
+ *
+ * A failed read is never evidence: when the root's identity, or one along
+ * either chain that could have decided the answer, cannot be read, the
+ * relationship is `unknown`, and every caller treats that as a possible
+ * dependency. A root that is not there has no second spelling to find.
  */
-async function relateWithIdentity(candidate: string, root: string, rootIdentity: string | null): Promise<PathRelation> {
+async function relateWithIdentity(candidate: string, root: string, rootIdentity: DirectoryIdentity): Promise<ProvenPathRelation> {
   const relation = relatePath(candidate, root);
-  if (relation !== 'unrelated' || rootIdentity === null) return relation;
+  if (relation !== 'unrelated' || rootIdentity === 'absent') return relation;
+  if (rootIdentity === 'unreadable') return 'unknown';
   const candidateChain = await identityChain(candidate);
   const at = candidateChain.indexOf(rootIdentity);
   if (at === 0) return 'equal';
   if (at > 0) return 'inside';
+  // One of the candidate's directories could not be read: it could be the root.
+  if (candidateChain.includes('unreadable')) return 'unknown';
   const candidateIdentity = candidateChain[0];
-  if (candidateIdentity === null || candidateIdentity === undefined) return 'unrelated';
+  if (candidateIdentity === undefined || candidateIdentity === 'absent') return 'unrelated';
   const rootAncestors = (await identityChain(root)).slice(1);
-  return rootAncestors.includes(candidateIdentity) ? 'ancestor' : 'unrelated';
+  if (rootAncestors.includes(candidateIdentity)) return 'ancestor';
+  return rootAncestors.includes('unreadable') ? 'unknown' : 'unrelated';
 }
 
 /**
@@ -254,17 +274,13 @@ export async function relateToFencedDirectory(
   if (hostView !== null && [target.hostPath, ...target.aliases].some((spelling) => pathsOverlap(hostView, spelling))) {
     return 'overlap';
   }
-  let targetIdentity: string;
-  try {
-    const stat = await fsPromises.stat(target.senchoPath, { bigint: true });
-    targetIdentity = `${stat.dev}:${stat.ino}`;
-  } catch (err) {
-    // A fenced directory that is not at its Sencho path any more has no second
-    // spelling here to find; the host-side comparison above still holds. One
-    // that is there and cannot be read could be anything.
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'unrelated' : 'unknown';
-  }
-  return (await relateWithIdentity(candidate, target.senchoPath, targetIdentity)) === 'unrelated' ? 'unrelated' : 'overlap';
+  // A fenced directory that is not at its Sencho path any more has no second
+  // spelling here to find; the host-side comparison above still holds. One
+  // that is there and cannot be read could be anything, and so could a
+  // candidate whose own directories cannot be read.
+  const relation = await relateWithIdentity(candidate, target.senchoPath, await identityOf(target.senchoPath));
+  if (relation === 'unknown') return 'unknown';
+  return relation === 'unrelated' ? 'unrelated' : 'overlap';
 }
 
 /** True when two host paths overlap (equal, or one inside the other). */
@@ -748,6 +764,13 @@ export interface ContainerRootMatch {
   depends: boolean;
   /** A read-only ancestor: it can see the data but not change it. */
   observes: boolean;
+  /**
+   * A bind whose relationship to the root could not be proven, because an
+   * identity it rests on could not be read, and nothing proven to depend on it.
+   * Every caller treats it as a possible dependent: a start is refused, an
+   * overwrite is refused, the dependency set and the in-use observation count it.
+   */
+  unproven: boolean;
 }
 
 /**
@@ -763,22 +786,24 @@ export async function matchContainerToRoot(
 ): Promise<ContainerRootMatch> {
   let depends = false;
   let observes = false;
-  let rootIdentity: string | null | undefined;
+  let unproven = false;
+  let rootIdentity: DirectoryIdentity | undefined;
   for (const mount of container.Mounts ?? []) {
     if (mount.Type !== 'bind' || typeof mount.Source !== 'string') continue;
     const writable = mount.RW !== false;
-    const relations: PathRelation[] = [root.hostPath, ...root.aliases].map((spelling) => relatePath(mount.Source as string, spelling));
+    const relations: ProvenPathRelation[] = [root.hostPath, ...root.aliases].map((spelling) => relatePath(mount.Source as string, spelling));
     const senchoView = hostToSenchoPath(mount.Source, ownMounts);
     if (senchoView !== null) {
       if (rootIdentity === undefined) rootIdentity = await identityOf(root.senchoPath);
       relations.push(await relateWithIdentity(await canonicalOrSelf(senchoView), root.senchoPath, rootIdentity));
     }
     for (const relation of relations) {
-      if (dependsOnRoot(relation, writable)) depends = true;
+      if (relation === 'unknown') unproven = true;
+      else if (dependsOnRoot(relation, writable)) depends = true;
       else if (relation === 'ancestor') observes = true;
     }
   }
-  return { depends, observes: observes && !depends };
+  return { depends, observes: observes && !depends && !unproven, unproven: unproven && !depends };
 }
 
 /** The dependent resolution of a host directory, with what only it can say. */
@@ -846,7 +871,10 @@ export async function resolveFsRootDependents(input: {
       observers.push((container.Names?.[0] ?? container.Id).replace(/^\//, ''));
       continue;
     }
-    if (!match.depends) continue;
+    // A bind that cannot be proven clear of the root counts as one that binds it:
+    // its stack joins the access check, or an unowned container holds the
+    // caller to the node-wide check.
+    if (!match.depends && !match.unproven) continue;
     mountedByContainer = true;
     const project = container.Labels?.['com.docker.compose.project'];
     const stack = project
@@ -895,7 +923,8 @@ export async function resolveFsRootDependents(input: {
     if (!listed || listed.outcome === 'unrenderable') return unrenderable(stackName);
     for (const candidate of listed.candidates) {
       const relation = await relateWithIdentity(candidate.senchoPath, input.root.senchoPath, rootIdentity);
-      if (dependsOnRoot(relation, candidate.writable)) {
+      // A declaration that cannot be proven clear of the root is a possible dependent.
+      if (relation === 'unknown' || dependsOnRoot(relation, candidate.writable)) {
         add(stackName, null);
         break;
       }
@@ -926,7 +955,7 @@ export async function resolveFsRootDependents(input: {
 
 /**
  * Whether anything is using the root right now, by the same rule: a live
- * container that depends on it. This is the only basis for the consistency
+ * container that depends on it, or that cannot be proven clear of it. This is the only basis for the consistency
  * label. Sencho's own editor writes to a stack source are not observed here,
  * and the operator page says so.
  */
@@ -942,7 +971,9 @@ export async function observeFsRootInUse(input: {
     if (self.isOwnContainer(container.Id)) continue;
     const state = String(container.State ?? '').toLowerCase();
     if (!IN_USE_STATES.has(state)) continue;
-    if ((await matchContainerToRoot(container, input.root, input.ownMounts)).depends) live.push(container.Id);
+    // A live container that cannot be proven clear of the root may be writing it.
+    const match = await matchContainerToRoot(container, input.root, input.ownMounts);
+    if (match.depends || match.unproven) live.push(container.Id);
   }
   return { inUse: live.length > 0, liveContainers: live };
 }

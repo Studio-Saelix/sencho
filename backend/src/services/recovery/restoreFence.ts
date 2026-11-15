@@ -575,8 +575,14 @@ export async function startContainerUnderFence<T>(
       return Promise.reject(new DataRestoreFenceError(fsTargets[0].hostPath, 'unproven', 'directory'));
     }
     for (const target of fsTargets) {
-      if ((await matchContainerToRoot({ Mounts: mounts }, target, ownMounts)).depends) {
+      const match = await matchContainerToRoot({ Mounts: mounts }, target, ownMounts);
+      if (match.depends) {
         return Promise.reject(new DataRestoreFenceError(target.hostPath, 'container', 'directory'));
+      }
+      // A bind whose relationship to the fenced directory could not be read
+      // could be another spelling of it: refused like an unreadable mount table.
+      if (match.unproven) {
+        return Promise.reject(new DataRestoreFenceError(target.hostPath, 'unproven', 'directory'));
       }
       checked.add(target.hostPath);
     }
