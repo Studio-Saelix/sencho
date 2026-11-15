@@ -30,6 +30,7 @@ import { openServiceUrl } from '@/lib/serviceUrl';
 import { fetchServiceUrlEntry } from './useServiceUrls';
 import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
 import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
+import { readComposeInputsRefusal } from '@/lib/composeInputsRefusal';
 import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
 import {
   classifyRemoteReadFailure,
@@ -803,7 +804,14 @@ export function useStackActions(options: UseStackActionsOptions) {
         return { ok: false, reason: afterHeaders };
       }
       if (!containersRes.ok) {
-        const message = `Could not load containers (${containersRes.status}).`;
+        // A refused compose file answers 409 with the reason: show it instead of
+        // the bare status, which leaves the operator no way to know why.
+        const refusal = await readComposeInputsRefusal(containersRes);
+        const afterRefusalBody = ownershipStillValid(owned);
+        if (afterRefusalBody !== 'ok') {
+          return { ok: false, reason: afterRefusalBody };
+        }
+        const message = refusal ?? `Could not load containers (${containersRes.status}).`;
         applyContainersFetchFailure(mode, message);
         return { ok: false, reason: 'http', error: message };
       }

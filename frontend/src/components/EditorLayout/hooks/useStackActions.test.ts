@@ -3862,6 +3862,105 @@ describe('container fetch contract', () => {
     expect(setContainers).not.toHaveBeenCalled();
   });
 
+  describe('a refused compose file (409 compose_inputs_refused)', () => {
+    const REASON = 'Sencho refused to read docker-compose.yml: the YAML aliases expand past the limit.';
+    const refused = () => new Response(JSON.stringify({ error: REASON, code: 'compose_inputs_refused' }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    it('foreground load shows the refusal text, not the bare status', async () => {
+      const setContainersLoadStatus = vi.fn();
+      const setContainersLoadError = vi.fn();
+      vi.mocked(apiFetch).mockResolvedValue(refused());
+      const { result } = setup({
+        editorState: {
+          containers: [],
+          setContainersLoadStatus,
+          setContainersLoadError,
+          setContainers: vi.fn(),
+        } as never,
+      });
+      await act(async () => {
+        await result.current.retryContainersLoad();
+      });
+      expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
+      expect(setContainersLoadError).toHaveBeenLastCalledWith(REASON);
+    });
+
+    it('soft refresh (the 10 s poll) of a confirmed-empty list shows the refusal text', async () => {
+      const setContainersLoadStatus = vi.fn();
+      const setContainersLoadError = vi.fn();
+      vi.mocked(apiFetch).mockResolvedValue(refused());
+      const { result } = setup({
+        editorState: {
+          containers: [],
+          containersLoadStatus: 'success',
+          containersLoadError: null,
+          setContainersLoadStatus,
+          setContainersLoadError,
+        } as never,
+      });
+      let outcome: 'ok' | 'skipped' | 'failed' = 'ok';
+      await act(async () => {
+        outcome = await result.current.refreshSelectedContainers('web', 'web.yml');
+      });
+      expect(outcome).toBe('failed');
+      expect(setContainersLoadError).toHaveBeenCalledWith(REASON);
+    });
+
+    it('a 409 without the refusal code keeps the status wording', async () => {
+      const setContainersLoadError = vi.fn();
+      vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ error: 'busy' }), { status: 409 }));
+      const { result } = setup({
+        editorState: {
+          containers: [],
+          setContainersLoadStatus: vi.fn(),
+          setContainersLoadError,
+          setContainers: vi.fn(),
+        } as never,
+      });
+      await act(async () => {
+        await result.current.retryContainersLoad();
+      });
+      expect(setContainersLoadError).toHaveBeenLastCalledWith('Could not load containers (409).');
+    });
+
+    it('a refusal body that is read after a newer fetch superseded it is dropped', async () => {
+      const setContainersLoadError = vi.fn();
+      let openBody: () => void = () => {};
+      const bodyGate = new Promise<void>((resolve) => { openBody = resolve; });
+      const slow = refused();
+      const readBody = slow.json.bind(slow);
+      slow.json = async () => { await bodyGate; return readBody(); };
+      vi.mocked(apiFetch)
+        .mockResolvedValueOnce(slow)
+        .mockResolvedValue(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      const { result } = setup({
+        editorState: {
+          containers: [],
+          setContainersLoadStatus: vi.fn(),
+          setContainersLoadError,
+          setContainers: vi.fn(),
+        } as never,
+      });
+      let first: Promise<void> = Promise.resolve();
+      await act(async () => {
+        first = result.current.retryContainersLoad();
+        await Promise.resolve();
+      });
+      // A newer fetch supersedes the first while its 409 body is still being read.
+      await act(async () => {
+        await result.current.refreshSelectedContainers('web', 'web.yml');
+      });
+      await act(async () => {
+        openBody();
+        await first;
+      });
+      expect(setContainersLoadError).not.toHaveBeenCalledWith(REASON);
+    });
+  });
+
   it('malformed 200 is not treated as success empty in foreground retry', async () => {
     const setContainersLoadStatus = vi.fn();
     const setContainersLoadError = vi.fn();
