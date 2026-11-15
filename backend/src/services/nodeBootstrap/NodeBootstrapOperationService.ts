@@ -12,6 +12,7 @@ import {
   type NodeBootstrapOperationTransition,
 } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
+import { PilotEnrollmentAttempts } from '../PilotEnrollmentAttempts';
 import { PilotTunnelManager } from '../PilotTunnelManager';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
 import {
@@ -171,6 +172,8 @@ interface OperationDeps {
   /** Readiness of the node a run registers: reset to provisional on each enrollment, checked once its Pilot connects. */
   readiness: Pick<NodeReadinessService, 'get' | 'verify'> & { markProvisional: (nodeId: number, operationId: string, hubUrl: string) => void };
   enrollWaitMs: number;
+  /** What the hub saw when this node's Pilot was refused, read when the wait for its connection ends (minting an enrollment clears it). */
+  attempts: Pick<PilotEnrollmentAttempts, 'lastRefusal'>;
   /** How long the package metadata refresh is retried while another apt job holds its lock. */
   aptLockRetry?: { intervalMs: number; totalMs: number };
 }
@@ -244,6 +247,7 @@ export class NodeBootstrapOperationService {
         markProvisional: (nodeId, operationId, hubUrl) => DatabaseService.getInstance().markNodeReadinessProvisional(nodeId, operationId, hubUrl, Date.now()),
       },
       enrollWaitMs: ENROLL_WAIT_MS,
+      attempts: PilotEnrollmentAttempts.getInstance(),
       ...deps,
     };
   }
@@ -845,14 +849,31 @@ export class NodeBootstrapOperationService {
       timer = setTimeout(() => finish(this.deps.tunnels.hasActiveTunnel(nodeId) ? 'connected' : 'timeout'), Math.max(0, deadline - this.deps.now()));
     });
     if (outcome === 'cancelled') throw new RunCancelled();
-    if (outcome === 'timeout') {
-      throw new StepFailure(
-        'failed',
-        'ENROLLMENT_NOT_CONNECTED',
-        'The Pilot started but did not connect before the wait ended. Check that the host can reach the hub URL, then retry; a retry mints a new enrollment.',
-      );
-    }
+    if (outcome === 'timeout') throw this.enrollmentTimeout(nodeId, op.enrollment_expires_at);
     this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; the hub now checks that it is ready for deployments.');
+  }
+
+  /**
+   * Why the wait for the Pilot ended. The hub can name only what it saw: a Pilot that reached it and was refused for an
+   * expired or already used enrollment, or an enrollment that ran out without being used. When nothing reached the hub,
+   * the cause (a name that does not resolve, a TLS or CA failure, a proxy that drops the WebSocket upgrade) is on the
+   * host and stays unknown to the hub, so the message says so and points at the agent's log instead of guessing.
+   */
+  private enrollmentTimeout(nodeId: number, expiresAt: number | null): StepFailure {
+    const refusal = this.deps.attempts.lastRefusal(nodeId);
+    if (refusal?.reason === 'enrollment_used') {
+      return new StepFailure('failed', 'ENROLLMENT_USED',
+        'The Pilot reached the hub, but the enrollment it presented was no longer valid: it was already used, or a newer enrollment replaced it (a compose file started earlier keeps its old token). Retry, which mints a new enrollment and rewrites the file.');
+    }
+    if (refusal?.reason === 'enrollment_expired' || (expiresAt !== null && this.deps.now() >= expiresAt)) {
+      return new StepFailure('failed', 'ENROLLMENT_EXPIRED', refusal
+        ? 'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.'
+        : 'The enrollment expired before any Pilot used it (an enrollment is valid for 15 minutes), and no connection attempt reached the hub. Retry, which mints a new enrollment.');
+    }
+    return new StepFailure('failed', 'ENROLLMENT_NOT_CONNECTED',
+      'The Pilot started, but no connection attempt from it reached the hub before the wait ended, so the hub cannot tell why. '
+      + 'The cause is on the server: `docker logs sencho-agent` names it (a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade). '
+      + 'Fix it, then retry; a retry mints a new enrollment.');
   }
 
   // --- state ----------------------------------------------------------------

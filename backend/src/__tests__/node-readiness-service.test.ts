@@ -6,6 +6,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { NodeReadinessService, type ReadinessFetch } from '../services/nodeBootstrap/NodeReadinessService';
 import { buildReadinessReport, type ReadinessProbes } from '../routes/pilotReadiness';
 import type { EnvironmentProbes } from '../services/EnvironmentCheckService';
+import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
 
 /**
  * Readiness checks against a scripted Pilot. The fetch below runs the agent's
@@ -590,5 +591,131 @@ describe('node readiness', () => {
     expect(body).not.toContain(token);
     expect(body).not.toContain(token.split('.')[1]);
     expect(JSON.parse(body).agent.enrolledNodeId).toBe(5);
+  });
+});
+
+describe('node readiness: evidence the agent could not measure', () => {
+  /** Run a real check, from the agent's own report builder through the hub's gates, with one disk probe. */
+  async function checkDisk(diskUsage: EnvironmentProbes['diskUsage'], trigger: 'tunnel-up' | 'admin') {
+    const { nodeId, model, tunnels, service } = setup();
+    model.env = { diskUsage };
+    announce(nodeId, (await buildReadinessReport('c'.repeat(32), agentProbes(model))).agent.version);
+    let view;
+    if (trigger === 'admin') {
+      tunnels.up.add(nodeId);
+      view = await service.verify(nodeId, AUDIT);
+    } else {
+      service.start();
+      tunnels.connect(nodeId);
+      await settle(service);
+      view = service.get(nodeId);
+    }
+    return { nodeId, view };
+  }
+
+  it.each(['tunnel-up', 'admin'] as const)('does not call a node ready when disk usage could not be determined (%s)', async (trigger) => {
+    for (const diskUsage of [async () => null, async () => { throw new Error('fsSize blew up'); }] as Array<EnvironmentProbes['diskUsage']>) {
+      const { nodeId, view } = await checkDisk(diskUsage, trigger);
+      expect(view?.state).toBe('not_ready');
+      expect(view?.gates.find((gate) => gate.id === 'disk_space')).toMatchObject({ status: 'unknown', summary: 'Disk usage could not be determined.' });
+      expect(db.getNodeReadiness(nodeId)?.state).toBe('not_ready');
+    }
+  });
+
+  it.each(['tunnel-up', 'admin'] as const)('still calls a node ready when the disk is measured, even low (%s)', async (trigger) => {
+    const normal = await checkDisk(async () => ({ usePercent: 40, freeBytes: 50 * 1024 ** 3 }), trigger);
+    expect(normal.view?.state).toBe('ready');
+    expect(normal.view?.gates.find((gate) => gate.id === 'disk_space')?.status).toBe('pass');
+    const low = await checkDisk(async () => ({ usePercent: 96, freeBytes: 1 * 1024 ** 3 }), trigger);
+    expect(low.view?.state).toBe('ready');
+    expect(low.view?.gates.find((gate) => gate.id === 'disk_space')).toMatchObject({ status: 'warn', summary: expect.stringMatching(/96% used/) });
+  });
+
+  it('reports a probe without a reading as unknown, and a measured warning as a warning', async () => {
+    const unread = await buildReadinessReport('e'.repeat(32), agentProbes({ nodeId: 1, probes: {}, env: { diskUsage: async () => null } }));
+    expect(unread.checks.find((check) => check.id === 'disk_space')).toMatchObject({ status: 'unknown' });
+    const low = await buildReadinessReport('e'.repeat(32), agentProbes({ nodeId: 1, probes: {}, env: { diskUsage: async () => ({ usePercent: 99, freeBytes: 1024 }) } }));
+    expect(low.checks.find((check) => check.id === 'disk_space')).toMatchObject({ status: 'warn' });
+    const unreadMounts = await buildReadinessReport('e'.repeat(32), agentProbes({ nodeId: 1, probes: {}, env: { bindMounts: async () => { throw new Error('inspect failed'); } } }));
+    expect(unreadMounts.checks.find((check) => check.id === 'path_mapping')).toMatchObject({ status: 'unknown' });
+  });
+});
+
+describe('node readiness: capabilities', () => {
+  it('calls a node ready only when the Pilot advertises the deployment baseline, taken in this report', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    const report = await buildReadinessReport('c'.repeat(32), agentProbes(model));
+    expect(report.agent.capabilities).toEqual(expect.arrayContaining(['stacks', 'containers', 'cross-node-rbac']));
+    announce(nodeId, report.agent.version);
+    tunnels.up.add(nodeId);
+    const view = await service.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('ready');
+    expect(view?.gates.find((gate) => gate.id === 'capabilities')).toMatchObject({ status: 'pass' });
+  });
+
+  it.each([
+    ['advertises none', () => []],
+    ['lacks one the baseline needs', (all: string[]) => all.filter((capability) => capability !== 'containers')],
+  ])('does not call a node ready when the Pilot %s', async (_label, narrow) => {
+    const honest = await buildReadinessReport('c'.repeat(32), agentProbes({ nodeId: 1, probes: {}, env: {} }));
+    let target = 0;
+    const answer: ReadinessFetch = async (url) => ({
+      status: 200,
+      body: JSON.parse(JSON.stringify({
+        ...honest,
+        nonce: new URL(url).searchParams.get('nonce'),
+        agent: { ...honest.agent, enrolledNodeId: target, capabilities: narrow(honest.agent.capabilities) },
+      })),
+    });
+    const { nodeId, tunnels, service } = setup({ fetch: answer });
+    target = nodeId;
+    announce(nodeId, honest.agent.version);
+    tunnels.up.add(nodeId);
+    const view = await service.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('not_ready');
+    expect(view?.gates.find((gate) => gate.id === 'identity')?.status).toBe('pass');
+    expect(view?.gates.find((gate) => gate.id === 'capabilities')?.status).toBe('fail');
+  });
+
+  it('treats an answer with no capability list as an unreadable report', async () => {
+    const honest = await buildReadinessReport('c'.repeat(32), agentProbes({ nodeId: 1, probes: {}, env: {} }));
+    const answer: ReadinessFetch = async (url) => {
+      const copy = JSON.parse(JSON.stringify({ ...honest, nonce: new URL(url).searchParams.get('nonce') }));
+      delete copy.agent.capabilities;
+      return { status: 200, body: copy };
+    };
+    const { nodeId, tunnels, service } = setup({ fetch: answer });
+    announce(nodeId, honest.agent.version);
+    tunnels.up.add(nodeId);
+    const view = await service.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('not_ready');
+    expect(view?.gates.at(-1)).toMatchObject({ id: 'contract', status: 'unknown' });
+  });
+});
+
+describe('node readiness: why a tunnel is down', () => {
+  it.each([
+    ['enrollment_expired', /enrollment that had expired/],
+    ['enrollment_used', /already used or replaced/],
+    ['credential_expired', /saved credential that had expired/],
+  ] as const)('names a refused Pilot (%s) instead of a generic disconnect, and says how to recover', async (reason, summary) => {
+    const attempts = new PilotEnrollmentAttempts();
+    const { nodeId, operationId } = setup();
+    void operationId;
+    const refused = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn(), changed: vi.fn(), attempts });
+    attempts.recordRefusal(nodeId, reason);
+    const view = await refused.verify(nodeId, AUDIT);
+    const gate = view?.gates.at(-1);
+    expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(summary) });
+    expect(gate && gate.status !== 'pass' ? gate.remediation : '').toMatch(/Regenerate enrollment token/);
+    expect(gate && gate.status !== 'pass' ? gate.remediation : '').not.toMatch(/Retry/);
+  });
+
+  it('says it cannot tell why when nothing refused reached the hub, and where to look', async () => {
+    const { nodeId, service } = setup();
+    const view = await service.verify(nodeId, AUDIT);
+    const gate = view?.gates.at(-1);
+    expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(/cannot tell why/) });
+    expect(gate && gate.status !== 'pass' ? gate.remediation : '').toMatch(/docker logs sencho-agent/);
   });
 });

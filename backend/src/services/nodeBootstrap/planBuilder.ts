@@ -556,7 +556,7 @@ export function buildBootstrapPlan(input: PlanBuildInput): BootstrapPlan {
       { id: 'agent-compose-version', title: 'docker compose works inside the agent', expected: 'docker compose version succeeds', slice: 'S3' },
       { id: 'agent-docker-inventory', title: 'A read-only Docker inventory works inside the agent', expected: 'listing containers through Docker succeeds', slice: 'S3' },
       { id: 'tunnel-connected', title: 'The tunnel is connected with the expected identity', expected: 'the Pilot holds this node\'s credential and dials the hub URL', slice: 'S3' },
-      { id: 'capability-match', title: 'The Pilot answers the hub\'s readiness check', expected: 'a fresh report from the version its tunnel announced', slice: 'S3' },
+      { id: 'capability-match', title: 'The Pilot reports the capabilities deployments need', expected: 'a fresh report from the version its tunnel announced, advertising stacks, containers and cross-node-rbac', slice: 'S3' },
     ],
     notices,
     evidenceDigest: evidenceDigestOf(facts),

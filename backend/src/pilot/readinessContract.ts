@@ -40,9 +40,23 @@ export const REPORTED_CHECK_IDS: readonly ReadinessCheckId[] = [
   'disk_space',
 ];
 
+/**
+ * The capabilities a Pilot must advertise before the hub deploys through it:
+ * stack and container operations, and the actor-role enforcement the hub's
+ * proxy refuses to forward a non-admin's request without (see
+ * `CROSS_NODE_RBAC_CAPABILITY`). A Pilot that lacks one is an older or
+ * differently built agent, and the hub's feature gates would treat the node as
+ * unable to do what a ready node is expected to do.
+ */
+export const REQUIRED_PILOT_CAPABILITIES: readonly string[] = ['stacks', 'containers', 'cross-node-rbac'];
+
 export interface ReportedCheck {
   id: ReadinessCheckId;
-  status: 'pass' | 'warn' | 'fail';
+  /**
+   * `unknown` means the agent could not take the measurement (a failed or empty read),
+   * which is not the same as a measured result worth a warning.
+   */
+  status: 'pass' | 'warn' | 'fail' | 'unknown';
   detail: string;
   remediation: string | null;
 }
@@ -60,6 +74,8 @@ export interface PilotReadinessReport {
     primaryUrl: string | null;
     /** Whether the agent trusts a hub CA bundle. */
     caBundle: boolean;
+    /** What the agent advertises on its own `/api/meta`, taken now, so the hub does not rely on a cached copy. */
+    capabilities: string[];
   };
   docker: {
     serverVersion: string | null;
@@ -79,6 +95,7 @@ export interface PilotReadinessReport {
 }
 
 const MAX_TEXT = 1000;
+const MAX_CAPABILITIES = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -99,12 +116,23 @@ function nullableBool(value: unknown): boolean | null | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function parseCapabilities(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_CAPABILITIES) return null;
+  const capabilities: string[] = [];
+  for (const entry of value) {
+    const capability = text(entry, 64);
+    if (!capability || capabilities.includes(capability)) return null;
+    capabilities.push(capability);
+  }
+  return capabilities;
+}
+
 function parseCheck(value: unknown): ReportedCheck | null {
   if (!isRecord(value)) return null;
   const id = value.id;
   if (typeof id !== 'string' || !(REPORTED_CHECK_IDS as readonly string[]).includes(id)) return null;
   const status = value.status;
-  if (status !== 'pass' && status !== 'warn' && status !== 'fail') return null;
+  if (status !== 'pass' && status !== 'warn' && status !== 'fail' && status !== 'unknown') return null;
   const detail = text(value.detail);
   const remediation = nullableText(value.remediation);
   if (detail === null || remediation === undefined) return null;
@@ -127,7 +155,8 @@ export function parseReadinessReport(value: unknown): PilotReadinessReport | nul
     ? null
     : (typeof agent.enrolledNodeId === 'number' && Number.isSafeInteger(agent.enrolledNodeId) ? agent.enrolledNodeId : undefined);
   const primaryUrl = nullableText(agent.primaryUrl, 2048);
-  if (version === null || enrolledNodeId === undefined || primaryUrl === undefined || typeof agent.caBundle !== 'boolean') return null;
+  const capabilities = parseCapabilities(agent.capabilities);
+  if (version === null || enrolledNodeId === undefined || primaryUrl === undefined || typeof agent.caBundle !== 'boolean' || capabilities === null) return null;
 
   const serverVersion = nullableText(docker.serverVersion, 64);
   const apiVersion = nullableText(docker.apiVersion, 64);
@@ -156,7 +185,7 @@ export function parseReadinessReport(value: unknown): PilotReadinessReport | nul
     contract: READINESS_CONTRACT_VERSION,
     nonce,
     generatedAt: value.generatedAt,
-    agent: { version, enrolledNodeId, primaryUrl, caBundle: agent.caBundle },
+    agent: { version, enrolledNodeId, primaryUrl, caBundle: agent.caBundle, capabilities },
     docker: { serverVersion, apiVersion },
     composeDir,
     checks,

@@ -23,7 +23,7 @@ function report(overrides: Partial<PilotReadinessReport> = {}): PilotReadinessRe
     contract: READINESS_CONTRACT_VERSION,
     nonce: NONCE,
     generatedAt: NOW,
-    agent: { version: '0.98.2', enrolledNodeId: 7, primaryUrl: 'https://hub.example.com', caBundle: false },
+    agent: { version: '0.98.2', enrolledNodeId: 7, primaryUrl: 'https://hub.example.com', caBundle: false, capabilities: ['stacks', 'containers', 'cross-node-rbac', 'fleet'] },
     docker: { serverVersion: '28.1.1', apiVersion: '1.49' },
     composeDir: '/opt/docker/sencho',
     checks: [
@@ -60,7 +60,7 @@ function gate(gates: ReadinessGate[], id: ReadinessGate['id']): ReadinessGate {
   return found;
 }
 
-function withCheck(id: PilotReadinessReport['checks'][number]['id'], status: 'pass' | 'warn' | 'fail', detail = 'observed'): PilotReadinessReport {
+function withCheck(id: PilotReadinessReport['checks'][number]['id'], status: 'pass' | 'warn' | 'fail' | 'unknown', detail = 'observed'): PilotReadinessReport {
   const base = report();
   return { ...base, checks: base.checks.map((check) => check.id === id ? { id, status, detail, remediation: status === 'pass' ? null : `fix ${id}` } : check) };
 }
@@ -68,6 +68,11 @@ function withCheck(id: PilotReadinessReport['checks'][number]['id'], status: 'pa
 describe('readiness report parser', () => {
   it('accepts a report of this contract', () => {
     expect(parseReadinessReport(JSON.parse(JSON.stringify(report())))).toEqual(report());
+  });
+
+  it('keeps a check the agent could not measure as unknown', () => {
+    const measured = withCheck('disk_space', 'unknown', 'Disk usage could not be determined.');
+    expect(parseReadinessReport(JSON.parse(JSON.stringify(measured)))?.checks.find((check) => check.id === 'disk_space')?.status).toBe('unknown');
   });
 
   const broken: Array<[string, unknown]> = [
@@ -81,7 +86,12 @@ describe('readiness report parser', () => {
     ['a missing CA flag', { ...report(), agent: { enrolledNodeId: 7, version: '1', primaryUrl: null } }],
     ['an unknown check', { ...report(), checks: [...report().checks.slice(1), { id: 'tls', status: 'pass', detail: 'x', remediation: null }] }],
     ['a check reported twice', { ...report(), checks: [report().checks[0], report().checks[0]] }],
-    ['a check with an unknown status', { ...report(), checks: [{ ...report().checks[0], status: 'ok' }] }],
+    ['a check with an unrecognized status', { ...report(), checks: [{ ...report().checks[0], status: 'ok' }] }],
+    ['no capability list', { ...report(), agent: { ...report().agent, capabilities: undefined } }],
+    ['capabilities that are not a list', { ...report(), agent: { ...report().agent, capabilities: 'stacks' } }],
+    ['a capability that is not text', { ...report(), agent: { ...report().agent, capabilities: ['stacks', 7] } }],
+    ['a capability listed twice', { ...report(), agent: { ...report().agent, capabilities: ['stacks', 'stacks'] } }],
+    ['an oversized capability list', { ...report(), agent: { ...report().agent, capabilities: Array.from({ length: 300 }, (_, index) => `cap-${index}`) } }],
     ['too many checks', { ...report(), checks: [...report().checks, report().checks[0]] }],
     ['a negative container count', { ...report(), inventory: { ...report().inventory, containers: -1 } }],
     ['an inventory flag as a string', { ...report(), inventory: { ...report().inventory, agentContainer: 'yes' } }],
@@ -99,7 +109,7 @@ describe('readiness gates', () => {
     expect(result.gates.every((entry) => entry.status === 'pass')).toBe(true);
     expect(result.gates.map((entry) => entry.id)).toEqual([
       'tunnel', 'contract', 'identity', 'hub_url', 'transport', 'clock', 'agent_version', 'release_match',
-      'docker_daemon', 'docker_compose', 'compose_dir', 'path_mapping', 'self_stack_location', 'disk_space', 'inventory',
+      'capabilities', 'docker_daemon', 'docker_compose', 'compose_dir', 'path_mapping', 'self_stack_location', 'disk_space', 'inventory',
     ]);
   });
 
@@ -120,6 +130,9 @@ describe('readiness gates', () => {
     ['a Compose directory mount that cannot be confirmed', withCheck('path_mapping', 'warn', 'Mounts unreadable.'), {}, 'path_mapping', /Mounts unreadable/],
     ['a Pilot project inside the Compose directory', withCheck('self_stack_location', 'fail', 'Inside.'), {}, 'self_stack_location', /Inside/],
     ['a disk that is full', withCheck('disk_space', 'fail', 'No space.'), {}, 'disk_space', /No space/],
+    ['a disk whose usage could not be read', withCheck('disk_space', 'unknown', 'Disk usage could not be determined.'), {}, 'disk_space', /could not be determined/],
+    ['a Pilot that advertises no capabilities', report({ agent: { ...report().agent, capabilities: [] } }), {}, 'capabilities', /does not advertise stacks, containers, cross-node-rbac/],
+    ['a Pilot missing one required capability', report({ agent: { ...report().agent, capabilities: ['stacks', 'cross-node-rbac'] } }), {}, 'capabilities', /does not advertise containers\b/],
     ['a container listing that failed', report({ inventory: { listed: false, containers: null, agentContainer: null, agentDataVolume: null } }), {}, 'inventory', /could not list/],
     ['a listing without the canonical Pilot', report({ inventory: { listed: true, containers: 2, agentContainer: false, agentDataVolume: null } }), {}, 'inventory', /not the canonical Pilot/],
     ['a Pilot without its data volume', report({ inventory: { listed: true, containers: 2, agentContainer: true, agentDataVolume: false } }), {}, 'inventory', /sencho-agent-data/],
@@ -156,6 +169,11 @@ describe('readiness gates', () => {
     expect(gate(httpResult.gates, 'disk_space')).toMatchObject({ status: 'warn', remediation: 'fix disk_space' });
   });
 
+  it('lets a Pilot that advertises more than the baseline pass the capability gate', () => {
+    const result = evaluateReadiness(report(), expected());
+    expect(gate(result.gates, 'capabilities')).toMatchObject({ status: 'pass' });
+  });
+
   it('warns, without blocking, when the Pilot runs another release than the hub', () => {
     const result = evaluateReadiness(report(), expected({ hubVersion: '0.99.0' }));
     expect(gate(result.gates, 'release_match')).toMatchObject({ status: 'warn', summary: expect.stringMatching(/0\.98\.2.*0\.99\.0/) });
@@ -172,7 +190,10 @@ describe('readiness gates', () => {
 
   it('names its own cause when the Pilot could not be asked', () => {
     const cases = [
-      [readinessWithoutReport({ kind: 'not_connected' }), 'tunnel', 'fail', /not connected/],
+      [readinessWithoutReport({ kind: 'not_connected' }), 'tunnel', 'fail', /no refused attempt from it reached the hub/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_expired' }), 'tunnel', 'fail', /enrollment that had expired/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_used' }), 'tunnel', 'fail', /already used or replaced/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'credential_expired' }), 'tunnel', 'fail', /saved credential that had expired/],
       [readinessWithoutReport({ kind: 'unsupported', status: 404 }), 'contract', 'fail', /does not provide the readiness report/],
       [readinessWithoutReport({ kind: 'refused', status: 403 }), 'contract', 'fail', /refused/],
       [readinessWithoutReport({ kind: 'malformed' }), 'contract', 'unknown', /not a readiness report/],

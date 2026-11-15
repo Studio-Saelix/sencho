@@ -5,7 +5,8 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import { DatabaseService } from '../services/DatabaseService';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
 import { setReadinessProbesForTest } from '../routes/pilotReadiness';
-import { parseReadinessReport } from '../pilot/readinessContract';
+import { parseReadinessReport, REQUIRED_PILOT_CAPABILITIES } from '../pilot/readinessContract';
+import { getActiveCapabilities } from '../services/CapabilityRegistry';
 import { PROXY_ROLE_HEADER } from '../services/license-headers';
 
 /**
@@ -68,6 +69,9 @@ describe('agent readiness route', () => {
     const report = parseReadinessReport(res.body);
     expect(report).toMatchObject({ nonce: NONCE, agent: { enrolledNodeId: 12 }, composeDir: '/opt/docker/sencho' });
     expect(report?.checks.map((check) => check.id)).not.toContain('tls');
+    // The capabilities are the ones this agent serves on its own /api/meta, taken for this request.
+    expect(report?.agent.capabilities).toEqual([...getActiveCapabilities()]);
+    expect(report?.agent.capabilities).toEqual(expect.arrayContaining([...REQUIRED_PILOT_CAPABILITIES]));
     expect(JSON.stringify(res.body)).not.toContain(ENROLLED_TOKEN);
   });
 

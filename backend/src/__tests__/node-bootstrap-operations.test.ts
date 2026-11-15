@@ -288,7 +288,7 @@ interface Harness {
 
 let hostCounter = 0;
 
-function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number; aptLockRetry?: { intervalMs: number; totalMs: number } } = {}): Harness {
+function harness(options: { attempts?: { lastRefusal: (nodeId: number) => { reason: 'enrollment_expired' | 'enrollment_used' | 'credential_expired'; at: number } | null }; facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number; aptLockRetry?: { intervalMs: number; totalMs: number } } = {}): Harness {
   hostCounter += 1;
   const hostname = `server-${hostCounter}.example.com`;
   const base = options.facts ?? freshFacts();
@@ -318,6 +318,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
       return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + (options.tokenTtlMs ?? 15 * 60_000) };
     },
     enrollWaitMs: options.enrollWaitMs ?? 2_000,
+    ...(options.attempts ? { attempts: options.attempts } : {}),
     aptLockRetry: options.aptLockRetry ?? { intervalMs: 5, totalMs: 1_000 },
   });
   if (options.connectOnStart !== false) {
@@ -797,6 +798,24 @@ describe('bootstrap operations: enrollment and retry', () => {
     db.deleteNode(stopped.nodeId as number);
   });
 
+  it.each([
+    ['a Pilot that was refused for an expired enrollment', { reason: 'enrollment_expired' as const, at: 1 }, 'ENROLLMENT_EXPIRED', /its enrollment had already expired/, 20_000],
+    ['a Pilot that was refused for a used or replaced enrollment', { reason: 'enrollment_used' as const, at: 1 }, 'ENROLLMENT_USED', /already used, or a newer enrollment replaced it/, 20_000],
+    ['an enrollment that ran out before any Pilot used it', null, 'ENROLLMENT_EXPIRED', /expired before any Pilot used it[\s\S]*no connection attempt reached the hub/, 1],
+    ['nothing reaching the hub at all', null, 'ENROLLMENT_NOT_CONNECTED', /no connection attempt from it reached the hub[\s\S]*docker logs sencho-agent[\s\S]*WebSocket upgrade/, 20_000],
+  ])('names the cause of a Pilot that never connected: %s', async (_label, refusal, code, message, tokenTtlMs) => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs, attempts: { lastRefusal: () => refusal } });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped).toMatchObject({ state: 'partial', active: true, agentStarted: true, error: { code } });
+    expect(stopped.error?.message).toMatch(message);
+    // Every one is still a stopped run the operator can Retry, which mints a new enrollment.
+    expect(stopped.actions).toMatchObject({ retry: true });
+    db.deleteNode(stopped.nodeId as number);
+  });
+
   it('retries on the same node with a new enrollment and replaces only its own compose file', async () => {
     const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
     const first = approve(h);
@@ -1077,7 +1096,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const op = h.service.start(request, context());
     await h.service.settled();
     expect(Date.now() - started).toBeLessThan(10_000);
-    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_EXPIRED' } });
     h.service.release(op.id, AUDIT);
     db.deleteNode(h.service.get(op.id).nodeId as number);
   });

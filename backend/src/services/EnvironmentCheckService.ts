@@ -13,7 +13,9 @@
  * is unit-testable without a live Docker daemon or filesystem. No probe failure
  * throws out of the report: it degrades to a non-throwing row whose status fits
  * the check. The Docker socket and compose-directory probes surface a `fail`;
- * an unreadable disk degrades to a `warn` rather than a false `pass`. Path
+ * an unreadable disk degrades to a `warn` (marked `unmeasured`, so a caller that
+ * decides readiness can tell no reading from a measured warning) rather than a
+ * false `pass`. Path
  * mapping distinguishes "not containerized" (a `pass`, the dev / bare-metal
  * case) from "containerized but mounts unreadable" (a `warn`), so an
  * unverifiable mapping never reads as healthy.
@@ -60,7 +62,16 @@ interface CheckBase {
 // compile-time guarantee instead of a convention a future check could forget.
 export type EnvironmentCheck =
     | (CheckBase & { status: 'pass' })
-    | (CheckBase & { status: 'warn' | 'fail'; remediation: string });
+    | (CheckBase & {
+        status: 'warn' | 'fail';
+        remediation: string;
+        /**
+         * True when the probe behind this row gave no reading at all (a failed or empty
+         * read), as opposed to a measured result that is worth a warning. A preflight
+         * surface shows both as a warning; a caller that decides readiness must not.
+         */
+        unmeasured?: true;
+    });
 
 export interface EnvironmentReport {
     checks: EnvironmentCheck[];
@@ -217,6 +228,7 @@ async function checkSelfStackLocation(
         return {
             ...base,
             status: 'warn',
+            unmeasured: true,
             detail: 'Could not verify whether Sencho is managed inside COMPOSE_DIR.',
             remediation:
                 'Confirm Sencho\'s own compose project is outside COMPOSE_DIR. Use Fleet -> Node Update for Sencho updates.',
@@ -250,6 +262,7 @@ async function checkSelfStackLocation(
         return {
             ...base,
             status: 'warn',
+            unmeasured: true,
             detail: 'Could not verify whether Sencho is managed inside COMPOSE_DIR.',
             remediation:
                 'Confirm Sencho\'s own compose project is outside COMPOSE_DIR. Use Fleet -> Node Update for Sencho updates.',
@@ -270,6 +283,7 @@ function checkPathMapping(dir: string, mounts: BindMounts): EnvironmentCheck {
         return {
             ...base,
             status: 'warn',
+            unmeasured: true,
             detail: 'Could not read the container mounts to verify path mapping.',
             remediation:
                 `Sencho is running in a container but could not inspect its own mounts. Confirm the compose `
@@ -331,6 +345,7 @@ function checkDisk(dir: string, usage: DiskUsage | null): EnvironmentCheck {
         return {
             ...base,
             status: 'warn',
+            unmeasured: true,
             detail: 'Disk usage could not be determined.',
             remediation:
                 'Sencho could not read host filesystem stats. An unknown disk state is not a guarantee of '
@@ -422,7 +437,9 @@ export function pickBackingMount(
         ?? sizes.find(s => s.mount === '/' || s.mount === 'C:')
         ?? sizes[0];
     if (!backing) return null;
-    return { usePercent: backing.use ?? 0, freeBytes: backing.available ?? 0 };
+    // A mount that reports no usage figures is no reading: 0% used and 0 bytes free would be invented, so it is unknown.
+    if (!Number.isFinite(backing.use) || !Number.isFinite(backing.available)) return null;
+    return { usePercent: backing.use as number, freeBytes: backing.available as number };
 }
 
 async function realDiskUsage(dir: string): Promise<DiskUsage | null> {

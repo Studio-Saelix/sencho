@@ -13,7 +13,7 @@ import {
 import DockerController from '../services/DockerController';
 import { buildRealProbes, collectEnvironmentReport, type EnvironmentProbes } from '../services/EnvironmentCheckService';
 import { PROXY_ROLE_HEADER } from '../services/license-headers';
-import { getSenchoVersion } from '../services/CapabilityRegistry';
+import { getActiveCapabilities, getSenchoVersion } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout } from '../utils/withTimeout';
@@ -88,7 +88,8 @@ export async function buildReadinessReport(nonce: string, probes: ReadinessProbe
     .filter((check): check is typeof check & { id: ReportedCheck['id'] } => (REPORTED_CHECK_IDS as readonly string[]).includes(check.id))
     .map((check) => ({
       id: check.id,
-      status: check.status,
+      // A probe that gave no reading is unknown, never the warning a preflight shows for it: the hub blocks readiness on unknown.
+      status: check.status !== 'pass' && check.unmeasured ? 'unknown' : check.status,
       detail: check.detail,
       remediation: check.status === 'pass' ? null : check.remediation,
     }));
@@ -110,6 +111,7 @@ export async function buildReadinessReport(nonce: string, probes: ReadinessProbe
       enrolledNodeId: enrolledNodeId(probes.persistedToken()),
       primaryUrl: process.env.SENCHO_PRIMARY_URL ?? null,
       caBundle: Boolean(process.env.SENCHO_PILOT_CA_FILE),
+      capabilities: [...getActiveCapabilities()],
     },
     docker: {
       serverVersion: typeof version?.Version === 'string' ? version.Version : null,

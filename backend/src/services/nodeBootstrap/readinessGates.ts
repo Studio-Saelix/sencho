@@ -1,4 +1,5 @@
-import type { PilotReadinessReport, ReadinessCheckId, ReportedCheck } from '../../pilot/readinessContract';
+import type { PilotRefusal } from '../PilotEnrollmentAttempts';
+import { REQUIRED_PILOT_CAPABILITIES, type PilotReadinessReport, type ReadinessCheckId, type ReportedCheck } from '../../pilot/readinessContract';
 
 /**
  * The hub's verdict on a Pilot's readiness report.
@@ -7,7 +8,9 @@ import type { PilotReadinessReport, ReadinessCheckId, ReportedCheck } from '../.
  * fact the report does not carry, or carries in a shape this build does not
  * know, is `unknown`, and `unknown` blocks Ready the same as `fail`. Only
  * `warn` lets the node be ready, for facts that do not stop a deployment
- * (a plain-HTTP hub the operator chose, a disk that is getting full).
+ * (a plain-HTTP hub the operator chose, a disk that is getting full). A probe
+ * that gave no reading (a disk whose usage could not be read) is `unknown`, not
+ * a warning: only a measured result may be a warning.
  */
 
 export type ReadinessGateId =
@@ -19,6 +22,7 @@ export type ReadinessGateId =
   | 'clock'
   | 'agent_version'
   | 'release_match'
+  | 'capabilities'
   | 'docker_daemon'
   | 'docker_compose'
   | 'compose_dir'
@@ -67,7 +71,7 @@ export interface ReadinessExpectation {
 
 /** Why no report could be judged. Each one maps to its own gate so the operator sees the cause, not a generic failure. */
 export type ReadinessFailure =
-  | { kind: 'not_connected' }
+  | { kind: 'not_connected'; refusal?: PilotRefusal }
   | { kind: 'unsupported'; status: number }
   | { kind: 'refused'; status: number }
   | { kind: 'malformed' }
@@ -82,6 +86,7 @@ const LABELS: Record<ReadinessGateId, string> = {
   clock: 'Clock skew',
   agent_version: 'Agent version',
   release_match: 'Hub and Pilot release',
+  capabilities: 'Pilot capabilities',
   docker_daemon: 'Docker engine',
   docker_compose: 'Docker Compose',
   compose_dir: 'Compose directory',
@@ -115,13 +120,32 @@ export function sameHubUrl(a: string, b: string): boolean {
   }
 }
 
+const REGENERATE_ENROLLMENT = 'Regenerate the enrollment (Settings → Nodes → Edit node → Regenerate enrollment token), put the new token in the sencho-agent compose file on the host, run `docker compose up -d`, then verify again.';
+
+/**
+ * A tunnel that is down. The hub knows why only when the Pilot reached it and was refused with a credential the hub
+ * signed; otherwise the cause (name resolution, TLS or CA trust, a proxy that drops the WebSocket upgrade) is on the host.
+ */
+function notConnected(refusal: PilotRefusal | undefined): ReadinessGate {
+  switch (refusal) {
+    case 'enrollment_expired':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with an enrollment that had expired.', REGENERATE_ENROLLMENT);
+    case 'enrollment_used':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with an enrollment that was already used or replaced by a newer one.', REGENERATE_ENROLLMENT);
+    case 'credential_expired':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its last attempt reached the hub with a saved credential that had expired.', REGENERATE_ENROLLMENT);
+    default:
+      return notPass('tunnel', 'fail', 'The Pilot is not connected to the hub, and no refused attempt from it reached the hub, so the hub cannot tell why.',
+        'On the host, run `docker logs sencho-agent`: it names a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade. Fix that, then verify again.');
+  }
+}
+
 /** The verdict when the agent could not be asked at all. */
 export function readinessWithoutReport(failure: ReadinessFailure): ReadinessResult {
   const gate = ((): ReadinessGate => {
     switch (failure.kind) {
       case 'not_connected':
-        return notPass('tunnel', 'fail', 'The Pilot is not connected to the hub, so nothing on the host could be verified.',
-          'Check that the sencho-agent container is running on the host and can reach the hub URL, then verify again.');
+        return notConnected(failure.refusal);
       case 'unsupported':
         return notPass('contract', 'fail', `The Pilot answered ${failure.status}: its image does not provide the readiness report this hub needs.`,
           'Run the same Sencho release on the hub and the Pilot (pull the image and recreate the sencho-agent project, or update the hub if it is the older one), then verify again.');
@@ -145,7 +169,10 @@ function reported(report: PilotReadinessReport, id: ReadinessCheckId): ReportedC
   return report.checks.find((check) => check.id === id) ?? null;
 }
 
-/** Map a check the agent ran on itself. A missing row is unknown, a warn on a fact that decides deployments fails. */
+/**
+ * Map a check the agent ran on itself. A missing row, or a row whose probe gave no reading (`unknown`), is
+ * unknown; a warn on a fact that decides deployments blocks; only a measured warn on `warnBlocks: false` passes.
+ */
 function fromReported(
   report: PilotReadinessReport,
   id: ReadinessCheckId & ReadinessGateId,
@@ -213,6 +240,12 @@ export function evaluateReadiness(report: PilotReadinessReport, expected: Readin
     ? pass('release_match', `The Pilot runs the hub's release (${version}).`)
     : notPass('release_match', 'warn', `The Pilot runs ${version} and the hub runs ${expected.hubVersion}. Features newer than the older side may not work on this node.`,
       'Run the same Sencho release on the hub and the Pilot.'));
+
+  const missingCapabilities = REQUIRED_PILOT_CAPABILITIES.filter((capability) => !report.agent.capabilities.includes(capability));
+  gates.push(missingCapabilities.length === 0
+    ? pass('capabilities', `The Pilot advertises the ${REQUIRED_PILOT_CAPABILITIES.length} capabilities deployments need.`)
+    : notPass('capabilities', 'fail', `The Pilot does not advertise ${missingCapabilities.join(', ')}, which deployments through this hub need.`,
+      'Run the same Sencho release on the hub and the Pilot (pull the image and recreate the sencho-agent project), then verify again.'));
 
   const socket = reported(report, 'docker_socket');
   const daemonWorks = socket?.status === 'pass' && report.docker.serverVersion !== null && report.docker.apiVersion !== null;

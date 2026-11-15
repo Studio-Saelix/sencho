@@ -6,6 +6,7 @@ import { safeAxiosTransport } from '../../utils/outboundTarget';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { DatabaseService, type NodeBootstrapEventStatus, type NodeReadinessRow, type NodeReadinessState } from '../DatabaseService';
 import { NotificationService } from '../NotificationService';
+import { PilotEnrollmentAttempts } from '../PilotEnrollmentAttempts';
 import { PilotTunnelManager } from '../PilotTunnelManager';
 import { getSenchoVersion } from '../CapabilityRegistry';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
@@ -74,6 +75,8 @@ interface ReadinessDeps {
   nonce: () => string;
   /** Tell open dashboards a node's readiness changed, so node lists refetch instead of showing a stale verdict. */
   changed: (nodeId: number) => void;
+  /** What the hub saw when this node's Pilot was refused, to say why a tunnel is down when it can. */
+  attempts: Pick<PilotEnrollmentAttempts, 'lastRefusal'>;
   timeoutMs: number;
 }
 
@@ -176,6 +179,7 @@ export class NodeReadinessService {
       now: () => Date.now(),
       nonce: () => crypto.randomBytes(16).toString('hex'),
       changed: (nodeId) => NotificationService.getInstance().broadcastEvent({ type: 'state-invalidate', scope: 'node-readiness', nodeId }),
+      attempts: PilotEnrollmentAttempts.getInstance(),
       timeoutMs: READINESS_TIMEOUT_MS,
       ...deps,
     };
@@ -297,7 +301,10 @@ export class NodeReadinessService {
 
   private async ask(nodeId: number, row: NodeReadinessRow): Promise<{ result: ReadinessResult; agentVersion: string | null }> {
     const loopback = this.deps.tunnels.hasActiveTunnel(nodeId) ? this.deps.tunnels.getLoopbackUrl(nodeId) : null;
-    if (!loopback) return { result: readinessWithoutReport({ kind: 'not_connected' }), agentVersion: null };
+    if (!loopback) {
+      const refusal = this.deps.attempts.lastRefusal(nodeId)?.reason;
+      return { result: readinessWithoutReport({ kind: 'not_connected', refusal }), agentVersion: null };
+    }
     const nonce = this.deps.nonce();
     const requestedAt = this.deps.now();
     const abort = new AbortController();
