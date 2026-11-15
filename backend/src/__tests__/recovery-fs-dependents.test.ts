@@ -432,18 +432,19 @@ describe('the fence on a host directory', () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it('names the directory in the refusal a stack file route answers with', () => {
+  it('names the directory in the refusal a stack file route answers with', async () => {
     fencedDirectory({ senchoPath: '/srv/compose/web/data', hostPath: '/opt/web/data' });
-    const refusal = fence.fsFenceRefusalFor('/srv/compose/web');
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    const refusal = (await fence.matchFsWorkToFences('/srv/compose/web')).refusal;
     expect(refusal?.code).toBe('data_restore');
     expect(refusal?.message).toContain('/opt/web/data');
     expect(refusal?.message).toContain('directory');
-    expect(fence.fsFenceRefusalFor('/srv/compose/web/data/db')).not.toBeNull();
-    expect(fence.fsFenceRefusalFor('/srv/compose/other')).toBeNull();
+    expect((await fence.matchFsWorkToFences('/srv/compose/web/data/db')).refusal).not.toBeNull();
+    expect((await fence.matchFsWorkToFences('/srv/compose/other')).refusal).toBeNull();
     // Trailing slashes do not change the comparison.
-    expect(fence.fsFenceRefusalFor('/srv/compose/web//')).not.toBeNull();
-    expect(fence.fsFenceRefusalFor('/srv/compose/web/dat/')).toBeNull();
-    expect(fence.fsFenceRefusalFor('/srv/compose/other//')).toBeNull();
+    expect((await fence.matchFsWorkToFences('/srv/compose/web//')).refusal).not.toBeNull();
+    expect((await fence.matchFsWorkToFences('/srv/compose/web/dat/')).refusal).toBeNull();
+    expect((await fence.matchFsWorkToFences('/srv/compose/other//')).refusal).toBeNull();
   });
 
   it('closes a fenced directory\'s recorded stacks to a Compose lifecycle like a volume\'s', async () => {
@@ -475,12 +476,186 @@ describe('the fence when nothing was fenced at the match', () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it('treats a fenced directory whose record cannot be read as fencing every host path', () => {
+  it('treats a fenced directory whose record cannot be read as fencing every host path', async () => {
     const intentId = fencedDirectory({ senchoPath: '/srv/data', hostPath: '/srv/data' });
     recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_paths_json = '{broken' WHERE id = ?").run(intentId);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(fence.RestoreFenceStore.getInstance().liveFencedFsTargets()).toEqual([{ senchoPath: '/', hostPath: '/', aliases: [] }]);
-    expect(fence.fsFenceRefusalFor('/srv/anything')).not.toBeNull();
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    expect((await fence.matchFsWorkToFences('/srv/anything')).refusal).not.toBeNull();
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+/**
+ * One host tree that Sencho reaches through two of its own bind destinations.
+ * Unit tests cannot make bind mounts, so the second destination is a symlink
+ * whose spelling `realpath` is made to keep: the two paths then differ
+ * lexically and share a device and inode, which is what two bind destinations
+ * of one directory look like.
+ */
+describe('the fence through another spelling of the fenced directory', () => {
+  let tree: string;
+  let real: string;
+  let second: string;
+  let parentLink: string;
+  let unrelated: string;
+
+  beforeEach(() => {
+    tree = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'spellings-')));
+    real = path.join(tree, 'host', 'data');
+    fs.mkdirSync(path.join(real, 'db'), { recursive: true });
+    second = path.join(tree, 'second-destination');
+    fs.symlinkSync(real, second);
+    parentLink = path.join(tree, 'parent-destination');
+    fs.symlinkSync(path.join(tree, 'host'), parentLink);
+    unrelated = path.join(tree, 'elsewhere');
+    fs.mkdirSync(unrelated);
+    vi.spyOn(fs.promises, 'realpath').mockImplementation((async (target: fs.PathLike) => path.resolve(String(target))) as unknown as typeof fs.promises.realpath);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tree, { recursive: true, force: true });
+  });
+
+  it('refuses file work on the same directory, a directory inside it, and an ancestor of it, under another spelling', async () => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    fencedDirectory({ senchoPath: real, hostPath: '/srv/host/data' });
+    expect((await fence.matchFsWorkToFences(second)).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(path.join(second, 'db'))).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(parentLink)).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(unrelated)).refusal).toBeNull();
+  });
+
+  it('refuses an ancestor under another spelling of a fenced child', async () => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    fencedDirectory({ senchoPath: path.join(real, 'db'), hostPath: '/srv/host/data/db' });
+    expect((await fence.matchFsWorkToFences(second)).refusal?.code).toBe('data_restore');
+  });
+
+  it('matches two own bind destinations of one host tree through the mount table', async () => {
+    // Two real, distinct directories stand for two destinations of `/hostroot`.
+    const first = path.join(tree, 'first-mount');
+    const other = path.join(tree, 'other-mount');
+    fs.mkdirSync(path.join(first, 'data'), { recursive: true });
+    fs.mkdirSync(path.join(other, 'data', 'db'), { recursive: true });
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: '/hostroot', destination: first },
+      { source: '/hostroot', destination: other },
+    ]);
+    fencedDirectory({ senchoPath: path.join(first, 'data'), hostPath: '/hostroot/data' });
+    expect((await fence.matchFsWorkToFences(path.join(other, 'data'))).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(path.join(other, 'data', 'db'))).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(other)).refusal?.code).toBe('data_restore');
+    expect((await fence.matchFsWorkToFences(unrelated)).refusal).toBeNull();
+  });
+
+  it('refuses file work it cannot prove clear of a fenced directory when its own mounts cannot be read', async () => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockRejectedValue(new Error('docker unavailable'));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    fencedDirectory({ senchoPath: real, hostPath: '/srv/host/data' });
+    const refusal = (await fence.matchFsWorkToFences(unrelated)).refusal;
+    expect(refusal?.code).toBe('data_restore');
+    expect(refusal?.message).toMatch(/cannot prove/);
+  });
+
+  describe('a container start', () => {
+    function inspectable(mounts: Array<{ Type: string; Source?: string; Name?: string; RW?: boolean }>) {
+      return { getContainer: () => ({ inspect: async () => ({ Mounts: mounts }) }) } as unknown as Pick<Docker, 'getContainer'>;
+    }
+    const affected = () => [
+      { label: 'equal', mounts: [{ Type: 'bind', Source: second, RW: true }] },
+      { label: 'child', mounts: [{ Type: 'bind', Source: path.join(second, 'db'), RW: true }] },
+      { label: 'writable ancestor', mounts: [{ Type: 'bind', Source: parentLink, RW: true }] },
+    ];
+
+    it('is refused for an equal, child or writable-ancestor bind through another spelling', async () => {
+      vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+      fencedDirectory({ senchoPath: real, hostPath: real });
+      const start = vi.fn(async () => 'started');
+      for (const { label, mounts } of affected()) {
+        await expect(fence.startContainerUnderFence(inspectable(mounts), label, start), label).rejects.toMatchObject({ code: 'data_restore' });
+      }
+      expect(start).not.toHaveBeenCalled();
+      // A read-only ancestor only observes.
+      await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: parentLink, RW: false }]), 'ro', start)).resolves.toBe('started');
+    });
+
+    it('is refused, never started, when Sencho cannot read its own mounts', async () => {
+      vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockRejectedValue(new Error('docker unavailable'));
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      fencedDirectory({ senchoPath: real, hostPath: real });
+      const start = vi.fn(async () => 'started');
+      for (const { label, mounts } of affected()) {
+        await expect(fence.startContainerUnderFence(inspectable(mounts), label, start), label)
+          .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/cannot prove/) });
+      }
+      expect(start).not.toHaveBeenCalled();
+      // A container that binds no host path is not in question.
+      await expect(fence.startContainerUnderFence(inspectable([{ Type: 'volume', Name: 'other_volume' }]), 'v', start)).resolves.toBe('started');
+    });
+  });
+});
+
+describe('file work admitted before a directory fence', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'fswork-')));
+    fs.mkdirSync(path.join(dir, 'data'));
+    fs.mkdirSync(path.join(dir, 'other'));
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function admit(target: string) {
+    const lease = fence.admitFsWork(target, new Set());
+    if (!('release' in lease)) throw new Error('not admitted');
+    return lease;
+  }
+
+  it('is waited for by the fence, and refused at its next step', async () => {
+    const target = { senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data'), aliases: [] };
+    const lease = admit(path.join(dir, 'data', 'db'));
+    fencedDirectory(target);
+    expect(lease.recheck()?.code).toBe('data_restore');
+    let drained: boolean | undefined;
+    const waiting = fence.waitForFsWorkOn(target, 5_000).then((result) => { drained = result; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(drained).toBeUndefined();
+    lease.release();
+    await waiting;
+    expect(drained).toBe(true);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('refuses the fence when the work does not finish in time', async () => {
+    const target = { senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data'), aliases: [] };
+    const lease = admit(dir);
+    fencedDirectory(target);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await fence.waitForFsWorkOn(target, 30)).toBe(false);
+    lease.release();
+  });
+
+  it('does not wait for work on an unrelated directory, and lets it carry on', async () => {
+    const target = { senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data'), aliases: [] };
+    const lease = admit(path.join(dir, 'other'));
+    fencedDirectory(target);
+    expect(await fence.waitForFsWorkOn(target, 5_000)).toBe(true);
+    expect(lease.recheck()).toBeNull();
+    lease.release();
+  });
+
+  it('refuses work cleared before a fence was recorded and registered after it', () => {
+    fencedDirectory({ senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data') });
+    const refused = fence.admitFsWork(path.join(dir, 'other'), new Set());
+    expect(refused).toMatchObject({ code: 'data_restore', message: expect.stringMatching(/while this file operation/) });
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
   });
 });

@@ -651,7 +651,10 @@ describe('GET /api/stacks/:stackName/files/download', () => {
 
   async function mockDownloadStream(stream: Readable, size: number): Promise<void> {
     const { FileSystemService } = await import('../services/FileSystemService');
+    const real = FileSystemService.getInstance();
     vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+      // The route registers the stack directory with the restore fence first.
+      getBaseDir: () => real.getBaseDir(),
       streamStackFile: vi.fn().mockResolvedValue({
         stream,
         size,

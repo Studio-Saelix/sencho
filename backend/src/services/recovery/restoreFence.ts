@@ -552,9 +552,16 @@ export async function startContainerUnderFence<T>(
   const checked = new Set<string>();
   if (fsTargets.length > 0 && bindsHostPath) {
     const { matchContainerToRoot, readOwnMounts } = await import('./fsRoots');
-    // Without Sencho's own mounts the host paths are still compared as they
-    // are; only the mapped spelling of a symlink is lost.
-    const ownMounts = await readOwnMounts().catch(() => null);
+    // `null` means Sencho is not in a container, so its paths are the host's.
+    // Mounts that cannot be read are not that: without them a symlinked or
+    // second spelling of the fenced directory cannot be recognised, so a start
+    // that binds any host path is refused until they can be read again.
+    let ownMounts: Awaited<ReturnType<typeof readOwnMounts>>;
+    try {
+      ownMounts = await readOwnMounts();
+    } catch {
+      return Promise.reject(new DataRestoreFenceError(fsTargets[0].hostPath, 'unproven', 'directory'));
+    }
     for (const target of fsTargets) {
       if ((await matchContainerToRoot({ Mounts: mounts }, target, ownMounts)).depends) {
         return Promise.reject(new DataRestoreFenceError(target.hostPath, 'container', 'directory'));
@@ -573,31 +580,140 @@ export async function startContainerUnderFence<T>(
   return startUnderFence(names, start, 'container', recheck);
 }
 
+// --- Stack file work under a directory fence --------------------------------
+
+/** How a fenced directory is told apart from another in a `checked` set. */
+function fsTargetMatchKey(target: FsTargetPaths): string {
+  return `${target.senchoPath}\0${target.hostPath}`;
+}
+
+/** The fenced directories a file operation was compared with and found clear of, and its refusal if it was not. */
+export interface FsWorkMatch {
+  refusal: DataRestoreFenceError | null;
+  checked: ReadonlySet<string>;
+}
+
 /**
- * The refusal a stack file operation gets when the directory it reads or writes
- * overlaps a host directory a live overwrite holds, or null. Compared in Sencho's
- * own namespace, where the file routes work.
+ * Compare a directory a stack file operation reads or writes, in Sencho's
+ * namespace, with every directory a live overwrite holds, by each spelling
+ * either has (see `relateToFencedDirectory`). An overlap is refused, and so is a
+ * relationship that cannot be proven. One query when nothing is fenced.
  */
-export function fsFenceRefusalFor(senchoPath: string): DataRestoreFenceError | null {
+export async function matchFsWorkToFences(senchoPath: string): Promise<FsWorkMatch> {
   const targets = RestoreFenceStore.getInstance().liveFencedFsTargets();
+  const checked = new Set<string>();
+  if (targets.length === 0) return { refusal: null, checked };
+  const { readOwnMounts, relateToFencedDirectory } = await import('./fsRoots');
+  const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
   for (const target of targets) {
-    if (pathsOverlapLexically(senchoPath, target.senchoPath)) {
-      return new DataRestoreFenceError(target.hostPath, 'browse', 'directory');
-    }
+    const relation = await relateToFencedDirectory(senchoPath, target, ownMounts);
+    if (relation === 'overlap') return { refusal: new DataRestoreFenceError(target.hostPath, 'browse', 'directory'), checked };
+    if (relation === 'unknown') return { refusal: new DataRestoreFenceError(target.hostPath, 'unproven', 'directory'), checked };
+    checked.add(fsTargetMatchKey(target));
   }
-  return null;
+  return { refusal: null, checked };
 }
 
-function withoutTrailingSlashes(p: string): string {
-  let end = p.length;
-  while (end > 0 && p[end - 1] === '/') end -= 1;
-  return p.slice(0, end) || '/';
+/** A stack file operation admitted against the directory fences, held until it has finished. */
+export interface FsWorkLease {
+  /**
+   * The refusal for a directory fenced since this work was admitted that it has
+   * not been proven clear of, or null. Synchronous: work that does more than one
+   * step (the items of a bulk operation, an upload after its body arrived) asks
+   * before each one, so a fence waiting for it does not wait for the rest.
+   */
+  recheck(): DataRestoreFenceError | null;
+  /** The work has finished. Idempotent. */
+  release(): void;
 }
 
-function pathsOverlapLexically(a: string, b: string): boolean {
-  const left = withoutTrailingSlashes(a);
-  const right = withoutTrailingSlashes(b);
-  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`) || left === '/' || right === '/';
+interface FsWorkEntry {
+  senchoPath: string;
+  startedAt: number;
+  /** Fenced directories this work is proven clear of; a fence's drain adds to it. */
+  checked: Set<string>;
+  done: Promise<void>;
+}
+
+/** Stack file operations admitted and not finished. */
+const fsWorkInFlight = new Set<FsWorkEntry>();
+
+function uncheckedFsFence(checked: ReadonlySet<string>): DataRestoreFenceError | null {
+  const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets()
+    .find((target) => !checked.has(fsTargetMatchKey(target)));
+  return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'files_recheck', 'directory') : null;
+}
+
+/**
+ * Admit a stack file operation that `matchFsWorkToFences` cleared, or refuse it.
+ *
+ * The check and the registration are one synchronous step, as for a container
+ * start, and the fence write that closes the other side is synchronous too: the
+ * work either sees a directory fenced after its match and is refused, or is
+ * registered before the fence exists and is waited for by `waitForFsWorkOn`.
+ */
+export function admitFsWork(senchoPath: string, checked: ReadonlySet<string>): FsWorkLease | DataRestoreFenceError {
+  const late = uncheckedFsFence(checked);
+  if (late) return late;
+  let settle: () => void = () => undefined;
+  const entry: FsWorkEntry = {
+    senchoPath,
+    startedAt: performance.now(),
+    checked: new Set(checked),
+    done: new Promise<void>((resolve) => { settle = resolve; }),
+  };
+  fsWorkInFlight.add(entry);
+  return {
+    recheck: () => (fsWorkInFlight.has(entry) ? uncheckedFsFence(entry.checked) : null),
+    release: () => {
+      if (!fsWorkInFlight.delete(entry)) return;
+      settle();
+    },
+  };
+}
+
+/** Test seam: how many stack file operations are admitted and unfinished. */
+export function fsWorkInFlightCountForTests(): number {
+  return fsWorkInFlight.size;
+}
+
+/**
+ * Wait until every stack file operation that overlaps `target`, or whose
+ * relationship to it cannot be proven, has finished. Called after the fence on
+ * `target` is recorded, so no operation can be admitted on it from then on and
+ * the set looked at here is complete. An operation proven clear of it is marked
+ * so, and its rechecks pass. False means one was still running when the cap ran
+ * out, or has been running long enough to count as hung: the fence is refused
+ * rather than taken under work that may still write.
+ */
+export async function waitForFsWorkOn(target: FsTargetPaths, timeoutMs = startDrainTimeoutMs): Promise<boolean> {
+  const entries = [...fsWorkInFlight];
+  if (entries.length === 0) return true;
+  const { readOwnMounts, relateToFencedDirectory } = await import('./fsRoots');
+  const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+  const key = fsTargetMatchKey(target);
+  const pending: FsWorkEntry[] = [];
+  for (const entry of entries) {
+    if (!fsWorkInFlight.has(entry)) continue;
+    if (await relateToFencedDirectory(entry.senchoPath, target, ownMounts) === 'unrelated') entry.checked.add(key);
+    else pending.push(entry);
+  }
+  const live = pending.filter((entry) => fsWorkInFlight.has(entry));
+  if (live.length === 0) return true;
+  const now = performance.now();
+  if (live.some((entry) => now - entry.startedAt >= hungStartAfterMs)) {
+    console.warn('[Recovery] A file operation on the directory has been running for over %d seconds; refusing the fence.', Math.round(hungStartAfterMs / 1000));
+    return false;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const capped = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.all(live.map((entry) => entry.done)).then(() => true), capped]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**

@@ -193,17 +193,71 @@ async function identityOf(target: string): Promise<string | null> {
   }
 }
 
+/** The identities of `target` and of each of its ancestors, nearest first; null for one that cannot be read. */
+async function identityChain(target: string): Promise<Array<string | null>> {
+  const chain: Array<string | null> = [];
+  let current = normalizeAbsolute(target);
+  while (current !== null) {
+    chain.push(await identityOf(current));
+    if (current === '/') break;
+    current = path.posix.dirname(current);
+  }
+  return chain;
+}
+
 /**
  * `relatePath`, plus identity: two spellings of one directory (a directory
  * Sencho reaches through two of its own mounts, say) are lexically unrelated, so
- * an unrelated pair is compared by device and inode as well. Only equality is
- * found this way; a parent reached under another spelling is matched lexically
- * or not at all.
+ * an unrelated pair is compared by device and inode as well, along both paths'
+ * ancestors. A candidate whose own directory or an ancestor is the root is
+ * equal to it or inside it; a candidate that is an ancestor of the root under
+ * another spelling contains it.
  */
 async function relateWithIdentity(candidate: string, root: string, rootIdentity: string | null): Promise<PathRelation> {
   const relation = relatePath(candidate, root);
   if (relation !== 'unrelated' || rootIdentity === null) return relation;
-  return (await identityOf(candidate)) === rootIdentity ? 'equal' : 'unrelated';
+  const candidateChain = await identityChain(candidate);
+  const at = candidateChain.indexOf(rootIdentity);
+  if (at === 0) return 'equal';
+  if (at > 0) return 'inside';
+  const candidateIdentity = candidateChain[0];
+  if (candidateIdentity === null || candidateIdentity === undefined) return 'unrelated';
+  const rootAncestors = (await identityChain(root)).slice(1);
+  return rootAncestors.includes(candidateIdentity) ? 'ancestor' : 'unrelated';
+}
+
+/**
+ * How a directory Sencho is about to read or write sits relative to a fenced
+ * host directory, from every spelling either has: the Sencho path, the daemon's
+ * path the Sencho path maps to through Sencho's own mounts (so a second bind
+ * destination of one host tree is recognised), the declared aliases, and the
+ * device and inode of each path's ancestors. `unknown` when the relationship
+ * cannot be proven: Sencho's own mounts are unreadable, or the fenced directory
+ * cannot be read here. The caller refuses an overlap and an unknown alike.
+ */
+export async function relateToFencedDirectory(
+  candidateSenchoPath: string,
+  target: FsTargetPaths,
+  ownMounts: OwnMounts | 'unreadable',
+): Promise<'overlap' | 'unrelated' | 'unknown'> {
+  const candidate = await canonicalOrSelf(candidateSenchoPath);
+  if (pathsOverlap(candidate, target.senchoPath)) return 'overlap';
+  if (ownMounts === 'unreadable') return 'unknown';
+  const hostView = senchoToHostPath(candidate, ownMounts);
+  if (hostView !== null && [target.hostPath, ...target.aliases].some((spelling) => pathsOverlap(hostView, spelling))) {
+    return 'overlap';
+  }
+  let targetIdentity: string;
+  try {
+    const stat = await fsPromises.stat(target.senchoPath, { bigint: true });
+    targetIdentity = `${stat.dev}:${stat.ino}`;
+  } catch (err) {
+    // A fenced directory that is not at its Sencho path any more has no second
+    // spelling here to find; the host-side comparison above still holds. One
+    // that is there and cannot be read could be anything.
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'unrelated' : 'unknown';
+  }
+  return (await relateWithIdentity(candidate, target.senchoPath, targetIdentity)) === 'unrelated' ? 'unrelated' : 'overlap';
 }
 
 /** True when two host paths overlap (equal, or one inside the other). */

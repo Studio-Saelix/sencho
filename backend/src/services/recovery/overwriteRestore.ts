@@ -14,6 +14,7 @@ import {
   fenceIdentityFor,
   releaseRestoreFence,
   RestoreFenceStore,
+  waitForFsWorkOn,
   waitForStartsInFlight,
   type FenceMember,
   type FenceMemberInput,
@@ -1358,6 +1359,16 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   // that no longer exists and leave the volume fenced for good.
   if (!drained) {
     console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', sanitizeForLog(state.intent.id));
+    deps.fence.setFenceState(state.intent.id, 'none');
+    await settleRollback(ctx, state, 'fence_unavailable');
+    return false;
+  }
+  // The same for a stack file operation on the directory: one admitted before
+  // the fence was recorded may still be writing it, and the pre-restore point and
+  // the swap must not run under it. Every one admitted after is refused.
+  if (state.intent.targetPaths && isFsTargetKey(state.intent.targetVolume)
+    && !await waitForFsWorkOn(state.intent.targetPaths)) {
+    console.warn('[Recovery] A file operation on the directory is still running; refusing the fence on %s.', sanitizeForLog(state.intent.id));
     deps.fence.setFenceState(state.intent.id, 'none');
     await settleRollback(ctx, state, 'fence_unavailable');
     return false;

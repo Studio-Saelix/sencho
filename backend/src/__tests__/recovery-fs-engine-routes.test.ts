@@ -790,6 +790,11 @@ describe('overwriting a host directory', () => {
  * storage lock is gone, with its fence held: the state only the intent records.
  */
 function fencedOverwriteOf(dir: string, dependentStacks: string[] = []): string {
+  return fencedOverwriteOfPaths({ senchoPath: dir, hostPath: dir, aliases: [] }, dependentStacks);
+}
+
+function fencedOverwriteOfPaths(targetPaths: { senchoPath: string; hostPath: string; aliases: string[] }, dependentStacks: string[] = []): string {
+  const dir = targetPaths.hostPath;
   const db = recoveryDbModule.recoveryDb();
   const storage = identityStore.StorageIdentityStore.getInstance().observe({
     ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: dir,
@@ -810,7 +815,7 @@ function fencedOverwriteOf(dir: string, dependentStacks: string[] = []): string 
   const store = intentsStore();
   const intent = store.recordOverwrite({
     operationId, pointId: point.id, targetVolume: `fs:${storage.storageKey}`,
-    targetPaths: { senchoPath: dir, hostPath: dir, aliases: [] }, actor: 'admin', processEpoch: 'old',
+    targetPaths, actor: 'admin', processEpoch: 'old',
     stagingVolume: `sencho-recovery-stage-${randomUUID()}`, expectedGenerationToken: storage.generationToken,
     dependentStacks,
   });
@@ -872,8 +877,10 @@ describe('the fence on a host directory, at the routes', () => {
     fs.symlinkSync(fenced, swapped);
     fencedOverwriteOf(fs.realpathSync(fenced), ['web']);
     const res = await request(app).get(`/api/stacks/web/files?rootId=${encodeURIComponent(bindId)}`).set('Cookie', adminCookie);
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('SYMLINK_ESCAPE');
+    // The fence follows the link to the directory it resolves to and refuses
+    // first; without a fence the file gateway answers SYMLINK_ESCAPE.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
     expect(JSON.stringify(res.body)).not.toContain('secret.txt');
   });
 
@@ -897,6 +904,168 @@ describe('the fence on a host directory, at the routes', () => {
     expect(res.status).toBe(409);
     expect(res.body.errorClass).toBe('lock_held');
     expect(res.body.error).toMatch(/contains this one or is inside it/);
+  });
+});
+
+describe('file work already running when a directory is fenced', () => {
+  async function gateway() {
+    return (await import('../services/FileRootGateway')).FileRootGateway.prototype;
+  }
+  async function fenceModule() {
+    return import('../services/recovery/restoreFence');
+  }
+
+  for (const variant of ['bind root', 'stack source'] as const) {
+    it(`stops a bulk delete on the ${variant} at the next item once the directory is fenced`, async () => {
+      const data = dataDir('web');
+      fs.writeFileSync(path.join(data, 'a.txt'), 'a');
+      fs.writeFileSync(path.join(data, 'b.txt'), 'b');
+      models.byStack.web = [{ source: data, target: '/data' }];
+      const query = variant === 'bind root' ? `?rootId=${encodeURIComponent(await rootIdOf('web'))}` : '';
+      const paths = variant === 'bind root' ? ['a.txt', 'b.txt'] : ['data/a.txt', 'data/b.txt'];
+      const proto = await gateway();
+      const original = proto.deletePath;
+      let calls = 0;
+      vi.spyOn(proto, 'deletePath').mockImplementation(async function (this: unknown, ...args: Parameters<typeof original>) {
+        calls += 1;
+        // The overwrite fences the directory while the first item is deleted.
+        if (calls === 1) fencedOverwriteOf(data, ['web']);
+        return original.apply(this, args);
+      });
+      const res = await request(app).post(`/api/stacks/web/files/bulk-delete${query}`).set('Cookie', adminCookie).send({ paths });
+      expect(res.status).toBe(200);
+      expect(res.body.deleted).toEqual([paths[0]]);
+      expect(res.body.failed).toEqual([{ path: paths[1], error: expect.stringMatching(/data restore/) }]);
+      expect(calls).toBe(1);
+      expect(fs.existsSync(path.join(data, 'b.txt'))).toBe(true);
+    });
+  }
+
+  it('stops a bulk move at the next item once the directory is fenced', async () => {
+    const data = dataDir('web');
+    fs.writeFileSync(path.join(data, 'a.txt'), 'a');
+    fs.writeFileSync(path.join(data, 'b.txt'), 'b');
+    fs.mkdirSync(path.join(data, 'into'));
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    const proto = await gateway();
+    const original = proto.rename;
+    let calls = 0;
+    vi.spyOn(proto, 'rename').mockImplementation(async function (this: unknown, ...args: Parameters<typeof original>) {
+      calls += 1;
+      if (calls === 1) fencedOverwriteOf(data, ['web']);
+      return original.apply(this, args);
+    });
+    const res = await request(app).post(`/api/stacks/web/files/bulk-move?rootId=${encodeURIComponent(bindId)}`)
+      .set('Cookie', adminCookie).send({ from: ['a.txt', 'b.txt'], toDir: 'into' });
+    expect(res.status).toBe(200);
+    expect(res.body.moved).toEqual(['a.txt']);
+    expect(res.body.failed).toEqual([{ path: 'b.txt', error: expect.stringMatching(/data restore/) }]);
+    expect(fs.existsSync(path.join(data, 'b.txt'))).toBe(true);
+  });
+
+  it('keeps a fence waiting while a copy into the directory is running, and lets it go once the copy has answered', async () => {
+    const data = dataDir('web');
+    fs.writeFileSync(path.join(data, 'a.txt'), 'a');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    const proto = await gateway();
+    const original = proto.copy;
+    let entered!: () => void;
+    const inCopy = new Promise<void>((resolve) => { entered = resolve; });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(proto, 'copy').mockImplementation(async function (this: unknown, ...args: Parameters<typeof original>) {
+      entered();
+      await held;
+      return original.apply(this, args);
+    });
+    const copying = request(app).post(`/api/stacks/web/files/copy?rootId=${encodeURIComponent(bindId)}`)
+      .set('Cookie', adminCookie).send({ from: 'a.txt', to: 'b.txt' }).then((r) => r);
+    await inCopy;
+    const fence = await fenceModule();
+    fencedOverwriteOf(data, ['web']);
+    const target = { senchoPath: data, hostPath: data, aliases: [] };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // The overwrite cannot go ahead under the copy: its drain gives up.
+    expect(await fence.waitForFsWorkOn(target, 50)).toBe(false);
+    const drained = fence.waitForFsWorkOn(target, 5_000);
+    finish();
+    expect((await copying).status).toBe(204);
+    expect(await drained).toBe(true);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('refuses an upload whose body was still arriving when the directory was fenced, and writes nothing', async () => {
+    const data = dataDir('web');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    const fence = await fenceModule();
+    const http = await import('http');
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (server.address() as import('net').AddressInfo).port;
+      const boundary = 'fencetestboundary';
+      const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="late.txt"\r\nContent-Type: text/plain\r\n\r\n`;
+      const tail = `late bytes\r\n--${boundary}--\r\n`;
+      const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1', port, method: 'POST',
+          path: `/api/stacks/web/files/upload?rootId=${encodeURIComponent(bindId)}`,
+          headers: {
+            Cookie: adminCookie,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': Buffer.byteLength(head) + Buffer.byteLength(tail),
+          },
+        }, (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += String(chunk); });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        });
+        req.on('error', reject);
+        req.write(head);
+        // The upload has been admitted and is waiting for the rest of its body.
+        void (async () => {
+          for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+          fencedOverwriteOf(data, ['web']);
+          vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+          // The overwrite waits for the upload rather than fencing under it.
+          expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 50)).toBe(false);
+          req.end(tail);
+        })().catch(reject);
+      });
+      const answered = await response;
+      expect(answered.status).toBe(409);
+      expect(JSON.parse(answered.body).code).toBe('data_restore');
+      expect(fs.existsSync(path.join(data, 'late.txt'))).toBe(false);
+      for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('refuses file work on a stack directory reached through a second own bind destination of the fenced tree', async () => {
+    const compose = fs.realpathSync(process.env.COMPOSE_DIR as string);
+    stackDir('web');
+    // The same host tree is also mounted at a second destination, where the
+    // overwrite recorded the directory.
+    const secondDestination = path.join(shared, `second-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(path.join(secondDestination, 'web', 'data'), { recursive: true });
+    const SelfIdentityService = (await import('../services/SelfIdentityService')).default;
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue([
+      { source: '/hoststacks', destination: compose },
+      { source: '/hoststacks', destination: secondDestination },
+    ]);
+    fencedOverwriteOfPaths({ senchoPath: path.join(secondDestination, 'web', 'data'), hostPath: '/hoststacks/web/data', aliases: [] });
+    const read = await request(app).get('/api/stacks/web/files').set('Cookie', adminCookie);
+    expect(read.status).toBe(409);
+    expect(read.body.code).toBe('data_restore');
+    const write = await request(app).put('/api/stacks/web/files/content?path=compose.yaml').set('Cookie', adminCookie).send({ content: 'x' });
+    expect(write.status).toBe(409);
+    stackDir('other');
+    expect((await request(app).get('/api/stacks/other/files').set('Cookie', adminCookie)).status).toBe(200);
   });
 });
 

@@ -121,6 +121,7 @@ import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../help
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
+import type { FsWorkLease } from '../services/recovery/restoreFence';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -3910,23 +3911,15 @@ async function resolveRootForOp(
   // legacy behaviour. Return a synthetic stack-source root without touching the
   // roots service, so plain stack-source ops never trigger a compose render.
   if (rootId === STACK_SOURCE_ROOT_ID) {
-    if (await directoryRestoreLive()) {
-      // The stackName param check already refuses an escaping name; refusing it
-      // again here keeps an escaping name from reaching the realpath below.
-      const base = path.resolve(FileSystemService.getInstance(req.nodeId).getBaseDir());
-      const stackDir = path.resolve(base, stackName);
-      if (!stackDir.startsWith(base + path.sep)) {
-        res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
-        return null;
-      }
-      let canonical = stackDir;
-      try {
-        canonical = await fsp.realpath(stackDir);
-      } catch {
-        // A directory that cannot be resolved is compared as written.
-      }
-      if (await refuseUnderDirectoryRestore(res, canonical)) return null;
+    // The stackName param check already refuses an escaping name; refusing it
+    // again here keeps an escaping name from reaching the fence's realpath.
+    const base = path.resolve(FileSystemService.getInstance(req.nodeId).getBaseDir());
+    const stackDir = path.resolve(base, stackName);
+    if (!stackDir.startsWith(base + path.sep)) {
+      res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
+      return null;
     }
+    if (await refuseUnderDirectoryRestore(res, stackDir)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3959,25 +3952,91 @@ async function resolveRootForOp(
   return root;
 }
 
-/** Whether any data restore holds a host directory fence right now. One query. */
-async function directoryRestoreLive(): Promise<boolean> {
-  const { RestoreFenceStore } = await import('../services/recovery/restoreFence');
-  return RestoreFenceStore.getInstance().liveFencedFsTargets().length > 0;
+/**
+ * Refuse a file operation on a directory that overlaps one a data restore is
+ * overwriting, or whose relationship to it cannot be proven: reading it would
+ * show a half-swapped tree, and writing it would change data the restore is
+ * replacing. Otherwise admit it: the operation is registered until its handler
+ * has finished and its response has closed, and a fence recorded meanwhile waits
+ * for it before it captures or swaps anything. One query when no such restore
+ * is live.
+ */
+async function refuseUnderDirectoryRestore(res: Response, dir: string): Promise<boolean> {
+  const { matchFsWorkToFences, admitFsWork } = await import('../services/recovery/restoreFence');
+  const match = await matchFsWorkToFences(dir);
+  const admitted = match.refusal ?? admitFsWork(dir, match.checked);
+  if (isDataRestoreFenceError(admitted)) {
+    res.status(409).json({ error: admitted.message, code: DATA_RESTORE_FENCE_CODE });
+    return true;
+  }
+  holdFsWork(res, admitted);
+  return false;
 }
 
 /**
- * Refuse a file operation on a directory that overlaps one a data restore is
- * overwriting: reading it would show a half-swapped tree, and writing it would
- * change data the restore is replacing. One query when no such restore is live.
- * The caller passes the directory's canonical path, already admitted.
+ * The stack file operations of one request: the directory fence leases it holds
+ * and how many of its handlers are still running. A lease is released when the
+ * response has closed and no handler is running, so neither a streamed download
+ * that outlives its handler nor a handler that keeps writing after its client
+ * went away is let go early.
  */
-async function refuseUnderDirectoryRestore(res: Response, canonicalDir: string): Promise<boolean> {
-  const { RestoreFenceStore, fsFenceRefusalFor } = await import('../services/recovery/restoreFence');
-  if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return false;
-  const refusal = fsFenceRefusalFor(canonicalDir);
-  if (!refusal) return false;
-  res.status(409).json({ error: refusal.message, code: DATA_RESTORE_FENCE_CODE });
-  return true;
+interface FileOpScope {
+  active: number;
+  closed: boolean;
+  leases: FsWorkLease[];
+}
+
+const fileOpScopes = new WeakMap<Response, FileOpScope>();
+
+function fileOpScopeOf(res: Response): FileOpScope {
+  const existing = fileOpScopes.get(res);
+  if (existing) return existing;
+  const scope: FileOpScope = { active: 0, closed: res.writableFinished || res.destroyed, leases: [] };
+  fileOpScopes.set(res, scope);
+  res.once('close', () => {
+    scope.closed = true;
+    settleFileOpScope(scope);
+  });
+  return scope;
+}
+
+function settleFileOpScope(scope: FileOpScope): void {
+  if (!scope.closed || scope.active > 0) return;
+  for (const lease of scope.leases.splice(0)) lease.release();
+}
+
+function holdFsWork(res: Response, lease: FsWorkLease): void {
+  const scope = fileOpScopeOf(res);
+  scope.leases.push(lease);
+  settleFileOpScope(scope);
+}
+
+/**
+ * The refusal for a directory fenced since this request's file operation was
+ * admitted, or null. Work with more than one step asks before each one.
+ */
+function fileOpRecheck(res: Response): { message: string } | null {
+  for (const lease of fileOpScopes.get(res)?.leases ?? []) {
+    const refusal = lease.recheck();
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/** Run a stack file route handler inside its request's file operation scope. */
+function fileOp(
+  handler: (req: Request, res: Response, next: NextFunction) => unknown,
+): (req: Request, res: Response, next: NextFunction) => Promise<unknown> {
+  return async (req, res, next) => {
+    const scope = fileOpScopeOf(res);
+    scope.active += 1;
+    try {
+      return await handler(req, res, next);
+    } finally {
+      scope.active -= 1;
+      settleFileOpScope(scope);
+    }
+  };
 }
 
 /** Drop the cached root allowlist after a stack-source mutation that can change declared mounts. */
@@ -4066,7 +4125,7 @@ stacksRouter.get('/:stackName/file-roots', async (req: Request, res: Response) =
   }
 });
 
-stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4100,9 +4159,9 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
     recordFileOp(req.nodeId, 'list', startedAt, false);
     return sendFsError(res, err, 'Failed to list directory');
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/content', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4138,9 +4197,9 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'read', startedAt, false);
     return sendFsError(res, err, 'Failed to read file');
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/download', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/download', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4233,7 +4292,7 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     recordFileOp(req.nodeId, 'download', startedAt, false);
     return sendFsError(res, err, 'Failed to download file');
   }
-});
+}));
 
 type UploadStartedReq = Request & { _fileUploadStartedAt?: number; _fileUploadRoot?: StackFileRoot };
 
@@ -4242,14 +4301,14 @@ stacksRouter.post(
   // Authorize BEFORE multer touches the body, so an unauthorized caller or a
   // read-only/non-existent root is rejected without ever spooling a temp file.
   // The resolved root is stashed for the handler so it is not resolved twice.
-  async (req: Request, res: Response, next: NextFunction) => {
+  fileOp(async (req: Request, res: Response, next: NextFunction) => {
     const stackName = req.params.stackName as string;
     if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
     const root = await resolveRootForOp(req, res, stackName, 'write');
     if (!root) return;
     (req as UploadStartedReq)._fileUploadRoot = root;
     next();
-  },
+  }),
   (req: Request, res: Response, next: NextFunction) => {
     // Capture the time the upload entered the route so every downstream
     // metric reports the same latency window: the body-transfer +
@@ -4287,7 +4346,7 @@ stacksRouter.post(
       next();
     });
   },
-  async (req: Request, res: Response) => {
+  fileOp(async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
     // The pre-multer middleware already authorized and resolved the root.
     const root = (req as UploadStartedReq)._fileUploadRoot;
@@ -4319,6 +4378,14 @@ stacksRouter.post(
     // Date.now() defensively in case the wrapper was bypassed in a test.
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
+    // The body took its time to arrive; a directory fenced meanwhile is waiting
+    // for this upload, so it is refused here instead of written under the fence.
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      recordFileOp(req.nodeId, 'upload', startedAt, false);
+      await cleanupUploadTemp(req);
+      return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     try {
       const gateway = FileRootGateway.getInstance(req.nodeId);
       const existing = await gateway.pathKind(root, stackName, targetRelPath);
@@ -4398,10 +4465,10 @@ stacksRouter.post(
       // always remains and must be removed on every exit (success, conflict, error).
       await cleanupUploadTemp(req);
     }
-  },
+  }),
 );
 
-stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response) => {
+stacksRouter.put('/:stackName/files/content', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4467,9 +4534,9 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'write', startedAt, false);
     return sendFsError(res, err, 'Failed to write file');
   }
-});
+}));
 
-stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => {
+stacksRouter.delete('/:stackName/files', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4509,9 +4576,9 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     recordFileOp(req.nodeId, 'delete', startedAt, false);
     return sendFsError(res, err, 'Failed to delete path');
   }
-});
+}));
 
-stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/folder', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4548,9 +4615,9 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'mkdir', startedAt, false);
     return sendFsError(res, err, 'Failed to create folder');
   }
-});
+}));
 
-stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Response) => {
+stacksRouter.patch('/:stackName/files/rename', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const { from, to } = req.body as { from?: unknown; to?: unknown };
@@ -4597,9 +4664,9 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
     recordFileOp(req.nodeId, 'rename', startedAt, false);
     return sendFsError(res, err, 'Failed to rename');
   }
-});
+}));
 
-stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/copy', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const { from, to } = req.body as { from?: unknown; to?: unknown };
@@ -4646,7 +4713,7 @@ stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) 
     recordFileOp(req.nodeId, 'copy', startedAt, false);
     return sendFsError(res, err, 'Failed to copy');
   }
-});
+}));
 
 // ── Bulk file operations (delete / move / download) ─────────────────────────
 
@@ -4748,7 +4815,7 @@ async function enumerateArchiveFiles(
   return files;
 }
 
-stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/bulk-delete', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const parsed = parseBulkPaths((req.body as { paths?: unknown }).paths, res);
@@ -4761,6 +4828,12 @@ stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Res
   const failed: { path: string; error: string }[] = [];
   for (const relPath of normalized) {
     const startedAt = Date.now();
+    // A directory fenced while the earlier items ran stops the rest.
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      failed.push({ path: relPath, error: fenced.message });
+      continue;
+    }
     try {
       await gateway.deletePath(root, stackName, relPath, true);
       deleted.push(relPath);
@@ -4774,9 +4847,9 @@ stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Res
   if (deleted.length > 0) afterStackMutation(req, stackName);
   logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkDelete', stack: stackName, deleted: deleted.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
   return res.json({ deleted, failed });
-});
+}));
 
-stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/bulk-move', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const body = req.body as { from?: unknown; toDir?: unknown };
@@ -4805,6 +4878,12 @@ stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Respo
     const startedAt = Date.now();
     const name = fromRel.split('/').pop() as string;
     const toRel = toDir ? `${toDir}/${name}` : name;
+    // A directory fenced while the earlier items ran stops the rest.
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      failed.push({ path: fromRel, error: fenced.message });
+      continue;
+    }
     try {
       await gateway.rename(root, stackName, fromRel, toRel);
       moved.push(fromRel);
@@ -4817,9 +4896,9 @@ stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Respo
   if (moved.length > 0) afterStackMutation(req, stackName);
   logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkMove', stack: stackName, moved: moved.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
   return res.json({ moved, failed });
-});
+}));
 
-stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/bulk-download', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const raw = req.query.path;
@@ -4901,9 +4980,9 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
     pack.destroy();
     if (!res.writableEnded) res.destroy();
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/permissions', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4925,9 +5004,9 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
     recordFileOp(req.nodeId, 'permissionsRead', startedAt, false);
     return sendFsError(res, err, 'Failed to read permissions');
   }
-});
+}));
 
-stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Response) => {
+stacksRouter.put('/:stackName/files/permissions', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4971,5 +5050,5 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
     recordFileOp(req.nodeId, 'chmod', startedAt, false);
     return sendFsError(res, err, 'Failed to set permissions');
   }
-});
+}));
 
