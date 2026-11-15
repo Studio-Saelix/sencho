@@ -450,10 +450,18 @@ export function startUnderFence<T>(
   volumeNames: readonly string[],
   start: () => Promise<T>,
   subject: FenceSubject = 'container',
+  /**
+   * A refusal to evaluate in the same synchronous step as the registration. The
+   * directory match is asynchronous, so it runs before; this re-reads the
+   * fenced directories here and refuses one that appeared after the match.
+   */
+  recheck?: () => DataRestoreFenceError | null,
 ): Promise<T> {
   const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
   const hit = volumeNames.find((name) => fenced.includes(name));
   if (hit) return Promise.reject(new DataRestoreFenceError(hit, subject));
+  const late = recheck?.() ?? null;
+  if (late) return Promise.reject(late);
   let run: Promise<T>;
   try {
     run = start();
@@ -528,7 +536,9 @@ export async function startContainerUnderFence<T>(
   // it, of a path inside it, or of an ancestor that can write it. A read-only
   // ancestor (a monitoring agent) still starts.
   const fsTargets = RestoreFenceStore.getInstance().liveFencedFsTargets();
-  if (fsTargets.length > 0 && mounts.some((m) => m.Type === 'bind')) {
+  const bindsHostPath = mounts.some((m) => m.Type === 'bind');
+  const checked = new Set<string>();
+  if (fsTargets.length > 0 && bindsHostPath) {
     const { matchContainerToRoot, readOwnMounts } = await import('./fsRoots');
     // Without Sencho's own mounts the host paths are still compared as they
     // are; only the mapped spelling of a symlink is lost.
@@ -537,9 +547,18 @@ export async function startContainerUnderFence<T>(
       if ((await matchContainerToRoot({ Mounts: mounts }, target, ownMounts)).depends) {
         return Promise.reject(new DataRestoreFenceError(target.hostPath, 'container', 'directory'));
       }
+      checked.add(target.hostPath);
     }
   }
-  return startUnderFence(names, start);
+  // A directory fenced after the match above was never compared with this
+  // container. It is refused at registration, which is synchronous with the
+  // fence write, so a fence is either matched or seen here; the caller retries.
+  const recheck = (): DataRestoreFenceError | null => {
+    if (!bindsHostPath) return null;
+    const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets().find((target) => !checked.has(target.hostPath));
+    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'container', 'directory') : null;
+  };
+  return startUnderFence(names, start, 'container', recheck);
 }
 
 /**
