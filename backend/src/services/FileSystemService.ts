@@ -1064,8 +1064,15 @@ export class FileSystemService {
         }
       }
 
-      await fsPromises.writeFile(safePath, content, 'utf-8');
-      const newStat = await fsPromises.stat(safePath);
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, safePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      await fsPromises.writeFile(contained, content, 'utf-8');
+      const newStat = await fsPromises.stat(contained);
       return { ok: true, mtimeMs: newStat.mtimeMs };
     });
   }
@@ -1227,7 +1234,16 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
-    return this.underDirectoryFences(safePath, () => fsPromises.readFile(safePath, encoding));
+    return this.underDirectoryFences(safePath, async () => {
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, safePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      return fsPromises.readFile(contained, encoding);
+    });
   }
 
   /**
@@ -1282,7 +1298,16 @@ export class FileSystemService {
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
-    return this.underDirectoryFences(filePath, () => fsPromises.writeFile(filePath, content, encoding));
+    return this.underDirectoryFences(filePath, async () => {
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, filePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      return fsPromises.writeFile(contained, content, encoding);
+    });
   }
 
   async access(filePath: string): Promise<void> {
@@ -1325,7 +1350,16 @@ export class FileSystemService {
     // that links into another stack is refused rather than overwritten.
     await this.assertRealWithinStack(stackName, envPath);
     try {
-      await this.underDirectoryFences(envPath, () => fsPromises.writeFile(envPath, content, 'utf-8'));
+      await this.underDirectoryFences(envPath, async () => {
+        // The containment barrier sits inline with the sink, where static
+        // analysis credits it.
+        const baseResolved = path.resolve(this.baseDir);
+        const contained = path.resolve(baseResolved, envPath);
+        if (!contained.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+        }
+        await fsPromises.writeFile(contained, content, 'utf-8');
+      });
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
       console.error('Error writing env file:', error);
@@ -1431,7 +1465,16 @@ export class FileSystemService {
     try {
       // Removing the stack directory removes every directory inside it, so it
       // is refused while a restore overwrites one of them.
-      await this.underDirectoryFences(stackDir, () => fsPromises.rm(stackDir, { recursive: true, force: true }));
+      await this.underDirectoryFences(stackDir, async () => {
+        // The containment barrier sits inline with the sink, where static
+        // analysis credits it.
+        const baseResolved = path.resolve(this.baseDir);
+        const contained = path.resolve(baseResolved, stackDir);
+        if (!contained.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+        }
+        await fsPromises.rm(contained, { recursive: true, force: true });
+      });
     } catch (error: unknown) {
       if (isDataRestoreFenceError(error)) throw error;
       const fsError = error as NodeJS.ErrnoException;
