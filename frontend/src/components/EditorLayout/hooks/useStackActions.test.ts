@@ -3906,6 +3906,7 @@ describe('container fetch contract', () => {
         outcome = await result.current.refreshSelectedContainers('web', 'web.yml');
       });
       expect(outcome).toBe('failed');
+      expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
       expect(setContainersLoadError).toHaveBeenCalledWith(REASON);
     });
 
