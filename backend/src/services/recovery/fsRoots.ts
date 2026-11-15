@@ -231,8 +231,7 @@ export type ProvenPathRelation = PathRelation | 'unknown';
  * as a possible dependency; `findDeclaredFsRoot`, which looks for an equal
  * declaration to admit an overwrite, does not find one and reports the
  * declaration as unplaced, so an overwrite no other declaration admits is
- * refused as unknown. A root
- * that is not there has no second spelling to find.
+ * refused as unknown. A root that is not there has no second spelling to find.
  */
 async function relateWithIdentity(candidate: string, root: string, rootIdentity: DirectoryIdentity): Promise<ProvenPathRelation> {
   const relation = relatePath(candidate, root);
