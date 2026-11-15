@@ -393,9 +393,11 @@ export class ResticEngine implements BackupEngine, PointContentReader {
    * Stream one regular file out of a saved point.
    *
    * The caller sends the headers from the metadata read and then hands the body
-   * to its sink. The byte count is checked against what the metadata promised, so
-   * a body that stopped early (a missing chunk, a helper killed mid-file) is an
-   * integrity failure rather than a short success.
+   * to its sink. Once the caller's signal is aborted the sink receives nothing
+   * more, even while the helper is still producing. The byte count is checked
+   * against what the metadata promised, so a body that stopped early (a missing
+   * chunk, a helper killed mid-file) is an integrity failure rather than a short
+   * success.
    */
   async dumpFile(
     request: ContentReadRequest,
@@ -417,6 +419,10 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       stdinSecret: this.deps.secret,
       signal: ctx.signal,
       onStdoutChunk: (chunk, control) => {
+        // The caller has left: the helper may still be producing, so stop at the
+        // sink boundary rather than hand a cancelled destination the rest of the
+        // file.
+        if (ctx.signal.aborted) return;
         bytes += chunk.length;
         sink(chunk, control);
       },
