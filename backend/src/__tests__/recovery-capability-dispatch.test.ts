@@ -531,6 +531,32 @@ describe('the hub preflight and a node without the overwrite surface', () => {
         });
       }
 
+      for (const [path, message] of [
+        ['/api/recovery/storage/roots/points', /directory a stack binds/],
+        ['/api/recovery/points/pt-1/restore/path', /one path of a recovery point/],
+      ] as const) {
+        it(`refuses POST ${path} when the node never advertised it, before forwarding it`, async () => {
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(message);
+          expect(mockRead.mock.calls.map(([args]) => args.path)).toEqual(['/api/recovery/node']);
+        });
+
+        it(`lets POST ${path} through to a node that advertises it`, async () => {
+          mockRead.mockImplementation(echoing({
+            ...descriptor('available', 'engine_registered'),
+            storageKinds: ['named_volume', 'bind_root'],
+            restoreScopes: ['root', 'path'],
+          }) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.body.code).not.toBe('UPDATE_REQUIRED');
+        });
+      }
+
       for (const path of otherPosts) {
         it(`does not refuse POST ${path} as an update-required request for a node without the overwrite`, async () => {
           mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
@@ -661,5 +687,58 @@ describe('a node that cannot restore over an existing volume', () => {
     const read = await remote.resolveRemoteRecoverySupport(proxyNodeId);
     expect(read.restoreModes).toEqual(['new_volume']);
     remote.resetRemoteRecoverySupportCacheForTests();
+  });
+});
+
+describe('storage kinds and restore scopes', () => {
+  it('advertises host directories and path restores from this build', async () => {
+    const { RESTIC_STORAGE_KINDS } = await import('../services/recovery/restic/ResticEngine');
+    expect(RESTIC_STORAGE_KINDS).toEqual(['named_volume', 'bind_root']);
+    const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
+    expect(res.body.restoreScopes).toEqual(['root', 'path']);
+  });
+
+  it('reads a missing field as what an older node can do, drops names it does not know, and refuses a non-list', async () => {
+    const parse = (extra: Record<string, unknown>) =>
+      capability.parseRecoveryNodeDescriptor({ ...descriptor('available', 'engine_registered'), ...extra });
+    const base = { ...descriptor('available', 'engine_registered') } as Record<string, unknown>;
+    delete base.storageKinds;
+    delete base.restoreScopes;
+    expect(capability.parseRecoveryNodeDescriptor(base)).toMatchObject({ storageKinds: ['named_volume'], restoreScopes: ['root'] });
+    expect(parse({ storageKinds: ['bind_root', 'object_store', 'bind_root'], restoreScopes: ['path', 'subtree'] }))
+      .toMatchObject({ storageKinds: ['bind_root'], restoreScopes: ['path'] });
+    expect(parse({ storageKinds: 'bind_root' })).toBeNull();
+    expect(parse({ restoreScopes: { path: true } })).toBeNull();
+  });
+
+  it('names the two routes an older node lacks, and no other', async () => {
+    const { requiredRecoveryScopeFor } = await import('../proxy/remoteNodeProxy');
+    expect(requiredRecoveryScopeFor('POST', '/recovery/storage/roots/points')).toEqual({ storageKind: 'bind_root' });
+    expect(requiredRecoveryScopeFor('post', '/recovery/storage/roots/points/')).toEqual({ storageKind: 'bind_root' });
+    expect(requiredRecoveryScopeFor('POST', '/recovery/points/p1/restore/path')).toEqual({ restoreScope: 'path' });
+    for (const [method, path] of [
+      ['GET', '/recovery/storage/roots/points'],
+      ['POST', '/recovery/storage/points'],
+      ['POST', '/recovery/points/p1/restore'],
+      ['POST', '/recovery/points/p1/restore/path/extra'],
+      ['POST', '/recovery/storage/roots/points/x'],
+    ] as const) {
+      expect(requiredRecoveryScopeFor(method, path), `${method} ${path}`).toEqual({});
+    }
+  });
+
+  it('refuses a directory capture or a path restore to a node that does not advertise it, and nothing else', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { storageKind: 'bind_root' }))
+      .toMatchObject({ ok: false, httpStatus: 409, errorClass: 'update_required' });
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { restoreScope: 'path' }))
+      .toMatchObject({ ok: false, httpStatus: 409, errorClass: 'update_required' });
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { storageKind: 'named_volume', restoreScope: 'root' }))
+      .toMatchObject({ ok: true });
   });
 });

@@ -205,6 +205,46 @@ describe('applyRecoverySchema', () => {
       .not.toThrow();
     // The new phase values are accepted by the rebuilt CHECK.
     expect(() => db.prepare("UPDATE recovery_restore_intents SET phase = 'fenced' WHERE id = 'i1'").run()).not.toThrow();
+    // v4: the rebuilt table carries the host-directory paths column, empty for this row.
+    expect(db.prepare("SELECT target_paths_json FROM recovery_restore_intents WHERE id = 'i1'").get())
+      .toEqual({ target_paths_json: null });
+  });
+
+  it('upgrades a v3 database in place: the host-directory paths column, every row kept', () => {
+    const db = freshDb();
+    applyRecoverySchema(db);
+    db.exec('ALTER TABLE recovery_restore_intents DROP COLUMN target_paths_json');
+    db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(RECOVERY_SCHEMA_STATE_KEY, '3');
+    db.exec(`
+      INSERT INTO recovery_storage_identities
+        (id, authority_id, owner_node_key, kind, locator, storage_key, generation, generation_token, state, first_seen_at, last_seen_at)
+        VALUES ('s1', 'a', 'docker-engine:a', 'named_volume', 'data', 'k', 1, 't', 'current', 1, 1);
+      INSERT INTO recovery_repositories (id, authority_id, owner_node_key, kind, locator, failure_domain, created_at)
+        VALUES ('r1', 'a', 'docker-engine:a', 'local_volume', 'repo', 'same_failure_domain', 1);
+      INSERT INTO recovery_operations (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+        VALUES ('op1', 'k1', 'restore', 'admin', 'local', 'running', 'e', 1, 1);
+      INSERT INTO recovery_points
+        (id, schema_version, storage_id, storage_generation, kind, repository_id, snapshot_id, status, consistency,
+         capture_json, trigger_kind, actor, source_operation_id, source_node_key, engine_id, capability_version, started_at, completed_at)
+        VALUES ('p1', 2, 's1', 1, 'root', 'r1', 'snap', 'succeeded', 'crash_consistent_live',
+         '{"fileCount":1,"byteCount":1,"skippedCount":0}', 'manual', 'admin', 'op1', 'docker-engine:a', 'restic', 1, 1, 2);
+      INSERT INTO recovery_restore_intents
+        (id, operation_id, point_id, target_mode, target_volume, phase, staging_volume, fence_state, actor, process_epoch, created_at, updated_at)
+        VALUES ('i1', 'op1', 'p1', 'staged_overwrite', 'data', 'fenced', 'sencho-recovery-stage-i1', 'held', 'admin', 'e', 1, 2);
+    `);
+    expect(applyRecoverySchema(db)).toEqual({ kind: 'current', version: 4 });
+    expect(state(db, RECOVERY_SCHEMA_STATE_KEY)).toBe('4');
+    expect(db.prepare("SELECT phase, fence_state, staging_volume, target_paths_json FROM recovery_restore_intents WHERE id = 'i1'").get())
+      .toEqual({ phase: 'fenced', fence_state: 'held', staging_volume: 'sencho-recovery-stage-i1', target_paths_json: null });
+    // A second boot changes nothing.
+    expect(applyRecoverySchema(db)).toEqual({ kind: 'current', version: 4 });
+  });
+
+  it('creates the host-directory paths column on a fresh install', () => {
+    const db = freshDb();
+    applyRecoverySchema(db);
+    const columns = (db.prepare('PRAGMA table_info(recovery_restore_intents)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain('target_paths_json');
   });
 
   it('is applied by DatabaseService at boot', async () => {
