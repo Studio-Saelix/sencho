@@ -22,15 +22,17 @@ import {
  * A connected tunnel proves only that an agent holds a credential. This
  * service asks the agent, through that tunnel, for a fresh readiness report
  * (`pilot/readinessContract.ts`) and judges it (`readinessGates.ts`); the
- * node is `ready` only when every gate passes on that answer.
+ * node is `ready` only when no gate on that answer failed or was unknown
+ * (warnings do not block).
  *
  * When it runs: on every tunnel-up for a bootstrapped node (first
  * enrollment, a reconnect after an agent restart, self-update, host reboot or
  * hub restart, and a re-enrollment), and when an admin asks to verify again.
  * There is no poller. A check is one bounded HTTP request; checks for one node
  * never overlap, and a check requested while one runs makes that check run
- * once more when it ends, so the stored verdict always describes the newest
- * tunnel. Nodes enrolled by hand have no readiness row and are never checked,
+ * once more when it ends (up to MAX_RERUNS), so the stored verdict describes
+ * the newest tunnel. A dropped tunnel, or a hub start, puts a ready node back
+ * to provisional until the next check. Nodes enrolled by hand have no readiness row and are never checked,
  * so their connection status means what it always meant.
  */
 
@@ -108,13 +110,23 @@ function parseGates(json: string | null): ReadinessGate[] | null {
   }
 }
 
+/**
+ * The state a reader may rely on. A verdict of ready is only as good as the
+ * evidence stored with it: unreadable or missing gates, or a stored failure,
+ * do not read as ready. Every reader (the run view and the node list) goes
+ * through this.
+ */
+export function effectiveReadinessState(row: Pick<NodeReadinessRow, 'state' | 'gates_json'>): NodeReadinessState {
+  if (row.state !== 'ready') return row.state;
+  const gates = parseGates(row.gates_json);
+  const proven = gates !== null && gates.length > 0 && gates.every((gate) => gate.status === 'pass' || gate.status === 'warn');
+  return proven ? 'ready' : 'not_ready';
+}
+
 export function readinessView(row: NodeReadinessRow): NodeReadinessView {
   const gates = parseGates(row.gates_json);
-  // A verdict of ready is only as good as the evidence stored with it: unreadable or missing gates do not read as ready.
-  const unproven = row.state === 'ready' && (gates === null || gates.length === 0);
-  if (gates === null) console.warn(`[Readiness] Node ${row.node_id} has unreadable stored gates.`);
   return {
-    state: unproven ? 'not_ready' : row.state,
+    state: effectiveReadinessState(row),
     operationId: row.operation_id,
     checkedAt: row.checked_at,
     agentVersion: row.agent_version,
@@ -128,7 +140,7 @@ export class NodeReadinessService {
   private readonly inflight = new Map<number, InflightCheck>();
   private started = false;
   private readonly onTunnelUp = (nodeId: number): void => {
-    // Deferred a turn so the run's own tunnel-up listener settles first.
+    // Deferred to a macrotask so the bootstrap run's own tunnel-up continuation (which marks the run enrolled) runs first.
     setImmediate(() => {
       try {
         if (!this.deps.db.getNodeReadiness(nodeId)) return;
@@ -144,7 +156,7 @@ export class NodeReadinessService {
 
   private readonly onTunnelDown = (nodeId: number): void => {
     try {
-      if (this.deps.db.demoteNodeReadinessOnDisconnect(nodeId, this.deps.now())) this.deps.changed(nodeId);
+      if (this.deps.db.demoteNodeReadinessOnDisconnect(nodeId, this.deps.now())) this.announce(nodeId);
     } catch (error: unknown) {
       console.error(`[Readiness] Node ${nodeId} could not be marked disconnected:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
@@ -176,6 +188,12 @@ export class NodeReadinessService {
   public start(): void {
     if (this.started) return;
     this.started = true;
+    try {
+      // Runs before the server accepts connections, so no tunnel is up: nothing is known to be ready yet.
+      this.deps.db.demoteReadyNodeReadiness(this.deps.now());
+    } catch (error: unknown) {
+      console.error('[Readiness] Ready nodes could not be reset at startup:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    }
     for (const row of this.deps.db.listNodeReadiness()) {
       if (row.state !== 'verifying') continue;
       try {
@@ -220,6 +238,8 @@ export class NodeReadinessService {
     }
     const entry: InflightCheck = { promise: Promise.resolve(null), rerun: false, audit };
     entry.promise = (async () => {
+      // Yield once so the entry is registered before the first check reaches the Pilot: a request made meanwhile joins it.
+      await Promise.resolve();
       try {
         let view: NodeReadinessView | null;
         let runs = 0;
@@ -243,20 +263,22 @@ export class NodeReadinessService {
     if (!row) return null;
     const operationId = row.operation_id;
     if (!this.deps.db.markNodeReadinessVerifying(nodeId, operationId, this.deps.now())) return this.get(nodeId);
-    this.deps.changed(nodeId);
+    this.announce(nodeId);
     let outcome: { result: ReadinessResult; agentVersion: string | null };
     try {
       outcome = await this.ask(nodeId, row);
     } catch (error: unknown) {
       // A check that broke on the hub must not leave the row verifying with no way out.
-      const message = `the hub could not finish the check (${sanitizeForLog(getErrorMessage(error, 'unknown')).slice(0, 200)}).`;
+      const reason = sanitizeForLog(getErrorMessage(error, 'unknown'));
+      console.error(`[Readiness] Check for node ${nodeId} broke on the hub:`, reason);
+      const message = `the hub could not finish the check (${reason.slice(0, 200)}).`;
       outcome = { result: readinessWithoutReport({ kind: 'unreachable', message }), agentVersion: null };
     }
     const { result, agentVersion } = outcome;
-    // A newer enrollment or a removed node took the row while the Pilot answered: this answer is stale and is dropped.
+    // A retry's new enrollment, a dropped tunnel or a removed node changed the row while the Pilot answered: this answer is stale and is dropped.
     if (!this.record(nodeId, operationId, result, agentVersion)) return this.get(nodeId);
-    // A reconnect that confirms the same verdict is not news; an asked-for check, or a changed verdict, is recorded.
-    if (audit === SYSTEM_AUDIT && row.state === result.verdict) return this.get(nodeId);
+    // A reconnect that confirms this enrollment's last verdict is not news (a dropped tunnel demotes the state, not the verdict); an asked-for check, or a changed verdict, is recorded.
+    if (audit === SYSTEM_AUDIT && row.verdict === result.verdict) return this.get(nodeId);
     this.note(row, result);
     recordBootstrapAudit(this.deps.db, this.deps.now(), audit, 'bootstrap.readiness.checked', {
       node: nodeId,
@@ -319,8 +341,17 @@ export class NodeReadinessService {
       agentVersion,
       checkedAt: this.deps.now(),
     });
-    if (recorded) this.deps.changed(nodeId);
+    if (recorded) this.announce(nodeId);
     return recorded;
+  }
+
+  /** Announce a change. A failed announcement is logged and never fails the check that made the change. */
+  private announce(nodeId: number): void {
+    try {
+      this.deps.changed(nodeId);
+    } catch (error: unknown) {
+      console.error(`[Readiness] Change for node ${nodeId} could not be announced:`, sanitizeForLog(getErrorMessage(error, 'unknown')));
+    }
   }
 
   /** Add the verdict to the bootstrap's activity, when that record still exists. */

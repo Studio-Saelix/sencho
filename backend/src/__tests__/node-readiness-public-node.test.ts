@@ -44,4 +44,14 @@ describe('public node readiness', () => {
     expect(toPublicNode(node).readiness).toMatchObject({ state: 'not_ready', checkedAt: 2000 });
     expect(JSON.stringify(toPublicNode(node))).not.toContain('gates');
   });
+
+  it('does not report ready in the node list when the stored evidence cannot back it', () => {
+    const id = addNode('corrupt-evidence', 'pilot_agent');
+    db.markNodeReadinessProvisional(id, 'op-2', 'https://hub.example.com', 1000);
+    db.markNodeReadinessVerifying(id, 'op-2', 1500);
+    db.recordNodeReadinessResult(id, 'op-2', { state: 'ready', gatesJson: 'not json', agentVersion: '1.0.0', checkedAt: 2000 });
+    const node = db.getNode(id);
+    if (!node) throw new Error('node missing');
+    expect(toPublicNode(node).readiness?.state).toBe('not_ready');
+  });
 });

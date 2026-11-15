@@ -4,6 +4,9 @@ import { beginNodeSession, markMilestone } from '@/lib/hydrationTiming';
 import type { Capability } from '@/lib/capabilities';
 import type { BootstrapOperationState, NodeReadinessState } from '@/components/nodes/bootstrap/types';
 
+/** How long a burst of readiness announcements is gathered before the node list is refetched once. */
+const READINESS_REFRESH_DELAY_MS = 500;
+
 export type NodeMode = 'proxy' | 'pilot_agent';
 
 export interface Node {
@@ -159,7 +162,9 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         } else {
           const updatedActive = data.find((n: Node) => n.id === currentActive.id);
           if (updatedActive) {
-            setActiveNodeState(updatedActive);
+            // Keep the same object when nothing about the active node changed, so a list refresh
+            // (such as another node's readiness changing) does not re-run every activeNode effect.
+            setActiveNodeState((prev) => (prev && JSON.stringify(prev) === JSON.stringify(updatedActive) ? prev : updatedActive));
             localStorage.setItem('sencho-active-node', String(updatedActive.id));
           } else {
             const fallback = data.find((n: Node) => n.is_default) ?? data[0] ?? null;
@@ -196,9 +201,15 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     };
 
     // The hub announces a changed readiness verdict, so badges in Fleet, the switcher and Settings do not go stale.
+    // A check announces more than once (verifying, then the verdict), so a burst is folded into one refetch.
+    let readinessTimer: ReturnType<typeof setTimeout> | null = null;
     const handleStateInvalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
-      if (detail?.scope === 'node-readiness') refreshNodes();
+      if (detail?.scope !== 'node-readiness' || readinessTimer !== null) return;
+      readinessTimer = setTimeout(() => {
+        readinessTimer = null;
+        refreshNodes();
+      }, READINESS_REFRESH_DELAY_MS);
     };
 
     window.addEventListener('node-not-found', handleNodeNotFound);
@@ -206,6 +217,7 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     return () => {
       window.removeEventListener('node-not-found', handleNodeNotFound);
       window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
+      if (readinessTimer !== null) clearTimeout(readinessTimer);
     };
   }, [refreshNodes]);
 

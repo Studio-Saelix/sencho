@@ -265,6 +265,10 @@ describe('readiness of an enrolled run', () => {
       { id: 'tunnel', label: 'Pilot tunnel', status: 'fail', summary: 'The Pilot is not connected to the hub.', remediation: 'Check the sencho-agent container.' },
     ]) });
     expect(operationAnswer(offline)).toMatchObject({ title: 'Not connected', line: 'Pilot tunnel: The Pilot is not connected to the hub.' });
+    const timedOut = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('not_ready', [
+      { id: 'tunnel', label: 'Pilot tunnel', status: 'unknown', summary: 'The readiness request did not complete: the Pilot answered HTTP 500.', remediation: 'Check the hub logs.' },
+    ]) });
+    expect(operationAnswer(timedOut).title).toBe('Not ready');
     const warned = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('ready', [
       { id: 'tunnel', label: 'Pilot tunnel', status: 'pass', summary: 'Connected.' },
       { id: 'transport', label: 'Tunnel transport', status: 'warn', summary: 'Plain HTTP.', remediation: 'Serve the hub over HTTPS.' },

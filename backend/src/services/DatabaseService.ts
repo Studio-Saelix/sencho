@@ -613,7 +613,8 @@ export type NodeBootstrapEventStatus = 'started' | 'done' | 'skipped' | 'failed'
 /**
  * Readiness of a bootstrapped node, judged by the hub from the Pilot's own
  * report (see NodeReadinessService). `provisional` until the first check
- * runs; `ready` only after every gate passed on a fresh report.
+ * runs; `ready` only when no gate failed or was unknown on a fresh report
+ * (a warning does not block).
  */
 export type NodeReadinessState = 'provisional' | 'verifying' | 'ready' | 'not_ready';
 
@@ -625,6 +626,8 @@ export interface NodeReadinessRow {
     state: NodeReadinessState;
     /** JSON array of the gates of the last finished check, or null before the first one. */
     gates_json: string | null;
+    /** The last check's verdict for this enrollment; kept when a dropped tunnel demotes the state, so a reconnect that confirms it is not news. */
+    verdict: 'ready' | 'not_ready' | null;
     agent_version: string | null;
     checked_at: number | null;
     updated_at: number;
@@ -1833,6 +1836,7 @@ export class DatabaseService {
         hub_url TEXT,
         state TEXT NOT NULL,
         gates_json TEXT,
+        verdict TEXT,
         agent_version TEXT,
         checked_at INTEGER,
         updated_at INTEGER NOT NULL,
@@ -6906,10 +6910,10 @@ stmt.run('gitops_schema_version', '1');
     /** Record a bootstrapped node as provisional, keeping the operation that registered it. Resets any earlier verdict. */
     public markNodeReadinessProvisional(nodeId: number, operationId: string, hubUrl: string, now: number): void {
         this.db.prepare(
-            `INSERT INTO node_readiness (node_id, operation_id, hub_url, state, gates_json, agent_version, checked_at, updated_at)
-             VALUES (?, ?, ?, 'provisional', NULL, NULL, NULL, ?)
+            `INSERT INTO node_readiness (node_id, operation_id, hub_url, state, gates_json, verdict, agent_version, checked_at, updated_at)
+             VALUES (?, ?, ?, 'provisional', NULL, NULL, NULL, NULL, ?)
              ON CONFLICT(node_id) DO UPDATE SET operation_id = excluded.operation_id, hub_url = excluded.hub_url, state = 'provisional',
-               gates_json = NULL, agent_version = NULL, checked_at = NULL, updated_at = excluded.updated_at`
+               gates_json = NULL, verdict = NULL, agent_version = NULL, checked_at = NULL, updated_at = excluded.updated_at`
         ).run(nodeId, operationId, hubUrl, now);
     }
 
@@ -6923,26 +6927,36 @@ stmt.run('gitops_schema_version', '1');
     }
 
     /**
-     * Start a check for the enrollment `operationId` recorded. False when the row
-     * is gone or a newer enrollment replaced it, so a check never claims a row it
-     * did not start on.
+     * Start a check for the run `operationId` that enrolled the node. False when
+     * the row is gone or another run enrolled the node since.
      */
     public markNodeReadinessVerifying(nodeId: number, operationId: string | null, now: number): boolean {
         return this.db.prepare('UPDATE node_readiness SET state = \'verifying\', updated_at = ? WHERE node_id = ? AND operation_id IS ?')
             .run(now, nodeId, operationId).changes > 0;
     }
 
-    /** A verified node whose tunnel dropped is no longer known to be ready; the next tunnel-up checks it again. */
+    /**
+     * A node whose tunnel dropped is no longer known to be ready: a `ready` row
+     * goes back to provisional, and so does a check in flight, whose answer then
+     * no longer lands. A `not_ready` row keeps its reasons. The next tunnel-up
+     * checks it again.
+     */
     public demoteNodeReadinessOnDisconnect(nodeId: number, now: number): boolean {
-        return this.db.prepare('UPDATE node_readiness SET state = \'provisional\', updated_at = ? WHERE node_id = ? AND state = \'ready\'')
+        return this.db.prepare('UPDATE node_readiness SET state = \'provisional\', updated_at = ? WHERE node_id = ? AND state IN (\'ready\', \'verifying\')')
             .run(now, nodeId).changes > 0;
+    }
+
+    /** At startup no tunnel is up yet, so no node is known to be ready until its Pilot reconnects and passes again. */
+    public demoteReadyNodeReadiness(now: number): number {
+        return this.db.prepare('UPDATE node_readiness SET state = \'provisional\', updated_at = ? WHERE state = \'ready\'').run(now).changes;
     }
 
     /**
      * Store the verdict of a check started by `markNodeReadinessVerifying`. Only
-     * lands while the row is still that check's: a newer enrollment (which resets
-     * the row to provisional under a new operation) or a removed node makes it a
-     * no-op, so a late answer never overwrites a newer state.
+     * lands while the row is still that check's: still `verifying` (a retry's new
+     * enrollment, which keeps the run id, or a dropped tunnel resets it to
+     * provisional), for the same run (another run may have enrolled the node),
+     * and not removed. A late answer therefore never overwrites a newer state.
      */
     public recordNodeReadinessResult(
         nodeId: number,
@@ -6950,9 +6964,9 @@ stmt.run('gitops_schema_version', '1');
         result: { state: 'ready' | 'not_ready'; gatesJson: string; agentVersion: string | null; checkedAt: number },
     ): boolean {
         return this.db.prepare(
-            `UPDATE node_readiness SET state = ?, gates_json = ?, agent_version = ?, checked_at = ?, updated_at = ?
+            `UPDATE node_readiness SET state = ?, verdict = ?, gates_json = ?, agent_version = ?, checked_at = ?, updated_at = ?
              WHERE node_id = ? AND operation_id IS ? AND state = 'verifying'`
-        ).run(result.state, result.gatesJson, result.agentVersion, result.checkedAt, result.checkedAt, nodeId, operationId).changes > 0;
+        ).run(result.state, result.state, result.gatesJson, result.agentVersion, result.checkedAt, result.checkedAt, nodeId, operationId).changes > 0;
     }
 
     /** Just the state of a bootstrap operation, for the node list (the full row carries the plan). */

@@ -180,8 +180,8 @@ function readinessAnswer(op: BootstrapOperationDetail): Omit<StatusPathAnswer, '
       const [first, ...rest] = blockingGates(readiness);
       return {
         tone: 'warning',
-        // A Pilot that could not be reached is not connected; any other failure is a connected node that is not ready.
-        title: first?.id === 'tunnel' ? 'Not connected' : 'Not ready',
+        // Only a tunnel that is down reads as not connected; a request that failed on a live tunnel is a node that is not ready.
+        title: first?.id === 'tunnel' && first.status === 'fail' ? 'Not connected' : 'Not ready',
         status: 'not_ready',
         line: first ? `${first.label}: ${first.summary}` : `${op.targetName} did not pass the readiness check.`,
         detail: [first?.remediation, rest.length > 0 ? `${rest.length} more check${rest.length === 1 ? '' : 's'} failed.` : null].filter(Boolean).join(' ') || null,

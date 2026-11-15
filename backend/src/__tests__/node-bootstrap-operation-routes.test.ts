@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -199,7 +199,16 @@ describe('bootstrap operation routes: refusals', () => {
     expect(res.status).toBe(200);
     expect(res.body.readiness).toMatchObject({ state: 'not_ready', gates: [expect.objectContaining({ id: 'tunnel', status: 'fail' })] });
     expect(res.body.actions.verify).toBe(true);
+    await vi.waitFor(() => {
+      const summaries = db.getAuditLogs({ page: 1, limit: 200 }).entries.map((entry) => entry.summary);
+      expect(summaries.some((summary) => summary.startsWith(`Checked bootstrapped node readiness: ${id}`))).toBe(true);
+      expect(summaries.some((summary) => summary.startsWith(`Approved bootstrap plan: ${id}`))).toBe(false);
+    });
+    // A run whose node carries no readiness (another run enrolled it, or it was never registered) cannot be checked.
     db.deleteNode(nodeId);
+    const gone = await request(app).post(`/api/nodes/bootstrap/operations/${id}/verify`).set('Authorization', adminAuth).send({});
+    expect(gone.status).toBe(409);
+    expect(gone.body.code).toBe('OPERATION_NOT_VERIFIABLE');
   });
 
   it('refuses a page cursor that is not one the list returned', async () => {

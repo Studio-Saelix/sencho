@@ -28,7 +28,7 @@ describe('NodeContext readiness refresh', () => {
   it('refetches the node list when the hub announces a changed readiness verdict, and only then', async () => {
     let state: 'provisional' | 'ready' = 'provisional';
     apiFetch.mockImplementation((path: string) => {
-      if (path === '/nodes') return Promise.resolve({ ok: true, json: async () => [LOCAL_NODE, bootstrapped(state)] });
+      if (path === '/nodes') return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     const { result } = renderHook(() => useNodes(), { wrapper });
@@ -39,9 +39,16 @@ describe('NodeContext readiness refresh', () => {
     act(() => { window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } })); });
     expect(listCalls()).toBe(before);
 
+    const activeBefore = result.current.activeNode;
     state = 'ready';
-    act(() => { window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } })); });
+    // A check announces twice (verifying, then the verdict): one refetch.
+    act(() => {
+      window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
+      window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
+    });
     await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready'));
     expect(listCalls()).toBe(before + 1);
+    // Another node's readiness changed; the active local node is the same object, so its effects do not rerun.
+    expect(result.current.activeNode).toBe(activeBefore);
   });
 });

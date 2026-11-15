@@ -462,6 +462,82 @@ describe('node readiness', () => {
     expect(service.get(nodeId)?.state).toBe('not_ready');
   });
 
+  it('does not audit every reconnect of a ready node after its tunnel drops', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    const audits = () => db.getAuditLogs({ page: 1, limit: 500 }).entries.filter((row) => row.summary.includes(`node=${nodeId} `)).length;
+    service.start();
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(audits()).toBe(1);
+    for (let flap = 0; flap < 4; flap += 1) {
+      tunnels.disconnect(nodeId);
+      tunnels.connect(nodeId);
+      await settle(service);
+    }
+    expect(service.get(nodeId)?.state).toBe('ready');
+    expect(audits()).toBe(1);
+  });
+
+  it('does not keep a node ready across a hub start, before its Pilot reconnects', async () => {
+    const { nodeId, model, tunnels, service } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    tunnels.up.add(nodeId);
+    await service.verify(nodeId, AUDIT);
+    expect(service.get(nodeId)?.state).toBe('ready');
+    const restarted = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn(), changed: vi.fn() });
+    services.push(restarted);
+    restarted.start();
+    expect(restarted.get(nodeId)?.state).toBe('provisional');
+  });
+
+  it('drops an answer whose tunnel dropped while the Pilot answered', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder: { model?: AgentModel } = {};
+    const { nodeId, model, tunnels, service } = setup({
+      fetch: async (url, signal) => { await gate; return agentFetch(holder.model as AgentModel)(url, signal); },
+    });
+    holder.model = model;
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    service.start();
+    tunnels.up.add(nodeId);
+    const check = service.verify(nodeId, AUDIT);
+    await new Promise((resolve) => setImmediate(resolve));
+    tunnels.disconnect(nodeId);
+    release();
+    await check;
+    expect(service.get(nodeId)?.state).toBe('provisional');
+  });
+
+  it('finishes a check whose change announcement fails', async () => {
+    const { nodeId, model, tunnels } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    tunnels.up.add(nodeId);
+    const failing = new NodeReadinessService({
+      db, tunnels, fetch: agentFetch(model), changed: () => { throw new Error('socket gone'); }, timeoutMs: 2_000,
+    });
+    services.push(failing);
+    const view = await failing.verify(nodeId, AUDIT);
+    expect(view?.state).toBe('ready');
+  });
+
+  it('stops rerunning a check after a bounded number of reruns', async () => {
+    const holder: { service?: NodeReadinessService; model?: AgentModel; nodeId?: number } = {};
+    const { nodeId, model, tunnels, service, fetch } = setup({
+      fetch: async (url, signal) => {
+        // Every answer arrives with another request already waiting, as under a flapping tunnel.
+        void holder.service?.verify(holder.nodeId as number, AUDIT);
+        return agentFetch(holder.model as AgentModel)(url, signal);
+      },
+    });
+    Object.assign(holder, { service, model, nodeId });
+    tunnels.up.add(nodeId);
+    await service.verify(nodeId, AUDIT);
+    await service.settled();
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
   it('keeps the agent credential out of the report', async () => {
     const model: AgentModel = { nodeId: 5, probes: {}, env: {} };
     const token = agentProbes(model).persistedToken() as string;

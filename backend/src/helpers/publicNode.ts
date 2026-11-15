@@ -1,4 +1,5 @@
 import { DatabaseService, type Node, type NodeBootstrapOperationState, type NodeReadinessState } from '../services/DatabaseService';
+import { effectiveReadinessState } from '../services/nodeBootstrap/NodeReadinessService';
 
 /**
  * Node shape safe to send to a browser or API-token client. The stored
@@ -37,7 +38,7 @@ export function toPublicNode(node: Node): PublicNode {
     has_token: typeof api_token === 'string' && api_token.length > 0,
     sealingKeyFingerprint: pin?.fingerprint ?? null,
     readiness: readiness ? {
-      state: readiness.state,
+      state: effectiveReadinessState(readiness),
       checkedAt: readiness.checked_at,
       operationId: readiness.operation_id,
       operationState: operationState ?? null,
