@@ -241,7 +241,13 @@ export async function relateToFencedDirectory(
   target: FsTargetPaths,
   ownMounts: OwnMounts | 'unreadable',
 ): Promise<'overlap' | 'unrelated' | 'unknown'> {
-  const candidate = await canonicalOrSelf(candidateSenchoPath);
+  // The candidate is an absolute directory in Sencho's namespace. Anything else
+  // (a relative path would resolve against the working directory) cannot be
+  // placed, and is refused like any relationship that cannot be proven.
+  if (!path.isAbsolute(candidateSenchoPath)) return 'unknown';
+  const resolved = path.resolve(candidateSenchoPath);
+  if (!resolved.startsWith(path.sep)) return 'unknown';
+  const candidate = await canonicalOrSelf(resolved);
   if (pathsOverlap(candidate, target.senchoPath)) return 'overlap';
   if (ownMounts === 'unreadable') return 'unknown';
   const hostView = senchoToHostPath(candidate, ownMounts);

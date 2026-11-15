@@ -445,6 +445,8 @@ describe('the fence on a host directory', () => {
     expect((await fence.matchFsWorkToFences('/srv/compose/web//')).refusal).not.toBeNull();
     expect((await fence.matchFsWorkToFences('/srv/compose/web/dat/')).refusal).toBeNull();
     expect((await fence.matchFsWorkToFences('/srv/compose/other//')).refusal).toBeNull();
+    // A path that is not absolute cannot be placed, so it is refused as unprovable.
+    expect((await fence.matchFsWorkToFences('srv/compose/other')).refusal?.message).toMatch(/cannot prove/);
   });
 
   it('closes a fenced directory\'s recorded stacks to a Compose lifecycle like a volume\'s', async () => {
