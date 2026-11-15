@@ -63,6 +63,7 @@ const routes: Array<['get' | 'post', string]> = [
   ['post', `/api/nodes/bootstrap/operations/${ID}/retry`],
   ['post', `/api/nodes/bootstrap/operations/${ID}/cancel`],
   ['post', `/api/nodes/bootstrap/operations/${ID}/release`],
+  ['post', `/api/nodes/bootstrap/operations/${ID}/verify`],
 ];
 
 describe('bootstrap operation routes: authorization', () => {
@@ -79,6 +80,12 @@ describe('bootstrap operation routes: authorization', () => {
 });
 
 describe('bootstrap operation routes: refusals', () => {
+  it('refuses to verify an operation that does not exist', async () => {
+    const res = await request(app).post(`/api/nodes/bootstrap/operations/${ID}/verify`).set('Authorization', adminAuth).send({});
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('OPERATION_NOT_FOUND');
+  });
+
   it('refuses a plan that was never reviewed', async () => {
     const res = await request(app).post('/api/nodes/bootstrap/operations').set('Authorization', adminAuth).send(BODY);
     expect(res.status).toBe(409);

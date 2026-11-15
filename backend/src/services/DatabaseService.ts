@@ -610,6 +610,26 @@ export interface NodeBootstrapOperation {
 
 export type NodeBootstrapEventStatus = 'started' | 'done' | 'skipped' | 'failed' | 'unknown' | 'info';
 
+/**
+ * Readiness of a bootstrapped node, judged by the hub from the Pilot's own
+ * report (see NodeReadinessService). `provisional` until the first check
+ * runs; `ready` only after every gate passed on a fresh report.
+ */
+export type NodeReadinessState = 'provisional' | 'verifying' | 'ready' | 'not_ready';
+
+export interface NodeReadinessRow {
+    node_id: number;
+    operation_id: string | null;
+    /** The hub URL the bootstrap plan configured the Pilot with; kept here because finished operations are pruned. */
+    hub_url: string | null;
+    state: NodeReadinessState;
+    /** JSON array of the gates of the last finished check, or null before the first one. */
+    gates_json: string | null;
+    agent_version: string | null;
+    checked_at: number | null;
+    updated_at: number;
+}
+
 export interface NodeBootstrapEvent {
     id: number;
     operation_id: string;
@@ -1804,6 +1824,20 @@ export class DatabaseService {
         FOREIGN KEY (operation_id) REFERENCES node_bootstrap_operations(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_node_bootstrap_events_op ON node_bootstrap_events(operation_id, id);
+
+      -- Whether a bootstrapped node passed the hub's readiness check. Only bootstrapped
+      -- nodes have a row; a node enrolled by hand keeps its plain connection status.
+      CREATE TABLE IF NOT EXISTS node_readiness (
+        node_id INTEGER PRIMARY KEY,
+        operation_id TEXT,
+        hub_url TEXT,
+        state TEXT NOT NULL,
+        gates_json TEXT,
+        agent_version TEXT,
+        checked_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+      );
 
       CREATE TABLE IF NOT EXISTS system_state (
         key TEXT PRIMARY KEY,
@@ -6535,6 +6569,7 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_sealing_keys WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM node_readiness WHERE node_id = ?').run(id);
             this.db.prepare(
                 'DELETE FROM notification_suppression_pending_retractions WHERE node_id = ?',
             ).run(id);
@@ -6866,6 +6901,38 @@ stmt.run('gitops_schema_version', '1');
                 )`
             ).run(event.operation_id, event.operation_id, DatabaseService.BOOTSTRAP_EVENTS_PER_OPERATION);
         })();
+    }
+
+    /** Record a bootstrapped node as provisional, keeping the operation that registered it. Resets any earlier verdict. */
+    public markNodeReadinessProvisional(nodeId: number, operationId: string, hubUrl: string, now: number): void {
+        this.db.prepare(
+            `INSERT INTO node_readiness (node_id, operation_id, hub_url, state, gates_json, agent_version, checked_at, updated_at)
+             VALUES (?, ?, ?, 'provisional', NULL, NULL, NULL, ?)
+             ON CONFLICT(node_id) DO UPDATE SET operation_id = excluded.operation_id, hub_url = excluded.hub_url, state = 'provisional',
+               gates_json = NULL, agent_version = NULL, checked_at = NULL, updated_at = excluded.updated_at`
+        ).run(nodeId, operationId, hubUrl, now);
+    }
+
+    public getNodeReadiness(nodeId: number): NodeReadinessRow | undefined {
+        return this.db.prepare('SELECT * FROM node_readiness WHERE node_id = ?').get(nodeId) as NodeReadinessRow | undefined;
+    }
+
+    /** Every readiness row; one per bootstrapped node, so bounded by the node table. */
+    public listNodeReadiness(): NodeReadinessRow[] {
+        return this.db.prepare('SELECT * FROM node_readiness').all() as NodeReadinessRow[];
+    }
+
+    public setNodeReadinessState(nodeId: number, state: NodeReadinessState, now: number): boolean {
+        return this.db.prepare('UPDATE node_readiness SET state = ?, updated_at = ? WHERE node_id = ?').run(state, now, nodeId).changes > 0;
+    }
+
+    public recordNodeReadinessResult(
+        nodeId: number,
+        result: { state: 'ready' | 'not_ready'; gatesJson: string; agentVersion: string | null; checkedAt: number },
+    ): boolean {
+        return this.db.prepare(
+            'UPDATE node_readiness SET state = ?, gates_json = ?, agent_version = ?, checked_at = ?, updated_at = ? WHERE node_id = ?'
+        ).run(result.state, result.gatesJson, result.agentVersion, result.checkedAt, result.checkedAt, nodeId).changes > 0;
     }
 
     public listNodeBootstrapEvents(operationId: string): NodeBootstrapEvent[] {

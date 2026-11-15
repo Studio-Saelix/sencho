@@ -1,3 +1,4 @@
+import { NodeReadinessService } from '../services/nodeBootstrap/NodeReadinessService';
 import type { Server } from 'http';
 import { DatabaseService } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
@@ -35,6 +36,7 @@ export function installShutdownHandlers(server: Server): void {
       try { LicenseService.getInstance().destroy(); } catch (e) {
         console.warn('[Shutdown] LicenseService cleanup failed:', (e as Error).message);
       }
+      try { NodeReadinessService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] NodeReadinessService cleanup failed:', (e as Error).message); }
       try { MonitorService.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] MonitorService cleanup failed:', (e as Error).message);
       }

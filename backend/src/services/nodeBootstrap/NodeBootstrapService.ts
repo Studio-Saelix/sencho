@@ -74,6 +74,7 @@ export type BootstrapErrorCode =
   | 'OPERATION_NOT_RUNNING'
   | 'OPERATION_NOT_RETRYABLE'
   | 'OPERATION_NOT_RELEASABLE'
+  | 'OPERATION_NOT_VERIFIABLE'
   | 'INVALID_CURSOR';
 
 export class BootstrapError extends Error {

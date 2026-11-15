@@ -280,7 +280,8 @@ export const bootstrapLimiter = rateLimit({
 // Approving and retrying a bootstrap run. Kept apart from the preflight
 // limiter so iterating on a preflight cannot lock an administrator out of
 // approving the plan they reviewed. Cancel and release are not limited beyond
-// the global API limiter, so stopping a run is never refused.
+// the global API limiter, so stopping a run is never refused. Nor is a readiness
+// check: it only reads the Pilot, and checks for one node never overlap.
 export const bootstrapOperationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 20 : 200,

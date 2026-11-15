@@ -298,3 +298,15 @@ nodeBootstrapRouter.post('/operations/:id/release', (req: Request, res: Response
     sendError(res, error, 'operation');
   }
 });
+
+/** Ask the enrolled node's Pilot for a fresh readiness report. Read-only on the host. */
+nodeBootstrapRouter.post('/operations/:id/verify', async (req: Request, res: Response) => {
+  if (!guard(req, res)) return;
+  const id = operationId(req, res);
+  if (!id) return;
+  try {
+    res.json(await NodeBootstrapOperationService.getInstance().verifyReadiness(id, auditContext(req)));
+  } catch (error: unknown) {
+    sendError(res, error, 'operation');
+  }
+});

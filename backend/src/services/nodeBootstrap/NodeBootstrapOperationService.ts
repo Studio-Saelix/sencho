@@ -21,6 +21,7 @@ import {
   type BootstrapPreflightRequest,
 } from './NodeBootstrapService';
 import { canonicalJson, sha256Hex } from './planBuilder';
+import { NodeReadinessService, type NodeReadinessView } from './NodeReadinessService';
 import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR, HUB_CA_STEP_ID } from './pathPolicy';
 import { sshExecClient, type BootstrapExecTransport, type ExecSession } from './sshExecClient';
 import { parsePrivateKey, SshTransportError } from './sshProbeClient';
@@ -138,7 +139,9 @@ export interface OperationView {
   createdAt: number;
   updatedAt: number;
   finishedAt: number | null;
-  actions: { cancel: boolean; retry: boolean; release: boolean };
+  actions: { cancel: boolean; retry: boolean; release: boolean; verify: boolean };
+  /** The hub's readiness verdict for the node this run registered; null before it registered one. */
+  readiness: NodeReadinessView | null;
 }
 
 export interface OperationDetail extends OperationView {
@@ -165,6 +168,8 @@ interface OperationDeps {
   now: () => number;
   mintToken: (nodeId: number) => { token: string; expiresAt: number };
   registerNode: (name: string, composeDir: string) => number;
+  /** Readiness of the node a run registers: reset to provisional on each enrollment, checked once its Pilot connects. */
+  readiness: Pick<NodeReadinessService, 'get' | 'verify'> & { markProvisional: (nodeId: number, operationId: string, hubUrl: string) => void };
   enrollWaitMs: number;
   /** How long the package metadata refresh is retried while another apt job holds its lock. */
   aptLockRetry?: { intervalMs: number; totalMs: number };
@@ -233,6 +238,11 @@ export class NodeBootstrapOperationService {
       now: () => Date.now(),
       mintToken: mintPilotEnrollmentToken,
       registerNode: defaultRegisterNode,
+      readiness: {
+        get: (nodeId) => NodeReadinessService.getInstance().get(nodeId),
+        verify: (nodeId, audit) => NodeReadinessService.getInstance().verify(nodeId, audit),
+        markProvisional: (nodeId, operationId, hubUrl) => DatabaseService.getInstance().markNodeReadinessProvisional(nodeId, operationId, hubUrl, Date.now()),
+      },
       enrollWaitMs: ENROLL_WAIT_MS,
       ...deps,
     };
@@ -477,6 +487,23 @@ export class NodeBootstrapOperationService {
     }
     this.audit(audit, 'bootstrap.execute.release', op, {});
     this.event(op, 'info', `Released by ${audit.username}. Nothing on the host was changed or removed${op.node_id !== null ? ', and the node record stays in Fleet' : ''}.`);
+    return this.detail(id);
+  }
+
+  /**
+   * Check again that an enrolled bootstrap's node is ready for deployments.
+   * Read-only on the host: the hub asks the Pilot for a fresh report. The
+   * verdict is stored on the node, not on the run, which stays `enrolled`.
+   */
+  public async verifyReadiness(id: string, audit: BootstrapAuditContext): Promise<OperationDetail> {
+    const op = this.reconcile(this.requireOperation(id));
+    if (op.state !== 'enrolled' || op.node_id === null || !this.deps.readiness.get(op.node_id)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_VERIFIABLE', 'Only an enrolled bootstrap\'s node can be checked for readiness.');
+    }
+    if (!this.deps.db.getNode(op.node_id)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_VERIFIABLE', 'The node this bootstrap registered was removed from Fleet.');
+    }
+    await this.deps.readiness.verify(op.node_id, audit);
     return this.detail(id);
   }
 
@@ -779,6 +806,8 @@ export class NodeBootstrapOperationService {
       this.deps.db.updateNodeBootstrapOperation(id, { node_id: nodeId, changes_made: 1 }, this.deps.now());
       this.audit(context.audit, 'bootstrap.node.created', op, { nodeId });
     }
+    // A new enrollment voids any earlier verdict: the node is provisional until its Pilot connects and is checked.
+    this.deps.readiness.markProvisional(nodeId, id, plan.hubUrl);
     const { token, expiresAt } = this.deps.mintToken(nodeId);
     this.deps.db.updateNodeBootstrapOperation(id, { enrollment_expires_at: expiresAt }, this.deps.now());
     this.event(this.requireOperation(id), 'info', `Enrollment minted for node ${nodeId}; it expires at ${new Date(expiresAt).toISOString()}.`, 'agent_project', COMPOSE_STEP_ID);
@@ -823,7 +852,7 @@ export class NodeBootstrapOperationService {
         'The Pilot started but did not connect before the wait ended. Check that the host can reach the hub URL, then retry; a retry mints a new enrollment.',
       );
     }
-    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled. The run does not verify that the node is ready for deployments.');
+    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; the hub now checks that it is ready for deployments.');
   }
 
   // --- state ----------------------------------------------------------------
@@ -930,7 +959,7 @@ export class NodeBootstrapOperationService {
     }, now)) {
       return this.requireOperation(op.id);
     }
-    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled. The run does not verify that the node is ready for deployments.', 'enroll', null);
+    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled; the hub checks that it is ready for deployments.', 'enroll', null);
     this.audit(SYSTEM_AUDIT, 'bootstrap.execute.finished', op, { state: 'enrolled', code: null, attempt: op.attempt, nodeId: op.node_id });
     return this.requireOperation(op.id);
   }
@@ -975,6 +1004,9 @@ export class NodeBootstrapOperationService {
   private view(op: NodeBootstrapOperation): OperationView {
     const running = RUNNING_STATES.includes(op.state) && this.runs.has(op.id);
     const stopped = !RUNNING_STATES.includes(op.state) && !this.runs.has(op.id);
+    // Only the run that last enrolled the node speaks for its readiness; an earlier run for the same node does not.
+    const nodeReadiness = op.node_id !== null ? this.deps.readiness.get(op.node_id) : null;
+    const readiness = nodeReadiness && nodeReadiness.operationId === op.id ? nodeReadiness : null;
     return {
       id: op.id,
       targetName: op.target_name,
@@ -1006,7 +1038,9 @@ export class NodeBootstrapOperationService {
         cancel: running && op.cancel_requested !== 1,
         retry: stopped && op.active === 1 && RETRYABLE_STATES.includes(op.state),
         release: stopped && op.active === 1,
+        verify: op.state === 'enrolled' && readiness !== null && readiness.state !== 'verifying',
       },
+      readiness,
     };
   }
 

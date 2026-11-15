@@ -489,8 +489,47 @@ describe('bootstrap operations: a clean run', () => {
     const node = db.getNode(op.nodeId as number);
     expect(node).toMatchObject({ name: h.name, type: 'remote', mode: 'pilot_agent', compose_dir: '/opt/docker/sencho' });
     expect(h.minted).toEqual([op.nodeId]);
-    expect(op.events.at(-1)?.message).toMatch(/does not verify that the node is ready for deployments/);
+    expect(op.events.at(-1)?.message).toMatch(/the hub now checks that it is ready for deployments/);
+    // Enrolled is not ready: the node this run registered is provisional until its Pilot is checked.
+    expect(db.getNodeReadiness(op.nodeId as number)).toMatchObject({ state: 'provisional', operation_id: op.id, hub_url: HUB_URL });
+    expect(op.readiness).toMatchObject({ state: 'provisional', operationId: op.id, checkedAt: null, gates: [] });
+    expect(op.actions.verify).toBe(true);
     db.deleteNode(op.nodeId as number);
+    expect(db.getNodeReadiness(op.nodeId as number)).toBeUndefined();
+  });
+
+  it('checks readiness only for an enrolled run, through the node readiness service', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    // While the run is in flight there is nothing to verify yet.
+    await expect(h.service.verifyReadiness(op.id, AUDIT)).rejects.toMatchObject({ code: 'OPERATION_NOT_VERIFIABLE' });
+    await h.service.settled();
+    const nodeId = h.service.get(op.id).nodeId as number;
+    const verify = vi.fn(async () => {
+      db.recordNodeReadinessResult(nodeId, { state: 'ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: Date.now() });
+      return null;
+    });
+    const checked = new NodeBootstrapOperationService({
+      db,
+      preflight: { preflight: h.preflight } as unknown as Pick<NodeBootstrapService, 'preflight'>,
+      exec: h.host.transport(),
+      tunnels: h.tunnels,
+      readiness: {
+        get: (id) => {
+          const row = db.getNodeReadiness(id);
+          return row ? { state: row.state, operationId: row.operation_id, checkedAt: row.checked_at, agentVersion: row.agent_version, gates: [] } : null;
+        },
+        verify,
+        markProvisional: () => undefined,
+      },
+    });
+    const detail = await checked.verifyReadiness(op.id, AUDIT);
+    expect(verify).toHaveBeenCalledWith(nodeId, AUDIT);
+    expect(detail.readiness).toMatchObject({ state: 'ready', operationId: op.id });
+    expect(detail.state).toBe('enrolled');
+    db.deleteNode(nodeId);
+    await expect(checked.verifyReadiness(op.id, AUDIT)).rejects.toMatchObject({ code: 'OPERATION_NOT_VERIFIABLE' });
   });
 
   it('mints the enrollment only after every Docker step has run', async () => {
@@ -609,7 +648,7 @@ describe('bootstrap operations: stopping honestly', () => {
     expect(detail.state).toBe('partial');
     expect(detail.active).toBe(true);
     expect(detail.step).toBe('install-docker-packages');
-    expect(detail.actions).toEqual({ cancel: false, retry: true, release: true });
+    expect(detail.actions).toEqual({ cancel: false, retry: true, release: true, verify: false });
     expect(detail.events.at(-1)?.detail).toContain('Could not get lock');
     expect(h.minted).toEqual([]);
     expect(detail.nodeId).toBeNull();
