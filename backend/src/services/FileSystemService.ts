@@ -689,9 +689,12 @@ export class FileSystemService {
    * inside, or around a directory a restore is overwriting (by any spelling,
    * a link included), or cannot be proven clear of one; otherwise registered
    * until `work` settles, so a fence recorded meanwhile waits for it before it
-   * captures or swaps anything. The editors, the Secrets push and every other
-   * caller of these sinks go through here, as the Files routes do through their
-   * own admission. One query when nothing is fenced.
+   * captures or swaps anything. Used by the single-file sinks the Compose and
+   * env editors and the local Secrets read and write go through
+   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged,
+   * writeFileIfUnchanged, createFileExclusive, readFile, writeFile,
+   * saveEnvContent) and by deleteStack; the Files routes have their own
+   * admission. One query when nothing is fenced.
    */
   private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
     const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');

@@ -1584,6 +1584,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(409).json({ error: result.error, code: COMPOSE_INPUTS_REFUSED_CODE });
       return;
     }
+    if (result.code === 'data_restore') {
+      res.status(409).json({ error: result.error, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,

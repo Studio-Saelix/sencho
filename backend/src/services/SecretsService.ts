@@ -546,7 +546,8 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
         return await fsService.readFile(resolved, 'utf-8');
     } catch (err) {
         // A data restore is overwriting the directory the env file is in: the
-        // read is refused with the fence's reason, like the env editor's.
+        // read is refused with the fence's reason. An import answers
+        // IMPORT_SOURCE_REFUSED; a push reports the target as not readable.
         if (isDataRestoreFenceError(err)) throw new SecretSourceRefusedError(err.message);
         const code = (err as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT') {

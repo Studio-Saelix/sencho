@@ -26,6 +26,7 @@ import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
@@ -68,7 +69,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'compose_inputs_refused' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'compose_inputs_refused' | 'data_restore' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -229,6 +230,13 @@ export class DeployedStackDeletionService {
       };
     }
 
+    // A stack directory that is, or holds, a directory a data restore is
+    // overwriting is not taken down and removed under it: refused before anything
+    // stops. The removal itself is fenced too, for a fence recorded after this.
+    const fence = await import('./recovery/restoreFence');
+    const fenced = await fence.matchFsWorkToFences(path.join(FileSystemService.getInstance(nodeId).getBaseDir(), stackName));
+    if (fenced.refusal) return { ok: false, code: 'data_restore', error: fenced.refusal.message };
+
     // Continuation loads ownership from the persisted intent; first call uses input.
     let requiredBlueprintId: number | null =
       typeof input.requireBlueprintId === 'number' ? input.requireBlueprintId : null;
@@ -357,6 +365,7 @@ export class DeployedStackDeletionService {
         await FileSystemService.getInstance(nodeId).deleteStack(stackName);
       } catch (fsErr) {
         db.updateCleanupPendingStatus(intentId, 'cancelled');
+        if (isDataRestoreFenceError(fsErr)) return { ok: false, code: 'data_restore', error: fsErr.message };
         return {
           ok: false,
           code: 'fs_failed',

@@ -227,8 +227,10 @@ export type ProvenPathRelation = PathRelation | 'unknown';
  *
  * A failed read is never evidence: when the root's identity, or one along
  * either chain that could have decided the answer, cannot be read, the
- * relationship is `unknown`, and every caller treats that as a possible
- * dependency. A root that is not there has no second spelling to find.
+ * relationship is `unknown`. The fence, dependency and in-use callers treat it
+ * as a possible dependency; `findDeclaredFsRoot`, which looks for an equal
+ * declaration to admit an overwrite, does not find one, and refuses. A root
+ * that is not there has no second spelling to find.
  */
 async function relateWithIdentity(candidate: string, root: string, rootIdentity: DirectoryIdentity): Promise<ProvenPathRelation> {
   const relation = relatePath(candidate, root);
@@ -253,8 +255,10 @@ async function relateWithIdentity(candidate: string, root: string, rootIdentity:
  * path the Sencho path maps to through Sencho's own mounts (so a second bind
  * destination of one host tree is recognised), the declared aliases, and the
  * device and inode of each path's ancestors. `unknown` when the relationship
- * cannot be proven: Sencho's own mounts are unreadable, or the fenced directory
- * cannot be read here. The caller refuses an overlap and an unknown alike.
+ * cannot be proven: the candidate is not an absolute path, Sencho's own mounts
+ * are unreadable, or the identity of the fenced directory, of the candidate, or
+ * of a parent of either that the comparison rests on cannot be read. The
+ * caller refuses an overlap and an unknown alike.
  */
 export async function relateToFencedDirectory(
   candidateSenchoPath: string,
@@ -871,17 +875,21 @@ export async function resolveFsRootDependents(input: {
       observers.push((container.Names?.[0] ?? container.Id).replace(/^\//, ''));
       continue;
     }
-    // A bind that cannot be proven clear of the root counts as one that binds it:
-    // its stack joins the access check, or an unowned container holds the
-    // caller to the node-wide check.
+    // A bind that cannot be proven clear of the root counts as one that binds it
+    // for every access check: its stack joins the dependents, or an unowned
+    // container holds the caller to the node-wide check. It is never a current
+    // dependent, because that would make a detached root read as attached and
+    // relax who may read its points.
     if (!match.depends && !match.unproven) continue;
     mountedByContainer = true;
     const project = container.Labels?.['com.docker.compose.project'];
     const stack = project
       ? projectToStack.get(project) ?? (input.knownStackNames.includes(project) ? project : null)
       : null;
-    if (stack) add(stack, container.Labels?.['com.docker.compose.service'] ?? null);
-    else unownedContainer = true;
+    const service = container.Labels?.['com.docker.compose.service'] ?? null;
+    if (!stack) unownedContainer = true;
+    else if (match.depends) add(stack, service);
+    else record(stack, service, found);
   }
 
   const stacks = (input.onlyStacks ?? input.knownStackNames).filter((name) => input.knownStackNames.includes(name));
@@ -923,8 +931,11 @@ export async function resolveFsRootDependents(input: {
     if (!listed || listed.outcome === 'unrenderable') return unrenderable(stackName);
     for (const candidate of listed.candidates) {
       const relation = await relateWithIdentity(candidate.senchoPath, input.root.senchoPath, rootIdentity);
-      // A declaration that cannot be proven clear of the root is a possible dependent.
-      if (relation === 'unknown' || dependsOnRoot(relation, candidate.writable)) {
+      // A declaration that cannot be proven clear of the root joins the access
+      // check as a possible dependent, but is not a current one (see above).
+      if (relation === 'unknown') {
+        record(stackName, null, found);
+      } else if (dependsOnRoot(relation, candidate.writable)) {
         add(stackName, null);
         break;
       }

@@ -729,12 +729,63 @@ describe('another spelling of a directory whose identity cannot be read', () => 
     // With the root unreadable no other spelling can be proven clear of it, so
     // every stack joins the check (web through its container and its source).
     expect([...new Set(resolution.dependents.map((d) => d.stackName))].sort()).toEqual(['api', 'web']);
+    expect(resolution.current).toEqual([]);
     expect(resolution.mountedByContainer).toBe(true);
     // An unowned container it cannot place holds the caller to the node-wide check,
     // and is not shown as a mere observer.
     expect(resolution.unownedContainer).toBe(true);
     expect(resolution.observers).toEqual([]);
     const live = containers([{ Id: 'writer', Mounts: [{ Source: second }] }]);
+    expect(await roots.observeFsRootInUse({ docker: live, root, ownMounts: null })).toEqual({ inUse: true, liveContainers: ['writer'] });
+  });
+
+  it('refuses a start and file work through a child spelling whose own directory cannot be read', async () => {
+    fencedDirectory({ senchoPath: real, hostPath: '/srv/host/data' });
+    unreadable(path.join(second, 'db'));
+    const start = vi.fn(async () => 'started');
+    // Its parent still proves it is inside the fenced directory.
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: path.join(second, 'db'), RW: false }]), 'child', start))
+      .rejects.toMatchObject({ code: 'data_restore' });
+    expect((await fence.matchFsWorkToFences(path.join(second, 'db'))).refusal?.code).toBe('data_restore');
+    // With the parent unreadable too, nothing proves it either way: still refused.
+    vi.mocked(fs.promises.stat).mockRestore();
+    unreadable(path.join(second, 'db'), second);
+    await expect(fence.startContainerUnderFence(inspectable([{ Type: 'bind', Source: path.join(second, 'db'), RW: false }]), 'child', start))
+      .rejects.toMatchObject({ code: 'data_restore', message: expect.stringMatching(/cannot prove/) });
+    expect((await fence.matchFsWorkToFences(path.join(second, 'db'))).refusal?.message).toMatch(/cannot prove/);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('keeps admitted work in the drain when the fenced directory itself cannot be read', async () => {
+    const target = { senchoPath: real, hostPath: '/srv/host/data', aliases: [] };
+    const lease = fence.admitFsWork(unrelated, new Set());
+    if (!('release' in lease)) throw new Error('not admitted');
+    fencedDirectory(target);
+    unreadable(real);
+    expect(await fence.waitForFsWorkOn(target, 30)).toBe(false);
+    lease.release();
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('counts a declaration or container whose own path cannot be read, but never as a current dependent', async () => {
+    const root = { senchoPath: real, hostPath: real, aliases: [] as string[] };
+    unreadable(second);
+    stackRoots({
+      api: { outcome: 'rendered', roots: [source('api'), bind(second)] },
+      clear: { outcome: 'rendered', roots: [source('clear'), bind(unrelated)] },
+    });
+    const resolution = await resolve({
+      known: ['web', 'api', 'clear'],
+      root,
+      docker: containers([{ Id: 'web-1', project: 'web', Mounts: [{ Source: second }] }]),
+    });
+    // Unproven stacks join the access check; a stack proven clear does not.
+    expect([...new Set(resolution.dependents.map((d) => d.stackName))].sort()).toEqual(['api', 'web']);
+    // They are not current dependents, so a root nothing proven depends on stays detached.
+    expect(resolution.current).toEqual([]);
+    const { pointContentReadTargetFor } = await import('../services/recovery/authorization');
+    expect(pointContentReadTargetFor('key', resolution).kind).toBe('detached');
+    const live = containers([{ Id: 'writer', Mounts: [{ Source: second }] }, { Id: 'other', Mounts: [{ Source: unrelated }] }]);
     expect(await roots.observeFsRootInUse({ docker: live, root, ownMounts: null })).toEqual({ inUse: true, liveContainers: ['writer'] });
   });
 

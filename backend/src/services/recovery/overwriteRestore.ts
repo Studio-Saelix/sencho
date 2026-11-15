@@ -388,7 +388,10 @@ async function intentHostRoot(
 /**
  * Every container that mounts the target, with the facts the preview shows. For
  * a host directory, a container depends on it by the rule in `dependsOnRoot`;
- * a read-only ancestor is not fenced, and Sencho's own container never is.
+ * a read-only ancestor is not fenced, and Sencho's own container never is. A
+ * container whose binds cannot be proven clear of the directory throws
+ * `identity_unknown`: at the preview and the admission that refuses the
+ * overwrite, and on a later check it settles the restore as a rollback.
  */
 async function listMountingContainers(deps: OverwriteDeps, target: OverwriteTarget | string): Promise<OverwriteContainerFact[]> {
   const resolved: OverwriteTarget = typeof target === 'string' ? { kind: 'named_volume', volumeName: target } : target;
@@ -411,7 +414,12 @@ async function listMountingContainers(deps: OverwriteDeps, target: OverwriteTarg
       // A container whose binds cannot be proven clear of the directory could be
       // writing it under another spelling: the overwrite cannot say which
       // workloads to stop, so it is refused rather than run beside one.
-      if (match.unproven) throw new RecoveryError('identity_unknown');
+      if (match.unproven) {
+        throw new RecoveryError('identity_unknown', {
+          detail: `Sencho cannot prove that the container ${containerName(container) || container.Id} stays clear of this directory: `
+            + 'the identity of a directory it binds, or of this one, could not be read.',
+        });
+      }
       if (!match.depends) continue;
     }
     const inspect = await inspectContainer(deps, container.Id);

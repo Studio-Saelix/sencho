@@ -1298,6 +1298,31 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       .rejects.toBeInstanceOf(SecretSourceRefusedError);
   });
 
+  it('refuses deleting a stack whose directory holds the fenced directory, before anything is stopped', async () => {
+    const { dir, data } = envStack();
+    // A dependent stack is already closed by the restore's stack lock; this one
+    // holds the directory without being recorded as one (another stack binds it).
+    fencedOverwriteOf(data, ['other']);
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    const down = vi.fn(async () => undefined);
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      evaluateDockerEndpoint: async () => null,
+      downStack: down,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const res = await request(app).delete('/api/stacks/web').set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(down).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+    expect(fs.readFileSync(path.join(data, 'app.env'), 'utf-8')).toBe('A=1\n');
+    // The removal is fenced as well, for a fence recorded after that check.
+    const { FileSystemService } = await import('../services/FileSystemService');
+    await expect(FileSystemService.getInstance(nodeId).deleteStack('web')).rejects.toMatchObject({ code: 'data_restore' });
+    expect(fs.existsSync(data)).toBe(true);
+  });
+
   it('leaves the editors of a stack clear of the fenced directory alone', async () => {
     const { data } = envStack();
     fencedOverwriteOf(data, ['web']);
