@@ -7,6 +7,7 @@ import { downloadTextFile } from '@/lib/download';
 import { toast } from '@/components/ui/toast-store';
 import { BootstrapPathSummary } from './BootstrapPathSummary';
 import { formatBootstrapPlanText } from './planText';
+import { BOOTSTRAP_SCOPE } from './scope';
 import type { BootstrapInspection, BootstrapPlan, BootstrapPlanStep } from './types';
 
 function stepMeta(step: BootstrapPlanStep): string {
@@ -134,6 +135,9 @@ export function BootstrapPlanStep({
 
       <section className="space-y-2" aria-label="Expected after execution">
         <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Expected after execution</h4>
+        <p className="text-xs text-muted-foreground" data-testid="bootstrap-plan-scope">
+          {BOOTSTRAP_SCOPE} Items marked readiness describe checks the run does not make.
+        </p>
         <ul className="rounded-lg border border-muted bg-card/30 px-3 py-1">
           {plan.verification.map((item) => (
             <li key={item.id} className="flex flex-wrap items-baseline gap-2 border-t border-muted py-2 text-xs first:border-t-0">

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { BOOTSTRAP_SCOPE } from '../scope';
 import { BootstrapServerDialog } from '../BootstrapServerDialog';
 import {
   BootstrapApiError,
@@ -81,6 +82,13 @@ beforeEach(() => {
   vi.mocked(fetchBootstrapCapabilities).mockResolvedValue(FALLBACK_CAPABILITIES);
   vi.mocked(checkBootstrapHostKey).mockResolvedValue(CHANGED_KEY);
   vi.mocked(runBootstrapPreflight).mockResolvedValue(BLOCKED_RESULT);
+});
+
+describe('BootstrapServerDialog scope', () => {
+  it('states on the first screen that a run executes and enrolls only', () => {
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    expect(screen.getByRole('dialog')).toHaveTextContent(BOOTSTRAP_SCOPE);
+  });
 });
 
 describe('BootstrapServerDialog new host trust decision', () => {

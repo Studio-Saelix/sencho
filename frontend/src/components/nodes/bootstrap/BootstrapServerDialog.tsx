@@ -14,6 +14,7 @@ import { useBootstrapOperation, type UseBootstrapOperation } from './useBootstra
 import { FirstTrustPrompt } from './FirstTrustPrompt';
 import { HostKeyCompare } from './HostKeyCompare';
 import { INVALIDATION_MESSAGE } from './invalidation';
+import { BOOTSTRAP_SCOPE } from './scope';
 import { useNodeBootstrap, type UseNodeBootstrap } from './useNodeBootstrap';
 import type { BootstrapStep } from './types';
 
@@ -175,6 +176,7 @@ function ApproveConfirm({
           then waits for the Pilot to enroll. It inspects the server again first and stops without changing anything
           if the server no longer matches the plan.
         </p>
+        <p data-testid="bootstrap-approve-scope">{BOOTSTRAP_SCOPE}</p>
         <ol className="list-decimal space-y-0.5 pl-5 text-xs">
           {plan.stages.map((stage) => <li key={stage.id}>{stage.title}</li>)}
         </ol>
@@ -360,7 +362,7 @@ export function BootstrapServerDialog({ open, onOpenChange }: { open: boolean; o
       <ModalHeader
         kicker="NODES · BOOTSTRAP"
         title="Bootstrap a new Linux server"
-        description="Inspect a host over SSH, review the plan, then approve it to prepare Docker and enroll a Pilot."
+        description={`Inspect a host over SSH, review the plan, then approve it to prepare Docker and enroll a Pilot. ${BOOTSTRAP_SCOPE}`}
       />
       <StepRail step={wizard.step} reachablePlan={reachablePlan} />
       <DialogBody wizard={wizard} run={run} />

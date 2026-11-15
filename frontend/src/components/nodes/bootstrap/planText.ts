@@ -1,3 +1,4 @@
+import { BOOTSTRAP_SCOPE } from './scope';
 import type { BootstrapPlan } from './types';
 
 /**
@@ -57,6 +58,7 @@ export function formatBootstrapPlanText(plan: BootstrapPlan): string {
   for (const notice of plan.notices) lines.push(`Note: ${notice}`);
   lines.push('');
   lines.push('Expected after execution:');
+  lines.push(BOOTSTRAP_SCOPE);
   for (const item of plan.verification) lines.push(`- [${item.slice === 'S2' ? 'run' : 'readiness'}] ${item.title}: ${item.expected}`);
   lines.push('');
   lines.push(`Plan digest: sha256:${plan.digest}`);

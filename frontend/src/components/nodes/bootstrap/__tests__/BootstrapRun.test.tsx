@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { BOOTSTRAP_SCOPE } from '../scope';
 import { BootstrapServerDialog } from '../BootstrapServerDialog';
 import {
   FALLBACK_CAPABILITIES,
@@ -212,7 +213,8 @@ describe('operation status mapping', () => {
 
   it('says an enrolled node is not verified yet, and a stopped run that changed things undid nothing', () => {
     const enrolled = operation({ state: 'enrolled', stage: 'enroll' });
-    expect(operationAnswer(enrolled).line).toMatch(/has not been verified yet/);
+    expect(operationAnswer(enrolled).line).toContain('only executed the plan and enrolled the Pilot');
+    expect(operationAnswer(enrolled).line).toContain('did not verify that the node is ready for deployments');
     expect(operationStages(enrolled).every((stage) => stage.tone === 'success')).toBe(true);
     expect(operationAnswer(STOPPED)).toMatchObject({ tone: 'warning', title: 'Stopped partway', detail: 'Steps that ran stay on the host. Nothing was undone.' });
     expect(operationStages(STOPPED).find((stage) => stage.id === 'docker')).toMatchObject({ word: 'stopped', tone: 'warning' });
@@ -227,6 +229,7 @@ describe('approving a plan', () => {
     const confirm = await screen.findByRole('alertdialog');
     expect(within(confirm).getByText(`Plan sha256:${DIGEST}`)).toBeInTheDocument();
     expect(within(confirm).getByText(/CHANGES server\.example\.com/)).toBeInTheDocument();
+    expect(within(confirm).getByTestId('bootstrap-approve-scope')).toHaveTextContent(BOOTSTRAP_SCOPE);
     expect(startBootstrapOperation).not.toHaveBeenCalled();
     await user.click(within(confirm).getByRole('button', { name: 'Approve and run' }));
 

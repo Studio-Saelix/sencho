@@ -1,6 +1,6 @@
 ---
 title: Node Bootstrap
-description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve.
+description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve. It executes the plan and enrolls the Pilot; it does not verify the server is ready for deployments.
 ---
 
 Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pilot node. It works in two halves:
@@ -8,7 +8,7 @@ Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pi
 - **Preflight.** Sencho connects to the host, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks. Its output is an ordered plan with exact commands, which you can read, copy and download. **The preflight changes nothing on the server.**
 - **Run.** When you approve that plan, Sencho inspects the server again, runs the plan's steps in order, installs only the Docker components that are missing, writes the Pilot files, starts the Pilot and waits for it to enroll. The run belongs to Sencho, not to your browser: closing the window does not stop it.
 
-**What a run does not do.** A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not verify that the node is ready for deployments (Docker, Compose and the stacks directory as seen from inside the Pilot). Treat a freshly enrolled node as unverified until you have checked it.
+**What a run does not do.** Bootstrap is execution and enrollment only. A run executes the plan and enrolls the Pilot, nothing more; it does not verify that the server is ready for deployments. The dialog says this in its header, on the plan and in the approval step, and a finished run repeats it. A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not verify that the node is ready for deployments (Docker, Compose and the stacks directory as seen from inside the Pilot). Treat a freshly enrolled node as unverified until you have checked it.
 
 The preflight answers questions a manual enrollment cannot:
 

@@ -1,5 +1,6 @@
 import type { StatusPathAnswer, StatusPathStage } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
+import { BOOTSTRAP_SCOPE_AFTER_RUN } from './scope';
 import type { BootstrapOperation, BootstrapOperationDetail, BootstrapOperationState } from './types';
 
 /**
@@ -121,7 +122,7 @@ export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAn
       tone: stopped.tone,
       title: stopped.title,
       status: op.state,
-      line: `${op.targetName} is enrolled. Its readiness for deployments has not been verified yet.`,
+      line: `${op.targetName} is enrolled. ${BOOTSTRAP_SCOPE_AFTER_RUN}`,
     };
   }
   return {

@@ -315,7 +315,7 @@ test.describe('Node bootstrap wizard', () => {
     await confirm.getByRole('button', { name: 'Approve and run' }).click();
 
     await expect(page.getByTestId('bootstrap-run-answer')).toContainText('Re-checking');
-    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('readiness for deployments has not been verified', { timeout: 10_000 });
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('did not verify that the node is ready for deployments', { timeout: 10_000 });
     expect(executeBody).toMatchObject({ planDigest: plan.digest, host: 'server.example.com', targetName: 'media-server' });
   });
 });
