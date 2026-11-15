@@ -691,8 +691,8 @@ export class FileSystemService {
    * until `work` settles, so a fence recorded meanwhile waits for it before it
    * captures or swaps anything. Used by the single-file sinks the Compose and
    * env editors and the local Secrets read and write go through
-   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged,
-   * writeFileIfUnchanged, createFileExclusive, readFile, writeFile,
+   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged and
+   * the conflict read it answers with, writeFileIfUnchanged, createFileExclusive, readFile, writeFile,
    * saveEnvContent) and by deleteStack; the Files routes have their own
    * admission. One query when nothing is fenced.
    */
@@ -917,14 +917,19 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
-    const fh = await fsPromises.open(safePath, 'r');
-    try {
-      const stat = await fh.stat();
-      const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs };
-    } finally {
-      await fh.close();
-    }
+    // The conflict answer carries these bytes back to the editor, so the read is
+    // file work on the file actually read: a link into a fenced directory is
+    // refused like the editor's own read, never answered with what is mid-restore.
+    return this.underDirectoryFences(safePath, async () => {
+      const fh = await fsPromises.open(safePath, 'r');
+      try {
+        const stat = await fh.stat();
+        const content = await fh.readFile('utf-8');
+        return { content, mtimeMs: stat.mtimeMs };
+      } finally {
+        await fh.close();
+      }
+    });
   }
 
   /**

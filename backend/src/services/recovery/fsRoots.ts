@@ -229,7 +229,8 @@ export type ProvenPathRelation = PathRelation | 'unknown';
  * either chain that could have decided the answer, cannot be read, the
  * relationship is `unknown`. The fence, dependency and in-use callers treat it
  * as a possible dependency; `findDeclaredFsRoot`, which looks for an equal
- * declaration to admit an overwrite, does not find one, and refuses. A root
+ * declaration to admit an overwrite, does not find one and reports the
+ * declaration as unplaced, so the overwrite is refused as unknown. A root
  * that is not there has no second spelling to find.
  */
 async function relateWithIdentity(candidate: string, root: string, rootIdentity: DirectoryIdentity): Promise<ProvenPathRelation> {
@@ -685,15 +686,19 @@ export async function probeProvenRoot(input: {
  * Every stack's current declaration of a directory, from a fresh render of each
  * stack. An overwrite may only write a directory some stack declares now, as a
  * bind it may write; `unrenderable` names a stack whose model would not render,
- * which makes the answer unknown.
+ * which makes the answer unknown. `unplaced` says that some declaration could
+ * not be compared with the directory because an identity it rests on could not
+ * be read: it may be this directory under another spelling, so a missing
+ * declaration is then unknown rather than absent.
  */
 export async function findDeclaredFsRoot(input: {
   nodeId: number;
   knownStackNames: readonly string[];
   environment: FsRootEnvironment;
   senchoPath: string;
-}): Promise<{ candidates: FsRootCandidate[]; unrenderable: string | null }> {
+}): Promise<{ candidates: FsRootCandidate[]; unrenderable: string | null; unplaced: boolean }> {
   const candidates: FsRootCandidate[] = [];
+  let unplaced = false;
   const rootIdentity = await identityOf(input.senchoPath);
   const listings = await mapLimited([...input.knownStackNames], RENDER_CONCURRENCY, (stackName) => listStackFsRootCandidates({
     nodeId: input.nodeId,
@@ -703,12 +708,14 @@ export async function findDeclaredFsRoot(input: {
   }));
   for (let index = 0; index < listings.length; index += 1) {
     const listed = listings[index];
-    if (listed.outcome === 'unrenderable') return { candidates, unrenderable: input.knownStackNames[index] };
+    if (listed.outcome === 'unrenderable') return { candidates, unrenderable: input.knownStackNames[index], unplaced };
     for (const candidate of listed.candidates) {
-      if (await relateWithIdentity(candidate.senchoPath, input.senchoPath, rootIdentity) === 'equal') candidates.push(candidate);
+      const relation = await relateWithIdentity(candidate.senchoPath, input.senchoPath, rootIdentity);
+      if (relation === 'equal') candidates.push(candidate);
+      else if (relation === 'unknown') unplaced = true;
     }
   }
-  return { candidates, unrenderable: null };
+  return { candidates, unrenderable: null, unplaced };
 }
 
 // --- Generation -------------------------------------------------------------

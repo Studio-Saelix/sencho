@@ -707,6 +707,35 @@ describe('overwriting a host directory', () => {
     expect(clear.body.target).toMatchObject({ hostPath: data, eligible: true });
   });
 
+  it('refuses as unknown, not as undeclared, when the only declaration of the directory cannot be placed', async () => {
+    const { pointId } = await capturedPoint();
+    // The stack now declares the directory only by a spelling whose identity
+    // cannot be read: it may be this directory, so "no stack declares it" is not known.
+    const unreadable = path.join(shared, `declared-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(unreadable);
+    models.byStack.web = [{ source: unreadable, target: '/data' }];
+    StackFileRoots.StackFileRootsService.invalidateNode(nodeId);
+    const original = fs.promises.stat.bind(fs.promises);
+    vi.spyOn(fs.promises, 'stat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
+      if (path.resolve(String(target)) === unreadable) throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+      return original(target, options);
+    }) as typeof fs.promises.stat);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await preview(pointId);
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('identity_unknown');
+    const admitted = await request(app).post(`/api/recovery/points/${pointId}/overwrite`).set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID(), confirmationToken: 'a'.repeat(64), confirmHostPath: '/x' });
+    expect(admitted.status).toBe(409);
+    expect(admitted.body.errorClass).toBe('identity_unknown');
+    // Readable, the same spelling is another directory, and the refusal says no stack declares this one.
+    vi.mocked(fs.promises.stat).mockRestore();
+    const undeclared = await preview(pointId);
+    expect(undeclared.status).toBe(200);
+    expect(undeclared.body.target.eligible).toBe(false);
+    expect(undeclared.body.target.ineligibleReason).toMatch(/No stack on this node declares this directory/);
+  });
+
   it('refuses to overwrite a stack source directory', async () => {
     stackDir('web');
     const res = await capture('web', 'stack-source');
@@ -1325,6 +1354,133 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(data)).toBe(true);
   });
 
+  /** `envStack`, with the compose file itself moved into the fenced directory and linked from the stack. */
+  function linkedComposeStack(): { dir: string; data: string; envFile: string; compose: string } {
+    const stack = envStack();
+    const compose = path.join(stack.data, 'compose.yaml');
+    fs.renameSync(path.join(stack.dir, 'compose.yaml'), compose);
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(stack.dir, 'compose.yaml'));
+    return { ...stack, compose };
+  }
+
+  it('refuses a Compose save whose opened file is no longer the one resolved, instead of answering with the fenced file', async () => {
+    const { data, compose } = linkedComposeStack();
+    const before = fs.readFileSync(compose, 'utf-8');
+    fencedOverwriteOf(data, ['web']);
+    const fence = await import('../services/recovery/restoreFence');
+    const res = await request(app).put('/api/stacks/web').set('Cookie', adminCookie)
+      .set('X-Compose-File', 'docker-compose.yml').send({ content: 'services: {}\n' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(res.body.currentContent).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('env_file');
+    expect(fs.readFileSync(compose, 'utf-8')).toBe(before);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('refuses the conflict read when the compose file changes to a link into the fenced directory during an admitted save', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    const before = fs.readFileSync(compose, 'utf-8');
+    // A second compose file outside the fence is the one the editor opened.
+    const opened = path.join(dir, 'docker-compose.yml');
+    fs.writeFileSync(opened, 'services:\n  other:\n    image: nginx\n');
+    fencedOverwriteOf(data, ['other']);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const original = proto.resolveComposeFile;
+    let calls = 0;
+    // The first resolution still names the opened file, so the save is admitted
+    // on it; the one inside the admission sees the link into the fence.
+    vi.spyOn(proto, 'resolveComposeFile').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      calls += 1;
+      if (calls === 1) return { filename: 'docker-compose.yml', absolute: opened };
+      return original.apply(this, args);
+    });
+    const res = await request(app).put('/api/stacks/web').set('Cookie', adminCookie)
+      .set('X-Compose-File', 'docker-compose.yml').send({ content: 'services: {}\n' });
+    expect(calls).toBe(2);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(res.body.currentContent).toBeUndefined();
+    expect(fs.readFileSync(compose, 'utf-8')).toBe(before);
+    expect(fs.readFileSync(opened, 'utf-8')).toBe('services:\n  other:\n    image: nginx\n');
+  });
+
+  it('refuses the env file list, the env editor and the env inventory when the compose file is in the fenced directory, and creates no env file', async () => {
+    const { dir, data, envFile } = linkedComposeStack();
+    const listed = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
+    expect(listed.body.envFiles).toEqual([envFile]);
+    fencedOverwriteOf(data, ['web']);
+    const variants = {
+      list: await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie),
+      read: await request(app).get('/api/stacks/web/env').set('Cookie', adminCookie),
+      create: await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=9\n' }),
+      save: await request(app).put('/api/stacks/web/env').set('Cookie', adminCookie).send({ content: 'A=9\n' }),
+      inventory: await request(app).get('/api/stacks/web/env-inventory').set('Cookie', adminCookie),
+    };
+    for (const [name, res] of Object.entries(variants)) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+    }
+    expect(variants.read.headers['x-env-exists']).toBeUndefined();
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+    expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
+  });
+
+  it('refuses a Secrets import and push whose env file the fenced compose file declares', async () => {
+    const { data } = linkedComposeStack();
+    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+    const secrets = SecretsService.getInstance();
+    fencedOverwriteOf(data, ['web']);
+    const refused = secrets.readImportOverlay(nodeId, 'web', 'app.env');
+    await expect(refused).rejects.toBeInstanceOf(SecretSourceRefusedError);
+    await expect(refused).rejects.toThrow(/data restore is overwriting/);
+  });
+
+  it('refuses a Secrets push into the fenced directory: as a whole when its preview read the target, per target when it did not', async () => {
+    const { data, envFile } = envStack();
+    const { SecretsService } = await import('../services/SecretsService');
+    const secrets = SecretsService.getInstance();
+    const { id } = secrets.create({ name: `push-fenced-${randomUUID().slice(0, 8)}`, kv: { A: '2' }, user: 'admin' });
+    const selector = { type: 'nodes' as const, ids: [nodeId] };
+    const plan = await secrets.previewPushDiff(id, selector, 'web', 'app.env');
+    const expectedTargets = plan.targets.map(({ nodeId: target, fingerprint }) => ({ nodeId: target, fingerprint }));
+    expect(expectedTargets[0].fingerprint).not.toBeNull();
+    fencedOverwriteOf(data, ['web']);
+    await expect(secrets.executePush(id, {
+      selector, stackName: 'web', envFileBasename: 'app.env', expectedVersion: plan.version, expectedTargets, user: 'admin',
+    })).rejects.toMatchObject({ name: 'PushTargetChangedError', reason: 'unreachable' });
+    expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
+    // Previewed under the fence: nothing was reviewed, so only that target fails.
+    const fencedPlan = await secrets.previewPushDiff(id, selector, 'web', 'app.env');
+    const result = await secrets.executePush(id, {
+      selector, stackName: 'web', envFileBasename: 'app.env', expectedVersion: fencedPlan.version,
+      expectedTargets: fencedPlan.targets.map(({ nodeId: target, fingerprint }) => ({ nodeId: target, fingerprint })),
+      user: 'admin',
+    });
+    expect(result.results[0].status).toBe('failed');
+    expect(fs.readFileSync(envFile, 'utf-8')).toBe('A=1\n');
+  });
+
+  it('refuses a Blueprint withdrawing a stack whose directory holds the fenced directory, before anything is stopped', async () => {
+    const { dir, data } = envStack();
+    fencedOverwriteOf(data, ['other']);
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    const down = vi.fn(async () => undefined);
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      evaluateDockerEndpoint: async () => null,
+      downStack: down,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const res = await request(app).post('/api/blueprints/withdraw-local').set('Cookie', adminCookie)
+      .send({ stackName: 'web', blueprintId: 1 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(down).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+  });
+
   it('leaves the editors of a stack clear of the fenced directory alone', async () => {
     const { data } = envStack();
     fencedOverwriteOf(data, ['web']);
@@ -1437,6 +1593,37 @@ describe('a download whose response a directory fence cut off before its source 
     const opened = hold.returned[0] as { kind: string; stream: import('stream').Readable };
     for (let i = 0; i < 100 && !opened.stream.destroyed; i += 1) await new Promise((r) => setTimeout(r, 10));
     expect(opened.stream.destroyed).toBe(true);
+  });
+
+  it('closes the file a bulk download is streaming when the fence cuts it off, and finishes its handler', async () => {
+    const data = dataDir('web');
+    bigFile(data);
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const query = `rootId=${encodeURIComponent(await rootIdOf('web'))}`;
+    const proto = await gatewayProto();
+    const original = proto.download;
+    const { PassThrough } = await import('stream');
+    // The entry streams one chunk and then waits for more, as a slow read would.
+    const streaming = new PassThrough();
+    let started!: () => void;
+    const flowing = new Promise<void>((resolve) => { started = resolve; });
+    vi.spyOn(proto, 'download').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      const opened = await original.apply(this, args) as { kind: string; stream?: import('stream').Readable; size: number };
+      opened.stream?.destroy();
+      streaming.write(Buffer.alloc(64 * 1024, 7));
+      started();
+      return { ...opened, kind: 'stream', stream: streaming };
+    });
+    const pending = request(app).get(`/api/stacks/web/files/bulk-download?${query}&path=big.bin`).set('Cookie', adminCookie)
+      .then(() => 'answered', () => 'cut off');
+    await flowing;
+    await new Promise((r) => setTimeout(r, 50));
+    const fence = await import('../services/recovery/restoreFence');
+    fencedOverwriteOf(data, ['web']);
+    expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+    expect(await pending).toBe('cut off');
+    await settled(fence);
+    expect(streaming.destroyed).toBe(true);
   });
 
   it('opens nothing for a bulk download cut off during its prewalk', async () => {

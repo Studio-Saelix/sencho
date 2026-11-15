@@ -653,7 +653,7 @@ async function observeFsTarget(
       environment,
       senchoPath: located.senchoPath,
     })
-    : { candidates: [], unrenderable: null };
+    : { candidates: [], unrenderable: null, unplaced: false };
   const aliases = [...new Set(declared.candidates.flatMap((candidate) => candidate.aliases))].sort();
   const location: FsRootLocation | null = located ? { ...located, aliases } : null;
   const resolution = location
@@ -717,6 +717,10 @@ async function observeFsTarget(
     && candidate.writable && candidate.ineligibleReason === 'docker_root_unknown');
   if (!writable && !writableAnySpelling) {
     if (dockerRootUnknown) refuse('path_mapping_unproven', describeFsIneligible('docker_root_unknown') ?? FS_UNPROVEN_REASON);
+    // A declaration whose identity could not be read may be this directory under
+    // another spelling: the answer is unknown, the same refusal a container that
+    // cannot be placed gets, never "no stack declares it".
+    else if (declared.unplaced) throw new RecoveryError('identity_unknown');
     else refuse('root_not_authorized', FS_NOT_DECLARED_REASON);
   }
 
@@ -1356,11 +1360,10 @@ function keepForCleanup(deps: OverwriteDeps, intentId: string, now = Date.now())
  */
 async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
   const deps = ctx.deps;
-  const dependency = await recheckDependents(ctx, state, { requireStopped: false });
-  if (dependency !== 'ok') {
-    await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
-    return false;
-  }
+  // A container whose bind became unreadable since admission throws here; it
+  // settles the restore like any other refusal instead of leaving the intent
+  // open, which would hold the directory until a restart reconciled it.
+  if (!await recheckDependentsOrSettle(ctx, state, { requireStopped: false }, 'Rechecking the dependents')) return false;
   deps.intents.advance(state.intent.id, 'fenced');
   // From here the workloads are being stopped, so the fence is live: every
   // Sencho path that could start or browse one is refused from this record.
@@ -2013,10 +2016,10 @@ async function recheckDependents(
 }
 
 /**
- * The post-fence call sites share one rule: a recheck that cannot answer must
- * not escape the pipeline with the workloads stopped and the fence held, because
- * only reconciliation would release them. A throw, a changed set and an unknown
- * generation all settle the restore the same way an ordinary refusal does.
+ * Every recheck shares one rule: a recheck that cannot answer must not escape
+ * the pipeline, because only reconciliation would then settle the intent (and,
+ * after the fence, release the stopped workloads). A throw, a changed set and an
+ * unknown generation all settle the restore the same way an ordinary refusal does.
  */
 async function recheckDependentsOrSettle(
   ctx: OverwriteRunContext,

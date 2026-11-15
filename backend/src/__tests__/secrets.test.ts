@@ -449,10 +449,20 @@ describe('SecretsService.executePush (remote node)', () => {
     let writes: string[] = [];
     let remoteReadFails = false;
     let afterWrite: (() => void) | null = null;
+    /** The remote routes that answer as a node whose env directory a data restore is overwriting. */
+    let remoteFenced = new Set<'envs' | 'env' | 'put'>();
+    const FENCE_MESSAGE = 'A data restore is overwriting the directory "/srv/app", and Sencho cannot prove this stays clear of it.';
 
     beforeAll(async () => {
         server = http.createServer((req, res) => {
             const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+            const route = req.method === 'PUT' ? 'put' : url.pathname.endsWith('/envs') ? 'envs' : 'env';
+            if (remoteFenced.has(route)) {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: FENCE_MESSAGE, code: 'data_restore' }));
+                return;
+            }
             if (req.method === 'GET' && url.pathname.endsWith('/envs')) {
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ envFiles: ['/srv/app/.env'] }));
@@ -507,6 +517,49 @@ describe('SecretsService.executePush (remote node)', () => {
         writes = [];
         remoteReadFails = false;
         afterWrite = null;
+        remoteFenced = new Set();
+    });
+
+    it('refuses an import from a remote node under a data restore the way a local one is refused', async () => {
+        const svc = SecretsService.getInstance();
+        const { SecretSourceRefusedError } = await import('../services/SecretsService');
+        for (const route of ['envs', 'env'] as const) {
+            remoteFenced = new Set([route]);
+            const refused = svc.readImportOverlay(remoteId, 'app', '.env');
+            await expect(refused, route).rejects.toBeInstanceOf(SecretSourceRefusedError);
+            await expect(refused, route).rejects.toThrow(FENCE_MESSAGE);
+        }
+        const { id } = svc.create({ name: 'import-remote-fenced', kv: { X: '1' }, user: TEST_USERNAME });
+        const preview = await request(app)
+            .post(`/api/secrets/${id}/import-from-stack/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: remoteId, stackName: 'app', envFileBasename: '.env' });
+        expect(preview.status).toBe(400);
+        expect(preview.body).toMatchObject({ code: 'IMPORT_SOURCE_REFUSED', error: FENCE_MESSAGE });
+    });
+
+    it('refuses a remote push under a data restore: as a whole when its preview read the target, per target when the write is refused', async () => {
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-remote-fenced', kv: { REMOTE_ONLY: 'new' }, user: TEST_USERNAME });
+        const selector = { type: 'nodes' as const, ids: [remoteId] };
+        const push = (plan: Awaited<ReturnType<typeof svc.previewPushDiff>>) => svc.executePush(id, {
+            selector,
+            stackName: 'app',
+            envFileBasename: '.env',
+            expectedVersion: plan.version,
+            expectedTargets: expectedTargetsFor(plan.targets),
+            user: TEST_USERNAME,
+        });
+        const plan = await svc.previewPushDiff(id, selector, 'app', '.env');
+        remoteFenced = new Set(['env']);
+        await expect(push(plan)).rejects.toMatchObject({ name: 'PushTargetChangedError', reason: 'unreachable' });
+        expect(writes).toHaveLength(0);
+        // The read still passes and the node's env editor refuses the write.
+        remoteFenced = new Set(['put']);
+        const result = await push(await svc.previewPushDiff(id, selector, 'app', '.env'));
+        expect(result.results[0].status).toBe('failed');
+        expect(result.results[0].error).toContain('data_restore');
+        expect(writes).toHaveLength(0);
     });
 
     it('refuses a remote target whose env file changed after the preview', async () => {

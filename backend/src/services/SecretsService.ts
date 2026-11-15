@@ -11,7 +11,7 @@ import { isPathWithinBase } from '../utils/validation';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
-import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -480,7 +480,15 @@ function confineToComposeRoot(nodeId: number, candidate: string): string | null 
 }
 
 async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
-    const paths = await resolveAllEnvFilePaths(nodeId, stackName);
+    let paths: string[];
+    try {
+        paths = await resolveAllEnvFilePaths(nodeId, stackName);
+    } catch (err) {
+        // The compose file that declares the env files sits in a directory a data
+        // restore is overwriting: refused with the fence's reason, as the read is.
+        if (isDataRestoreFenceError(err)) throw new SecretSourceRefusedError(err.message);
+        throw err;
+    }
     if (paths.length === 0) {
         if (basename === '.env') {
             const baseDir = FileSystemService.getInstance(nodeId).getBaseDir();
@@ -496,6 +504,21 @@ async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: 
     const safe = confineToComposeRoot(nodeId, match);
     if (!safe) throw new SecretSourceError('Invalid env file path');
     return { absolutePath: safe };
+}
+
+/**
+ * A remote node's refusal because a data restore is overwriting the directory
+ * the env file (or the compose file declaring it) is in: the same
+ * SecretSourceRefusedError a local read raises, so an import answers alike on
+ * every transport. Null for any other answer.
+ */
+async function remoteFenceRefusal(res: Response): Promise<SecretSourceRefusedError | null> {
+    if (res.status !== 409) return null;
+    const body = await res.clone().json().catch(() => null) as { error?: unknown; code?: unknown } | null;
+    if (body?.code !== DATA_RESTORE_FENCE_CODE) return null;
+    return new SecretSourceRefusedError(typeof body.error === 'string' && body.error
+        ? body.error
+        : 'A data restore is overwriting the directory this env file is in.');
 }
 
 /**
@@ -522,6 +545,8 @@ async function resolveEnvFileRemote(node: Node, stackName: string, basename: str
         if (res.status === 404 && basename === '.env') {
             return { absolutePath: '.env' };
         }
+        const refusal = await remoteFenceRefusal(res);
+        if (refusal) throw refusal;
         throw new Error(`failed to list env files (HTTP ${res.status})`);
     }
     const body = await res.json() as { envFiles?: string[] };
@@ -587,7 +612,11 @@ async function readEnvRemote(node: Node, stackName: string, absolutePath: string
         if (missingAsEmpty) return '';
         throw new SecretSourceError(`env file '${path.basename(absolutePath)}' does not exist in stack '${stackName}' on node ${node.name}`);
     }
-    if (!res.ok) throw new Error(`failed to read env (HTTP ${res.status})`);
+    if (!res.ok) {
+        const refusal = await remoteFenceRefusal(res);
+        if (refusal) throw refusal;
+        throw new Error(`failed to read env (HTTP ${res.status})`);
+    }
     // A node answers 200 with an empty body and this header when the stack has
     // no env file at all. An import must not read that as an empty source.
     if (!missingAsEmpty && res.headers.get('X-Env-Exists') === 'false') {

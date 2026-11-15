@@ -17,6 +17,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { parseInterpolationRefs, type InterpolationRef } from './envVarParse';
+import { isDataRestoreFenceError } from './dataRestoreFenceError';
 
 const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB, matches the routes/stacks.ts bound
 const ROOT_COMPOSE_CANDIDATES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
@@ -147,7 +148,11 @@ async function parseComposeServices(fsService: FileSystemService, absPath: strin
   let content: string;
   try {
     content = await fsService.readFile(absPath, 'utf-8');
-  } catch {
+  } catch (err) {
+    // A data restore overwriting the compose file's directory is not "no
+    // compose file": answering that would list no env file, and the editor
+    // would offer to create one the next deploy reads.
+    if (isDataRestoreFenceError(err)) throw err;
     return null;
   }
   if (content.length > MAX_COMPOSE_PARSE_BYTES) return null;

@@ -968,6 +968,9 @@ stacksRouter.get('/:stackName/envs', async (req: Request, res: Response) => {
     const envPaths = await resolveAllEnvFilePaths(req.nodeId, stackName);
     res.json({ envFiles: envPaths });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     res.status(500).json({ error: 'Failed to resolve env files' });
   }
 });
@@ -2250,6 +2253,10 @@ stacksRouter.get('/:stackName/env-inventory', async (req: Request, res: Response
   try {
     res.json(await buildEnvInventory(req.nodeId, stackName));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to build env inventory for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build env inventory' });

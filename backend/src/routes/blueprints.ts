@@ -684,7 +684,9 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
             });
             return;
         }
-        if (result.code === 'docker_endpoint_protected' || result.code === 'compose_inputs_refused') {
+        // A data restore overwriting a directory the stack holds is a refusal to
+        // try again later, the same answer DELETE /api/stacks/:stackName gives.
+        if (result.code === 'docker_endpoint_protected' || result.code === 'compose_inputs_refused' || result.code === 'data_restore') {
             res.status(409).json({ error: result.error, code: result.code });
             return;
         }
