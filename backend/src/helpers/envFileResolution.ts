@@ -110,14 +110,20 @@ function inlineEnvKeysOf(environment: unknown): string[] {
  * a directory may only be mid-swap, so its absence is not an answer. One query
  * when nothing is fenced; called only once a file was found missing.
  */
-async function refuseIfFenced(abs: string): Promise<void> {
+async function refuseIfFenced(abs: string, baseDir: string): Promise<void> {
   const { matchFsWorkToFences } = await import('../services/recovery/restoreFence');
   const spellings = [abs];
-  try {
-    // A link whose target directory was moved aside dangles: compare where it points.
-    spellings.push(path.resolve(path.dirname(abs), await fsPromises.readlink(abs)));
-  } catch {
-    // Not a link, or not there at all.
+  // Canonical containment barrier, inline with the readlink below: only a path
+  // under the compose root is asked where it points.
+  const baseResolved = path.resolve(baseDir);
+  const safePath = path.resolve(baseResolved, abs);
+  if (safePath.startsWith(baseResolved + path.sep)) {
+    try {
+      // A link whose target directory was moved aside dangles: compare where it points.
+      spellings.push(path.resolve(path.dirname(safePath), await fsPromises.readlink(safePath)));
+    } catch {
+      // Not a link, or not there at all.
+    }
   }
   for (const spelling of spellings) {
     const match = await matchFsWorkToFences(spelling);
@@ -131,7 +137,7 @@ async function existenceOf(fsService: FileSystemService, abs: string, baseDir: s
     await fsService.access(abs);
     return 'present';
   } catch (err) {
-    await refuseIfFenced(abs);
+    await refuseIfFenced(abs, baseDir);
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unverifiable';
   }
 }
@@ -160,7 +166,7 @@ async function discoverAuthoredComposeFiles(
     } catch {
       // A compose file missing because its directory is being restored is not
       // "no compose file"; otherwise try the next candidate.
-      await refuseIfFenced(abs);
+      await refuseIfFenced(abs, stackDir);
     }
   }
   return [];
