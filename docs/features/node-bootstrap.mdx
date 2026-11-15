@@ -1,14 +1,15 @@
 ---
 title: Node Bootstrap
-description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, and runs only the plan you approve. It is execution and enrollment only and does not verify that the node is ready for deployments.
+description: Prepare a Linux server over SSH and enroll it as a Pilot node. Sencho verifies the host key, inspects the server without changing it, shows the exact plan, runs only the plan you approve, then checks through the Pilot that the node is ready for deployments.
 ---
 
-Node bootstrap turns an Ubuntu server you can reach over SSH into an enrolled Pilot node. It works in two halves:
+Node bootstrap turns an Ubuntu server you can reach over SSH into a verified Pilot node. It works in three parts:
 
 - **Preflight.** Sencho connects to the host, runs a fixed catalog of read-only commands, and reports what it found with the same pass, warning, blocked and unknown language used by the other environment checks. Its output is an ordered plan with exact commands, which you can read, copy and download. **The preflight changes nothing on the server.**
 - **Run.** When you approve that plan, Sencho inspects the server again, runs the plan's steps in order, installs only the Docker components that are missing, writes the Pilot files, starts the Pilot and waits for it to enroll. The run belongs to Sencho, not to your browser: closing the window does not stop it.
+- **Readiness.** Once the Pilot connects, Sencho asks it, through its tunnel, for a fresh report on its identity, Docker, Compose and the Compose directory, and judges that report. The node is **Ready** only when every check passes. This part reads the server and changes nothing on it.
 
-**What a run does not do.** Bootstrap is execution and enrollment only: a run executes the plan, checks each step's result, and enrolls the Pilot. It is not a complete, verified provisioning. The dialog says so on every step and in the approval step, and the status of an enrolled run repeats it. A finished run leaves the node enrolled: its Pilot is connected to this Sencho instance. It does not check the node from inside the Pilot, so it does not verify that the node is ready for deployments (the Compose directory mount, Docker and Compose access, and capabilities). Treat a freshly enrolled node as unverified until you have checked it.
+**A connection is not readiness.** A connected tunnel proves only that the Pilot holds a credential. Until the readiness check passes, the node shows **Unverified** in Fleet, in the node switcher and in **Settings → Nodes**, and the run's status says which check failed and what to do about it. Nodes you enroll by hand or connect over the API proxy are not checked this way: their connection status means what it always meant.
 
 The preflight answers questions a manual enrollment cannot:
 
@@ -33,7 +34,7 @@ Only an administrator signed in to the Sencho web interface can run the prefligh
 
 ## Open the workflow
 
-Go to **Fleet**, then open **Node management** at the end of the Overview toolbar and choose **Bootstrap new Linux server**.
+Go to **Fleet**, then open **Node management** at the end of the Overview toolbar and choose **Bootstrap new Linux server**. The same entry is in **Settings → Nodes**, above the node list.
 
 The same menu holds **Connect existing node**, which opens the manual Add node form for a node that is already running Sencho or a Pilot agent. Manual enrollment and bootstrap deploy the same agent configuration, from the same compose file.
 
@@ -139,12 +140,41 @@ Approving, retrying, cancelling and releasing a run are recorded in the audit lo
 
 **Activity** under the status lists what was approved (digest, administrator, time, attempt), the server, the host key, the node, and every recorded step with its outcome. A failed step keeps the last lines of its output, with any secret removed.
 
+## Readiness
+
+After the Pilot connects, Sencho sends it a one-time request through the Pilot tunnel and the Pilot answers with a report about itself. The Pilot never decides it is ready: Sencho compares the report with what the run set up and judges each check. A check whose answer is missing, or that the Pilot could not answer, counts as failed, never as passed.
+
+| Check | Passes when |
+| --- | --- |
+| Pilot tunnel | The tunnel is connected and carried the request. |
+| Readiness report | The answer is a report for this request (it carries the request's one-time value), from a Pilot release that provides it. |
+| Node identity | The Pilot holds the credential for this node, not for another node record. |
+| Hub URL | The Pilot dials the hub URL the run configured. |
+| Tunnel transport | The tunnel runs over TLS when the hub URL is HTTPS. A plain HTTP hub is allowed, with a warning. |
+| Clock skew | The server's clock is within five minutes of the hub's. |
+| Agent version | The report comes from the agent version the tunnel announced, so a Pilot that restarted or updated mid-check is not trusted. |
+| Docker engine | The Docker engine answers through the mounted socket. |
+| Docker Compose | Docker Compose v2 works inside the Pilot. |
+| Compose directory | The Pilot manages the node's Compose directory, and the directory exists and is writable. |
+| Compose directory mount | The directory is bind-mounted into the Pilot at the same path. |
+| Pilot project location | The `sencho-agent` project lives outside the Compose directory. |
+| Free disk space | Enough space is free. Low space is a warning, not a failure. |
+| Container inventory | Listing containers works, and the list shows the `sencho-agent` container keeping its data in the `sencho-agent-data` volume. |
+
+The check reads only: it lists containers and asks Docker for its version, and it never starts, stops or changes anything on the server. Proving that a deployment works is up to you, for example by deploying a small test stack to the node.
+
+**When it runs.** Every time the Pilot connects (after enrollment, an agent restart or self-update, a host reboot, a hub restart, or a re-enrollment), and when you select **Verify again** on the run. Checks for one node never overlap, and nothing polls in the background. If Sencho restarts during a check, the node is recorded as unverified until the Pilot reconnects and is checked again. A retry of the run sets the node back to unverified until its new enrollment is checked.
+
+**Where it shows.** The run's status names the first check that failed, with its remediation, and **Activity** lists every check. Fleet, the node switcher and **Settings → Nodes** show **Verifying** or **Unverified** next to the node until it passes; a node that passed shows no badge. An unverified node stays selectable and deployments to it are not refused, so you can fix it from Sencho; treat it as not ready until it passes. While the run is open, the dialog reads it again every five seconds until the verdict lands.
+
 ## Run outcomes
 
 | Status | What it means | What you can do |
 | --- | --- | --- |
 | Re-checking, Running, Enrolling | The run is in progress. | **Cancel run** stops it after the current step, or at once while the run waits for another apt job. |
-| Enrolled | The Pilot connected. The node is enrolled; its readiness for deployments is not verified. | Nothing further in this workflow. |
+| Enrolled, then Verifying | The Pilot connected and Sencho is checking it. | Wait; the status updates on its own. |
+| Ready | The Pilot connected and passed every readiness check. | Deploy to the node. |
+| Connected, unverified | The Pilot connected, but a readiness check failed or could not be answered. | Fix what the status names, then select **Verify again**. |
 | Blocked | The run stopped before changing anything in this attempt (the server changed, the recheck could not reach it, or the hub restarted first). | Run the preflight again and approve the new plan. If an earlier attempt of the same run had already changed the server, the run still holds it: use **Retry**. |
 | Failed | A step refused or exited with an error before any step had changed the server (for example the first step). The server is released. | Fix the cause and start again. |
 | Stopped partway | A step failed or refused after earlier steps changed the server (for example the package check, which runs after the repository steps), a package, service or start step failed partway through, or the Pilot started but did not connect in time. | **Retry**, or **Release server**. |
@@ -219,7 +249,7 @@ The plan keeps the contracts later steps depend on:
 - **Self-update:** the container's Compose labels locate the compose file and service, so a custom Agent directory remains self-updateable. The generated project and container are named `sencho-agent` and the Compose service is `agent`; the preflight uses those names to recognize an existing Pilot.
 - **Reboot:** both directories must be on persistent local storage, Docker is enabled at boot, and the agent uses `restart: unless-stopped`.
 - **Restart and recovery:** the project is idempotent, the volume survives container recreation, and the bootstrap marker distinguishes a previous attempt from an unrelated installation.
-- **Readiness:** a tunnel connection alone is not proof that the node is ready, and bootstrap does not go further. A readiness check, which this workflow does not perform, would inspect the running container, require a bind mount whose source and destination both equal the chosen Compose directory, and verify the agent can read and write it.
+- **Readiness:** a tunnel connection alone is not proof that the node is ready. Sencho checks the node again every time its Pilot connects, so an agent restart, a self-update, a host reboot, a hub restart or a re-enrollment each lead to a fresh check, and the node keeps its identity throughout (see [Readiness](#readiness)).
 
 ## Changing a directory later
 
@@ -274,6 +304,13 @@ The Agent installation directory has no settings field. It is chosen only here.
 | `WRITE_INCOMPLETE` | A file did not arrive in full, usually because the connection dropped, so it was not put in place. Retry. |
 | `CONTEXT_NOT_SEALED` | At the start step, the Agent directory or a directory above it, a directory the Compose directory's name is looked up in (including the directories a link in that name leads through, and a name that cannot be followed to the end), `compose.yaml` or the hub CA is owned by someone other than root and the SSH user or can be changed by one, or could not be inspected (the output names it). Docker opens these by name after Sencho has checked them, so nothing was started. Make the named path owned by root or the SSH user and remove group and other write permission (`chmod go-w`), then retry; for a directory the preflight reports the same path beforehand. |
 | `START_INPUT_INCOMPLETE` | The values the start step compares against did not arrive in full, usually because the connection dropped, so nothing was started. Retry. |
+| `OPERATION_NOT_VERIFIABLE` | Only an enrolled run whose node is still in Fleet can be checked again. Open the latest run for the node. |
+| Unverified: Pilot tunnel | The Pilot is not connected. Check that the `sencho-agent` container is running and can reach the hub URL (DNS, firewall, reverse proxy), then select **Verify again**. |
+| Unverified: Readiness report | The Pilot release does not provide the readiness report, or refused the request. Update the Pilot to the hub's release, or re-enroll the node, then verify again. |
+| Unverified: Node identity | The Pilot holds no credential (enrollment expired or was used) or one for another node. Regenerate the enrollment, or remove the duplicate node record. |
+| Unverified: Hub URL or Tunnel transport | The Pilot dials another hub URL, or an HTTPS hub's tunnel arrived without TLS. Fix `SENCHO_PRIMARY_URL` in the `sencho-agent` project, or the reverse proxy in front of the hub, then verify again. |
+| Unverified: Clock skew | Synchronize the server's clock (`timedatectl` or an NTP client), then verify again. |
+| Unverified: Docker engine, Docker Compose, Compose directory or mount | The Pilot cannot use Docker, Compose v2 is missing, or the Compose directory is missing, unwritable or not mounted at the same path. The status names which; fix it on the server, then verify again. |
 | `RUN_ABORTED` | The run stopped on an internal error on the hub. Steps already run stay on the server. Check the hub logs, then retry. |
 | `dpkg was interrupted` in a step's output | A package step was cut off earlier. Run `sudo dpkg --configure -a` on the server, then retry. |
 
