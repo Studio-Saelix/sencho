@@ -460,6 +460,33 @@ describe('node readiness', () => {
     db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
     db.recordNodeReadinessResult(nodeId, operationId, { state: 'ready', gatesJson: '[]', agentVersion: '1.0.0', checkedAt: Date.now() });
     expect(service.get(nodeId)?.state).toBe('not_ready');
+    // A stored failure or unknown under a ready state does not read as ready either.
+    for (const status of ['fail', 'unknown'] as const) {
+      db.markNodeReadinessVerifying(nodeId, operationId, Date.now());
+      db.recordNodeReadinessResult(nodeId, operationId, {
+        state: 'ready',
+        gatesJson: JSON.stringify([{ id: 'docker_compose', label: 'Docker Compose', status, summary: 'Missing.', remediation: 'Install it.' }]),
+        agentVersion: '1.0.0',
+        checkedAt: Date.now(),
+      });
+      expect(service.get(nodeId)?.state).toBe('not_ready');
+    }
+  });
+
+  it('audits the first verdict of a new enrollment even when it repeats the last one', async () => {
+    const { nodeId, operationId, model, tunnels, service } = setup();
+    announce(nodeId, (await buildReadinessReport('a'.repeat(32), agentProbes(model))).agent.version);
+    const audits = () => db.getAuditLogs({ page: 1, limit: 500 }).entries.filter((row) => row.summary.includes(`node=${nodeId} `)).length;
+    service.start();
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(audits()).toBe(1);
+    db.markNodeReadinessProvisional(nodeId, operationId, HUB_URL, Date.now());
+    tunnels.disconnect(nodeId);
+    tunnels.connect(nodeId);
+    await settle(service);
+    expect(service.get(nodeId)?.state).toBe('ready');
+    expect(audits()).toBe(2);
   });
 
   it('does not audit every reconnect of a ready node after its tunnel drops', async () => {

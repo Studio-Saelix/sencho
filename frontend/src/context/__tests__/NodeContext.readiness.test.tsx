@@ -41,14 +41,20 @@ describe('NodeContext readiness refresh', () => {
 
     const activeBefore = result.current.activeNode;
     state = 'ready';
-    // A check announces twice (verifying, then the verdict): one refetch.
+    // Two announcements inside one window: one refetch.
     act(() => {
       window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
       window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
     });
-    await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready'));
+    await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready'), { timeout: 3000 });
     expect(listCalls()).toBe(before + 1);
     // Another node's readiness changed; the active local node is the same object, so its effects do not rerun.
     expect(result.current.activeNode).toBe(activeBefore);
+
+    // A later announcement, after the window closed, refetches again.
+    state = 'provisional';
+    act(() => { window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } })); });
+    await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'), { timeout: 3000 });
+    expect(listCalls()).toBe(before + 2);
   });
 });

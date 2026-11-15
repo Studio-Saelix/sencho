@@ -201,7 +201,7 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     };
 
     // The hub announces a changed readiness verdict, so badges in Fleet, the switcher and Settings do not go stale.
-    // A check announces more than once (verifying, then the verdict), so a burst is folded into one refetch.
+    // Announcements that arrive within one window share a refetch; a check that outlasts it refetches again for its verdict.
     let readinessTimer: ReturnType<typeof setTimeout> | null = null;
     const handleStateInvalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ scope?: unknown }>).detail;

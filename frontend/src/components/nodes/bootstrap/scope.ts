@@ -3,7 +3,7 @@
  * result. A run executes the approved plan (checking each step's result) and
  * enrolls the Pilot. The run does not decide that the node is ready: once the
  * Pilot connects, the hub asks it for a fresh readiness report and marks the
- * node ready only when every check passes. docs/features/node-bootstrap.mdx
+ * node ready only when no check fails or goes unanswered (warnings do not block). docs/features/node-bootstrap.mdx
  * states the same facts.
  */
 export const BOOTSTRAP_SCOPE =

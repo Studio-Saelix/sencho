@@ -53,5 +53,13 @@ describe('public node readiness', () => {
     const node = db.getNode(id);
     if (!node) throw new Error('node missing');
     expect(toPublicNode(node).readiness?.state).toBe('not_ready');
+    db.markNodeReadinessVerifying(id, 'op-2', 2500);
+    db.recordNodeReadinessResult(id, 'op-2', {
+      state: 'ready',
+      gatesJson: JSON.stringify([{ id: 'inventory', label: 'Container inventory', status: 'fail', summary: 'No agent.', remediation: 'Recreate it.' }]),
+      agentVersion: '1.0.0',
+      checkedAt: 3000,
+    });
+    expect(toPublicNode(node).readiness?.state).toBe('not_ready');
   });
 });
