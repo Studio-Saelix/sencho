@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
@@ -34,15 +34,81 @@ beforeEach(() => {
 });
 
 describe('EnvironmentPanel', () => {
-  it('renders items with status badges and a secret presence badge (never a value)', async () => {
+  it('groups items under their status and shows a secret presence badge (never a value)', async () => {
     mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
     render(<EnvironmentPanel stackName="demo" />);
-    expect(screen.getByText(/loading environment/i)).toBeTruthy();
     await screen.findByText('DB_PASSWORD');
     expect(screen.getByText('MISSING_VAR')).toBeTruthy();
-    const badges = screen.getAllByTestId('env-status-badge');
-    expect(badges.some(b => b.getAttribute('data-status') === 'missing')).toBe(true);
+    expect(screen.getByText('missing · 1')).toBeTruthy();
+    expect(screen.getByText('present · 1')).toBeTruthy();
     expect(screen.getByTestId('env-secret-badge')).toBeTruthy();
+  });
+
+  it('states each status once: no per-row status badge and no tally strip beside the group headers', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    render(<EnvironmentPanel stackName="demo" />);
+    await screen.findByText('DB_PASSWORD');
+    expect(screen.queryByTestId('env-status-badge')).toBeNull();
+    expect(screen.queryByText('2 vars')).toBeNull();
+    expect(screen.getAllByText(/\bmissing\b/i).filter(el => el.closest('[data-testid="env-item-row"]'))).toHaveLength(0);
+  });
+
+  it('leads with one Answer naming the loudest problem and offers the file verb', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    const onOpenFiles = vi.fn();
+    render(<EnvironmentPanel stackName="demo" onOpenFiles={onOpenFiles} />);
+    const answer = await screen.findByTestId('env-answer');
+    expect(screen.getAllByTestId('status-answer')).toHaveLength(1);
+    expect(answer.querySelector('[data-tone="destructive"]')).toBeTruthy();
+    expect(answer).toHaveTextContent('1 missing');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit env files' }));
+    expect(onOpenFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers no verb when the editor cannot open files', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    render(<EnvironmentPanel stackName="demo" />);
+    await screen.findByTestId('env-answer');
+    expect(screen.queryByRole('button', { name: 'Edit env files' })).toBeNull();
+  });
+
+  it('reads resolved, with no verb, when nothing is wrong', async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...INVENTORY, items: [INVENTORY.items[0]], summary: { ...INVENTORY.summary, total: 1, missing: 0 } }),
+    });
+    render(<EnvironmentPanel stackName="demo" onOpenFiles={vi.fn()} />);
+    const answer = await screen.findByTestId('env-answer');
+    expect(answer).toHaveTextContent('resolved');
+    expect(screen.queryByRole('button', { name: 'Edit env files' })).toBeNull();
+  });
+
+  it('a missing env file outranks duplicate and shell-only variables in the Answer', async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...INVENTORY,
+        items: [{ ...INVENTORY.items[0], status: 'duplicate' }],
+        envFiles: [{ rawPaths: ['./gone.env'], existence: 'missing', required: true, isInterpolationSource: false, isInjectionSource: true, declaringServices: ['web'] }],
+        summary: { total: 1, missing: 0, unused: 0, duplicate: 1, unpersisted: 0, likelySecret: 0 },
+      }),
+    });
+    render(<EnvironmentPanel stackName="demo" />);
+    expect(await screen.findByTestId('env-answer')).toHaveTextContent('env file missing');
+  });
+
+  it('shows a layout-matched skeleton only after the delay gate, never a bare text line', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedFetch.mockReturnValue(new Promise(() => {}));
+      render(<EnvironmentPanel stackName="demo" />);
+      expect(screen.queryByTestId('environment-skeleton')).toBeNull();
+      await act(async () => { vi.advanceTimersByTime(400); });
+      expect(screen.getByTestId('environment-skeleton')).toBeTruthy();
+      expect(screen.queryByText(/loading environment/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('copies a checklist that excludes values', async () => {
@@ -60,6 +126,9 @@ describe('EnvironmentPanel', () => {
     mockedFetch.mockResolvedValue({ ok: false });
     render(<EnvironmentPanel stackName="demo" />);
     await screen.findByText(/could not load the environment inventory/i);
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    fireEvent.click(screen.getByTestId('env-retry-btn'));
+    await screen.findByText('DB_PASSWORD');
   });
 
   it('renders the env files section, the shell-only status, and the partial-render banner', async () => {
@@ -78,10 +147,11 @@ describe('EnvironmentPanel', () => {
     mockedFetch.mockResolvedValue({ ok: true, json: async () => inv });
     render(<EnvironmentPanel stackName="demo" />);
     await screen.findByText('SHELL_VAR');
-    expect(screen.getAllByTestId('env-status-badge').some(b => b.getAttribute('data-status') === 'unpersisted')).toBe(true);
+    expect(screen.getByText('shell-only · 1')).toBeTruthy();
     expect(screen.getByTestId('env-files-section')).toBeTruthy();
     expect(screen.getByText('./gone.env')).toBeTruthy();
-    expect(screen.getByText(/effective model unavailable/i)).toBeTruthy();
+    expect(screen.getByTestId('status-marker')).toHaveTextContent(/effective model unavailable/i);
+    expect(screen.getAllByTestId('status-answer')).toHaveLength(1);
   });
 
   it('renders an empty state when no variables are present', async () => {

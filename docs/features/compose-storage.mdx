@@ -15,7 +15,7 @@ Click any stack in the left sidebar, then switch to the **Storage** tab in the A
 <Frame>
   <img
     src="/images/compose-storage/storage-tab.png"
-    alt="The Anatomy panel tab strip with Storage selected, showing the STORAGE PORTABILITY label, a node-bound verdict card with the reason that a bind path outside the stack directory must exist on every target node, the mount row for that bind, and a SNAPSHOT COVERAGE section with a warning and Take a fleet snapshot link"
+    alt="The Anatomy panel tab strip with Storage selected, showing the STORAGE PORTABILITY label, a node-bound verdict block with the reason that a bind path outside the stack directory must exist on every target node, the mount row for that bind, and a SNAPSHOT COVERAGE section with a warning line and Take a fleet snapshot link"
   />
 </Frame>
 
@@ -37,7 +37,7 @@ If the stack declares no mounts at all, the inventory shows a single card: "This
 
 ## Portability verdict
 
-The top of the tab gives the stack a single verdict. Below the verdict chip, Sencho lists every specific reason that contributed to it, so you know exactly what is tying the stack to the node or limiting its portability.
+The top of the tab gives the stack a single verdict. The verdict block states the first reason that contributed to it and counts the rest; **All reasons** opens the full list, so you know exactly what is tying the stack to the node or limiting its portability.
 
 | Verdict | Meaning |
 |---------|---------|
@@ -55,7 +55,7 @@ A few things worth knowing:
 <Frame>
   <img
     src="/images/compose-storage/storage-node-bound.png"
-    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict card with the reason the service mounts the Docker socket tying the stack to this host's Docker engine, followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
+    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict block with the reason the service mounts the Docker socket tying the stack to this host's Docker engine, followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
   />
 </Frame>
 
@@ -63,7 +63,7 @@ A few things worth knowing:
 
 Persistent storage is only as safe as its backups. Sencho shows administrators whether a recent fleet snapshot covers the stack:
 
-- When the stack has persistent storage and has not been included in a fleet snapshot in the last 7 days, a **warning card** appears with a "Take a fleet snapshot" link. On remote nodes the link is hidden; take the snapshot from the Fleet view on the hub instead.
+- When the stack has persistent storage and has not been included in a fleet snapshot in the last 7 days, a warning line appears with a "Take a fleet snapshot" link. On remote nodes the link is hidden; take the snapshot from the Fleet view on the hub instead.
 - When a recent snapshot exists, the section shows the relative time: "Last fleet snapshot 3d ago."
 - The section is visible to **administrators only**. Other roles see only the caveat below.
 

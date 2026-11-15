@@ -5,7 +5,7 @@
  * hub-local `/fleet/snapshots/coverage` path, and that non-admins never fetch it).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 
 const auth = vi.hoisted(() => ({ isAdmin: false }));
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -46,11 +46,46 @@ describe('StoragePanel', () => {
     })) });
     render(<StoragePanel stackName="app" />);
     const verdict = await screen.findByTestId('storage-portability');
-    expect(verdict).toHaveAttribute('data-status', 'node-bound');
+    expect(verdict).toHaveAttribute('data-state', 'node-bound');
     expect(verdict).toHaveTextContent(/node-bound/i);
     expect(screen.getByTestId('storage-service-web')).toBeInTheDocument();
     expect(screen.getByTestId('storage-service-db')).toBeInTheDocument();
     expect(screen.getByText(/\/var\/lib/)).toBeInTheDocument();
+  });
+
+  it('names the first reason in the Answer and keeps every reason behind one disclosure', async () => {
+    route({ storage: jsonRes(inventory({
+      portability: { status: 'node-bound', reasons: ['bind /mnt/media', 'mounts the Docker socket', 'bind /srv/x'] },
+    })) });
+    render(<StoragePanel stackName="app" />);
+    const verdict = await screen.findByTestId('storage-portability');
+    expect(verdict).toHaveTextContent('bind /mnt/media');
+    expect(verdict).toHaveTextContent('2 more reasons');
+    expect(screen.queryByText(/mounts the Docker socket/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /all reasons/i }));
+    expect(await screen.findByText(/mounts the Docker socket/)).toBeInTheDocument();
+  });
+
+  it('keeps the verdict the only toned block even when the snapshot gap shows', async () => {
+    auth.isAdmin = true;
+    route({ storage: jsonRes(inventory({ portability: { status: 'node-bound', reasons: ['bind /mnt/media'] } })), coverage: jsonRes({ latestAt: null }) });
+    const { container } = render(<StoragePanel stackName="app" />);
+    const warning = await screen.findByTestId('storage-snapshot-warning');
+    expect(container.querySelectorAll('[data-tone]')).toHaveLength(1);
+    expect(warning.className).not.toMatch(/\bborder\b|bg-warning/);
+  });
+
+  it('shows a layout-matched skeleton only after the delay gate', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiFetch).mockReturnValue(new Promise(() => {}));
+      render(<StoragePanel stackName="app" />);
+      expect(screen.queryByTestId('storage-skeleton')).toBeNull();
+      await act(async () => { vi.advanceTimersByTime(400); });
+      expect(screen.getByTestId('storage-skeleton')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows the cannot-render banner with the render error', async () => {

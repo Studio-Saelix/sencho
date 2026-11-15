@@ -9,7 +9,7 @@ The **Environment** tab in the right-hand **Anatomy** panel answers a question C
 The inventory is advisory and read only. It never changes a stack, and it works entirely from variable **names**: a value is never read into the report, the checklist, or the logs, so nothing sensitive is exposed.
 
 <Frame>
-  <img src="/images/environment-guardrails/env-overview.png" alt="Environment tab open on a stack. The panel shows a PROJECT ENVIRONMENT FILE section reading 'Using .env (default)', a summary line reading '18 vars · 2 likely secret', an ENV FILES section with .env marked missing and a second file marked unverifiable, and a PRESENT group listing injected variables." />
+  <img src="/images/environment-guardrails/env-overview.png" alt="Environment tab open on a stack. The panel shows a PROJECT ENVIRONMENT FILE section reading 'Using .env (default)', a colored summary block reading '1 missing' with an Edit env files button, an ENV FILES section with .env marked missing and a second file marked unverifiable, and a PRESENT group listing injected variables." />
 </Frame>
 
 ## Interpolation versus container injection
@@ -29,7 +29,9 @@ The inventory labels each variable with how it is used, so you can tell at a gla
 
 ### Summary
 
-At the top of the variable list, a summary line reports the total variable count and how many fall into each problem category: missing, duplicate, shell-only, unused, and likely secret. Problem counts are highlighted in color so issues stand out at a glance without scrolling through every variable.
+At the top of the variable list, one colored block gives the answer: the most serious problem in the stack, such as `1 missing` or `env file missing`, and what it does. When nothing is wrong it reads `resolved`. An **Edit env files** button opens the stack's Files tab so you can fix the problem where it lives. If the effective Compose model cannot be rendered, the block says so and the inventory covers the authored files only.
+
+Below it, variables are grouped by status, and each group header carries its own count. A variable's status is stated once, by the group it sits in.
 
 ### Status
 
@@ -43,12 +45,12 @@ For every variable, Sencho records its source, its scope, and a status:
 | **Duplicate** | Defined in two different places, which can resolve to different effective values. |
 | **Shell-only** | Referenced and resolved only from the shell of the host, not persisted with the stack, so it will not follow the stack to another node. |
 
-A variable marked with `${VAR:?message}` in the Compose file is **required**: if it is unset or empty, Compose refuses to start. Required variables carry a separate **required** badge alongside their status badge.
+A variable marked with `${VAR:?message}` in the Compose file is **required**: if it is unset or empty, Compose refuses to start. Required variables carry a separate **required** badge.
 
 Variables whose name suggests a secret, such as `DB_PASSWORD`, `API_KEY`, or `CLIENT_SECRET`, are marked with a lock and show presence only. Their value is never read, so it cannot appear in the inventory, the checklist, or anywhere else.
 
 <Frame>
-  <img src="/images/environment-guardrails/env-secrets.png" alt="Variable list showing TUNNEL_TOKEN and VPN_PASS, each with a lock badge labelled 'secret' next to their present status badge." />
+  <img src="/images/environment-guardrails/env-secrets.png" alt="Variable list showing TUNNEL_TOKEN and VPN_PASS, each with a lock badge labelled 'secret'." />
 </Frame>
 
 The classification is a heuristic based on the variable name. It errs toward marking things as secret. Marking a non-secret as a likely secret only hides a value that the inventory never reads anyway, so there is no downside.
@@ -103,7 +105,7 @@ The inventory is built against the **active node**, so selecting a remote node i
 
 ## Permissions
 
-Any authenticated user with `stack:read` permission can view the environment inventory, the env file status list, and the summary line.
+Any authenticated user with `stack:read` permission can view the environment inventory, the env file status list, and the summary block.
 
 Configuring the project environment file list requires `stack:edit` permission. Read-only users see the configured files but cannot add, remove, or reorder them.
 

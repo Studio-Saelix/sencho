@@ -9,6 +9,10 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
+import { StatusPath } from '@/components/ui/status-path';
+import { Skeleton } from '@/components/ui/skeleton';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import type { StatusTone } from '@/lib/statusTone';
 
 // Mirrors the backend /storage payload (the frontend never imports backend).
 type PortabilityStatus = 'portable' | 'partially-portable' | 'node-bound' | 'unknown';
@@ -49,11 +53,11 @@ const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 const CHIP_CLASS = 'rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide';
 
-const STATUS_META: Record<PortabilityStatus, { label: string; tone: string; icon: LucideIcon }> = {
-  'portable': { label: 'portable', tone: 'border-success/40 bg-success/[0.06] text-success', icon: Check },
-  'partially-portable': { label: 'partially portable', tone: 'border-info/40 bg-info/[0.06] text-info', icon: Info },
-  'node-bound': { label: 'node-bound', tone: 'border-warning/40 bg-warning/[0.06] text-warning', icon: MapPin },
-  'unknown': { label: 'unknown', tone: 'border-muted bg-card/40 text-stat-subtitle', icon: HelpCircle },
+const STATUS_META: Record<PortabilityStatus, { label: string; tone: StatusTone; icon: LucideIcon; line: string }> = {
+  'portable': { label: 'portable', tone: 'success', icon: Check, line: 'Every mount stays inside the stack directory, so the stack moves with its files.' },
+  'partially-portable': { label: 'partially portable', tone: 'neutral', icon: Info, line: 'The Compose files move cleanly, but a volume holds data on this node.' },
+  'node-bound': { label: 'node-bound', tone: 'warning', icon: MapPin, line: 'The stack needs host paths or the Docker socket that exist only on this node.' },
+  'unknown': { label: 'unknown', tone: 'neutral', icon: HelpCircle, line: 'Sencho could not work out how portable this stack is.' },
 };
 
 const isSocketMount = (m: StorageMount): boolean =>
@@ -158,6 +162,8 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
     return () => controller.abort();
   }, [stackName, nodeId, isAdmin, reloadKey]);
 
+  const { showBusy } = useVisualBusy(!inventory && !loadError);
+
   const showSnapshotWarning = isAdmin && inventory?.stateful === true && !snapshot.recent;
 
   const services = inventory ? [...new Set(inventory.mounts.map(m => m.service))] : [];
@@ -179,20 +185,20 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
           </button>
         </div>
       ) : !inventory ? (
-        <div className="py-3 font-mono text-[11px] text-stat-subtitle">Loading storage…</div>
+        showBusy ? <StorageSkeleton /> : null
       ) : !inventory.renderable ? (
-        <div className={cn(CARD_CLASS, 'border-destructive/40 bg-destructive/[0.06] text-destructive')}>
-          <div className="flex items-center gap-2">
-            <TriangleAlert className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-            <span className="font-mono text-[11px] uppercase tracking-wide">cannot render</span>
-          </div>
-          <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">
-            {inventory.renderError ?? 'Sencho could not render the effective Compose model.'}
-          </div>
-        </div>
+        <StatusPath
+          stages={[]}
+          answer={{
+            tone: 'destructive',
+            icon: TriangleAlert,
+            title: 'cannot render',
+            line: inventory.renderError ?? 'Sencho could not render the effective Compose model.',
+          }}
+        />
       ) : (
         <>
-          <PortabilityCard portability={inventory.portability} />
+          <PortabilityAnswer portability={inventory.portability} />
 
           {inventory.mounts.length === 0 ? (
             <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex items-center gap-2 text-stat-subtitle')}>
@@ -215,20 +221,18 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
           <section>
             <div className={cn(LABEL_CLASS, 'mb-1.5')}>snapshot coverage</div>
             {showSnapshotWarning && (
-              <div data-testid="storage-snapshot-warning" className={cn(CARD_CLASS, 'mb-2 border-warning/40 bg-warning/[0.06] text-warning')}>
-                <div className="flex items-center gap-2">
-                  <TriangleAlert className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-                  <span className="text-[12px] leading-relaxed text-foreground/90">
-                    This stack has persistent storage but no fleet snapshot in the last 7 days.
-                  </span>
-                </div>
+              <div data-testid="storage-snapshot-warning" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="flex items-center gap-2 text-[12px] leading-relaxed text-foreground/90">
+                  <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-warning" strokeWidth={1.5} aria-hidden />
+                  This stack has persistent storage but no fleet snapshot in the last 7 days.
+                </span>
                 {activeNode?.type !== 'remote' && (
                   <button
                     type="button"
                     onClick={() => window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
                       detail: { view: 'fleet', fleetTab: 'snapshots' },
                     }))}
-                    className="mt-1.5 text-[12px] font-medium text-brand hover:underline"
+                    className="text-[12px] font-medium text-brand hover:underline max-md:min-h-11"
                   >
                     Take a fleet snapshot →
                   </button>
@@ -240,7 +244,7 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
                 Last fleet snapshot {formatTimeAgo(snapshot.at)}.
               </div>
             )}
-            <div className="flex items-start gap-2 rounded-lg border border-muted bg-card/40 px-3 py-2 text-stat-subtitle">
+            <div className="flex items-start gap-2 text-stat-subtitle">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
               <span className="text-[11px] leading-relaxed">
                 Fleet snapshots capture Compose and env files, not the data inside named volumes or bind mounts. Back up volume data separately before moving or restoring.
@@ -253,22 +257,43 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
   );
 }
 
-function PortabilityCard({ portability }: { portability: StorageInventory['portability'] }) {
+function PortabilityAnswer({ portability }: { portability: StorageInventory['portability'] }) {
   const meta = STATUS_META[portability.status] ?? STATUS_META.unknown;
-  const Icon = meta.icon;
+  const [first, ...rest] = portability.reasons;
   return (
-    <div data-testid="storage-portability" data-status={portability.status} className={cn(CARD_CLASS, meta.tone)}>
-      <div className="flex items-center gap-2">
-        <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-        <span className="font-mono text-[11px] uppercase tracking-wide">{meta.label}</span>
+    <StatusPath
+      stages={[]}
+      answer={{
+        tone: meta.tone,
+        icon: meta.icon,
+        title: meta.label,
+        status: portability.status,
+        line: first ?? meta.line,
+        detail: rest.length > 0 ? `${rest.length} more ${rest.length === 1 ? 'reason' : 'reasons'}` : null,
+        'data-testid': 'storage-portability',
+      }}
+      proof={rest.length > 0 ? {
+        label: 'All reasons',
+        children: (
+          <ul className="flex flex-col gap-1">
+            {portability.reasons.map((r, i) => (
+              <li key={i} className="text-[12px] leading-relaxed text-foreground/80">· {r}</li>
+            ))}
+          </ul>
+        ),
+      } : undefined}
+    />
+  );
+}
+
+function StorageSkeleton() {
+  return (
+    <div data-testid="storage-skeleton" className="flex flex-col gap-4" aria-hidden>
+      <Skeleton className="h-14 w-full" />
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-16 w-full" />
       </div>
-      {portability.reasons.length > 0 && (
-        <ul className="mt-1.5 flex flex-col gap-1">
-          {portability.reasons.map((r, i) => (
-            <li key={i} className="text-[12px] leading-relaxed text-foreground/80">· {r}</li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
