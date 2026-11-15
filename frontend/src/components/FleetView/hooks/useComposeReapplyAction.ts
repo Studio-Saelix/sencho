@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import type { NodeUpdateStatus } from '../types';
+import { isReapplyUnavailableReason, reapplyUnavailableSentence } from '../reapplyUnavailableCopy';
 import type { EndpointProviderScope, UpdateConfirmChoice } from '../LocalUpdateConfirmDialog';
 
 export type ComposeReapplyTarget = {
@@ -12,7 +13,15 @@ export type ComposeReapplyTarget = {
     initialScope?: EndpointProviderScope;
 };
 
-function parseReapplyError(err: Record<string, unknown>, fallback: string): string {
+function parseReapplyError(err: Record<string, unknown>, fallback: string, nodeName: string): string {
+    // The node cannot reapply right now (the editor or sheet acted on an answer
+    // that went stale): say which node and why, in the same words as the
+    // dialog that refuses up front, not the transport's generic failure.
+    // 'REAPPLY_UNAVAILABLE' mirrors REAPPLY_UNAVAILABLE_CODE in the backend's
+    // helpers/selfUpdateEligibility.ts; both sides are pinned by a test.
+    if (err?.code === 'REAPPLY_UNAVAILABLE' && isReapplyUnavailableReason(err.reason)) {
+        return reapplyUnavailableSentence(err.reason, nodeName);
+    }
     const nested = err?.data as Record<string, unknown> | undefined;
     const message = err?.message ?? err?.error ?? nested?.error;
     return typeof message === 'string' && message ? message : fallback;
@@ -130,7 +139,7 @@ export function useComposeReapplyAction(options: UseComposeReapplyActionOptions 
                     }
                 } else {
                     const err = await res.json().catch(() => ({}));
-                    toast.error(parseReapplyError(err, 'Failed to trigger local compose reapply.'));
+                    toast.error(parseReapplyError(err, 'Failed to trigger local compose reapply.', target.name));
                 }
                 return;
             }
@@ -143,7 +152,7 @@ export function useComposeReapplyAction(options: UseComposeReapplyActionOptions 
                 onRemoteSuccessRef.current?.();
             } else {
                 const err = await res.json().catch(() => ({}));
-                toast.error(parseReapplyError(err, 'Failed to trigger compose reapply.'));
+                toast.error(parseReapplyError(err, 'Failed to trigger compose reapply.', target.name));
             }
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');

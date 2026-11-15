@@ -317,6 +317,11 @@ export async function buildEffectiveAnatomy(nodeId: number, stackName: string): 
           sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
         renderError = 'Sencho could not parse the rendered Compose model.';
       }
+    } else if (result.refusal) {
+      // Sencho's own refusal names the file and the reason and never a value
+      // from it. The generic nudge below would send the operator looking for a
+      // syntax error the file does not have.
+      renderError = result.refusal;
     } else {
       // Raw stderr can echo file content/secrets and is never surfaced; only the
       // names of any missing required variables, otherwise a generic nudge.

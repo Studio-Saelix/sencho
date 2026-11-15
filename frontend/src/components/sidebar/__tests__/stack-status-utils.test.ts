@@ -153,5 +153,26 @@ describe('stack-status-utils', () => {
       const parsed = parseBulkStatusPayload({ 'web.yml': { status: 'running', mainPort: 49152 } }, ['web.yml']);
       expect(parsed.portServices).toEqual({});
     });
+
+    it('carries a restarting count into the row counts', () => {
+      const payload = { 'web.yml': { status: 'exited' as const, running: 0, total: 1, restarting: 1 } };
+      expect(isValidBulkPayload(payload)).toBe(true);
+      expect(parseBulkStatusPayload(payload, ['web.yml']).counts).toEqual({
+        'web.yml': { running: 0, total: 1, restarting: 1 },
+      });
+    });
+
+    it('keeps the counts shape unchanged when the node omits restarting', () => {
+      const parsed = parseBulkStatusPayload(
+        { 'web.yml': { status: 'running', running: 2, total: 2 } },
+        ['web.yml'],
+      );
+      expect(parsed.counts).toEqual({ 'web.yml': { running: 2, total: 2 } });
+      expect(parsed.counts['web.yml']?.restarting).toBeUndefined();
+    });
+
+    it('rejects a non-number restarting count', () => {
+      expect(isValidBulkPayload({ 'web.yml': { status: 'exited', restarting: '1' } })).toBe(false);
+    });
   });
 });

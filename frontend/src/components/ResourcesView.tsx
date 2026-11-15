@@ -5,6 +5,7 @@ import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from "@/components/ui/button";
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -1050,19 +1051,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                 <Tooltip>
                                                                     <TooltipTrigger asChild>
                                                                         <DropdownMenuTrigger asChild>
-                                                                            <Button
+                                                                            <IconBusyButton
                                                                                 variant="ghost"
                                                                                 size="icon"
-                                                                                className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                                                disabled={scanningImageRef === img.RepoTags[0]}
+                                                                                icon={ShieldCheck}
+                                                                                busyIcon={Loader2}
+                                                                                className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors [&_svg]:size-3.5"
+                                                                                pending={scanningImageRef === img.RepoTags[0]}
                                                                                 aria-label={`Scan ${img.RepoTags[0]}`}
-                                                                            >
-                                                                                {scanningImageRef === img.RepoTags[0] ? (
-                                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
-                                                                                ) : (
-                                                                                    <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                                                )}
-                                                                            </Button>
+                                                                            />
                                                                         </DropdownMenuTrigger>
                                                                     </TooltipTrigger>
                                                                     <TooltipContent>Scan for vulnerabilities</TooltipContent>

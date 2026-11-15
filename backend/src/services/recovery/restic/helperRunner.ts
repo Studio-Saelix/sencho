@@ -1,7 +1,8 @@
 import type Docker from 'dockerode';
 import { Writable } from 'stream';
-import { errorMessageForLog } from '../../../utils/safeLog';
-import type { RecoveryErrorClass } from '../types';
+import { StringDecoder } from 'string_decoder';
+import { errorMessageForLog, sanitizeForLog } from '../../../utils/safeLog';
+import type { ContentChunkSink, RecoveryErrorClass } from '../types';
 import { RecoveryError } from '../redaction';
 import { RECOVERY_HELPER_RESTIC_PATH } from './helperImage';
 
@@ -37,7 +38,7 @@ export const HELPER_SOURCE_MOUNT = '/data';
 /** Where the restore target is mounted. */
 export const HELPER_RESTORE_MOUNT = '/restore';
 
-export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'restore' | 'unlock' | 'materialize' | 'swap';
+export type HelperProfile = 'probe' | 'config' | 'init' | 'backup' | 'check' | 'read' | 'restore' | 'unlock' | 'materialize' | 'swap';
 
 /**
  * What a profile allows. `source`/`target` name the extra mount a profile
@@ -146,6 +147,26 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     memoryBytes: GIB,
     timeoutMs: null,
   },
+  // `restic ls` and `restic dump`: read one saved point's contents. Only the
+  // repository is mounted, read-only; no application volume is attached, because
+  // the bytes come out of the repository, so no capability is needed. The output
+  // is the data itself, which is why the run streams it instead of collecting it.
+  // The profile sets no deadline. A listing run passes its own
+  // (`CONTENT_LISTING_TIMEOUT_MS`, because it loads the index before the first
+  // entry); a dump runs as long as the file does and ends on the caller's
+  // cancellation, the download route's idle stop, or when restic exits.
+  read: {
+    user: '0:0',
+    capAdd: [],
+    repositoryReadOnly: true,
+    needsRepository: true,
+    source: null,
+    target: null,
+    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    pidsLimit: 256,
+    memoryBytes: GIB,
+    timeoutMs: null,
+  },
   // `--verify` reads restored files back after their ownership is applied, so the
   // profile needs the capability that made them unreadable to a plain root.
   restore: {
@@ -239,6 +260,13 @@ export interface HelperRunSpec {
    * capture with unreadable files as clean. The listener decides what is JSON.
    */
   onStderrLine?: (line: string) => void;
+  /**
+   * Called with raw stdout bytes instead of parsed lines, for a run whose output
+   * *is* the data (`restic dump`). The sink applies backpressure: after it calls
+   * `control.pause()`, the helper's output stream stops until `resume()`, so a
+   * large file moves at the destination's pace and is never buffered whole.
+   */
+  onStdoutChunk?: ContentChunkSink;
 }
 
 export interface HelperRunResult {
@@ -256,6 +284,12 @@ export const HELPER_STDERR_TAIL_BYTES = 8 * 1024;
 export const HELPER_ABORT_GRACE_MS = 10_000;
 /** How long the attach stream may take to flush after the process exits. */
 export const HELPER_STREAM_FLUSH_MS = 1_000;
+/**
+ * How long a stream the sink paused may take to deliver its tail after the
+ * process exits. A slow client needs more than the flush window, but a socket
+ * that never closes must still let the run settle.
+ */
+export const HELPER_PAUSED_TAIL_MS = 30_000;
 
 /** A timer that keeps the event loop free to exit. */
 function delay(ms: number): Promise<void> {
@@ -332,6 +366,12 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
     Memory: spec.memoryBytes,
     Tmpfs: { ...spec.tmpfs },
     Mounts: mounts,
+    // Output reaches Sencho over the attach stream only. A logging driver would
+    // copy it too, and for the read profile the output is the file itself: the
+    // default json-file driver would write every downloaded byte to the Docker
+    // root, and journald or a remote driver would keep it after the container is
+    // removed. Nothing reads helper logs, so no driver runs.
+    LogConfig: { Type: 'none', Config: {} },
   };
   if (spec.capAdd.length > 0) hostConfig.CapAdd = [...spec.capAdd];
 
@@ -391,11 +431,14 @@ export interface HelperRunnerDeps {
 class LineSplitter {
   private buffer = '';
   private discarding = false;
+  // A demuxed frame can end inside a multi-byte character; decoding each chunk on
+  // its own would turn both halves into U+FFFD and corrupt the line.
+  private readonly decoder = new StringDecoder('utf8');
 
   constructor(private readonly onLine: (line: string) => void) {}
 
   write(chunk: Buffer): void {
-    this.buffer += chunk.toString('utf8');
+    this.buffer += this.decoder.write(chunk);
     let index = this.buffer.indexOf('\n');
     while (index !== -1) {
       const line = this.buffer.slice(0, index);
@@ -412,6 +455,7 @@ class LineSplitter {
   }
 
   end(): void {
+    this.buffer += this.decoder.end();
     if (this.buffer.length > 0 && !this.discarding) this.onLine(this.buffer);
     this.buffer = '';
     this.discarding = false;
@@ -465,9 +509,59 @@ export class RecoveryHelperRunner {
       }
     };
 
+    let attachStream: NodeJS.ReadableStream | null = null;
+    let pausedBySink = false;
+    let exited = false;
+    // The chunk sink's backpressure control. Pausing the attach stream stops the
+    // demuxer's data events, so a slow destination leaves at most one socket
+    // chunk buffered rather than a whole file. Once the run is aborted or the
+    // process has exited, a pause is ignored: what is left on the socket is
+    // bounded, and a sink that pauses a stream nobody will resume again would
+    // keep the stream from ending and the run from settling.
+    const sinkControl = {
+      pause: (): void => {
+        if (pausedBySink || aborted || exited) return;
+        pausedBySink = true;
+        attachStream?.pause();
+      },
+      resume: (): void => {
+        if (!pausedBySink) return;
+        pausedBySink = false;
+        attachStream?.resume();
+      },
+    };
+
+    const onAbort = (): void => {
+      if (aborted) return;
+      aborted = true;
+      // A stream the sink paused would hold the tail on the socket; let it drain.
+      if (pausedBySink) {
+        pausedBySink = false;
+        attachStream?.resume();
+      }
+      void kill('SIGINT');
+      graceTimer = setTimeout(() => {
+        killed = true;
+        void kill('SIGKILL');
+      }, HELPER_ABORT_GRACE_MS);
+      graceTimer.unref?.();
+    };
+
+    const lineSplitter = request.onStdoutLine ? new LineSplitter(request.onStdoutLine) : null;
     const stdout = new Writable({
       write: (chunk: Buffer, _enc, cb) => {
-        if (request.onStdoutLine) splitter.write(chunk);
+        if (request.onStdoutChunk) {
+          try {
+            request.onStdoutChunk(chunk, sinkControl);
+          } catch (err) {
+            // A sink that throws (the client vanished mid-body) must not escape
+            // into the demuxer's data handler; end the run instead.
+            console.error('[Recovery] Content sink failed for operation %s:', sanitizeForLog(request.operationId), errorMessageForLog(err));
+            onAbort();
+          }
+        } else {
+          lineSplitter?.write(chunk);
+        }
         cb();
       },
     });
@@ -486,21 +580,10 @@ export class RecoveryHelperRunner {
         cb();
       },
     });
-    const splitter = new LineSplitter(request.onStdoutLine ?? ((): void => {}));
-
-    const onAbort = (): void => {
-      if (aborted) return;
-      aborted = true;
-      void kill('SIGINT');
-      graceTimer = setTimeout(() => {
-        killed = true;
-        void kill('SIGKILL');
-      }, HELPER_ABORT_GRACE_MS);
-      graceTimer.unref?.();
-    };
 
     const runPromise = (async (): Promise<number | null> => {
       const stream = await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true });
+      attachStream = stream;
       const ended = new Promise<void>((resolve) => {
         stream.once('end', () => resolve());
         stream.once('close', () => resolve());
@@ -509,15 +592,35 @@ export class RecoveryHelperRunner {
       // stderr stay separate even though they share one socket.
       this.deps.docker.modem.demuxStream(stream, stdout, stderr);
       await container.start();
+      // An abort or a deadline that lands while the container is still being
+      // created has no live process to signal. Send the kill again now that one
+      // exists, or the helper would run to completion with nobody waiting for it.
+      if (aborted || killed) {
+        killed = true;
+        void kill('SIGKILL');
+      }
       if (request.stdinSecret !== undefined) stream.write(request.stdinSecret);
       // Always close stdin: the helper reads the password from it and then must
       // see EOF, or `cat config` waits forever for more input.
       stream.end();
       const exitInfo = await container.wait();
-      // The exit code is the run's result. The stream only carries output that is
-      // still being flushed, so a stream that never closes cannot hold the
-      // operation open after the process is gone.
-      await Promise.race([ended, delay(HELPER_STREAM_FLUSH_MS)]);
+      exited = true;
+      if (pausedBySink && !aborted) {
+        // The sink paused the stream for backpressure (a slow client), so the
+        // process may be gone while its last bytes are still on the socket.
+        // Resume, and wait for the stream itself rather than the 1 s flush
+        // window, which would lose the tail of a file the client asked for. The
+        // wait is still bounded: a socket that never closes ends the run, and
+        // the byte count then reports the short body.
+        pausedBySink = false;
+        stream.resume();
+        await Promise.race([ended, delay(HELPER_PAUSED_TAIL_MS)]);
+      } else {
+        // The exit code is the run's result. The stream only carries output that
+        // is still being flushed, so a stream that never closes cannot hold the
+        // operation open after the process is gone.
+        await Promise.race([ended, delay(HELPER_STREAM_FLUSH_MS)]);
+      }
       return typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : null;
     })();
 
@@ -537,7 +640,7 @@ export class RecoveryHelperRunner {
     let exitCode: number | null;
     try {
       exitCode = await runPromise;
-      splitter.end();
+      lineSplitter?.end();
       stderrSplitter.end();
     } catch (err) {
       console.error('[Recovery] Helper run failed for operation %s:', request.operationId, errorMessageForLog(err));

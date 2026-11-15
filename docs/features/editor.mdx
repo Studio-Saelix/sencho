@@ -164,6 +164,10 @@ Against a node whose Sencho instance does not include this action, only the down
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
+## Opening a reported location
+
+Compose Doctor findings and Compose Labels rows can open the exact authored line. A link in the form `compose.override.yaml:14` opens the **Files** tab on that file and selects the range; a link to the primary Compose file opens the **compose.yaml** tab instead. A link never applies a range to a buffer that no longer matches the file it was located in: the range is tied to the file content it was computed from, and Sencho verifies the content it opens still matches that revision. If the file changed between locating the range and opening it, nothing is selected and Sencho says the location is no longer current; click the link again after the report refreshes. A clean primary Compose buffer is re-read and refreshed first, while one with unsaved edits keeps them and opens the tab without moving the selection. For the primary Compose buffer, saving or discarding the unsaved edits does not apply the pending range; click the link again. If the Files viewer has unsaved changes, its usual discard confirmation appears and, when confirmed, rereads the file before applying the range.
+
 ## Diff preview before save
 
 When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, **Save Only**, or **Save & Pull Images** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
@@ -270,7 +274,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
   </Accordion>
   <Accordion title='"Sencho instance protected" dialog, or disabled Stop, Update, and Delete buttons'>
-    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked: their buttons are disabled, and **Stop service** on one of its services opens the dialog. **Restart** stays available. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
+    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked: their buttons are disabled, and **Stop service** on one of its services opens the dialog. **Restart** stays available. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. When a node cannot recreate itself, the dialog names that node and the reason instead, such as its Docker endpoint not answering when it started, a missing Compose label, or a container it could not identify. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

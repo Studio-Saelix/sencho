@@ -20,7 +20,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './fleet/FleetEmptyState';
+import { FleetTabActions, FleetEmptyState, FleetEmptyCard } from './fleet/FleetEmptyState';
 
 // --- Types ---
 
@@ -165,6 +165,9 @@ export default function FleetSnapshots() {
     const safePage = Math.min(page, totalPages - 1);
     const pagedSnapshots = snapshots.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
     const needsPagination = snapshots.length > PAGE_SIZE;
+    // With no rows the empty card carries the admin's create action, so the
+    // action row must not repeat it. While loading, the row keeps the action.
+    const showsEmptyState = !loading && snapshots.length === 0;
 
     // --- Data Fetching ---
 
@@ -926,33 +929,29 @@ export default function FleetSnapshots() {
 
     return (
         <div className="space-y-4">
-            <FleetTabHeading
-                title="Fleet Snapshots"
-                subtitle="Point-in-time compose backups across every node."
-                action={
-                    <div className="flex items-center gap-2">
-                        {needsPagination && (
-                            <div className="flex items-center gap-1.5">
-                                <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
-                                    <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                </Button>
-                                <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
-                                    {safePage + 1} / {totalPages}
-                                </span>
-                                <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>
-                                    <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                </Button>
-                            </div>
-                        )}
-                        {isAdmin && !showCreateForm && (
-                            <Button size="sm" className="gap-1.5" onClick={() => setShowCreateForm(true)}>
-                                <Plus className="w-4 h-4" strokeWidth={1.5} />
-                                Create Snapshot
+            {(needsPagination || (isAdmin && !showCreateForm && !showsEmptyState)) && (
+                <FleetTabActions>
+                    {needsPagination && (
+                        <div className="flex items-center gap-1.5">
+                            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
+                                <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
                             </Button>
-                        )}
-                    </div>
-                }
-            />
+                            <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
+                                {safePage + 1} / {totalPages}
+                            </span>
+                            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>
+                                <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+                            </Button>
+                        </div>
+                    )}
+                    {isAdmin && !showCreateForm && (
+                        <Button size="sm" className="gap-1.5" onClick={() => setShowCreateForm(true)}>
+                            <Plus className="w-4 h-4" strokeWidth={1.5} />
+                            Create Snapshot
+                        </Button>
+                    )}
+                </FleetTabActions>
+            )}
 
             {/* Create form */}
             {showCreateForm && (
@@ -995,7 +994,7 @@ export default function FleetSnapshots() {
                         ))}
                     </div>
                 </div>
-            ) : snapshots.length === 0 ? (
+            ) : showsEmptyState ? (
                 <FleetEmptyState>
                     <FleetEmptyCard
                         icon={Camera}

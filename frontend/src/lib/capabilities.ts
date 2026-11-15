@@ -62,6 +62,10 @@ export const CAPABILITIES = [
   'volume-protection-v1',
   'host-usage-unknown-v1',
   'agent-observation-v1',
+  // A node that answers the read-only Docker socket inventory. A hub must treat
+  // an older remote as "this node cannot report its socket access", not as a
+  // clean inventory with nothing to show.
+  'socket-inventory-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

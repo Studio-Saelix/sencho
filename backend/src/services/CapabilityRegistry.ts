@@ -6,6 +6,7 @@ import { SENCHO_VERSION } from '../generated/version';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import type { ImagePinKind } from '../helpers/selfUpdateCompose';
+import { parseSelfUpdateUnavailableCode, type SelfUpdateUnavailableCode } from '../helpers/selfUpdateEligibility';
 import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
 
 const IMAGE_PIN_KINDS: readonly ImagePinKind[] = ['floating', 'semver', 'digest', 'unknown'];
@@ -86,6 +87,10 @@ export const CAPABILITIES = [
   'volume-protection-v1',
   'host-usage-unknown-v1',
   'agent-observation-v1',
+  // A node that answers the read-only Docker socket inventory. A hub must treat
+  // an older remote as "this node cannot report its socket access", not as a
+  // clean inventory with nothing to show.
+  'socket-inventory-v1',
 ] as const;
 
 /**
@@ -308,6 +313,12 @@ export interface RemoteMeta {
    * older than this field or offline. Safe to expose (no private repository path).
    */
   imageChannel: 'community' | 'hardened' | 'unknown' | null;
+  /**
+   * Bounded reason the remote cannot recreate its own Compose configuration.
+   * Null/absent when the remote advertises `self-update`, is offline, predates
+   * the field, or sent a value outside the enum.
+   */
+  selfUpdateUnavailable?: SelfUpdateUnavailableCode | null;
   /** True while the remote is still verifying a Docker endpoint replacement it ran during an update. */
   endpointProviderPending?: boolean;
   /**
@@ -386,6 +397,7 @@ export const OFFLINE_META: RemoteMeta = {
   imagePinKind: null,
   updateBlocked: false,
   imageChannel: null,
+  selfUpdateUnavailable: null,
 };
 
 function parseImageChannel(value: unknown): RemoteMeta['imageChannel'] {
@@ -478,6 +490,7 @@ export async function probeRemoteMeta(
       imagePinKind: parseImagePinKind(res.data.imagePinKind),
       updateBlocked: res.data.updateBlocked === true,
       imageChannel: parseImageChannel(res.data.imageChannel),
+      selfUpdateUnavailable: parseSelfUpdateUnavailableCode(res.data.selfUpdateUnavailable),
       endpointProviderPending: res.data.endpointProviderPending === true,
       endpointProviderCompletedAt: typeof res.data.endpointProviderCompletedAt === 'number'
         ? res.data.endpointProviderCompletedAt

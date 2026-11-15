@@ -87,7 +87,7 @@ import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServic
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
-import { errorMessageForLog, redactImageReference, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactImageForDisplay, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, evaluatedDeployCandidateVerification, policyBlockPayload, policyEvidenceFor, pulledCandidateVerifier, pulledDeployCandidateVerification, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning, PulledCandidateBlockedError, verifyPulledCandidates } from '../helpers/policyGate';
@@ -96,6 +96,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
+import { inArrivalOrder, ArrivalQueueFullError } from '../helpers/arrivalOrder';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
   ImageUpdateService,
@@ -116,6 +117,8 @@ import {
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../helpers/composeRefusalRoute';
+import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
@@ -766,6 +769,9 @@ async function runStackBulkOp(
       }
       if (outcome.kind === 'data-restore') {
         return { stackName, ok: false, error: outcome.message, code: DATA_RESTORE_FENCE_CODE };
+      }
+      if (outcome.kind === 'compose-refused') {
+        return { stackName, ok: false, error: outcome.message, code: COMPOSE_INPUTS_REFUSED_CODE };
       }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
@@ -1561,6 +1567,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(423).json({ error: result.error, code: RECOVERY_VOLUME_PROTECTED_CODE });
       return;
     }
+    if (result.code === 'compose_inputs_refused') {
+      res.status(409).json({ error: result.error, code: COMPOSE_INPUTS_REFUSED_CODE });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
@@ -1597,6 +1607,8 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
   } catch (error) {
     outcome = 'error';
     console.error('[Stacks] Failed to fetch containers for %s:', sanitizeForLog(stackName), error);
+    // A refused stack is not an empty one: say why the list cannot be read.
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to fetch containers' });
   } finally {
     logDebugTiming('[Stacks:debug]', {
@@ -1932,7 +1944,7 @@ stacksRouter.get('/:stackName/preflight', async (req: Request, res: Response) =>
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
-    res.json(ComposeDoctorService.getInstance().getLatest(req.nodeId, stackName));
+    res.json(await ComposeDoctorService.getInstance().getLatest(req.nodeId, stackName));
   } catch (error) {
     console.error('[Stacks] Failed to load preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
@@ -1978,13 +1990,14 @@ const PREFLIGHT_RULE_ID_SET: ReadonlySet<string> = new Set(RULE_IDS);
 
 /** An acknowledgement as the API returns it. The reason is operator-entered free
  *  text and the image anchor is copied from the rendered model, which inlines a
- *  registry credential, so both are redacted in every response, the same as on the
- *  Doctor report. The stored anchor stays raw: expiry compares against it. */
+ *  registry credential or another resolved secret, so both get the full display
+ *  redaction in every response, the same as on the Doctor report. The stored
+ *  anchor stays raw: expiry compares against it. */
 function acknowledgementForWire(ack: PreflightAcknowledgement): PreflightAcknowledgement {
   return {
     ...ack,
     reason: redactSensitiveText(ack.reason),
-    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageReference(ack.anchor_image_ref),
+    anchor_image_ref: ack.anchor_image_ref === null ? null : redactImageForDisplay(ack.anchor_image_ref),
   };
 }
 
@@ -2238,6 +2251,7 @@ stacksRouter.get('/:stackName/label-inventory', async (req: Request, res: Respon
   } catch (error) {
     console.error('[Stacks] Failed to build label inventory for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to build label inventory' });
   }
 });
@@ -2276,31 +2290,55 @@ stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => 
   }
 });
 
+// Saves to one stack are applied in the order they reach this handler, per node and stack.
+// Validating the stack is asynchronous, so without the queue a save that stalls there
+// (and whose client has since given up on it) would be applied after a later save that
+// already replied, and undo it. A client that abandoned a save cannot know the node has
+// stopped working on it; the order here is what keeps the later save final. The queue
+// admits a bounded number of saves that have not finished, per stack and across the node,
+// so saves that never finish answer further saves with 429 instead of holding every one
+// of them. Saves already admitted keep their order.
 stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
-  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
-  const parsed = ExposurePutSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid exposure intent' });
-    return;
-  }
-  const { service, intent } = parsed.data;
+  const nodeId = req.nodeId;
   try {
-    if (intent === null) {
-      DatabaseService.getInstance().deleteStackExposureIntent(req.nodeId, stackName, service);
-    } else {
-      DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
-    }
-    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
-    invalidateNodeNetworkingAggregate(req.nodeId);
-    res.json(exposurePayload(req.nodeId, stackName));
+    await saveInArrivalOrder(req, res, nodeId, stackName);
   } catch (error) {
-    console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
-      sanitizeForLog(getErrorMessage(error, 'unknown')));
-    res.status(500).json({ error: 'Failed to save exposure intent' });
+    if (!(error instanceof ArrivalQueueFullError)) throw error;
+    console.error('[Stacks] Exposure save for %s refused, too many saves are waiting:', sanitizeForLog(stackName));
+    res.status(429).json({
+      error: 'Too many exposure saves are waiting on this node, so this one was not applied. Try again shortly; if it keeps happening, the node is not finishing earlier saves and may need a restart.',
+      code: 'exposure_save_queue_full',
+    });
   }
 });
+
+function saveInArrivalOrder(req: Request, res: Response, nodeId: number, stackName: string): Promise<void> {
+  return inArrivalOrder(`${nodeId}\0${stackName}`, async () => {
+    if (!(await requireStackExists(nodeId, stackName, res))) return;
+    const parsed = ExposurePutSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid exposure intent' });
+      return;
+    }
+    const { service, intent } = parsed.data;
+    try {
+      if (intent === null) {
+        DatabaseService.getInstance().deleteStackExposureIntent(nodeId, stackName, service);
+      } else {
+        DatabaseService.getInstance().setStackExposureIntent(nodeId, stackName, service, intent, req.user?.username ?? null);
+      }
+      // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+      invalidateNodeNetworkingAggregate(nodeId);
+      res.json(exposurePayload(nodeId, stackName));
+    } catch (error) {
+      console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')));
+      res.status(500).json({ error: 'Failed to save exposure intent' });
+    }
+  });
+}
 
 // Update guard: readiness reports computed on demand from existing stores
 // (preflight runs, drift findings, backup slot, update preview, live Docker
@@ -2549,6 +2587,9 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (sendIfRecoveryVolumeProtected(res, error)) return;
+    // A refusal ran nothing, like the two above: say why, and keep it out of
+    // the failure feed.
+    if (sendIfComposeInputsRefused(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
@@ -2591,6 +2632,8 @@ export type ContainerActionOutcome =
   | { kind: 'endpoint-protected'; message: string; reason: string }
   /** A data restore owns a volume one of the containers mounts, so its start was refused. */
   | { kind: 'data-restore'; message: string }
+  /** Sencho refused to hand the stack's inputs to Compose, so its containers could not be listed. */
+  | { kind: 'compose-refused'; message: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2650,6 +2693,7 @@ export async function containerActionForStack(
       return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
     }
     if (isDataRestoreFenceError(error)) return { kind: 'data-restore', message: error.message };
+    if (error instanceof ComposeExpansionRefusal) return { kind: 'compose-refused', message: error.message };
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2692,6 +2736,10 @@ async function bulkContainerOp(
     }
     if (outcome.kind === 'data-restore') {
       res.status(409).json({ error: outcome.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
+    if (outcome.kind === 'compose-refused') {
+      res.status(409).json({ error: outcome.message, code: COMPOSE_INPUTS_REFUSED_CODE });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2792,6 +2840,7 @@ async function handleServiceAction(
       res.status(409).json({ error: error.message, code: error.code });
       return;
     }
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   } finally {
     releaseStackOpLock(req, stackName);

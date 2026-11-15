@@ -19,12 +19,13 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 let tmpDir: string;
 let authoredComposeFileArgs: typeof import('../utils/authoredComposeArgs').authoredComposeFileArgs;
 let authoredComposeEnvFileArgs: typeof import('../utils/authoredComposeArgs').authoredComposeEnvFileArgs;
+let DeploySpecRefusedError: typeof import('../utils/authoredComposeArgs').DeploySpecRefusedError;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ authoredComposeFileArgs, authoredComposeEnvFileArgs } = await import('../utils/authoredComposeArgs'));
+    ({ authoredComposeFileArgs, authoredComposeEnvFileArgs, DeploySpecRefusedError } = await import('../utils/authoredComposeArgs'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ NodeRegistry } = await import('../services/NodeRegistry'));
 });
@@ -117,7 +118,7 @@ describe('authoredComposeFileArgs', () => {
             files: ['compose.yaml', '/etc/passwd'],
             contextDir: null,
         });
-        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+        expect(() => authoredComposeFileArgs(stackName)).toThrow(DeploySpecRefusedError);
     });
 
     it('throws when a spec file path contains a ".." traversal', () => {
@@ -127,7 +128,7 @@ describe('authoredComposeFileArgs', () => {
             files: ['compose.yaml', '../escape.yml'],
             contextDir: null,
         });
-        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+        expect(() => authoredComposeFileArgs(stackName)).toThrow(DeploySpecRefusedError);
     });
 
     it('throws when the context dir contains a ".." traversal', () => {
@@ -137,7 +138,7 @@ describe('authoredComposeFileArgs', () => {
             files: ['compose.yaml', 'infra/prod.yml'],
             contextDir: '../escape',
         });
-        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+        expect(() => authoredComposeFileArgs(stackName)).toThrow(DeploySpecRefusedError);
     });
 });
 

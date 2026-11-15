@@ -179,9 +179,9 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fle
             meta={meta}
             primaryAction={{
                 label: probing ? 'Probing…' : 'Test probe',
-                icon: probing ? Loader2 : Activity,
+                icon: Activity,
                 onClick: () => { void runProbe(); },
-                disabled: probing,
+                pending: probing,
             }}
             destructiveAction={canManage && target ? {
                 label: removing ? 'Removing…' : 'Remove from mesh',

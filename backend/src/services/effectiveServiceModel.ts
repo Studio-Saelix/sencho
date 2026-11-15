@@ -159,6 +159,10 @@ export async function buildEffectiveServiceModel(nodeId: number, stackName: stri
       }
     }
 
+    if (result.refusal) {
+      return { renderable: false, code: 'effective_model_render_failed', error: result.refusal };
+    }
+
     // Raw stderr can echo file content/secrets and is never surfaced; only the
     // names of any missing required variables, otherwise a generic nudge.
     const missing = parseMissingRequiredVars(result.stderr);

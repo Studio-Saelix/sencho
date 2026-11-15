@@ -92,6 +92,9 @@ const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
   /^\/security\/scans\/[^/]+\/sarif\/?$/,
   /^\/stacks\/[^/]+\/files\/download\/?$/,
   /^\/stacks\/[^/]+\/files\/bulk-download\/?$/,
+  // A saved recovery point's file body: the node streams it out of the
+  // repository and the operator waits for the bytes, not for a page.
+  /^\/recovery\/points\/[^/]+\/download\/?$/,
 ];
 
 /**
@@ -107,11 +110,20 @@ const SLOW_READS: ReadonlyArray<RegExp> = [
   /^\/system\/docker-df\/?$/,
   // The full resources inventory, including the volume df section.
   /^\/system\/resources\/?$/,
+  // Socket inventory: inspects each listed container up to its bound, with a
+  // 15 s route budget. Express routes are case-insensitive by default, and the
+  // remote proxy's socket-inventory gate matches `/i` too, so the budget has to
+  // follow the same spelling.
+  /^\/socket\/inventory\/?$/i,
   // The volume browser: may pull a helper image on first use.
   /^\/volumes\/[^/]+\/(?:list|stat|read)\/?$/,
   // Import scan and update preview walk a repository / inspect images.
   /^\/stacks\/import\/scan\/?$/,
   /^\/stacks\/[^/]+\/update-preview\/?$/,
+  // Browsing a saved point starts a helper that opens the repository and loads
+  // its index, and the route builds the page before it answers, so the 30 s
+  // budget covers the run rather than only the first entry.
+  /^\/recovery\/points\/[^/]+\/browse\/?$/,
 ];
 
 /**

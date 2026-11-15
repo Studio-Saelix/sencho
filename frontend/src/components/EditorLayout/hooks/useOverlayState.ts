@@ -193,8 +193,26 @@ export function useOverlayState() {
   } | null>(null);
 
   const [selfStackProtectedOpen, setSelfStackProtectedOpen] = useState(false);
-  const openSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(true), []);
-  const closeSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(false), []);
+  /**
+   * Present when the dialog opened because Reapply is unavailable on the node,
+   * carrying the node and the bounded reason so the dialog can name both.
+   * Null for a guard refusal (the generic protection copy stays correct there).
+   */
+  const [selfStackProtectedContext, setSelfStackProtectedContext] = useState<{
+    nodeName: string | null;
+    reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  } | null>(null);
+  const openSelfStackProtected = useCallback((context?: {
+    nodeName: string | null;
+    reason: import('@/components/FleetView/types').ReapplyUnavailableReason | null;
+  }) => {
+    setSelfStackProtectedContext(context ?? null);
+    setSelfStackProtectedOpen(true);
+  }, []);
+  const closeSelfStackProtected = useCallback(() => {
+    setSelfStackProtectedOpen(false);
+    setSelfStackProtectedContext(null);
+  }, []);
 
   /** The Docker endpoint guard's refusal: its text and which target it refused. */
   const [dockerEndpointProtected, setDockerEndpointProtected] = useState<{
@@ -251,6 +269,7 @@ export function useOverlayState() {
     preDeployAdvisory, setPreDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen, openSelfStackProtected, closeSelfStackProtected,
+    selfStackProtectedContext,
     dockerEndpointProtected, setDockerEndpointProtected, openDockerEndpointProtected,
     composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, Suspense, type ComponentProps } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import { AlertCircle, FileIcon, Download, Loader2, Save, WrapText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -7,8 +7,31 @@ import { toast } from '@/components/ui/toast-store';
 import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { cn, formatBytes } from '@/lib/utils';
+import { revealLocation, type AuthoredLocation } from '@/lib/authoredLocation';
+import { sha256Hex } from '@/lib/sha256';
 
 const WORD_WRAP_KEY = 'sencho.fileViewer.wordWrap';
+
+type MonacoEditor = import('monaco-editor').editor.IStandaloneCodeEditor;
+
+/**
+ * Binds an editor instance to the resource it was mounted for. The effect
+ * cleanup clears the binding when the resource changes or the editor unmounts,
+ * so a reveal can never be applied to the previous file's disposed editor.
+ */
+function EditorHost({
+  token,
+  onReady,
+  onGone,
+  ...props
+}: {
+  token: string;
+  onReady: (token: string, editor: MonacoEditor) => void;
+  onGone: (token: string) => void;
+} & Omit<ComponentProps<typeof Editor>, 'onMount'>) {
+  useEffect(() => () => onGone(token), [token, onGone]);
+  return <Editor {...props} onMount={(editor) => onReady(token, editor)} />;
+}
 
 interface FileViewerProps {
   stackName: string;
@@ -19,6 +42,11 @@ interface FileViewerProps {
   rootId?: string;
   onSaved?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** A reported authored location to reveal once this file's content is loaded. */
+  reveal?: AuthoredLocation | null;
+  /** Bumped when a reveal targets the already-selected path, forcing a reread. */
+  reloadKey?: number;
+  onRevealApplied?: () => void;
 }
 
 function getFilename(path: string): string {
@@ -119,9 +147,34 @@ export function FileViewer({
   rootId,
   onSaved,
   onDirtyChange,
+  reveal,
+  reloadKey = 0,
+  onRevealApplied,
 }: FileViewerProps) {
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
+  // SHA-256 of the content currently in the buffer, computed once per read.
+  // A reveal is applied only when it equals the digest the range was computed
+  // against, so coordinates from an older revision never select newer lines.
+  const [loadedHash, setLoadedHash] = useState<string | null>(null);
+  // A mounted editor is only valid for the exact resource it was created for.
+  // The token changes with the file (and root), so an unmount that races a new
+  // load cannot leave a stale editor eligible to receive a reveal.
+  const editorBindingRef = useRef<{ editor: MonacoEditor; token: string } | null>(null);
+  const editorToken = `${rootId ?? ''}\u0000${selectedPath ?? ''}`;
+  const editorTokenRef = useRef(editorToken);
+  editorTokenRef.current = editorToken;
+  const [editorBindingVersion, setEditorBindingVersion] = useState(0);
+  const appliedRevealRef = useRef<string | null>(null);
+  // The reveal object whose content mismatch was already reported, so one
+  // pending request does not toast on every render while a fresh click can try
+  // again with the newly read revision.
+  const refusedRevealRef = useRef<AuthoredLocation | null>(null);
+  // True while a read is replacing the buffer. A reveal must wait for that
+  // read: judging the old buffer against the new location would refuse a range
+  // that the read in flight is about to make current.
+  const loadInFlightRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +182,7 @@ export function FileViewer({
   const [isOversized, setIsOversized] = useState(false);
   const [size, setSize] = useState(0);
   const [loadedVersion, setLoadedVersion] = useState<string | null>(null);
+  const [loadEpoch, setLoadEpoch] = useState(0);
 
   const readOnly = !canEdit;
   const hasChanges = content !== originalContent;
@@ -184,21 +238,29 @@ export function FileViewer({
     if (!selectedPath) {
       setContent('');
       setOriginalContent('');
+      setLoadedHash(null);
       setIsBinary(false);
       setIsOversized(false);
       setError(null);
+      loadInFlightRef.current = false;
       return;
     }
 
     let cancelled = false;
+    loadInFlightRef.current = true;
     setLoading(true);
     setError(null);
+    setLoadedPath(null);
+    setLoadedHash(null);
     setIsBinary(false);
     setIsOversized(false);
+    // A reread must be able to re-apply the same one-shot range.
+    appliedRevealRef.current = null;
 
     readStackFile(stackName, selectedPath, { rootId })
       .then((result) => {
         if (cancelled) return;
+        loadInFlightRef.current = false;
         setSize(result.size);
         setLoadedVersion(result.version ?? fsVersionFromMtime(result.mtimeMs) ?? null);
         // Check oversized BEFORE binary: the backend returns oversized:true
@@ -216,20 +278,28 @@ export function FileViewer({
           const text = result.content ?? '';
           setContent(text);
           setOriginalContent(text);
+          setLoadedHash(sha256Hex(text));
+          setLoadedPath(selectedPath);
+          setLoadEpoch((epoch) => epoch + 1);
         }
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        loadInFlightRef.current = false;
         setError(e instanceof Error ? e.message : 'Failed to load file.');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        // The buffer now reflects this read; the reveal effect reruns on the
+        // content/hash/epoch updates and may apply the range.
+        loadInFlightRef.current = false;
+        setLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [stackName, selectedPath, rootId]);
+  }, [stackName, selectedPath, rootId, reloadKey]);
 
   const handleSave = async () => {
     if (!selectedPath) return;
@@ -264,6 +334,60 @@ export function FileViewer({
     }
   };
 
+  const bindEditor = useCallback((token: string, editor: MonacoEditor) => {
+    // A late mount from a render that has already been replaced is not the
+    // editor for the current resource; ignore it.
+    if (token !== editorTokenRef.current) return;
+    editorBindingRef.current = { editor, token };
+    appliedRevealRef.current = null;
+    setEditorBindingVersion((version) => version + 1);
+  }, []);
+
+  const unbindEditor = useCallback((token: string) => {
+    if (editorBindingRef.current?.token === token) editorBindingRef.current = null;
+  }, []);
+
+  const applyReveal = () => {
+    const binding = editorBindingRef.current;
+    // An unsaved buffer is not the content the range was computed against;
+    // the explorer's discard confirmation is the only path that replaces it.
+    if (hasChanges) return;
+    if (!reveal || !binding || binding.token !== editorToken || loadedPath !== reveal.file) return;
+    // A read that is replacing the buffer has not produced a verdict yet: the
+    // reveal effect reruns when it completes.
+    if (loadInFlightRef.current) return;
+    const key = `${reveal.file}:${reveal.fileHash ?? ''}:${reveal.line}:${reveal.column}:${reveal.endLine}:${reveal.endColumn}`;
+    if (appliedRevealRef.current === key) return;
+    // The range belongs to one revision. A missing digest cannot be verified,
+    // and a digest that does not match the loaded content means the file moved
+    // on after the range was computed: open nothing rather than a guessed line.
+    if (reveal.fileHash === undefined || loadedHash === null || loadedHash !== reveal.fileHash) {
+      if (refusedRevealRef.current !== reveal) {
+        refusedRevealRef.current = reveal;
+        toast.info('This location is no longer current. The file changed after it was located; refresh and open its link again.');
+      }
+      onRevealApplied?.();
+      return;
+    }
+    revealLocation(binding.editor, reveal);
+    appliedRevealRef.current = key;
+    onRevealApplied?.();
+  };
+
+  useEffect(() => {
+    if (!reveal) {
+      // A cleared request must not suppress the next click on the same line.
+      appliedRevealRef.current = null;
+      refusedRevealRef.current = null;
+      return;
+    }
+    applyReveal();
+    // The editor must be mounted for this exact resource and the requested
+    // file's content must be loaded before a range can be applied. `loadEpoch`
+    // covers a reread of the same path, where `loadedPath` may not change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal, loadedPath, loadedHash, editorToken, editorBindingVersion, loadEpoch]);
+
   if (!selectedPath) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -296,6 +420,7 @@ export function FileViewer({
   if (isBinary) {
     const handleForceText = async () => {
       const requestedPath = selectedPath;
+      loadInFlightRef.current = true;
       setLoading(true);
       setError(null);
       try {
@@ -304,6 +429,7 @@ export function FileViewer({
         // file while the override request was in flight. Drop the response
         // rather than stomp on the new file's state.
         if (selectedPathRef.current !== requestedPath) return;
+        loadInFlightRef.current = false;
         setSize(result.size);
         setLoadedVersion(result.version ?? fsVersionFromMtime(result.mtimeMs) ?? null);
         if (result.oversized) {
@@ -317,15 +443,20 @@ export function FileViewer({
           const text = result.content ?? '';
           setContent(text);
           setOriginalContent(text);
+          setLoadedHash(sha256Hex(text));
           setIsBinary(false);
         }
       } catch (e) {
         if (selectedPathRef.current !== requestedPath) return;
+        loadInFlightRef.current = false;
         const message = e instanceof Error ? e.message : 'Failed to load file as text.';
         setError(message);
         toast.error(message);
       } finally {
-        if (selectedPathRef.current === requestedPath) setLoading(false);
+        if (selectedPathRef.current === requestedPath) {
+          loadInFlightRef.current = false;
+          setLoading(false);
+        }
       }
     };
     return (
@@ -398,7 +529,10 @@ export function FileViewer({
 
       <div className="flex-1 min-h-0">
         <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
-          <Editor
+          <EditorHost
+            token={editorToken}
+            onReady={bindEditor}
+            onGone={unbindEditor}
             height="100%"
             language={language}
             value={content}

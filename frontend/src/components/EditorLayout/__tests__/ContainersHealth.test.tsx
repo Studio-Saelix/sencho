@@ -35,6 +35,7 @@ function renderHealth(c: ContainerInfo, activeNode: Node | null = LOCAL_NODE) {
       containerStats={{}}
       containerStatsError={null}
       isAdmin
+      canDeploy
       activeNode={activeNode}
       openLogViewer={vi.fn()}
       openBashModal={vi.fn()}
@@ -118,6 +119,7 @@ describe('density toggle and summary strip', () => {
         containerStats={containerStats}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -228,6 +230,7 @@ describe('density toggle and summary strip', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -246,6 +249,7 @@ describe('density toggle and summary strip', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -300,6 +304,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -324,6 +329,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -351,6 +357,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -376,6 +383,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -407,6 +415,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -435,6 +444,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -454,6 +464,124 @@ describe('declared-service headers (multi-service only)', () => {
     expect(serviceAction).toHaveBeenCalledWith('restart', 'web');
   });
 
+  it('offers Restart and Stop, not Start, for a flattened service that is only restarting', async () => {
+    const user = userEvent.setup();
+    const serviceAction = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({
+            Id: 'loop1',
+            Names: ['/looper'],
+            Service: 'looper',
+            State: 'restarting',
+            Status: 'Restarting (1) 5 seconds ago',
+          }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        canDeploy
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={serviceAction}
+        effectiveServices={[spec({ name: 'looper' })]}
+      />,
+    );
+
+    await user.click(screen.getByLabelText('Service actions'));
+    expect(screen.queryByRole('menuitem', { name: 'Start service' })).toBeNull();
+    await user.click(await screen.findByRole('menuitem', { name: 'Stop service' }));
+    expect(serviceAction).toHaveBeenCalledWith('stop', 'looper');
+  });
+
+  it('offers Stop on a multi-replica header whose replicas are all restarting', async () => {
+    const user = userEvent.setup();
+    const serviceAction = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web-1'], Service: 'web', State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+          makeContainer({ Id: 'w2', Names: ['/web-2'], Service: 'web', State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        canDeploy
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={serviceAction}
+        effectiveServices={[spec({ name: 'web', expectedReplicas: 2 })]}
+      />,
+    );
+
+    // The declared-service header owns the menu; nested replica cards hide it.
+    await user.click(screen.getAllByLabelText('Service actions')[0]);
+    expect(screen.getByRole('menuitem', { name: 'Restart service' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Start service' })).toBeNull();
+  });
+
+  it('hides every service lifecycle menu from a user without stack:deploy', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web-1'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'w2', Names: ['/web-2'], Service: 'web', State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        canDeploy={false}
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        // web keeps a grouped header (2 replicas); db is flattened; cache has
+        // no container at all, so all three shared placements are covered.
+        effectiveServices={[
+          spec({ name: 'web', expectedReplicas: 2 }),
+          spec({ name: 'db' }),
+          spec({ name: 'cache', declaredImage: null }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(/1\/2 running/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Service actions')).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /service$/ })).toBeNull();
+  });
+
+  it('hides the flat per-container lifecycle menu from a user without stack:deploy', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({
+            Id: 'loop1',
+            Names: ['/looper'],
+            Service: 'looper',
+            State: 'restarting',
+            Status: 'Restarting (1) 5 seconds ago',
+          }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        canDeploy={false}
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'looper' })]}
+      />,
+    );
+
+    // The newly exposed restarting controls must not reach a read-only user.
+    expect(screen.queryByLabelText('Service actions')).toBeNull();
+  });
+
   it('retains multi-replica header Update without leaking onto nested children', () => {
     render(
       <ContainersHealth
@@ -465,6 +593,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -495,6 +624,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -524,6 +654,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -548,6 +679,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -571,6 +703,7 @@ describe('declared-service headers (multi-service only)', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -593,6 +726,7 @@ describe('containers load states', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -611,6 +745,7 @@ describe('containers load states', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -630,6 +765,7 @@ describe('containers load states', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -654,6 +790,7 @@ describe('containers load states', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -673,6 +810,7 @@ describe('containers load states', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -702,6 +840,7 @@ describe('ContainersHealth inspect image icon', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -833,6 +972,7 @@ describe('live-refresh stale chip', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -854,6 +994,7 @@ describe('live-refresh stale chip', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
@@ -912,6 +1053,7 @@ describe('io.sencho.* labels on the container list', () => {
         containerStats={{}}
         containerStatsError={null}
         isAdmin
+        canDeploy
         activeNode={LOCAL_NODE}
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}

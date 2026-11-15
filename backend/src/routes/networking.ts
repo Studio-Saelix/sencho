@@ -7,7 +7,7 @@ import {
 } from '../services/network/networkingAggregate';
 import DockerController from '../services/DockerController';
 import { findSnapshotNetwork, sanitizeNetworkInspect } from '../services/network/sanitizeNetworkInspect';
-import { getErrorMessage } from '../utils/errors';
+import { getErrorMessage, isDockerNotFoundError } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidDockerResourceId } from '../utils/validation';
 import { isValidDockerNetworkName } from '../services/network/dockerNetworkName';
@@ -74,9 +74,7 @@ networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promi
     res.json(okEnvelope(true, { network: sanitizeNetworkInspect(raw, snapNet, snapshot) }));
   } catch (error: unknown) {
     console.error('[Networking] Failed to inspect network:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-    const statusCode = (error as { statusCode?: number }).statusCode;
-    const is404 = statusCode === 404
-      || (error instanceof Error && error.message.includes('404'));
+    const is404 = isDockerNotFoundError(error);
     res.status(is404 ? 404 : 500).json({
       error: is404 ? 'Network not found' : 'Failed to inspect network',
     });

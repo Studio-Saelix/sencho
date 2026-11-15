@@ -10,6 +10,11 @@ import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
+// The alias guard (which resolves COMPOSE_ENV_FILES itself) and the recovery
+// pre-spawn check both refuse a process-selected env file that is a pipe, and
+// the guard runs first; either message names the file as not a regular file.
+const NOT_A_REGULAR_FILE = /not a regular file/;
+
 describe('captured invocation on recovery Compose args', () => {
   let tmpDir: string;
   let composeDir: string;
@@ -1132,7 +1137,7 @@ describe('captured invocation on recovery Compose args', () => {
             await expect(svc.composeUpWithRecoveryOverride(
               stackName,
               path.join(stackDir, '.sencho-recovery-unused.yml'),
-            )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+            )).rejects.toThrow(NOT_A_REGULAR_FILE);
           });
         }
         expect(execute).not.toHaveBeenCalled();
@@ -1163,7 +1168,7 @@ describe('captured invocation on recovery Compose args', () => {
           path.join(stackDir, '.sencho-recovery-unused.yml'),
           undefined,
           layerInvocation(stackName, ['--env-file']),
-        )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+        )).rejects.toThrow(NOT_A_REGULAR_FILE);
         expect(execute).toHaveBeenCalledTimes(1);
       } finally {
         if (previous === undefined) delete process.env.COMPOSE_ENV_FILES;
@@ -1393,7 +1398,7 @@ describe('captured invocation on recovery Compose args', () => {
             await expect(svc.composeUpWithRecoveryOverride(
               stackName,
               path.join(stackDir, '.sencho-recovery-unused.yml'),
-            )).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+            )).rejects.toThrow(NOT_A_REGULAR_FILE);
           });
         }
         expect(execute).not.toHaveBeenCalled();

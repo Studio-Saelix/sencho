@@ -204,10 +204,10 @@ interface DoctorAggregationOptions {
  *  unified list (live findings enriched in place, plus new Doctor-only cards
  *  appended). Fail-soft per stack: a getLatest() failure is logged and skipped,
  *  never fails the whole aggregate. */
-export function applyDoctorNetworkingFindings(
+export async function applyDoctorNetworkingFindings(
   live: NetworkingFinding[],
   options: DoctorAggregationOptions,
-): NetworkingFinding[] {
+): Promise<NetworkingFinding[]> {
   const { nodeId, stackNames, stackFacts, snapshot } = options;
   const factsByStack = new Map(stackFacts.map((f) => [f.stack, f]));
 
@@ -232,7 +232,7 @@ export function applyDoctorNetworkingFindings(
   for (const stack of stackNames) {
     let report;
     try {
-      report = ComposeDoctorService.getInstance().getLatest(nodeId, stack);
+      report = await ComposeDoctorService.getInstance().getLatest(nodeId, stack);
     } catch (error) {
       console.warn('[Networking] Doctor lookup failed for stack %s; skipped:',
         sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));

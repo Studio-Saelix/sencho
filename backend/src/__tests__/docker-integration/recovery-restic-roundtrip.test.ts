@@ -260,6 +260,7 @@ function populateSource(volume: string): void {
     'set -e',
     'mkdir -p tree/sub setgid secretdir',
     'printf "alpha" > a.txt',
+    ': > empty.bin',
     'dd if=/dev/urandom of=tree/big.bin bs=1024 count=64 2>/dev/null',
     'truncate -s 1048576 sparse.bin',
     'ln -s a.txt link-rel',
@@ -375,6 +376,90 @@ describeIf('recovery round trip against real Docker', () => {
     } finally {
       removeVolume(source);
       removeVolume(target);
+    }
+  }, 300_000);
+
+  it('lists a saved point, stats an entry and dumps a file\'s exact bytes', async () => {
+    const source = volumeName('sencho-it-contents');
+    try {
+      createVolume(source);
+      populateSource(source);
+      const token = await tokenFor(source);
+      const engine = engineFor(source);
+      const capture = await engine.createPoint(
+        {
+          storage: storageFor(source, token),
+          repository: RecoveryRepositoryStore.getInstance().get(repositoryId) as never,
+          trigger: 'manual',
+          actor: 'integration',
+          kind: 'root',
+        },
+        context('integration-contents-capture'),
+      );
+      expect(capture.ok).toBe(true);
+      if (!capture.ok) return;
+
+      const read = (path: string) => ({ snapshotId: capture.evidence.snapshotId, repositoryId, path });
+      const readContext = (operationId: string) => ({ operationId, signal: new AbortController().signal });
+      const page = { offset: 0, pageSize: 500 };
+      const lookup = { offset: 0, pageSize: 0 };
+      const listed = async (path: string, operationId: string, at = page) => {
+        const result = await engine.readDirectory(read(path), at, readContext(operationId));
+        if (!result.ok) throw new Error(`read of ${path} failed: ${result.errorClass}`);
+        return result.evidence;
+      };
+
+      const root = await listed('/', 'integration-contents-root');
+      if (!root.found) throw new Error('root not found');
+      expect(root.self.type).toBe('directory');
+      const names = root.entries.map((entry) => entry.name);
+      expect(names).toEqual(expect.arrayContaining(['a.txt', 'tree', 'secretdir', 'link-rel', 'hardlink', 'sparse.bin', 'setgid']));
+      // restic's tree order is by name, which is what makes an offset stable.
+      expect(names).toEqual([...names].sort());
+      expect(root.entries.find((entry) => entry.name === 'a.txt')).toMatchObject({ path: '/a.txt', type: 'file', size: 5, downloadable: true });
+      expect(root.entries.find((entry) => entry.name === 'link-rel')).toMatchObject({ type: 'symlink', size: null, downloadable: false });
+
+      const tree = await listed('/tree', 'integration-contents-tree');
+      if (!tree.found) throw new Error('tree not found');
+      expect(tree.self).toMatchObject({ name: 'tree', type: 'directory' });
+      expect(tree.entries.map((entry) => entry.name)).toEqual(['big.bin', 'sub']);
+
+      // A subdirectory of a tree that holds an empty directory still answers it.
+      const empty = await listed('/tree/sub', 'integration-contents-empty');
+      expect(empty.found && empty.entries).toEqual([]);
+
+      const file = await listed('/a.txt', 'integration-contents-file', lookup);
+      expect(file.found && file.self).toMatchObject({ path: '/a.txt', type: 'file', size: 5, mode: '0644' });
+
+      expect(await listed('/nope', 'integration-contents-missing')).toEqual({ found: false });
+
+      // A link is stored with its target verbatim, so an absolute one is listed
+      // as a link and never resolved to the host path it names.
+      const absolute = await listed('/link-abs', 'integration-contents-abs', lookup);
+      expect(absolute.found && absolute.self).toMatchObject({ type: 'symlink', path: '/link-abs' });
+      // A link in the middle of a path is not a way through it.
+      expect(await listed('/link-rel/anything', 'integration-contents-through')).toEqual({ found: false });
+
+      const chunks: Buffer[] = [];
+      const dump = await engine.dumpFile(
+        read('/a.txt'),
+        5,
+        (chunk) => { chunks.push(chunk); },
+        readContext('integration-contents-dump'),
+      );
+      expect(dump).toEqual({ ok: true, evidence: { bytes: 5 } });
+      expect(Buffer.concat(chunks).toString()).toBe('alpha');
+
+      // A body shorter than the metadata promised is an integrity answer, never a
+      // short success: this is how a missing chunk reaches the caller.
+      const short = await engine.dumpFile(read('/a.txt'), 6, () => undefined, readContext('integration-contents-short'));
+      expect(short).toEqual({ ok: false, errorClass: 'integrity_mismatch' });
+
+      // An empty file is a real download with a zero-byte body, not a refusal.
+      const emptyDump = await engine.dumpFile(read('/empty.bin'), 0, () => undefined, readContext('integration-contents-empty-dump'));
+      expect(emptyDump).toEqual({ ok: true, evidence: { bytes: 0 } });
+    } finally {
+      removeVolume(source);
     }
   }, 300_000);
 

@@ -1,7 +1,7 @@
 import { useMemo, useState, Fragment } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Lock, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Input } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -220,9 +220,7 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = fal
               </PopoverContent>
             </Popover>
           )}
-          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={refresh} disabled={busy} aria-label="Refresh">
-            <RefreshCw className={cn('h-4 w-4', busy && 'animate-spin')} />
-          </Button>
+          <IconBusyButton variant="outline" size="sm" icon={RefreshCw} className="h-9 w-9 p-0" onClick={refresh} pending={busy} aria-label="Refresh" />
         </div>
       </div>
 

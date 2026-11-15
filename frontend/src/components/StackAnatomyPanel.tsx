@@ -48,6 +48,8 @@ interface StackAnatomyPanelProps {
   /** Deploys the stack through the editor's own handler; the Drift tab's redeploy verb runs it. */
   onRedeploy?: () => void | Promise<void>;
   onOpenFiles?: () => void;
+  /** Open an authored Compose location in the editor or the Files tab. */
+  onOpenLocation?: (location: import('@/lib/authoredLocation').AuthoredLocation) => void;
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
@@ -123,6 +125,7 @@ export default function StackAnatomyPanel({
   gitSourcePending,
   onEditCompose,
   onOpenGitSource,
+  onOpenLocation,
   onApplyUpdate,
   onRedeploy,
   onOpenFiles,
@@ -849,7 +852,7 @@ export default function StackAnatomyPanel({
       </TabsContent>
       {doctorEnabled && (
         <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
-          <PreflightPanel stackName={stackName} canEdit={canEdit} />
+          <PreflightPanel stackName={stackName} canEdit={canEdit} onOpenLocation={onOpenLocation} />
         </TabsContent>
       )}
       {networkingEnabled && (
@@ -864,7 +867,7 @@ export default function StackAnatomyPanel({
       )}
       {composeLabelsEnabled && (
         <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0">
-          <ComposeLabelsPanel stackName={stackName} />
+          <ComposeLabelsPanel stackName={stackName} onOpenLocation={onOpenLocation} />
         </TabsContent>
       )}
       {storageEnabled && (

@@ -265,7 +265,7 @@ export class UpdateGuardService {
     }
 
     const [preflight, drift, containers, siblings, preview, backup, disk, updatePolicyPair] = await Promise.all([
-      this.collect('preflight', stackName, async () => ComposeDoctorService.getInstance().getLatest(nodeId, stackName)),
+      this.collect('preflight', stackName, () => ComposeDoctorService.getInstance().getLatest(nodeId, stackName)),
       this.collect('drift', stackName, async () =>
         db.getOpenDriftFindings(nodeId, stackName).filter(f => !serviceName || f.service === serviceName).length),
       this.collect('containers', stackName, () =>

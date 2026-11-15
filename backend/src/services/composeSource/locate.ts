@@ -1,0 +1,1037 @@
+/**
+ * The rule-to-authored-field table. Compose Doctor rules never see the authored
+ * project: this module maps a finished hit onto the field its rule is about and
+ * returns a location only for a reason a consumer may act on.
+ */
+import {
+  correlateField, correlateLabel, correlateVariableReference, displayRange,
+  hasLaterUnparsedLayer, hasOutsideComposeLayer, hasProjectCycle, hasUnparsedComposeLayer, hasUnresolvedService,
+} from './correlate';
+import { authoredNodeKey, authoredScalarOf } from './parseComposeDocument';
+import { containerPortRange, enumeratedHostPorts, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { isActingReason, type AuthoredFileSource, type AuthoredLocation, type AuthoredNode, type AuthoredProject, type CorrelationResult } from './types';
+import type { RuleHit } from '../preflight/types';
+import type { EffectiveModel, EffPortSpec } from '../preflight/effectiveModel';
+
+function toLocation(result: CorrelationResult): AuthoredLocation | undefined {
+  if (!isActingReason(result.reason) || !result.origin) return undefined;
+  const { origin } = result;
+  return {
+    file: origin.file,
+    path: result.path,
+    line: origin.range.line,
+    column: origin.range.column,
+    endLine: origin.range.endLine,
+    endColumn: origin.range.endColumn,
+  };
+}
+
+interface ItemCandidate {
+  file: string;
+  /** Service key inside `file`; differs from the effective service for an `extends` base. */
+  declaredService: string;
+  node: AuthoredNode;
+  layerIndex: number;
+  writability: AuthoredFileSource['writability'];
+  /** Sequence index, when the candidate is one item of a list. */
+  index?: number;
+}
+
+const ALL_INTERFACES = 'all';
+
+/**
+ * The most effective publications a port location is attempted for. Compose
+ * expands a paired range such as `1-65535:1-65535` into one publication per
+ * port, and the all-interfaces exposure rule reports one finding for each, so a
+ * run can ask for tens of thousands of locations on the synchronous Doctor path
+ * and each one reads the model. Past this count no port finding carries a link.
+ * The authored file, the claims of each port and the authored items behind each
+ * publication are read once per run (see `memoized`), so a repeated finding
+ * costs a lookup. The first finding for each publication still reads the
+ * authored items, so the bound caps that work at the square of the count.
+ */
+const MAX_LOCATABLE_PUBLICATIONS = 2048;
+
+/** Whether the model holds too many publications for a port finding to be located. */
+function exceedsLocatingBound(model: EffectiveModel | null): boolean {
+  if (!model) return false;
+  let total = 0;
+  for (const service of model.services) {
+    total += service.ports.length;
+    if (total > MAX_LOCATABLE_PUBLICATIONS) return true;
+  }
+  return false;
+}
+
+/** Rules whose subject names one enumerated host port, not a whole publication. */
+const PER_PORT_RULES: ReadonlySet<string> = new Set(['port-conflict-node', 'port-conflict-internal']);
+
+function normalizedInterface(ip: string): string {
+  return ip === '' || ip === '0.0.0.0' || ip === '::' || ip === '[::]' ? ALL_INTERFACES : ip;
+}
+
+function sameInterface(a: string, b: string): boolean {
+  const left = normalizedInterface(a);
+  const right = normalizedInterface(b);
+  return left === right;
+}
+
+/** Compose lowercases a short-syntax protocol; an authored long form keeps its case. */
+function sameProtocol(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/** An authored host port in the same text form the rule subject uses. */
+function normalizedHostPart(hostPart: string): string {
+  const trimmed = hostPart.trim();
+  if (isDynamicHostPort(trimmed)) return 'dynamic';
+  if (!isFixedHostPort(trimmed)) return trimmed;
+  const [start, end] = trimmed.split('-');
+  const first = String(parseInt(start, 10));
+  return end === undefined ? first : `${first}-${String(parseInt(end, 10))}`;
+}
+
+/**
+ * The scans below walk an authored file's nodes, and one Doctor run asks the
+ * same question once per finding. A project is read once per run and never
+ * changes, so each answer is computed once and reused for every finding: the
+ * work then grows with the size of the file, not with the file times the number
+ * of findings. The cache key is the project (or a scope list taken from it), so
+ * nothing outlives the run that built it.
+ */
+const memos = new WeakMap<object, Map<string, unknown>>();
+
+function memoized<T>(owner: object, key: string, compute: () => T): T {
+  let entries = memos.get(owner);
+  if (!entries) {
+    entries = new Map();
+    memos.set(owner, entries);
+  }
+  if (entries.has(key)) return entries.get(key) as T;
+  const value = compute();
+  entries.set(key, value);
+  return value;
+}
+
+interface ServiceScope {
+  file: AuthoredFileSource;
+  /** Service key inside `file`; differs for an `extends` base. */
+  declaredService: string;
+  /** Effective merge layer of the declaration that introduced it. */
+  layerIndex: number;
+}
+
+/**
+ * Every parsed file that declares this effective service, including an
+ * `extends` base under its own declared name. A same-named service in an
+ * unrelated file is never included.
+ */
+function serviceScopes(project: AuthoredProject, service: string): ServiceScope[] {
+  return memoized(project, `scopes:${service}`, () => {
+    const scopes: ServiceScope[] = [];
+    for (const definition of project.serviceDefinitions.get(service) ?? []) {
+      const file = project.files.find(entry => entry.file === definition.file && entry.state === 'parsed');
+      // A definition whose file this model cannot read must not be skipped: the
+      // remaining scopes could otherwise look decisive.
+      if (!file) return [];
+      scopes.push({ file, declaredService: definition.declaredService, layerIndex: definition.layerIndex });
+    }
+    return scopes;
+  });
+}
+
+/** A sequence item whose identity this reader cannot decide. */
+function isUnresolvedItem(node: AuthoredNode | undefined, interpolationMatters: boolean): boolean {
+  if (!node) return false;
+  return node.kind === 'alias' || node.customTag !== undefined
+    || (interpolationMatters && node.hasInterpolation);
+}
+
+/** The long-form fields that carry a sequence item's identity for its rule. */
+const IDENTITY_FIELDS: Record<string, ReadonlySet<string>> = {
+  ports: new Set(['published', 'target', 'host_ip', 'protocol']),
+  volumes: new Set(['target']),
+  env_file: new Set(['path']),
+};
+
+/**
+ * Whether a declaration at or after `layerIndex` cannot be compared with the
+ * hit: it could still supersede a literal item this reader managed to match.
+ */
+function hasUnresolvedSequenceItem(
+  scopes: ServiceScope[],
+  field: string,
+  layerIndex: number,
+  interpolationMatters: boolean,
+): boolean {
+  return memoized(scopes, `unresolved:${field}:${layerIndex}:${interpolationMatters}`,
+    () => scanUnresolvedSequenceItem(scopes, field, layerIndex, interpolationMatters));
+}
+
+function scanUnresolvedSequenceItem(
+  scopes: ServiceScope[],
+  field: string,
+  layerIndex: number,
+  interpolationMatters: boolean,
+): boolean {
+  const identityFields = IDENTITY_FIELDS[field] ?? new Set<string>();
+  for (const scope of scopes) {
+    if (scope.layerIndex < layerIndex) continue;
+    const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
+    for (const [nodePath, node] of scope.file.nodes) {
+      if (!nodePath.startsWith(prefix)) continue;
+      const index = /^(\d+)\]/.exec(nodePath.slice(prefix.length));
+      if (!index) continue;
+      const itemPath = `${prefix}${index[1]}]`;
+      if (nodePath === itemPath) {
+        if (isUnresolvedItem(node, interpolationMatters)) return true;
+        continue;
+      }
+      // Only the identity-bearing long-form fields; interpolating a bind source
+      // says nothing about which target the finding names.
+      if (!identityFields.has(nodePath.slice(itemPath.length + 1))) continue;
+      if (isUnresolvedItem(node, interpolationMatters)) return true;
+    }
+  }
+  return false;
+}
+
+/** A `!reset`/`!override`/unsupported tag on the field itself makes every item ambiguous. */
+function fieldHasTag(scopes: ServiceScope[], field: string): boolean {
+  return scopes.some(scope => scope.file.nodes.get(
+    authoredNodeKey(['services', scope.declaredService, ...field.split('.')]),
+  )?.customTag !== undefined);
+}
+
+/** The largest sequence index any scope declares for one field. */
+function scopedSequenceCount(scopes: ServiceScope[], field: string): number {
+  return memoized(scopes, `count:${field}`, () => {
+    let max = 0;
+    for (const scope of scopes) {
+      const prefix = `${authoredNodeKey(['services', scope.declaredService, ...field.split('.')])}[`;
+      for (const nodePath of scope.file.nodes.keys()) {
+        if (!nodePath.startsWith(prefix) || !nodePath.endsWith(']')) continue;
+        const index = Number(nodePath.slice(prefix.length, -1));
+        if (Number.isInteger(index)) max = Math.max(max, index + 1);
+      }
+    }
+    return max;
+  });
+}
+
+/** One authored `ports` item, with the parts that identify a publication. */
+interface AuthoredPortSpec {
+  hostText: string;
+  hostIp: string;
+  protocol: string;
+  dynamic: boolean;
+  targetStartPort?: number;
+  targetEndPort?: number;
+}
+
+function portItemValue(file: AuthoredFileSource, declaredService: string, index: number): AuthoredPortSpec | null {
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index]));
+  // An alias item's own text is not the publication, and this model does not
+  // attribute the anchor's value to this item. Never read it as `dynamic`.
+  if (!item || item.kind === 'alias') return null;
+  const text = authoredScalarOf(item);
+  if (text !== undefined) {
+    const split = splitShortPortSpec(text.trim());
+    if (!split) return null;
+    const hostText = normalizedHostPart(split.hostPart);
+    const target = containerPortRange(split.container);
+    return {
+      hostText,
+      hostIp: split.hostIp,
+      protocol: split.protocol,
+      dynamic: hostText === 'dynamic',
+      ...(target ? { targetStartPort: target.start, targetEndPort: target.end } : {}),
+    };
+  }
+  const published = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'published'])));
+  const protocol = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'protocol']))) ?? 'tcp';
+  const hostIp = authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'host_ip']))) ?? '';
+  const target = containerPortRange(authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'ports', index, 'target']))));
+  const hostText = published === undefined ? 'dynamic' : normalizedHostPart(published);
+  return {
+    hostText,
+    hostIp,
+    protocol,
+    dynamic: hostText === 'dynamic',
+    ...(target ? { targetStartPort: target.start, targetEndPort: target.end } : {}),
+  };
+}
+
+interface AuthoredPortItem {
+  scope: ServiceScope;
+  index: number;
+  author: AuthoredPortSpec;
+  node: AuthoredNode;
+}
+
+/** Every readable authored `ports` item of one service, in sequence order. */
+function authoredPortItems(scopes: ServiceScope[]): AuthoredPortItem[] {
+  return memoized(scopes, 'items:ports', () => {
+    const items: AuthoredPortItem[] = [];
+    const count = scopedSequenceCount(scopes, 'ports');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const author = portItemValue(scope.file, scope.declaredService, index);
+        if (!author) continue;
+        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'ports', index]));
+        if (!node) continue;
+        items.push({ scope, index, author, node });
+      }
+    }
+    return items;
+  });
+}
+
+function effectiveHostText(spec: EffPortSpec): string {
+  if (spec.dynamic) return 'dynamic';
+  return spec.startPort === spec.endPort ? String(spec.startPort) : `${spec.startPort}-${spec.endPort}`;
+}
+
+function subjectMatchesSpec(spec: EffPortSpec, hostText: string, protocol: string): boolean {
+  if (spec.protocol !== protocol) return false;
+  if (spec.dynamic) return hostText === 'dynamic';
+  if (hostText === 'dynamic') return false;
+  if (hostText.includes('-')) return effectiveHostText(spec) === hostText;
+  const port = Number(hostText);
+  return Number.isInteger(port) && port >= spec.startPort && port <= spec.endPort;
+}
+
+function collapsedKey(start: number, end: number, hostIp: string, protocol: string): string {
+  return `${start}-${end}|${normalizedInterface(hostIp)}|${protocol.toLowerCase()}`;
+}
+
+/**
+ * The first fixed publication of each exact span, interface and protocol, so
+ * asking whether a renderer kept an authored range collapsed is one lookup, not
+ * a scan of every publication per authored item per finding.
+ */
+function collapsedPublications(effectivePorts: readonly EffPortSpec[]): Map<string, EffPortSpec> {
+  return memoized(effectivePorts, 'collapsed', () => {
+    const index = new Map<string, EffPortSpec>();
+    for (const port of effectivePorts) {
+      if (port.dynamic) continue;
+      const key = collapsedKey(port.startPort, port.endPort, port.hostIp, port.protocol);
+      if (!index.has(key)) index.set(key, port);
+    }
+    return index;
+  });
+}
+
+function authoredHostMatchesEffective(
+  author: AuthoredPortSpec,
+  spec: EffPortSpec,
+  effectivePorts: readonly EffPortSpec[],
+  specText: string,
+): boolean {
+  if (author.dynamic !== (spec.dynamic === true)) return false;
+  if (spec.dynamic) {
+    if (spec.targetStartPort === undefined || author.targetStartPort === undefined) return true;
+    return author.targetStartPort === spec.targetStartPort && author.targetEndPort === spec.targetEndPort;
+  }
+  if (author.hostText === specText) return true;
+  if (!author.hostText.includes('-')) return false;
+  const [start, end] = author.hostText.split('-').map(Number);
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
+  // Compose normally expands an authored range into one publication per host
+  // port, so the range is the source of every single-port publication inside
+  // it. A renderer that keeps the range collapsed reports one publication with
+  // the exact span; that publication is this declaration's only source, and a
+  // different port (or interface or protocol) inside the span came from
+  // another declaration.
+  const collapsed = collapsedPublications(effectivePorts).get(collapsedKey(start, end, spec.hostIp, spec.protocol));
+  if (collapsed) return collapsed === spec;
+  return spec.startPort === spec.endPort && spec.startPort >= start && spec.startPort <= end;
+}
+
+function authoredHostMatchesSubject(author: AuthoredPortSpec, hostText: string): boolean {
+  if (hostText === 'dynamic') return author.dynamic;
+  if (author.dynamic) return false;
+  if (author.hostText === hostText) return true;
+  const range = author.hostText.includes('-') ? author.hostText.split('-').map(Number) : null;
+  if (range && !hostText.includes('-')) {
+    const port = Number(hostText);
+    return Number.isInteger(port) && port >= range[0] && port <= range[1];
+  }
+  return false;
+}
+
+/** Whether one authored item is the declaration that produced this effective spec. */
+function authoredPortMatches(
+  author: AuthoredPortSpec,
+  spec: EffPortSpec,
+  broadOnly: boolean,
+  effectivePorts: readonly EffPortSpec[],
+  specText: string = effectiveHostText(spec),
+): boolean {
+  if (!sameProtocol(author.protocol, spec.protocol)) return false;
+  if (broadOnly && normalizedInterface(author.hostIp) !== ALL_INTERFACES) return false;
+  if (!broadOnly && !sameInterface(author.hostIp, spec.hostIp)) return false;
+  return authoredHostMatchesEffective(author, spec, effectivePorts, specText);
+}
+
+/**
+ * The authored `ports` items that produced one effective publication, stopping
+ * at the second: two sources make the origin ambiguous whatever else matches.
+ * One publication is asked about once per finding that counts it, and each
+ * answer reads the authored items until it finds a second, so the answer is
+ * kept per publication, together with the effective ports it was matched
+ * against and under the authored scopes it was read from.
+ */
+function itemsProducing(
+  scopes: ServiceScope[],
+  spec: EffPortSpec,
+  broadOnly: boolean,
+  effectivePorts: readonly EffPortSpec[],
+): AuthoredPortItem[] {
+  const bySpec = memoized(scopes, `spec-items:${broadOnly}`,
+    () => new Map<EffPortSpec, { ports: readonly EffPortSpec[]; items: AuthoredPortItem[] }>());
+  const known = bySpec.get(spec);
+  // The answer also depends on the effective ports it was matched against, so a
+  // publication reused by another model's ports is matched again.
+  if (known && known.ports === effectivePorts) return known.items;
+  const found: AuthoredPortItem[] = [];
+  const specText = effectiveHostText(spec);
+  for (const item of authoredPortItems(scopes)) {
+    if (!authoredPortMatches(item.author, spec, broadOnly, effectivePorts, specText)) continue;
+    found.push(item);
+    if (found.length > 1) break;
+  }
+  bySpec.set(spec, { ports: effectivePorts, items: found });
+  return found;
+}
+
+/** A subject's `host/protocol` split; the host may be a range or `dynamic`. */
+function splitPortSubject(key: string): { hostText: string; protocol: string } {
+  const slash = key.lastIndexOf('/');
+  return {
+    hostText: slash === -1 ? key : key.slice(0, slash),
+    protocol: slash === -1 ? 'tcp' : key.slice(slash + 1),
+  };
+}
+
+/** The authored target of one `volumes` sequence item. */
+function volumeItemTarget(file: AuthoredFileSource, declaredService: string, index: number): string | null {
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index]));
+  if (item) {
+    const text = authoredScalarOf(item);
+    if (text !== undefined) {
+      const parts = text.split(':');
+      if (parts.length === 1) return parts[0];
+      // A drive-letter source (C:\data:/data) keeps its colon.
+      const offset = /^[A-Za-z]$/.test(parts[0]) ? 1 : 0;
+      return parts[offset + 1] ?? null;
+    }
+  }
+  return authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index, 'target']))) ?? null;
+}
+
+/** The authored source of one `volumes` sequence item, or null when unnamed. */
+function volumeItemSource(file: AuthoredFileSource, declaredService: string, index: number): string | null {
+  const item = file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index]));
+  if (item) {
+    const text = authoredScalarOf(item);
+    if (text !== undefined) {
+      const parts = text.split(':');
+      if (parts.length === 1) return null;
+      const offset = /^[A-Za-z]$/.test(parts[0]) ? 1 : 0;
+      return parts[offset] ?? null;
+    }
+  }
+  return authoredScalarOf(file.nodes.get(authoredNodeKey(['services', declaredService, 'volumes', index, 'source']))) ?? null;
+}
+
+/**
+ * A location on the latest layer that declares a matching item or map entry.
+ * `field` is the path under the service (`ports`, or `environment.KEY`). The
+ * path names the service as the located file declares it, so an `extends` base
+ * shows its own key rather than the extending service's.
+ */
+function itemLocation(candidates: ItemCandidate[], field: string): AuthoredLocation | undefined {
+  if (candidates.length === 0) return undefined;
+  const winner = candidates.reduce((latest, candidate) => candidate.layerIndex > latest.layerIndex ? candidate : latest);
+  const range = displayRange(winner.node);
+  const basePath = `services.${winner.declaredService}.${field}`;
+  return {
+    file: winner.file,
+    path: winner.index !== undefined ? `${basePath}[${winner.index}]` : basePath,
+    line: range.line,
+    column: range.column,
+    endLine: range.endLine,
+    endColumn: range.endColumn,
+  };
+}
+
+/**
+ * Locate the single `ports` item responsible for a hit. The rule subject names
+ * the surviving publication, and the effective model supplies the interface and
+ * (for dynamic publications) the container target, so a loopback override can
+ * never stand in for the broad base declaration that caused the finding.
+ * `restrictSpecs` narrows the publications a multi-service conflict locator has
+ * already decided are the conflict's sources; every other caller derives them
+ * from the hit subject.
+ */
+function locatePort(
+  project: AuthoredProject,
+  hit: RuleHit,
+  model: EffectiveModel | null,
+  restrictSpecs?: EffPortSpec[],
+): AuthoredLocation | undefined {
+  if (!hit.service) return undefined;
+  if (exceedsLocatingBound(model)) return undefined;
+  // A declared file outside the boundary has unknown contents and could still
+  // contribute or supersede the publication. Refuse consistently with the
+  // generic field and label correlation, which refuse the whole project.
+  if (hasOutsideComposeLayer(project)) return undefined;
+  if (hasUnresolvedService(project, hit.service)) return undefined;
+  const broadOnly = hit.ruleId === 'port-exposed-all-interfaces' || hit.ruleId === 'sensitive-service-broad-exposure';
+  const subject = hit.subject?.kind === 'port' ? splitPortSubject(hit.subject.key) : undefined;
+  const effective = model?.services.find(entry => entry.name === hit.service);
+  if (!effective && !subject) return undefined;
+  // A per-port rule enumerates single ports under the shared bound; only the
+  // publications it counted at this port can be the finding's source. Matching
+  // the authored item to those effective publications, rather than to the bare
+  // subject text, also keeps an unrelated range declaration from competing.
+  const bounded = restrictSpecs ?? (PER_PORT_RULES.has(hit.ruleId) && subject !== undefined && model && effective
+    ? portClaimants(model, subject.hostText, subject.protocol).find(claim => claim.service === effective.name)?.specs ?? []
+    : undefined);
+  const specs = bounded ?? (effective?.ports.filter(spec =>
+    (!broadOnly || normalizedInterface(spec.hostIp) === ALL_INTERFACES)
+    && (subject === undefined || subjectMatchesSpec(spec, subject.hostText, subject.protocol))) ?? []);
+  // A subjectless hit (sensitive-service-broad-exposure) covers the whole
+  // service; it is locatable only when exactly one surviving publication matches.
+  if (subject === undefined && specs.length !== 1) return undefined;
+  // One subject can cover several surviving publications (a broad and a
+  // loopback entry on one host port). If their interface/target identity
+  // differs, the hit does not say which one it came from: refuse.
+  const specIdentities = new Set(specs.map(spec =>
+    `${normalizedInterface(spec.hostIp)}|${spec.dynamic ? 'dynamic' : 'fixed'}|${spec.targetStartPort ?? ''}-${spec.targetEndPort ?? ''}`));
+  if (subject !== undefined && specIdentities.size > 1) return undefined;
+
+  const scopes = serviceScopes(project, hit.service);
+  if (fieldHasTag(scopes, 'ports')) return undefined;
+  const effectivePorts = effective?.ports ?? [];
+  // `ports` appends across Compose layers, so every matching authored item is a
+  // live declaration of the publication the hit names. Selecting the latest
+  // layer would silently discard an earlier identical declaration; the field is
+  // locatable only when exactly one authored item can be its source, so the
+  // search stops at the second.
+  const found = new Set<AuthoredPortItem>();
+  if (bounded !== undefined) {
+    for (const spec of specs) {
+      for (const item of itemsProducing(scopes, spec, broadOnly, effectivePorts)) found.add(item);
+      if (found.size > 1) return undefined;
+    }
+  } else {
+    for (const item of authoredPortItems(scopes)) {
+      const matched = subject !== undefined
+        ? authoredHostMatchesSubject(item.author, subject.hostText)
+          && sameProtocol(item.author.protocol, subject.protocol)
+          && (!broadOnly || normalizedInterface(item.author.hostIp) === ALL_INTERFACES)
+        : specs.some(spec => authoredPortMatches(item.author, spec, broadOnly, effectivePorts));
+      if (!matched) continue;
+      found.add(item);
+      if (found.size > 1) return undefined;
+    }
+  }
+  if (found.size !== 1) return undefined;
+  const [{ scope, index, node }] = [...found];
+  const matches: ItemCandidate[] = [{
+    file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex,
+    writability: scope.file.writability, index,
+  }];
+  // A later scalar replaces an earlier one, but `ports` appends: an unparsed
+  // layer anywhere in the project could contribute another copy of this
+  // publication, so no single layer is decisive.
+  if (hasUnparsedComposeLayer(project)) return undefined;
+  // An interpolated or aliased item in any layer could resolve to the same
+  // publication; the literal item is not provably its only source.
+  if (hasUnresolvedSequenceItem(scopes, 'ports', 0, true)) return undefined;
+  return itemLocation(matches, 'ports');
+}
+
+/**
+ * Every service's publications that the per-port rule counted at one host port,
+ * in effective-model order. The claims of a whole model are indexed once per
+ * run, because a stack with many conflicting ports asks this once per finding.
+ */
+function portClaimants(
+  model: EffectiveModel,
+  hostText: string,
+  protocol: string,
+): { service: string; specs: EffPortSpec[] }[] {
+  const index = memoized(model, 'claims', () => {
+    const claims = new Map<string, { service: string; specs: EffPortSpec[] }[]>();
+    for (const svc of model.services) {
+      for (const spec of svc.ports) {
+        for (const port of enumeratedHostPorts(spec)) {
+          const key = `${port}/${spec.protocol}`;
+          const list = claims.get(key) ?? [];
+          const tail = list[list.length - 1];
+          if (tail && tail.service === svc.name) tail.specs.push(spec);
+          else list.push({ service: svc.name, specs: [spec] });
+          claims.set(key, list);
+        }
+      }
+    }
+    return claims;
+  });
+  // A subject that is not a plain port number claims nothing.
+  const port = Number(hostText);
+  if (hostText === '' || !Number.isInteger(port)) return [];
+  return index.get(`${port}/${protocol}`) ?? [];
+}
+
+/**
+ * Locate the first participant of a same-stack port conflict. Unlike
+ * `port-conflict-node`, this rule names a port but no service: the finding's
+ * message names every service the rule counted as claiming it at that port,
+ * including a service whose claim sits on an unrelated interface. The link
+ * considers only the claims that overlap another service's interface, because
+ * only those can cause the conflict, and only the ports the rule's bounded
+ * enumeration reaches count. It names the first participating service in
+ * effective-model order (the rendered configuration's order, not the file's),
+ * but only when every participant resolves to exactly one authored item. If any
+ * participant is ambiguous then the finding's source as a whole is ambiguous,
+ * and a link to one participant would imply the others had been decided.
+ */
+function locatePortConflictInternal(
+  project: AuthoredProject,
+  hit: RuleHit,
+  model: EffectiveModel | null,
+): AuthoredLocation | undefined {
+  if (hit.subject?.kind !== 'port' || !model || exceedsLocatingBound(model)) return undefined;
+  const subject = splitPortSubject(hit.subject.key);
+  const claimants = portClaimants(model, subject.hostText, subject.protocol);
+  // Which claimants publish on each interface, so asking whether a publication
+  // overlaps another service's interface is a lookup, not a scan of every claim.
+  const publishers = new Map<string, Set<number>>();
+  claimants.forEach((claim, position) => {
+    for (const spec of claim.specs) {
+      const key = normalizedInterface(spec.hostIp);
+      const set = publishers.get(key) ?? new Set<number>();
+      set.add(position);
+      publishers.set(key, set);
+    }
+  });
+  const otherThan = (set: Set<number> | undefined, position: number): boolean =>
+    set !== undefined && (set.size > 1 || !set.has(position));
+  const overlapsAnother = (spec: EffPortSpec, position: number): boolean => {
+    const key = normalizedInterface(spec.hostIp);
+    // An all-interfaces publication overlaps every other claimant's.
+    if (key === ALL_INTERFACES) return claimants.length > 1;
+    return otherThan(publishers.get(key), position) || otherThan(publishers.get(ALL_INTERFACES), position);
+  };
+  const participants = claimants
+    .map((claim, position) => ({
+      service: claim.service,
+      // Only this service's publications that overlap another service's
+      // interface can be sources of the conflict; its other claims at the same
+      // port are not part of what the finding reports. Interfaces overlap the
+      // way the rule's own test does: either one is all-interfaces, or equal.
+      specs: claim.specs.filter(spec => overlapsAnother(spec, position)),
+    }))
+    .filter(claim => claim.specs.length > 0);
+  // The rule only reports a conflict, so a model that names fewer than two
+  // conflicting services does not describe the source of the hit.
+  if (participants.length < 2) return undefined;
+  const locations = participants.map(participant =>
+    locatePort(project, { ...hit, service: participant.service }, model, participant.specs));
+  if (locations.some(location => location === undefined)) return undefined;
+  return locations[0];
+}
+
+/**
+ * Locate one participant of a duplicate `container_name` conflict. The same
+ * multi-participant shape as a same-stack port conflict: the hit names the
+ * duplicated name but no service, so it links to the first service in
+ * effective-model order and refuses when any participant's declaration is
+ * ambiguous.
+ */
+function locateContainerNameConflict(
+  project: AuthoredProject,
+  hit: RuleHit,
+  model: EffectiveModel | null,
+): AuthoredLocation | undefined {
+  if (hit.subject?.kind !== 'container-name' || !model) return undefined;
+  const name = hit.subject.key;
+  const participants = model.services.filter(svc => svc.containerName === name).map(svc => svc.name);
+  if (participants.length < 2) return undefined;
+  const locations = participants.map(service => locateEffective(project, service, 'container_name', model));
+  if (locations.some(location => location === undefined)) return undefined;
+  return locations[0];
+}
+
+interface AuthoredVolumeItem {
+  scope: ServiceScope;
+  index: number;
+  node: AuthoredNode;
+  source: string | null;
+}
+
+/** Every authored `volumes` item of one service, grouped by its target. */
+function authoredVolumeItems(scopes: ServiceScope[]): Map<string, AuthoredVolumeItem[]> {
+  return memoized(scopes, 'items:volumes', () => {
+    const byTarget = new Map<string, AuthoredVolumeItem[]>();
+    const count = scopedSequenceCount(scopes, 'volumes');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const target = volumeItemTarget(scope.file, scope.declaredService, index);
+        if (target === null) continue;
+        const node = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'volumes', index]));
+        if (!node) continue;
+        const list = byTarget.get(target) ?? [];
+        list.push({ scope, index, node, source: volumeItemSource(scope.file, scope.declaredService, index) });
+        byTarget.set(target, list);
+      }
+    }
+    return byTarget;
+  });
+}
+
+/** Locate the single `volumes` item a bind hit names, else the sequence key. */
+function locateVolume(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
+  if (!hit.service) return undefined;
+  if (hasOutsideComposeLayer(project)) return undefined;
+  if (hasUnresolvedService(project, hit.service)) return undefined;
+  if (hit.subject?.kind === 'bind') {
+    const target = hit.subject.key;
+    const matches: Array<ItemCandidate & { source: string | null }> = [];
+    const scopes = serviceScopes(project, hit.service);
+    if (fieldHasTag(scopes, 'volumes')) return undefined;
+    for (const item of authoredVolumeItems(scopes).get(target) ?? []) {
+      matches.push({
+        file: item.scope.file.file, declaredService: item.scope.declaredService, node: item.node,
+        layerIndex: item.scope.layerIndex, writability: item.scope.file.writability, index: item.index,
+        source: item.source,
+      });
+    }
+    if (matches.length > 0) {
+      const latest = Math.max(...matches.map(match => match.layerIndex));
+      if (hasLaterUnparsedLayer(project, latest)) return undefined;
+      const latestMatches = matches.filter(match => match.layerIndex === latest);
+      // Two declarations in the winning layer with the same target are not
+      // distinguishable from the hit; an unresolved item there could be the
+      // one that actually produced the effective bind.
+      if (latestMatches.length !== 1) return undefined;
+      // Compose replaces a mount by target, so a later declaration with a
+      // different source is the effective one. An earlier declaration with
+      // the SAME source is textually equivalent, though, and the effective
+      // model cannot say which one produced the mount: refuse.
+      const winner = latestMatches[0];
+      if (winner.source !== null && matches.some(match =>
+        match.layerIndex < latest && match.source === winner.source)) return undefined;
+      if (hasUnresolvedSequenceItem(scopes, 'volumes', latest, true)) return undefined;
+      return itemLocation(matches, 'volumes');
+    }
+    // The hit names a bind target no authored declaration matches: refuse to
+    // point at the whole volumes field as if it were that mount.
+    return undefined;
+  }
+  return toLocation(correlateField(project, hit.service, 'volumes'));
+}
+
+interface AuthoredEnvFileItem {
+  scope: ServiceScope;
+  index: number;
+  node: AuthoredNode;
+  text: string;
+}
+
+/** Every readable authored `env_file` entry of one service, in sequence order. */
+function authoredEnvFileItems(scopes: ServiceScope[]): AuthoredEnvFileItem[] {
+  return memoized(scopes, 'items:env_file', () => {
+    const items: AuthoredEnvFileItem[] = [];
+    const count = scopedSequenceCount(scopes, 'env_file');
+    for (let index = 0; index < count; index += 1) {
+      for (const scope of scopes) {
+        const shortNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index]));
+        const longNode = scope.file.nodes.get(authoredNodeKey(['services', scope.declaredService, 'env_file', index, 'path']));
+        const text = authoredScalarOf(shortNode) ?? authoredScalarOf(longNode);
+        const node = longNode ?? shortNode;
+        if (text !== undefined && node) items.push({ scope, index, node, text });
+      }
+    }
+    return items;
+  });
+}
+
+/** Locate the `env_file` entry naming the missing path, else the field. */
+function locateEnvFile(project: AuthoredProject, hit: RuleHit): AuthoredLocation | undefined {
+  if (!hit.service) return undefined;
+  if (hasOutsideComposeLayer(project)) return undefined;
+  if (hasUnresolvedService(project, hit.service)) return undefined;
+  const path = hit.sourcePath;
+  if (path !== undefined) {
+    const scopes = serviceScopes(project, hit.service);
+    if (fieldHasTag(scopes, 'env_file')) return undefined;
+    const matches: ItemCandidate[] = [];
+    for (const item of authoredEnvFileItems(scopes)) {
+      const { text } = item;
+      if (text === path || text.endsWith(`/${path}`) || path.endsWith(`/${text}`)) {
+        matches.push({
+          file: item.scope.file.file, declaredService: item.scope.declaredService, node: item.node,
+          layerIndex: item.scope.layerIndex, writability: item.scope.file.writability, index: item.index,
+        });
+      }
+    }
+    if (matches.length > 0) {
+      // `env_file` entries append across layers, so an identical path declared
+      // twice is two live declarations of the missing file. A single authored
+      // entry must match before the location may name a file.
+      if (matches.length !== 1) return undefined;
+      if (hasUnparsedComposeLayer(project)) return undefined;
+      if (hasUnresolvedSequenceItem(scopes, 'env_file', 0, true)) return undefined;
+      return itemLocation(matches, 'env_file');
+    }
+    // The hit names a missing env file no authored entry matches.
+    return undefined;
+  }
+  return toLocation(correlateField(project, hit.service, 'env_file'));
+}
+
+/** The list-form `environment` items one scope's file declares for its service. */
+function environmentListItems(scope: ServiceScope): AuthoredNode[] {
+  return memoized(scope, 'items:environment', () => {
+    const items: AuthoredNode[] = [];
+    for (const node of scope.file.nodes.values()) {
+      if (node.segments.length === 4
+        && node.segments[0] === 'services'
+        && node.segments[1] === scope.declaredService
+        && node.segments[2] === 'environment'
+        && typeof node.segments[3] === 'number') items.push(node);
+    }
+    return items;
+  });
+}
+
+/** Locate the authored `environment` entry for one key, map or list form. */
+function locateEnvironmentKey(project: AuthoredProject, service: string, key: string): AuthoredLocation | undefined {
+  if (hasOutsideComposeLayer(project)) return undefined;
+  if (hasUnresolvedService(project, service)) return undefined;
+  const candidates: ItemCandidate[] = [];
+  const unresolvedLayers: number[] = [];
+  const scopes = serviceScopes(project, service);
+  if (fieldHasTag(scopes, 'environment')) return undefined;
+  for (const scope of scopes) {
+    const pathSegments = ['services', scope.declaredService, 'environment'] as const;
+    const mapNode = scope.file.nodes.get(authoredNodeKey([...pathSegments, key]));
+    if (mapNode) {
+      // An alias is a reference, not the declaration that holds the value; the
+      // anchor cannot be attributed to this key from here.
+      if (mapNode.kind === 'alias' || mapNode.customTag !== undefined) {
+        unresolvedLayers.push(scope.layerIndex);
+      } else {
+        candidates.push({ file: scope.file.file, declaredService: scope.declaredService, node: mapNode, layerIndex: scope.layerIndex, writability: scope.file.writability });
+      }
+      continue;
+    }
+    for (const node of environmentListItems(scope)) {
+      const text = authoredScalarOf(node);
+      if (text === undefined) {
+        // A list item this reader cannot read could be this key in another
+        // spelling; it only matters if it is at or after the matched layer.
+        if (node.kind === 'alias') unresolvedLayers.push(scope.layerIndex);
+        continue;
+      }
+      if (!text.startsWith(`${key}=`)) continue;
+      candidates.push({ file: scope.file.file, declaredService: scope.declaredService, node, layerIndex: scope.layerIndex, writability: scope.file.writability });
+    }
+  }
+  if (candidates.length !== 1) return undefined;
+  if (hasLaterUnparsedLayer(project, candidates[0].layerIndex)) return undefined;
+  if (unresolvedLayers.some(layer => layer >= candidates[0].layerIndex)) return undefined;
+  return itemLocation(candidates, `environment.${key}`);
+}
+
+function topLevelKey(sourcePath: string | undefined): string | undefined {
+  if (!sourcePath) return undefined;
+  const match = /^networks\.([^,\s]+)/.exec(sourcePath) ?? /^volumes\.([^,\s]+)/.exec(sourcePath);
+  return match?.[1];
+}
+
+function locateEffective(project: AuthoredProject, service: string, field: string, model: EffectiveModel | null): AuthoredLocation | undefined {
+  const effective = model?.services.find(entry => entry.name === service);
+  let value: string | undefined;
+  switch (field) {
+    case 'image': value = effective?.image; break;
+    case 'privileged': value = effective?.privileged ? 'true' : undefined; break;
+    case 'network_mode': value = effective?.networkMode; break;
+    case 'user': value = effective?.user; break;
+    case 'restart': value = effective?.restart; break;
+    case 'container_name': value = effective?.containerName; break;
+    default: value = undefined;
+  }
+  return toLocation(correlateField(project, service, field, value));
+}
+
+/**
+ * Locate one finished Doctor hit. `null` or an absent origin means no location
+ * is shown; a consumer must treat that as "the source cannot be decided", never
+ * as "there is no authored source".
+ */
+export function locateFinding(
+  project: AuthoredProject | null,
+  hit: RuleHit,
+  model: EffectiveModel | null = null,
+): AuthoredLocation | undefined {
+  if (!project) return undefined;
+  // A cyclic project is rejected by Compose and has no defensible layer order.
+  if (hasProjectCycle(project)) return undefined;
+
+  switch (hit.ruleId) {
+    case 'render-failed':
+      // The origin is a file this reader could not parse. A location there is
+      // never actionable (the wording of the criterion names this case first).
+      return undefined;
+    case 'env-unset': {
+      const variable = hit.sourcePath;
+      if (!variable) return undefined;
+      return toLocation(correlateVariableReference(project, variable, hit.service));
+    }
+    case 'env-literal-dollar': {
+      // The hit's sourcePath is the affected environment KEY, not a variable
+      // reference. Locate that key's authored declaration.
+      if (!hit.service || !hit.sourcePath) return undefined;
+      return locateEnvironmentKey(project, hit.service, hit.sourcePath);
+    }
+    case 'env-file-missing':
+      return locateEnvFile(project, hit);
+    case 'port-exposed-all-interfaces':
+    case 'port-conflict-node':
+    case 'sensitive-service-broad-exposure':
+      return locatePort(project, hit, model);
+    case 'port-conflict-internal':
+      return locatePortConflictInternal(project, hit, model);
+    case 'container-name-internal-dup':
+      return locateContainerNameConflict(project, hit, model);
+    case 'bind-path-missing':
+    case 'bind-path-permission':
+    case 'docker-socket-mount':
+    case 'docker-socket-proxy-writable':
+    case 'anonymous-volume':
+      return locateVolume(project, hit);
+    case 'uid-gid-risk':
+      if (!hit.service) return undefined;
+      return locateEffective(project, hit.service, 'user', model);
+    case 'privileged':
+      if (!hit.service) return undefined;
+      return locateEffective(project, hit.service, 'privileged', model);
+    case 'network-mode-host':
+      if (!hit.service) return undefined;
+      return locateEffective(project, hit.service, 'network_mode', model);
+    case 'image-latest':
+    case 'image-not-digest-pinned':
+      if (!hit.service) return undefined;
+      return locateEffective(project, hit.service, 'image', model);
+    case 'no-restart-policy': {
+      if (!hit.service) return undefined;
+      // The rule fires for an absent restart and for an explicit `no`. Only the
+      // latter has an authored field; pointing at the service key would claim a
+      // declaration the operator never wrote.
+      const effective = model?.services.find(entry => entry.name === hit.service);
+      if (effective?.restart !== 'no') return undefined;
+      return locateEffective(project, hit.service, 'restart', model);
+    }
+    case 'no-healthcheck':
+      // The rule fires because no authored healthcheck exists.
+      return undefined;
+    case 'healthcheck-disabled':
+      if (!hit.service) return undefined;
+      return toLocation(correlateField(project, hit.service, 'healthcheck'));
+    case 'deploy-swarm-only':
+      if (!hit.service) return undefined;
+      return toLocation(correlateField(project, hit.service, 'deploy'));
+    case 'container-name-collision':
+      if (!hit.service) return undefined;
+      return locateEffective(project, hit.service, 'container_name', model);
+    case 'external-network-missing':
+    case 'new-network': {
+      const key = topLevelKey(hit.sourcePath);
+      if (!key) return undefined;
+      return toLocation(correlateTopLevel(project, 'networks', key));
+    }
+    case 'external-volume-missing':
+    case 'new-volume': {
+      const key = topLevelKey(hit.sourcePath);
+      if (!key) return undefined;
+      return toLocation(correlateTopLevel(project, 'volumes', key));
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** Top-level collections are not service fields; correlate them directly. */
+function correlateTopLevel(project: AuthoredProject, collection: string, key: string): CorrelationResult {
+  const path = `${collection}.${key}`;
+  const candidates = [];
+  for (const file of project.files) {
+    if (file.state !== 'parsed') continue;
+    // An extends base contributes services, never top-level resources, so it
+    // is not a declaration of this project's networks or volumes.
+    if (file.kind === 'compose-extends') continue;
+    const node = file.nodes.get(authoredNodeKey([collection, key]));
+    if (node) candidates.push({ file: file.file, node, layerIndex: file.layerIndex, writability: file.writability });
+  }
+  if (hasOutsideComposeLayer(project)) {
+    return {
+      path,
+      candidates: candidates.map(candidate => ({ file: candidate.file, range: displayRange(candidate.node), path, layerIndex: candidate.layerIndex })),
+      reason: 'ambiguous-unparsed-source',
+      ambiguity: { kind: 'outside-boundary', detail: 'A declared Compose layer is outside the managed boundary.' },
+    };
+  }
+  if (candidates.length === 1) {
+    if (candidates[0].node.customTag !== undefined) {
+      return {
+        path,
+        candidates: candidates.map(candidate => ({ file: candidate.file, range: displayRange(candidate.node), path, layerIndex: candidate.layerIndex })),
+        reason: 'compose-tag',
+        ambiguity: { kind: 'compose-tag', detail: 'The declaration is a Compose !reset or !override marker.' },
+      };
+    }
+    const node = candidates[0].node;
+    // Top-level declarations are mappings that merge across layers, so any
+    // unparsed layer can still contribute the key or one of its fields.
+    if (node.kind === 'alias'
+      || hasLaterUnparsedLayer(project, candidates[0].layerIndex)
+      || (node.kind !== 'scalar' && hasUnparsedComposeLayer(project))) {
+      return {
+        path,
+        candidates: candidates.map(candidate => ({ file: candidate.file, range: displayRange(candidate.node), path, layerIndex: candidate.layerIndex })),
+        reason: 'ambiguous-unparsed-source',
+        ambiguity: { kind: 'unparsed-source', detail: 'A compose layer could not be parsed.' },
+      };
+    }
+    const range = displayRange(node);
+    return {
+      path,
+      origin: { file: candidates[0].file, writability: candidates[0].writability, range, path, layerIndex: candidates[0].layerIndex },
+      candidates: candidates.map(candidate => ({
+        file: candidate.file,
+        range: displayRange(candidate.node),
+        path,
+        layerIndex: candidate.layerIndex,
+      })),
+      reason: 'unique',
+    };
+  }
+  if (candidates.length === 0) return { path, candidates: [], reason: 'no-authored-source' };
+  return {
+    path,
+    candidates: candidates.map(candidate => ({
+      file: candidate.file,
+      range: displayRange(candidate.node),
+      path,
+      layerIndex: candidate.layerIndex,
+    })),
+    reason: 'ambiguous-multiple-sources',
+  };
+}
+
+export { correlateLabel };

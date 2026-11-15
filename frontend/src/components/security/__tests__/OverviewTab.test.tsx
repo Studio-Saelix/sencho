@@ -356,7 +356,7 @@ describe('OverviewTab remediation affordances', () => {
 
     /** Desktop control names in the review queue, in visual order. The phone menu stays in the DOM under jsdom. */
     function queueControlNames(): string[] {
-      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).closest<HTMLElement>('.shadow-card-bevel');
       if (card === null) throw new Error('review queue card missing');
       return within(card)
         .getAllByRole('button')
@@ -391,7 +391,7 @@ describe('OverviewTab remediation affordances', () => {
         'More ways to dismiss',
       ]);
       expect(screen.queryByRole('button', { name: /more actions/i })).not.toBeInTheDocument();
-      const card = screen.getByRole('heading', { name: /why monitoring/i }).parentElement;
+      const card = screen.getByRole('heading', { name: /why monitoring/i }).closest<HTMLElement>('.shadow-card-bevel');
       if (card === null) throw new Error('review queue card missing');
       const slot = within(card).getByTestId('finding-row-more-slot');
       expect(slot.previousElementSibling).toBe(
@@ -429,10 +429,27 @@ describe('OverviewTab remediation affordances', () => {
       }];
       renderOverview([dismissable()], { canManageNode: true });
       expect(screen.getByRole('heading', { name: /why monitoring/i })).toBeInTheDocument();
-      expect(screen.getByText(/1 dismissed/i)).toBeInTheDocument();
-      expect(screen.getByText(/dismissed by alice/i)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /1 dismissed/i }));
+      expect(await screen.findByText(/dismissed by alice/i)).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: /restore/i }));
       expect(dismissalState.restore).toHaveBeenCalledWith(7);
+    });
+
+    it('returns focus to the count after Escape closes the dismissed sheet', async () => {
+      const user = userEvent.setup();
+      dismissalState.dismissals = [{
+        id: 7, nodeId: 1, surface: 'security', findingKey: 'security:1:needs_review:all', fingerprint: 'fp-1',
+        severity: 'review', count: 2, mode: 'until_change', expiresAt: null, createdBy: 'alice', createdAt: Date.now(),
+      }];
+      renderOverview([dismissable()], { canManageNode: true });
+      const opener = screen.getByRole('button', { name: /1 dismissed/i });
+      opener.focus();
+      await user.keyboard('{Enter}');
+      await screen.findByRole('dialog');
+
+      await user.keyboard('{Escape}');
+
+      await waitFor(() => expect(opener).toHaveFocus());
     });
   });
 });

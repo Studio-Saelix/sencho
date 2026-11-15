@@ -10,7 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { FileEntry } from '@/lib/stackFilesApi';
+import type { FileEntry, FileRoot } from '@/lib/stackFilesApi';
+import type { PendingAuthoredReveal } from '@/lib/authoredLocation';
 import { downloadBlob } from '@/lib/download';
 
 // Holder for the renameStackPath mock and the captured onMove callback, so tests
@@ -19,6 +20,7 @@ const h = vi.hoisted(() => ({
   renameMock: vi.fn<(stack: string, from: string, to: string) => Promise<void>>(),
   copyMock: vi.fn<(stack: string, from: string, to: string, rootId?: string) => Promise<void>>(),
   listMock: vi.fn<(stack: string, dir: string, rootId?: string) => Promise<FileEntry[]>>(),
+  listRootsMock: vi.fn<() => Promise<import('@/lib/stackFilesApi').FileRoot[]>>(async () => []),
   bulkDeleteMock: vi.fn<(stack: string, paths: string[], rootId?: string) => Promise<{ deleted: string[]; failed: { path: string; error: string }[] }>>(),
   bulkMoveMock: vi.fn<(stack: string, from: string[], toDir: string, rootId?: string) => Promise<{ moved: string[]; failed: { path: string; error: string }[] }>>(),
   bulkDownloadMock: vi.fn<(stack: string, paths: string[], rootId?: string) => Promise<Response>>(),
@@ -29,12 +31,14 @@ const h = vi.hoisted(() => ({
   newFileProps: null as null | { open: boolean; currentDir: string; rootId?: string },
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
+  fileViewerReveal: null as unknown,
+  fileViewerReloadKey: 0,
 }));
 
 vi.mock('@/lib/stackFilesApi', () => ({
   STACK_SOURCE_ROOT_ID: 'stack-source',
   listStackDirectory: h.listMock,
-  listFileRoots: vi.fn().mockResolvedValue([]),
+  listFileRoots: h.listRootsMock,
   downloadStackFile: vi.fn(),
   readStackFile: vi.fn(),
   writeStackFile: vi.fn(),
@@ -95,7 +99,8 @@ vi.mock('../FilePermissionsDialog', () => ({ FilePermissionsDialog: () => null }
 // FileTree mock: selection buttons (two siblings + one nested file) plus capture
 // of the onMove callback so move-handler behaviour can be driven directly.
 vi.mock('../FileTree', () => ({
-  FileTree: ({ onSelectFile, onMove, onContextMenuDuplicate, onSelectionChange }: {
+  FileTree: ({ sourceKey, onSelectFile, onMove, onContextMenuDuplicate, onSelectionChange }: {
+    sourceKey?: string;
     onSelectFile: (rel: string, entry: FileEntry) => void;
     onMove?: (fromRel: string, entryName: string, destDir: string) => void;
     onContextMenuDuplicate?: (relPath: string, entry: FileEntry) => void;
@@ -105,6 +110,7 @@ vi.mock('../FileTree', () => ({
     h.onSelectionChange = onSelectionChange ?? null;
     return (
       <div>
+        <div data-testid="tree-root">{sourceKey ?? ''}</div>
         <button onClick={() => onSelectionChange?.(new Set(['a.txt', 'b.txt']))}>bulk-select-two</button>
         <button onClick={() => onSelectionChange?.(new Set(['compose.yaml', 'a.txt']))}>bulk-select-protected</button>
         <button onClick={() => onSelectFile('a.txt', { name: 'a.txt', type: 'file', size: 1, mtime: 0, isProtected: false })}>
@@ -124,18 +130,25 @@ vi.mock('../FileTree', () => ({
   },
 }));
 
-// FileViewer mock exposes a button that flips its dirty signal.
+// FileViewer mock exposes a button that flips its dirty signal and captures
+// the reveal request so navigation tests can assert what the viewer receives.
 vi.mock('../FileViewer', () => ({
-  FileViewer: ({ selectedPath, onDirtyChange }: {
+  FileViewer: ({ selectedPath, onDirtyChange, reveal, reloadKey }: {
     selectedPath: string | null;
     onDirtyChange?: (dirty: boolean) => void;
-  }) => (
-    <div>
-      <div data-testid="viewer-selected">{selectedPath ?? '(none)'}</div>
-      <button onClick={() => onDirtyChange?.(true)}>mark-dirty</button>
-      <button onClick={() => onDirtyChange?.(false)}>mark-clean</button>
-    </div>
-  ),
+    reveal?: unknown;
+    reloadKey?: number;
+  }) => {
+    h.fileViewerReveal = reveal;
+    h.fileViewerReloadKey = reloadKey ?? 0;
+    return (
+      <div>
+        <div data-testid="viewer-selected">{selectedPath ?? '(none)'}</div>
+        <button onClick={() => onDirtyChange?.(true)}>mark-dirty</button>
+        <button onClick={() => onDirtyChange?.(false)}>mark-clean</button>
+      </div>
+    );
+  },
 }));
 
 import { StackFileExplorer } from '../StackFileExplorer';
@@ -428,6 +441,116 @@ describe('StackFileExplorer bulk selection', () => {
     expect(screen.getByText('2 selected')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Clear selection' }));
     expect(screen.queryByText('2 selected')).not.toBeInTheDocument();
+  });
+});
+
+describe('StackFileExplorer source navigation and late root discovery', () => {
+  const volumeRoot: FileRoot = {
+    id: 'volume-a',
+    kind: 'volume',
+    label: 'volume-a',
+    hostPathOrName: 'volume-a',
+    mounts: [],
+    readonly: false,
+    accessible: true,
+    browsable: true,
+    writable: true,
+    chmodable: false,
+    dangerous: false,
+    managedSourceOverlap: false,
+    warning: null,
+    backend: 'fs',
+  };
+
+  const reveal: PendingAuthoredReveal = {
+    target: { surface: 'files', file: 'app.labels' },
+    location: { file: 'app.labels', line: 2, column: 1, endLine: 2, endColumn: 8 },
+  };
+
+  it('keeps a completed source reveal when the root list resolves afterwards', async () => {
+    let resolveRoots: ((roots: FileRoot[]) => void) | undefined;
+    h.listRootsMock.mockImplementationOnce(() => new Promise<FileRoot[]>((resolve) => { resolveRoots = resolve; }));
+    const { rerender } = render(
+      <StackFileExplorer
+        stackName="my-stack"
+        canEdit
+        isDarkMode={false}
+        reveal={reveal}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('viewer-selected').textContent).toBe('app.labels'));
+    expect(screen.getByTestId('tree-root').textContent).toBe('my-stack:stack-source');
+
+    // The real parent clears the one-shot request once it is applied; reproduce
+    // that before the late roots arrive so the old reveal cannot self-heal.
+    rerender(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={null} />);
+
+    resolveRoots?.([volumeRoot]);
+    await waitFor(() => expect(h.listRootsMock).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId('tree-root').textContent).toBe('my-stack:stack-source');
+    expect(screen.getByTestId('viewer-selected').textContent).toBe('app.labels');
+  });
+
+  it('keeps the stack source when a file is selected before roots resolve', async () => {
+    let resolveRoots: ((roots: FileRoot[]) => void) | undefined;
+    h.listRootsMock.mockImplementationOnce(() => new Promise<FileRoot[]>((resolve) => { resolveRoots = resolve; }));
+    render(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} />);
+
+    fireEvent.click(screen.getByText('select-a'));
+    expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt');
+    expect(screen.getByTestId('tree-root').textContent).toBe('my-stack:stack-source');
+
+    resolveRoots?.([volumeRoot]);
+    await waitFor(() => expect(h.listRootsMock).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId('tree-root').textContent).toBe('my-stack:stack-source');
+    expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt');
+  });
+
+  it('rereads an already-selected path before applying a fresh range', async () => {
+    const samePath: PendingAuthoredReveal = {
+      target: { surface: 'files', file: 'a.txt' },
+      location: { file: 'a.txt', line: 3, column: 2, endLine: 3, endColumn: 9 },
+    };
+    const { rerender } = render(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={null} />);
+    fireEvent.click(screen.getByText('select-a'));
+    await waitFor(() => expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt'));
+    const before = h.fileViewerReloadKey;
+
+    rerender(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={samePath} />);
+
+    await waitFor(() => expect(h.fileViewerReveal).toEqual(samePath.location));
+    // The viewer gets a new reload epoch even though the selected path did not
+    // change, so a buffer loaded before the edit cannot receive the new range.
+    expect(h.fileViewerReloadKey).toBeGreaterThan(before);
+    expect(screen.queryByText(/discard unsaved changes/i)).not.toBeInTheDocument();
+  });
+
+  it('guards an already-selected path while the viewer is dirty', async () => {
+    const samePath: PendingAuthoredReveal = {
+      target: { surface: 'files', file: 'a.txt' },
+      location: { file: 'a.txt', line: 3, column: 2, endLine: 3, endColumn: 9 },
+    };
+    const { rerender } = render(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={null} />);
+    fireEvent.click(screen.getByText('select-a'));
+    fireEvent.click(screen.getByText('mark-dirty'));
+    const before = h.fileViewerReloadKey;
+
+    rerender(<StackFileExplorer stackName="my-stack" canEdit isDarkMode={false} reveal={samePath} />);
+
+    expect(await screen.findByText(/discard unsaved changes/i)).toBeInTheDocument();
+    expect(h.fileViewerReveal).toBeNull();
+    expect(h.fileViewerReloadKey).toBe(before);
+
+    await userEvent.click(screen.getByRole('button', { name: /discard and open/i }));
+    // Confirmation is the only path that replaces the dirty buffer.
+    expect(h.fileViewerReloadKey).toBeGreaterThan(before);
+
+    // Once the viewer reports the reread as clean, it receives the range.
+    fireEvent.click(screen.getByText('mark-clean'));
+    await waitFor(() => expect(h.fileViewerReveal).toEqual(samePath.location));
   });
 });
 

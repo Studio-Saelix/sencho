@@ -8,7 +8,7 @@ import { OverviewToolbar } from './OverviewToolbar';
 import type { FleetTopologyNode, LayoutMode, SavedPositions } from '@/lib/fleet-topology-layout';
 import type { Label as StackLabel } from '../label-types';
 import type { Node } from '@/context/NodeContext';
-import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry } from './types';
+import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry, NodeManagementActions } from './types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 
 interface OverviewTabProps {
@@ -44,9 +44,7 @@ interface OverviewTabProps {
     onTopologyModeChange: (mode: LayoutMode) => void;
     topologyPositions: SavedPositions;
     onTopologyPositionsChange: (positions: SavedPositions) => void;
-    onAddNode?: () => void;
-    onCheckUpdates?: () => void;
-    checkingUpdates?: boolean;
+    nodeManagement?: NodeManagementActions;
 }
 
 export function OverviewTab({
@@ -82,9 +80,7 @@ export function OverviewTab({
     onTopologyModeChange,
     topologyPositions,
     onTopologyPositionsChange,
-    onAddNode,
-    onCheckUpdates,
-    checkingUpdates,
+    nodeManagement,
 }: OverviewTabProps) {
     // A fast answer never flashes the skeleton; the pane just holds still.
     const { showBusy } = useVisualBusy(loading);
@@ -129,9 +125,7 @@ export function OverviewTab({
                         labelFilters={labelFilters}
                         onLabelFiltersChange={onLabelFiltersChange}
                         onClearFilters={onClearFilters}
-                        onAddNode={onAddNode}
-                        onCheckUpdates={onCheckUpdates}
-                        checkingUpdates={checkingUpdates}
+                        nodeManagement={nodeManagement}
                     />
 
                     {viewMode === 'topology' && processedNodes.length > 0 ? (

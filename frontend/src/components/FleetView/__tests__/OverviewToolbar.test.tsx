@@ -82,32 +82,30 @@ describe('OverviewToolbar', () => {
     expect(screen.queryByText('Tags')).not.toBeInTheDocument();
   });
 
-  it('renders the manage-nodes button and fires onAddNode when provided', () => {
-    const onAddNode = vi.fn();
-    render(<OverviewToolbar {...props({ onAddNode })} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Manage nodes' }));
-    expect(onAddNode).toHaveBeenCalledTimes(1);
-  });
+  const nodeManagement = {
+    canConnectExisting: true,
+    canBootstrapServer: true,
+    checkingUpdates: false,
+    onConnectExisting: vi.fn(),
+    onBootstrapServer: vi.fn(),
+    onCheckUpdates: vi.fn(),
+  };
 
-  it('omits the manage-nodes button when onAddNode is not provided', () => {
-    render(<OverviewToolbar {...props()} />);
+  it('renders one node-management control in place of the old toolbar buttons', () => {
+    render(<OverviewToolbar {...props({ nodeManagement })} />);
+    expect(screen.getByRole('button', { name: 'Node management' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Manage nodes' })).not.toBeInTheDocument();
-  });
-
-  it('renders the Check Updates button and fires onCheckUpdates when provided', () => {
-    const onCheckUpdates = vi.fn();
-    render(<OverviewToolbar {...props({ onCheckUpdates })} />);
-    fireEvent.click(screen.getByRole('button', { name: /Check for node updates/ }));
-    expect(onCheckUpdates).toHaveBeenCalledTimes(1);
-  });
-
-  it('omits the Check Updates button when onCheckUpdates is not provided', () => {
-    render(<OverviewToolbar {...props()} />);
     expect(screen.queryByRole('button', { name: /Check for node updates/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Node Update/ })).not.toBeInTheDocument();
   });
 
-  it('disables the Check Updates button while a check is in flight', () => {
-    render(<OverviewToolbar {...props({ onCheckUpdates: vi.fn(), checkingUpdates: true })} />);
-    expect(screen.getByRole('button', { name: /Check for node updates/ })).toBeDisabled();
+  it('keeps the node-management control in topology mode', () => {
+    render(<OverviewToolbar {...props({ viewMode: 'topology', nodeManagement })} />);
+    expect(screen.getByRole('button', { name: 'Node management' })).toBeInTheDocument();
+  });
+
+  it('omits the node-management control when the caller passes none', () => {
+    render(<OverviewToolbar {...props()} />);
+    expect(screen.queryByRole('button', { name: 'Node management' })).not.toBeInTheDocument();
   });
 });

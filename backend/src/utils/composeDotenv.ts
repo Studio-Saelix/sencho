@@ -39,6 +39,54 @@ export class ComposeEnvFileError extends Error {
 /** Compose's chain separator when COMPOSE_PATH_SEPARATOR is unset or empty. */
 export const DEFAULT_PATH_SEPARATOR = ':';
 
+/**
+ * Bounds for a caller that reads env files it does not trust. Interpolation
+ * copies the value of every variable a line names, so a few kilobytes of
+ * `${A}${A}` over a value that doubles on each line can build gigabytes.
+ */
+export interface ComposeEnvLimits {
+  /** Longest value, before interpolation, in UTF-16 code units. */
+  maxRawValue: number;
+  /** Code units one statement may copy out of the variables it names. */
+  maxStatementReads: number;
+  /** Deepest `${` nesting a value may have; deeper costs quadratic time. */
+  maxTemplateDepth: number;
+  /**
+   * Code units every statement may copy and store, counted across every reader
+   * that shares this object, so many small readers cannot add up to a large one.
+   */
+  shared: { remaining: number };
+}
+
+/**
+ * The deepest brace nesting in `text`. Every `{` counts as a level, not only
+ * `${`, because the expander's own walk (`firstBraceClose`) counts any `{` and
+ * skips the byte after it, so a `{` it does not close would otherwise keep a
+ * template open that a `${`-only count had already closed. It over-counts, which
+ * only errs toward refusing a deeper value.
+ */
+export function templateNestingDepth(text: string): number {
+  let depth = 0;
+  let deepest = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '{') {
+      depth += 1;
+      if (depth > deepest) deepest = depth;
+    } else if (text[i] === '}' && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return deepest;
+}
+
+/** Raised when env-file text passes a {@link ComposeEnvLimits} bound. */
+export class ComposeEnvLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ComposeEnvLimitError';
+  }
+}
+
 /** The byte-order mark Compose drops from the start of an env file's bytes. */
 const UTF8_BOM = '\uFEFF';
 
@@ -307,7 +355,18 @@ function parseEnvFileText(
   content: string,
   lookup: ComposeEnvLookup,
   assign: (name: string, value: string) => void,
+  limits?: Pick<ComposeEnvLimits, 'maxRawValue' | 'maxTemplateDepth'>,
 ): void {
+  const maxRawValue = limits?.maxRawValue ?? Infinity;
+  const maxDepth = limits?.maxTemplateDepth ?? Infinity;
+  const checkRaw = (raw: string, decoded = raw): void => {
+    // The depth is read from the text that is interpolated: an escape such as
+    // `\044` or `\173` decodes to `$` or `{`, so counting the raw text alone
+    // would miss a template the escapes spell.
+    if (raw.length > maxRawValue || (maxDepth !== Infinity && templateNestingDepth(decoded) > maxDepth)) {
+      throw new ComposeEnvLimitError('a value is longer or nested deeper than the limit');
+    }
+  };
   let cursor = 0;
   for (;;) {
     cursor = skipToStatement(content, cursor);
@@ -373,9 +432,9 @@ function parseEnvFileText(
     const quote = content[cursor];
     if (quote === DOUBLE_QUOTE || quote === SINGLE_QUOTE) {
       const { raw, next } = readQuotedValue(content, cursor, quote);
-      const value = quote === DOUBLE_QUOTE
-        ? expandComposeEnvTemplate(expandComposeEnvEscapes(raw), lookup)
-        : raw;
+      const decoded = quote === DOUBLE_QUOTE ? expandComposeEnvEscapes(raw) : raw;
+      checkRaw(raw, decoded);
+      const value = quote === DOUBLE_QUOTE ? expandComposeEnvTemplate(decoded, lookup) : raw;
       assign(key, value);
       cursor = next;
       continue;
@@ -390,6 +449,7 @@ function parseEnvFileText(
     const rawValue = trimRightUnicodeSpace(
       commentAt === -1 ? content.slice(cursor, end) : content.slice(cursor, cursor + commentAt),
     );
+    checkRaw(rawValue);
     assign(key, expandComposeEnvTemplate(rawValue, lookup));
     cursor = lineEnd === -1 ? content.length : lineEnd + 1;
   }
@@ -438,7 +498,10 @@ function readQuotedValue(text: string, openIndex: number, quote: string): { raw:
 export class ComposeEnvFiles {
   private readonly values = new Map<string, string>();
 
-  constructor(private readonly processEnv: ComposeEnvLookup) {}
+  constructor(
+    private readonly processEnv: ComposeEnvLookup,
+    private readonly limits?: ComposeEnvLimits,
+  ) {}
 
   lookup(name: string): string | undefined {
     const fromProcess = this.processEnv(name);
@@ -460,6 +523,21 @@ export class ComposeEnvFiles {
     return [...this.values.keys()];
   }
 
+  /**
+   * Add values the files read after this call can interpolate, as the
+   * environment a service declares for itself. A name the base lookup answers
+   * stays answered by it, the same as for a file's assignment.
+   */
+  seed(entries: Iterable<[string, string]>): void {
+    for (const [name, value] of entries) {
+      if (this.limits) {
+        this.limits.shared.remaining -= value.length;
+        if (this.limits.shared.remaining < 0) throw new ComposeEnvLimitError('the env files copy more text than the limit');
+      }
+      this.values.set(name, value);
+    }
+  }
+
   /** Read one file's text, adding its assignments. Throws on unreadable syntax.
    *  `raw` is Compose's `format: raw`: each line is `NAME=value` with the value
    *  kept literally, quotes, `$` and `#` included. */
@@ -473,9 +551,38 @@ export class ComposeEnvFiles {
     // starts with. Only the first character is considered, so a BOM elsewhere
     // stays the character Compose rejects in a name.
     const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
-    parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
-      this.values.set(name, value);
-    });
+    const limits = this.limits;
+    if (limits === undefined) {
+      parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
+        this.values.set(name, value);
+      });
+      return;
+    }
+    // A statement's reads are what its interpolation copies out of variables;
+    // the shared total also counts what it stores.
+    let statementReads = 0;
+    const spend = (amount: number): void => {
+      limits.shared.remaining -= amount;
+      if (limits.shared.remaining < 0) throw new ComposeEnvLimitError('the env files copy more text than the limit');
+    };
+    parseEnvFileText(
+      text,
+      (name) => {
+        const value = this.lookup(name);
+        if (value !== undefined) {
+          statementReads += value.length;
+          if (statementReads > limits.maxStatementReads) throw new ComposeEnvLimitError('a value expands past the limit');
+          spend(value.length);
+        }
+        return value;
+      },
+      (name, value) => {
+        statementReads = 0;
+        spend(value.length);
+        this.values.set(name, value);
+      },
+      limits,
+    );
   }
 
   private readRaw(content: string): void {

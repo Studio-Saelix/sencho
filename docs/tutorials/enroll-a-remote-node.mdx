@@ -22,7 +22,7 @@ This tutorial does not cover **Distributed API Proxy** mode (for a remote host y
 
 <Steps>
   <Step title="Open the Add node form">
-    On your control instance, click your avatar in the top-right and choose **Settings**. In the sidebar, under **Infrastructure**, pick **Nodes**, then click **Add node**.
+    On your control instance, click your avatar in the top-right and choose **Settings**. In the sidebar, under **Infrastructure**, pick **Nodes**, then click **Add node**. The same form opens from **Fleet → Node management → Connect existing node**; the fields and behavior below are identical.
 
     Set **Name** to something that identifies the host (`media-server` here). Leave **Type** as **Remote** and **Mode** as **Pilot Agent**, both defaults. In **Compose Directory**, enter the absolute path on the remote host where its Compose stacks already live, or where you want them to live, `/home/ubuntu/media-stacks` in this example. The agent mounts that same path inside its own container, so existing bind-mount paths in your Compose files keep working unchanged.
 

@@ -33,6 +33,7 @@ import {
   observeVolumeInUse,
   probeGenerationToken,
   resolveVolumeDependents,
+  type DependentResolution,
 } from './volumeSources';
 import {
   prepareOverwriteAdmission,
@@ -49,16 +50,35 @@ import {
   type ResolveAction,
 } from './overwriteRestore';
 import { RestoreFenceStore } from './restoreFence';
+import {
+  POINT_BROWSE_PAGE_SIZE,
+  POINT_READ_CONCURRENCY,
+  acquirePointReadSlot,
+  describePointReadEvidence,
+  pointReadEligibility,
+  skippedInDirectory,
+} from './pointContents';
+import { pointContentReadTargetFor, type PointContentReadTarget } from './authorization';
 import type {
   BackupEngine,
+  ContentChunkSink,
+  ContentDump,
+  ContentReadContext,
+  ContentReadRequest,
   EngineExecutionContext,
+  EngineResult,
   IntegrityMethod,
   OperationFinish,
+  PointContentReader,
+  PointEntry,
+  PointListing,
+  ReadablePoint,
   RecoveryErrorClass,
   RecoveryOperation,
   RecoveryProgress,
   RepositoryDescriptor,
   StorageDependent,
+  StorageIdentity,
 } from './types';
 
 /**
@@ -112,6 +132,40 @@ export interface AdmissionResult {
   replayed: boolean;
   /** The restore intent an overwrite created, so a client can resolve it later. */
   intentId?: string;
+}
+
+/** A regular file with a known size: the only entry a download serves. */
+export type PointFileEntry = PointEntry & { type: 'file'; size: number };
+
+/**
+ * A download proven to be a regular file, with the run that streams its bytes.
+ * The read slot is held until `release`, which the caller runs on every ending.
+ */
+export interface PointContentDownload {
+  entry: PointFileEntry;
+  stream: (sink: ContentChunkSink) => Promise<EngineResult<ContentDump>>;
+  release: () => void;
+}
+
+/** What a content read is given by its route: how to authorize, and when to stop. */
+export interface PointReadInput {
+  pointId: string;
+  /** A path `parsePointPath` already accepted. */
+  path: string;
+  authorize: (target: PointContentReadTarget) => boolean;
+  /** Whether this caller may be told that an id names no point. */
+  mayLearnIdIsUnknown: () => boolean;
+  signal: AbortSignal;
+}
+
+/** One opened read: the proven point and the engine that reads it, holding a slot. */
+interface OpenedPointRead {
+  point: ReadablePoint;
+  storage: StorageIdentity;
+  reader: PointContentReader;
+  request: ContentReadRequest;
+  ctx: ContentReadContext;
+  release: () => void;
 }
 
 /**
@@ -903,6 +957,148 @@ export class RecoveryEngineService {
     }
   }
 
+  // --- Point contents (read-only) -------------------------------------------
+
+  /**
+   * One page of one directory of a saved point, with the evidence that says
+   * what the point is.
+   *
+   * A read writes no operation row and takes no lock: a snapshot is immutable,
+   * so two reads cannot disagree, and a read never holds up a capture. It does
+   * take one of the node's read slots, counted per repository.
+   */
+  async browsePoint(input: PointReadInput & { offset: number }): Promise<PointListing> {
+    const opened = await this.openPointRead(input);
+    try {
+      const read = await opened.reader.readDirectory(
+        opened.request,
+        { offset: input.offset, pageSize: POINT_BROWSE_PAGE_SIZE },
+        opened.ctx,
+      );
+      if (!read.ok) throw new RecoveryError(read.errorClass);
+      if (!read.evidence.found) throw new RecoveryError('invalid_request', { reason: 'path_not_found' });
+      if (read.evidence.self.type !== 'directory') {
+        throw new RecoveryError('invalid_request', { reason: 'not_a_directory' });
+      }
+      const verifications = this.points.verificationsForPoints([opened.point.id]).get(opened.point.id) ?? [];
+      return {
+        point: describePointReadEvidence(opened.point, opened.storage, verifications),
+        path: input.path,
+        entries: read.evidence.entries,
+        skipped: skippedInDirectory(opened.point.exclusions, input.path),
+        offset: input.offset,
+        nextOffset: read.evidence.nextOffset,
+        limits: { pageSize: POINT_BROWSE_PAGE_SIZE, concurrentReads: POINT_READ_CONCURRENCY },
+      };
+    } finally {
+      opened.release();
+    }
+  }
+
+  /**
+   * Prepare one file's download. A record-only read proves the path is a regular
+   * file with a size, so the caller can send `Content-Length` before a byte
+   * moves; `stream` then runs the dump. A symlink is never followed: its target
+   * is not in the point. A directory and a special file have no body.
+   */
+  async prepareDownload(input: PointReadInput): Promise<PointContentDownload> {
+    const opened = await this.openPointRead(input);
+    try {
+      const read = await opened.reader.readDirectory(opened.request, { offset: 0, pageSize: 0 }, opened.ctx);
+      if (!read.ok) throw new RecoveryError(read.errorClass);
+      if (!read.evidence.found) throw new RecoveryError('invalid_request', { reason: 'path_not_found' });
+      const self = read.evidence.self;
+      if (self.type !== 'file' || self.size === null) {
+        throw new RecoveryError('invalid_request', { reason: 'unsupported_entry_type' });
+      }
+      const entry: PointFileEntry = { ...self, type: 'file', size: self.size };
+      return {
+        entry,
+        stream: (sink) => opened.reader.dumpFile(opened.request, entry.size, sink, opened.ctx),
+        release: opened.release,
+      };
+    } catch (err) {
+      opened.release();
+      throw err;
+    }
+  }
+
+  /**
+   * Authorize, check and open one content read. Access is decided first, on the
+   * dependents resolved for this request with a Compose render, so a caller who
+   * may not read the storage is refused even while the engine is starting, and
+   * an unknown id is answered as a denial unless the caller may know ids.
+   */
+  private async openPointRead(input: PointReadInput): Promise<OpenedPointRead> {
+    const point = this.points.get(input.pointId);
+    if (!point) {
+      if (!input.mayLearnIdIsUnknown()) throw new RecoveryError('permission_denied');
+      throw new RecoveryError('invalid_request', { detail: 'No recovery point on this node has that id.' });
+    }
+    const storage = StorageIdentityStore.getInstance().getById(point.storageId);
+    if (!input.authorize(await this.pointContentReadTarget(storage))) {
+      throw new RecoveryError('permission_denied');
+    }
+    this.requireReady();
+    if (!storage) throw new RecoveryError('identity_unknown');
+
+    const eligibility = pointReadEligibility(point, storage, {
+      id: point.repositoryId,
+      active: this.repositories.getActive()?.id === point.repositoryId,
+    });
+    if (!eligibility.readable) {
+      if (eligibility.reason === 'repository_replaced') {
+        throw new RecoveryError('repository_unavailable', {
+          reason: 'repository_replaced',
+          detail: 'This point is in a recovery repository that has been replaced, and it can no longer be read here.',
+        });
+      }
+      throw new RecoveryError('invalid_request', { reason: eligibility.reason });
+    }
+    const readable = eligibility.point;
+    const repository = this.repositories.get(point.repositoryId);
+    if (!repository) throw new RecoveryError('repository_unavailable');
+
+    const release = acquirePointReadSlot(repository.id);
+    if (!release) {
+      // The node is busy, not lacking the feature: the shared capability sentence
+      // would say volume protection is unavailable, so this refusal says to retry.
+      throw new RecoveryError('capability_unavailable', {
+        reason: 'read_capacity',
+        detail: 'This node is already reading as many saved points as it allows. Try again shortly.',
+      });
+    }
+    try {
+      const operationId = `read-${randomUUID()}`;
+      const engine = this.buildEngine(repository, operationId, input.signal) as BackupEngine & Partial<PointContentReader>;
+      if (typeof engine.readDirectory !== 'function' || typeof engine.dumpFile !== 'function') {
+        // The node protects volumes but its engine predates this read path. The
+        // shared sentence would say volume protection is unavailable, which is not
+        // what happened, so this refusal says what it means.
+        throw new RecoveryError('capability_unavailable', {
+          detail: 'The recovery engine on this node cannot read saved point contents.',
+        });
+      }
+      return {
+        point: readable,
+        storage,
+        reader: engine as BackupEngine & PointContentReader,
+        request: { snapshotId: readable.snapshotId, repositoryId: repository.id, path: input.path },
+        ctx: { operationId, signal: input.signal },
+        release,
+      };
+    } catch (err) {
+      release();
+      throw err;
+    }
+  }
+
+  /** What a content read is decided on, from the dependents resolved now with a render. */
+  private async pointContentReadTarget(storage: StorageIdentity | null): Promise<PointContentReadTarget> {
+    if (!storage) return { kind: 'detached' };
+    return pointContentReadTargetFor(storage.storageKey, await this.resolveStorageDependents(storage));
+  }
+
   /** The deps every overwrite entry point needs, so the three cannot drift. */
   private async overwriteDeps(input: {
     actor: string;
@@ -989,6 +1185,17 @@ export class RecoveryEngineService {
       this.requireNodeWideAccess(authorize);
       return;
     }
+    const resolution = await this.resolveStorageDependents(storage);
+    // An unrenderable model makes the full dependent set unknown; the check then
+    // runs without a stack, which the caller does for a null storage key.
+    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
+    if (!authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
+      throw new RecoveryError('permission_denied');
+    }
+  }
+
+  /** Every stack that depends on a stored volume, resolved now with a Compose render. */
+  private async resolveStorageDependents(storage: { locator: string }): Promise<DependentResolution> {
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
     const knownStackNames = await knownStacksFor(this.nodeId);
     // The volume may be gone by now (that is when a point is needed), so the
@@ -998,7 +1205,7 @@ export class RecoveryEngineService {
       ownerNodeKey,
       locator: storage.locator,
     });
-    const resolution = await resolveVolumeDependents({
+    return resolveVolumeDependents({
       nodeId: this.nodeId,
       ownerNodeKey,
       knownStackNames,
@@ -1007,12 +1214,6 @@ export class RecoveryEngineService {
       render: true,
       docker: this.docker(),
     });
-    // An unrenderable model makes the full dependent set unknown; the check then
-    // runs without a stack, which the caller does for a null storage key.
-    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
-    if (!authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
-      throw new RecoveryError('permission_denied');
-    }
   }
 
   private requireNodeWideAccess(

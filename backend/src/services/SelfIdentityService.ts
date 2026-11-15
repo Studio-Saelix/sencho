@@ -5,6 +5,7 @@ import { defaultInspectImage } from './selfDevBuildDetect';
 import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigest } from './registry-api';
 import { getSenchoVersion } from './CapabilityRegistry';
 import { withTimeout } from '../utils/withTimeout';
+import { errorMessageForLog } from '../utils/safeLog';
 
 /**
  * Identifies the Docker resources that belong to the running Sencho container
@@ -104,7 +105,7 @@ class SelfIdentityService {
       // An identity that failed to settle must read as "could not tell", never
       // as the "not in a container" default the guard would then trust.
       this.state = 'unresolved';
-      this.unresolvedReason = `Self identification failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.unresolvedReason = `Self identification failed: ${errorMessageForLog(err)}`;
       console.warn('[SelfIdentity] initialization failed:', this.unresolvedReason);
     }).finally(() => {
       this.initialized = this.state !== 'unresolved';
@@ -211,7 +212,9 @@ class SelfIdentityService {
       } catch (err) {
         const e = err as { statusCode?: number; message?: string };
         if (e?.statusCode === 404) return null;
-        const detail = e?.message || String(err);
+        // Docker errors can echo the endpoint URL, and that URL can carry a
+        // credential: redact before it reaches a log or the stored reason.
+        const detail = errorMessageForLog(err);
         failure = `${label} inspect failed: ${detail}`;
         console.warn(`[SelfIdentity] ${label} inspect failed:`, detail);
         return null;
@@ -228,7 +231,7 @@ class SelfIdentityService {
     try {
       cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
     } catch (err) {
-      const detail = (err as Error)?.message || String(err);
+      const detail = errorMessageForLog(err);
       failure = `cgroup read failed: ${detail}`;
       console.warn('[SelfIdentity] cgroup read failed:', detail);
     }
@@ -244,7 +247,7 @@ class SelfIdentityService {
     try {
       mountId = await SelfIdentityService.readContainerIdFromMountinfo();
     } catch (err) {
-      const detail = (err as Error)?.message || String(err);
+      const detail = errorMessageForLog(err);
       failure = `mountinfo read failed: ${detail}`;
       console.warn('[SelfIdentity] mountinfo read failed:', detail);
     }
@@ -306,8 +309,7 @@ class SelfIdentityService {
       }
       this.revision = revision;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn('[SelfIdentity] build revision enrichment failed:', message);
+      console.warn('[SelfIdentity] build revision enrichment failed:', errorMessageForLog(err));
     }
   }
 

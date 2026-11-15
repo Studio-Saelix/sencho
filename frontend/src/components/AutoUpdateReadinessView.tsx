@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe, ChevronRight } from 'lucide-react';
+import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe, ChevronRight, SquarePen } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -37,7 +37,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
-import { toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
+import { openStackEditor, toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
 
@@ -355,6 +355,48 @@ export function AutoPill({
   );
 }
 
+/**
+ * A newer tag, including a blocked major bump, has no update Sencho can apply:
+ * the only resolution is the tag in the Compose file, so the row offers that
+ * destination as its verb in place of a disabled Apply. An uncertain check and
+ * a review-required stack keep the disabled Apply (the Risk badge says why, and
+ * so does the Apply tooltip for a review-required stack), and a session without
+ * edit authority keeps it too rather than get a verb that does nothing.
+ */
+function useComposeEditVerb(card: StackCard): boolean {
+  const { can } = useAuth();
+  const { preview, nodeId, stack } = card;
+  return !!preview
+    && isTagOnlyAdvisory(preview)
+    && !isActionableUpdatePreview(preview)
+    && !isPreviewUncertain(preview)
+    && !isReviewRequiredUpdatePreview(preview)
+    && can('stack:edit', 'stack', stack, nodeId);
+}
+
+function applyTitleFor(preview: UpdatePreview | null): string | undefined {
+  if (preview?.summary.blocked) return preview.summary.blocked_reason ?? undefined;
+  if (isVerificationOnlyPreview(preview)) return 'Digest verification failed';
+  if (isReviewRequiredUpdatePreview(preview)) return 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+  return undefined;
+}
+
+function OpenEditorButton({ stack, nodeId, title, className }: { stack: string; nodeId: number; title?: string; className?: string }) {
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => openStackEditor(nodeId, stack)}
+      title={title}
+      aria-label={`Open stack editor for ${stack}`}
+      className={cn('gap-1.5', className)}
+    >
+      <SquarePen className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+      Open stack editor
+    </Button>
+  );
+}
+
 function StackReadinessCard({
   card,
   canServiceUpdate = false,
@@ -378,7 +420,8 @@ function StackReadinessCard({
   // build-only), not preview.images.length (shared tags collapse that list).
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
-  const verificationOnly = isVerificationOnlyPreview(preview);
+  const autoPillShown = isPolicySkipped(unattendedPolicy) || !autoUpdateEnabled;
+  const composeEditVerb = useComposeEditVerb(card);
   const reviewRequired = isReviewRequiredUpdatePreview(preview);
   // Full-stack apply is held for review when another image in the same stack
   // failed digest verification: applying would pull/recreate that image as
@@ -441,10 +484,7 @@ function StackReadinessCard({
           const blockedReason = p.summary.blocked_reason;
           const verificationFailed = Boolean(p.summary.verification_failed);
           const verificationError = p.summary.verification_error;
-          let applyTitle: string | undefined;
-          if (blocked) applyTitle = blockedReason ?? undefined;
-          else if (verificationOnly) applyTitle = 'Digest verification failed';
-          else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+          const applyTitle = applyTitleFor(p);
 
           let headline: ReactNode;
           if (verificationFailed && !p.summary.has_update) {
@@ -495,7 +535,7 @@ function StackReadinessCard({
               </div>
 
               {blocked && blockedReason && (
-                <div className="rounded border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] text-destructive/90">
+                <div className="text-[11px] text-destructive/90">
                   {blockedReason}
                 </div>
               )}
@@ -520,35 +560,37 @@ function StackReadinessCard({
               )}
 
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
-                <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
-                  {isPolicySkipped(unattendedPolicy) ? (
-                    <>
-                      <CircleSlash className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span data-testid="readiness-schedule">Skipped by update policy</span>
-                    </>
-                  ) : nextRun ? (
-                    <>
-                      <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
-                      <span className="text-stat-subtitle/70">· {formatRelative(nextRun)}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Clock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                      <span>No schedule</span>
-                    </>
-                  )}
-                </div>
-                <Button
-                  size="sm"
-                  onClick={() => onApply(stack, nodeId)}
-                  disabled={applyDisabled}
-                  title={applyTitle}
-                  className="gap-1.5"
-                >
-                  <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                  {applying ? 'Applying...' : 'Apply now'}
-                </Button>
+                {/* The header pill already says Off or skipped; the footer states only the schedule, or its absence. */}
+                {!autoPillShown && (
+                  <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
+                    {nextRun ? (
+                      <>
+                        <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                        <span>Scheduled · <span className="text-stat-value">{formatClock(nextRun)}</span></span>
+                        <span className="text-stat-subtitle/70">· {formatRelative(nextRun)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Clock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                        <span>No schedule</span>
+                      </>
+                    )}
+                  </div>
+                )}
+                {composeEditVerb ? (
+                  <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} className="ml-auto" />
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => onApply(stack, nodeId)}
+                    disabled={applyDisabled}
+                    title={applyTitle}
+                    className="ml-auto gap-1.5"
+                  >
+                    <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                    {applying ? 'Applying...' : 'Apply now'}
+                  </Button>
+                )}
               </div>
             </>
           );
@@ -686,6 +728,7 @@ function ReadinessHero({
   canRefresh,
   unresolvedChecks = false,
   detectionDisabled = false,
+  unanswered,
 }: {
   total: number;
   ready: number;
@@ -695,14 +738,24 @@ function ReadinessHero({
   canRefresh: boolean;
   unresolvedChecks?: boolean;
   detectionDisabled?: boolean;
+  /**
+   * No load has produced a count yet. `checking` while the attempt is in flight,
+   * `unavailable` once it settled without an answer; either way there is nothing
+   * to count, so an all-clear would be false.
+   */
+  unanswered?: 'checking' | 'unavailable';
 }) {
   const headline = detectionDisabled
     ? 'Image update detection disabled'
-    : total === 0
-      ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
-      : total === 1
-        ? '1 update pending'
-        : `${total} updates pending`;
+    : unanswered === 'checking'
+      ? 'Checking for updates'
+      : unanswered === 'unavailable'
+        ? 'Could not check for updates'
+        : total === 0
+          ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
+          : total === 1
+            ? '1 update pending'
+            : `${total} updates pending`;
   const acrossNodes = nodeCount > 1
     ? ` across ${nodeCount} nodes`
     : nodeCount === 1
@@ -728,21 +781,9 @@ function ReadinessHero({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          {total > 0 && (
-            <div className="text-right">
-              <div className="font-mono tabular-nums text-2xl text-stat-value">
-                {ready}<span className="text-stat-subtitle/60"> / {total}</span>
-              </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                Ready
-              </div>
-            </div>
-          )}
-          {canRefresh && (
-            <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
-          )}
-        </div>
+        {canRefresh && (
+          <RecheckButton holdBusyWidth refreshing={refreshing} onClick={onRefresh} />
+        )}
       </div>
     </div>
   );
@@ -844,15 +885,12 @@ function ReadinessTableRow({
   const hasDetail = previewLoaded && !verificationNote && preview !== null;
   const blocked = preview?.summary.blocked ?? false;
   const reviewRequired = isReviewRequiredUpdatePreview(preview);
-  const verificationOnly = isVerificationOnlyPreview(preview);
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const applyDisabled = !isActionableUpdatePreview(preview) || applying || applyingService !== null;
-  let applyTitle: string | undefined;
-  if (blocked) applyTitle = preview?.summary.blocked_reason ?? undefined;
-  else if (verificationOnly) applyTitle = 'Digest verification failed';
-  else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+  const composeEditVerb = useComposeEditVerb(card);
+  const applyTitle = applyTitleFor(preview);
 
   let change: ReactNode;
   if (loading) {
@@ -955,7 +993,9 @@ function ReadinessTableRow({
           {schedule}
         </TableCell>
         <TableCell className="text-right">
-          {hasDetail && (
+          {hasDetail && (composeEditVerb ? (
+            <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} />
+          ) : (
             <Button
               size="sm"
               onClick={() => onApply(stack, nodeId)}
@@ -967,7 +1007,7 @@ function ReadinessTableRow({
               <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
               {applying ? 'Applying...' : 'Apply now'}
             </Button>
-          )}
+          ))}
         </TableCell>
       </TableRow>
       {hasDetail && expanded && preview && (
@@ -987,7 +1027,7 @@ function ReadinessTableRow({
               {preview.changelog ?? 'No changelog available from the registry yet.'}
             </div>
             {blocked && preview.summary.blocked_reason && (
-              <div className="rounded border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] text-destructive/90">
+              <div className="text-[11px] text-destructive/90">
                 {preview.summary.blocked_reason}
               </div>
             )}
@@ -1107,6 +1147,8 @@ export function MobileReadinessCard({
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
+  const composeEditVerb = useComposeEditVerb(card);
+  const applyTitle = applyTitleFor(preview);
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -1205,23 +1247,27 @@ export function MobileReadinessCard({
                 ))}
               </div>
             )}
-            <div className="flex items-center justify-between gap-[10px] pt-0.5">
+            <div className="flex flex-wrap items-center justify-between gap-[10px] pt-0.5">
               <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
                 {isPolicySkipped(unattendedPolicy)
                   ? 'Skipped by update policy'
                   : nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
-              <Button
-                size="sm"
-                variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
-                onClick={() => onApply(stack, nodeId)}
-                disabled={applyDisabled}
-                title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
-                className="gap-1.5"
-              >
-                <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-                {applying ? 'Applying...' : 'Apply now'}
-              </Button>
+              {composeEditVerb ? (
+                <OpenEditorButton stack={stack} nodeId={nodeId} title={applyTitle} className="ml-auto" />
+              ) : (
+                <Button
+                  size="sm"
+                  variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
+                  onClick={() => onApply(stack, nodeId)}
+                  disabled={applyDisabled}
+                  title={applyTitle}
+                  className="ml-auto gap-1.5"
+                >
+                  <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                  {applying ? 'Applying...' : 'Apply now'}
+                </Button>
+              )}
             </div>
           </>
         );
@@ -1271,7 +1317,7 @@ function MobileNodeSection({
 function CheckFailuresNotice({ failures }: { failures: { stack: string; reason: string | null }[] }) {
   if (failures.length === 0) return null;
   return (
-    <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+    <div className="rounded-lg border border-card-border p-3">
       <div className="flex items-center gap-2 font-mono text-[11px] text-warning">
         <AlertTriangle className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
         {failures.length} stack{failures.length !== 1 ? 's' : ''} could not be checked
@@ -1292,6 +1338,49 @@ interface AutoUpdateReadinessProps {
   headerActions?: ReactNode;
 }
 
+/**
+ * The board's empty body once the first load has settled. With no count to show it
+ * names what it knows: detection is off, the status could not be loaded, some
+ * checks are unresolved, or everything is current.
+ */
+function ReadinessEmptyState({
+  detectionDisabled,
+  unavailable,
+  unresolvedChecks,
+  centered = false,
+}: {
+  detectionDisabled: boolean;
+  unavailable: boolean;
+  unresolvedChecks: boolean;
+  centered?: boolean;
+}) {
+  return (
+    <div className={cn('flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16', centered && 'text-center')}>
+      <Shield
+        className={`h-8 w-8 ${unavailable || unresolvedChecks ? 'text-warning/70' : 'text-success/70'}`}
+        strokeWidth={1.5}
+        aria-hidden="true"
+      />
+      <div className="font-display italic text-xl text-stat-value">
+        {detectionDisabled
+          ? 'Detection disabled'
+          : unavailable
+            ? 'Update readiness unavailable'
+            : unresolvedChecks ? 'No verified updates pending' : 'All stacks on current builds'}
+      </div>
+      <div className="font-mono text-[11px] text-stat-subtitle">
+        {detectionDisabled
+          ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+          : unavailable
+            ? 'The fleet update status could not be loaded.'
+            : unresolvedChecks
+              ? 'Review the unresolved checks above, then recheck.'
+              : 'Sencho rechecks registries on the configured interval.'}
+      </div>
+    </div>
+  );
+}
+
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
   const { runWithLog } = useDeployFeedback();
@@ -1305,6 +1394,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   // True once the latest load has settled (data or error). The skeleton belongs to
   // the first load only: a later reload, even over an empty list, keeps what is shown.
   const [hasLoaded, setHasLoaded] = useState(false);
+  // True once a load has produced data. A failed first load leaves it false, so the
+  // view says the status is unavailable instead of reporting a count it does not have.
+  const [hasAnswered, setHasAnswered] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
   // Local-node stacks whose latest check could not determine status. The fleet
@@ -1464,6 +1556,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       if (token !== loadTokenRef.current) return;
       setGroups(initialGroups);
+      // The fleet answer is in and the count is known; the per-stack previews
+      // only refine how each card reads, so the headline no longer has to wait
+      // for them (and must not call the load unavailable while they are pending).
+      setHasAnswered(true);
       // Resolve service-scoped-update capability for every node in this fleet
       // view (not just the active one) so per-service Apply can gate on each
       // card's own node; skips nodes whose meta is already cached.
@@ -1625,6 +1721,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   // It ends when the first load settles or its rows arrive (their previews may still be fetching), so later reloads over an empty list keep the empty state.
   const firstLoad = loading && !hasLoaded && groups.length === 0;
   const { showBusy: showSkeleton } = useVisualBusy(firstLoad);
+  // Nothing has been counted yet: the first attempt is in flight, or it settled
+  // without an answer (a failed load), which is an unknown state, not an empty one.
+  // A reload after that failure keeps the unavailable verdict until one answers.
+  const unanswered: 'checking' | 'unavailable' | undefined = hasAnswered
+    ? undefined
+    : firstLoad ? 'checking' : 'unavailable';
 
   // Nodes that advertise service-scoped updates, resolved per node (not just
   // the active one) since this view spans the whole fleet.
@@ -1819,22 +1921,32 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   if (isMobile) {
     return (
       <div className="flex h-full min-h-0 flex-col">
+        {/* Mobile has no idle tone, so the unknown state stays off success green:
+            brand, pulsed while checking; warning once the attempt has failed. */}
         <Masthead
           kicker="fleet · updates"
           state={cadence?.enabled === false
             ? 'Disabled'
-            : total === 0
-              ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
-              : `${total} pending`}
-          stateTone={cadence?.enabled === false
+            : unanswered === 'checking'
+              ? 'Checking'
+              : unanswered === 'unavailable'
+                ? 'Unavailable'
+                : total === 0
+                  ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+                  : `${total} pending`}
+          stateTone={cadence?.enabled === false || unanswered === 'checking'
             ? 'brand'
-            : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
-          live={total > 0 && cadence?.enabled !== false}
+            : unanswered === 'unavailable'
+              ? 'warning'
+              : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
+          live={cadence?.enabled !== false && (unanswered === 'checking' || total > 0)}
           meta={cadence?.enabled === false
             ? 'image update detection off'
-            : total > 0
-              ? `${ready} ready · ${total - ready} in review`
-              : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
+            : unanswered
+              ? undefined
+              : total > 0
+                ? `${ready} ready · ${total - ready} in review`
+                : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
@@ -1856,21 +1968,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               {showSkeleton && <ReadinessLoadingSkeleton layout="phone" />}
             </div>
           ) : groups.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
-              <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
-              <div className="font-display italic text-xl text-stat-value">
-                {cadence?.enabled === false
-                  ? 'Detection disabled'
-                  : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
-              </div>
-              <div className="font-mono text-[11px] text-stat-subtitle">
-                {cadence?.enabled === false
-                  ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
-                  : checkFailures.length > 0
-                    ? 'Review the unresolved checks above, then recheck.'
-                    : 'Sencho rechecks registries on the configured interval.'}
-              </div>
-            </div>
+            <ReadinessEmptyState
+              detectionDisabled={cadence?.enabled === false}
+              unavailable={unanswered === 'unavailable'}
+              unresolvedChecks={checkFailures.length > 0}
+              centered
+            />
           ) : (
             groups.map(group => (
               <MobileNodeSection
@@ -1898,6 +2001,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         canRefresh={canRefreshFleet}
         unresolvedChecks={checkFailures.length > 0}
         detectionDisabled={cadence?.enabled === false}
+        unanswered={unanswered}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1915,21 +2019,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           {showSkeleton && <ReadinessLoadingSkeleton layout={viewMode} />}
         </div>
       ) : groups.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
-          <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
-          <div className="font-display italic text-xl text-stat-value">
-            {cadence?.enabled === false
-              ? 'Detection disabled'
-              : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
-          </div>
-          <div className="font-mono text-[11px] text-stat-subtitle">
-            {cadence?.enabled === false
-              ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
-              : checkFailures.length > 0
-                ? 'Review the unresolved checks above, then recheck.'
-                : 'Sencho rechecks registries on the configured interval.'}
-          </div>
-        </div>
+        <ReadinessEmptyState
+          detectionDisabled={cadence?.enabled === false}
+          unavailable={unanswered === 'unavailable'}
+          unresolvedChecks={checkFailures.length > 0}
+        />
       ) : (
         <div className="flex flex-col gap-4">
           <div className="flex justify-end">

@@ -69,6 +69,12 @@ export interface SystemSheetProps {
    */
   noScroll?: boolean;
   /**
+   * Where keyboard focus goes when the sheet closes. Radix returns it to a
+   * registered trigger; a sheet opened from a control outside the dialog has no
+   * trigger, so the caller may take over the close-auto-focus here.
+   */
+  onCloseAutoFocus?: (event: Event) => void;
+  /**
    * Constrain the scrolling body to the sheet width and let any wider child scroll
    * horizontally instead of overflowing the sheet. Use when the body contains a
    * fixed-layout widget that forces its own min-width (e.g. the Monaco editor),
@@ -94,6 +100,7 @@ export function SystemSheet({
   footerContext,
   size = 'md',
   noScroll = false,
+  onCloseAutoFocus,
   constrainBodyWidth = false,
   children,
 }: SystemSheetProps) {
@@ -106,6 +113,7 @@ export function SystemSheet({
       <SheetContent
         side="right"
         showClose={false}
+        onCloseAutoFocus={onCloseAutoFocus}
         className={cn(
           'w-full p-0 flex flex-col gap-0 border-glass-border',
           SIZE_CLASS[size],

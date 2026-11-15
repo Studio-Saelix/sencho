@@ -175,6 +175,7 @@
                 "pages": [
                   "features/multi-node",
                   "features/pilot-agent",
+                  "features/node-bootstrap",
                   "features/sencho-mesh",
                   "features/fleet-view",
                   "features/fleet-dossier",

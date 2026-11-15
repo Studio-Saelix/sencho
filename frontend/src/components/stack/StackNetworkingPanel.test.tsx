@@ -14,6 +14,7 @@ vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: n
 
 import { apiFetch } from '@/lib/api';
 import StackNetworkingPanel from './StackNetworkingPanel';
+import { saveExposureIntent } from '@/hooks/useExposureIntent';
 
 function jsonRes(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => body, text: async () => '' } as unknown as Response;
@@ -126,6 +127,42 @@ describe('StackNetworkingPanel', () => {
     await screen.findByText('web_backend');
     fireEvent.click(screen.getAllByRole('button', { name: 'internal' })[0]);
     await waitFor(() => expect(putBodies()).toContainEqual({ service: '', intent: 'internal' }));
+  });
+
+  it('addresses a save to the node the stack is open on', async () => {
+    nodeState.id = 7;
+    mockApi(facts());
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    fireEvent.click(screen.getAllByRole('button', { name: 'internal' })[0]);
+    await waitFor(() => expect(putBodies()).toHaveLength(1));
+    const put = vi.mocked(apiFetch).mock.calls.find(c => c[1]?.method === 'PUT')!;
+    expect(put[1]).toMatchObject({ nodeId: 7 });
+  });
+
+  it('sends a save from another surface for the same stack only after its own is answered', async () => {
+    let answer!: (res: Response) => void;
+    mockApi(facts());
+    const route = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation((url: string, opts?: RequestInit) => {
+      if (url.endsWith('/exposure') && opts?.method === 'PUT' && JSON.parse(opts.body as string).service === '') {
+        return new Promise<Response>((resolve) => { answer = resolve; });
+      }
+      return route(url, opts);
+    });
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    fireEvent.click(screen.getAllByRole('button', { name: 'internal' })[0]);
+    await waitFor(() => expect(putBodies()).toHaveLength(1));
+
+    // A popover elsewhere saves the same stack on the same node while the panel's save is out.
+    const other = saveExposureIntent('web', 'api', 'lan', 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(putBodies()).toHaveLength(1);
+
+    answer(jsonRes({ intents: [{ service: '', intent: 'internal' }] }));
+    expect(await other).toEqual([{ service: 'api', intent: 'lan' }]);
+    expect(putBodies()).toEqual([{ service: '', intent: 'internal' }, { service: 'api', intent: 'lan' }]);
   });
 
   it('saves a per-service intent under the service name', async () => {

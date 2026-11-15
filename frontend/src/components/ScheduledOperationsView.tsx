@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -672,10 +673,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 ]}
                 onChange={(v) => setView(v)}
               />
-              <Button variant="outline" size="sm" onClick={fetchTasks} disabled={loading}>
-                <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
-                Refresh
-              </Button>
+              <IconBusyButton variant="outline" size="sm" icon={RefreshCw} label="Refresh" onClick={fetchTasks} pending={loading} />
               <Button size="sm" onClick={() => openCreate()}>
                 <Plus className="w-4 h-4 mr-2" strokeWidth={1.5} />
                 New Schedule

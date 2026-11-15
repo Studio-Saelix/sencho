@@ -472,6 +472,8 @@ export interface PreflightFindingRow {
     title: string;
     message: string;
     source_path: string | null;
+    /** JSON {file,line,column,endLine,endColumn} of the authored source, when known. */
+    source_location?: string | null;
     remediation: string | null;
     service: string | null;
     created_at: number;
@@ -556,6 +558,115 @@ export interface PilotEnrollment {
     token_hash: string;
     expires_at: number;
     used_at: number | null;
+}
+
+/** Lifecycle of one approved bootstrap execution. See NodeBootstrapOperationService. */
+export type NodeBootstrapOperationState =
+    | 'rechecking'
+    | 'running'
+    | 'enrolling'
+    | 'enrolled'
+    | 'blocked'
+    | 'failed'
+    | 'partial'
+    | 'cancelled'
+    | 'outcome_unknown'
+    | 'recovery_required';
+
+export interface NodeBootstrapOperation {
+    id: string;
+    target_key: string;
+    host: string;
+    port: number;
+    username: string;
+    address: string;
+    target_name: string;
+    host_key_fingerprint: string;
+    compose_dir: string;
+    agent_dir: string;
+    plan_json: string;
+    plan_digest: string;
+    approved_by: string;
+    approved_at: number;
+    attempt: number;
+    state: NodeBootstrapOperationState;
+    stage: string | null;
+    step: string | null;
+    node_id: number | null;
+    /** 1 once a step may have changed the host; never reset. */
+    changes_made: 0 | 1;
+    /** 1 once the start step began, so the Pilot container may exist. */
+    agent_started: 0 | 1;
+    /** 1 while the operation holds its target (the per-target lock). */
+    active: 0 | 1;
+    cancel_requested: 0 | 1;
+    error_code: string | null;
+    error_message: string | null;
+    enrollment_expires_at: number | null;
+    created_at: number;
+    updated_at: number;
+    finished_at: number | null;
+}
+
+export type NodeBootstrapEventStatus = 'started' | 'done' | 'skipped' | 'failed' | 'unknown' | 'info';
+
+export interface NodeBootstrapEvent {
+    id: number;
+    operation_id: string;
+    attempt: number;
+    at: number;
+    stage: string | null;
+    step: string | null;
+    status: NodeBootstrapEventStatus;
+    message: string;
+    detail: string | null;
+}
+
+/**
+ * Progress a running operation records about itself. Lifecycle, lock and
+ * approval columns are not here: they change only through
+ * `transitionNodeBootstrapOperation`, a compare-and-set on the state.
+ */
+export type NodeBootstrapOperationProgress = Partial<Pick<NodeBootstrapOperation,
+    'stage' | 'step' | 'node_id' | 'changes_made' | 'agent_started' | 'cancel_requested' | 'enrollment_expires_at'>>;
+
+/** What a state transition may also write. The identity columns (target, host, key, directories) never change after insert. */
+export type NodeBootstrapOperationTransition = NodeBootstrapOperationProgress & Partial<Pick<NodeBootstrapOperation,
+    'state' | 'active' | 'error_code' | 'error_message' | 'finished_at' | 'attempt' | 'plan_json'
+    | 'plan_digest' | 'approved_by' | 'approved_at'>>;
+
+const BOOTSTRAP_OPERATION_COLUMNS: ReadonlyArray<keyof NodeBootstrapOperation> = [
+    'id', 'target_key', 'host', 'port', 'username', 'address', 'target_name', 'host_key_fingerprint',
+    'compose_dir', 'agent_dir', 'plan_json', 'plan_digest', 'approved_by', 'approved_at', 'attempt', 'state',
+    'stage', 'step', 'node_id', 'changes_made', 'agent_started', 'active', 'cancel_requested', 'error_code',
+    'error_message', 'enrollment_expires_at', 'created_at', 'updated_at', 'finished_at',
+];
+const BOOTSTRAP_OPERATION_COLUMN_SET: ReadonlySet<string> = new Set(BOOTSTRAP_OPERATION_COLUMNS);
+
+/** `column = ?` assignments for the keys of `updates`, each checked against the fixed column list. */
+function bootstrapAssignments(updates: NodeBootstrapOperationTransition): { assignments: string[]; values: Array<string | number | null> } {
+    const assignments: string[] = [];
+    const values: Array<string | number | null> = [];
+    for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined) continue;
+        if (!BOOTSTRAP_OPERATION_COLUMN_SET.has(key) || key === 'id') {
+            throw new Error(`Unknown bootstrap operation column: ${key}`);
+        }
+        assignments.push(`${key} = ?`);
+        values.push(value as string | number | null);
+    }
+    return { assignments, values };
+}
+
+/** Trust-on-first-use pin for a bootstrap SSH host key, keyed by host and port. */
+export interface NodeBootstrapTrust {
+    host: string;
+    port: number;
+    fingerprint: string;
+    algorithm: string;
+    approved_by: string | null;
+    approved_at: number;
+    last_seen_at: number;
 }
 
 export interface Label {
@@ -875,6 +986,14 @@ export interface SecretVersionRow {
 }
 
 export type SecretPushStatus = 'ok' | 'failed' | 'skipped';
+
+/** A write was refused because the bundle moved on since the caller read it. */
+export class SecretVersionConflictError extends Error {
+    constructor(public readonly currentVersion: number) {
+        super(`Secret is at version ${currentVersion}`);
+        this.name = 'SecretVersionConflictError';
+    }
+}
 
 export interface SecretPushRow {
     id: number;
@@ -1428,6 +1547,7 @@ export class DatabaseService {
         this.migrateStackAlertServiceScope();
         this.migrateGitOpsSourcePolicy();
         this.migrateRecoverySchema();
+        this.migrateNodeBootstrapTrustHostCase();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1616,6 +1736,74 @@ export class DatabaseService {
         used_at INTEGER,
         FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_trust (
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        fingerprint TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        PRIMARY KEY (host, port)
+      );
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_operations (
+        id TEXT PRIMARY KEY,
+        target_key TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        address TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        host_key_fingerprint TEXT NOT NULL,
+        compose_dir TEXT NOT NULL,
+        agent_dir TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        plan_digest TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL,
+        stage TEXT,
+        step TEXT,
+        node_id INTEGER,
+        changes_made INTEGER NOT NULL DEFAULT 0,
+        agent_started INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        error_message TEXT,
+        enrollment_expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_target
+        ON node_bootstrap_operations(target_key) WHERE active = 1;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_key
+        ON node_bootstrap_operations(host_key_fingerprint) WHERE active = 1;
+      -- A page of held runs seeks to its cursor in this index and reads on in the order it is returned,
+      -- and the finished history reads the newest rows of the second one, so neither reads rows it does not return.
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_active_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 1;
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_ops_finished_page
+        ON node_bootstrap_operations(created_at DESC, id DESC) WHERE active = 0;
+
+      CREATE TABLE IF NOT EXISTS node_bootstrap_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        stage TEXT,
+        step TEXT,
+        status TEXT NOT NULL,
+        message TEXT NOT NULL,
+        detail TEXT,
+        FOREIGN KEY (operation_id) REFERENCES node_bootstrap_operations(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_bootstrap_events_op ON node_bootstrap_events(operation_id, id);
 
       CREATE TABLE IF NOT EXISTS system_state (
         key TEXT PRIMARY KEY,
@@ -2102,6 +2290,7 @@ export class DatabaseService {
         title TEXT NOT NULL,
         message TEXT NOT NULL,
         source_path TEXT,
+        source_location TEXT,
         remediation TEXT,
         service TEXT,
         created_at INTEGER NOT NULL
@@ -2513,6 +2702,7 @@ export class DatabaseService {
         maybeAddCol('preflight_findings', 'rule_version', 'INTEGER');
         maybeAddCol('preflight_findings', 'subject_kind', 'TEXT');
         maybeAddCol('preflight_findings', 'subject_key', 'TEXT');
+        maybeAddCol('preflight_findings', 'source_location', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -5051,12 +5241,13 @@ stmt.run('gitops_schema_version', '1');
             );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
-                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at, rule_version, subject_kind, subject_key)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    (id, run_id, rule_id, severity, title, message, source_path, source_location, remediation, service, created_at, rule_version, subject_kind, subject_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             );
             for (const f of findings) {
                 insert.run(
-                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at,
+                    f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.source_location ?? null,
+                    f.remediation, f.service, f.created_at,
                     f.rule_version ?? null, f.subject_kind ?? null, f.subject_key ?? null,
                 );
             }
@@ -6459,6 +6650,228 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('UPDATE pilot_enrollments SET used_at = ? WHERE node_id = ?').run(now, row.node_id);
             return { ...row, used_at: now };
         })();
+    }
+
+    // --- Node bootstrap trust pins ---
+
+    // The host column holds the lower-case spelling: DNS names are
+    // case-insensitive, so one server must never hold two pins. The accessors
+    // fold their input so a caller cannot reach a case variant of a pin.
+
+    public getNodeBootstrapTrust(host: string, port: number): NodeBootstrapTrust | undefined {
+        return this.db.prepare(
+            'SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust WHERE host = ? AND port = ?'
+        ).get(host.toLowerCase(), port) as NodeBootstrapTrust | undefined;
+    }
+
+    /**
+     * Fold pins stored under a mixed-case host into the lower-case row. Spellings
+     * that hold the same key merge into the oldest approval. Spellings that hold
+     * different keys cannot be ranked: the later pin never went through a
+     * changed-key confirmation, and a replacement resets the approval time, so
+     * neither "oldest" nor "newest" is known to be the key the operator last
+     * chose. Neither is trusted: the host is dropped, and the next preflight
+     * asks for a fresh trust decision. Every dropped key is logged and audited
+     * with who approved it and when; the audit row is written in the same
+     * transaction as the drop, so neither can be lost without the other.
+     * Idempotent.
+     */
+    private migrateNodeBootstrapTrustHostCase(): void {
+        const rows = this.db.prepare(
+            `SELECT host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at FROM node_bootstrap_trust
+             ORDER BY approved_at ASC, (host = lower(host)) DESC, last_seen_at DESC, host`
+        ).all() as NodeBootstrapTrust[];
+        if (!rows.some((row) => row.host !== row.host.toLowerCase())) return;
+        const remove = this.db.prepare('DELETE FROM node_bootstrap_trust WHERE host = ? AND port = ?');
+        const insert = this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const audit = this.db.prepare(
+            `INSERT INTO audit_log (timestamp, username, method, path, status_code, node_id, ip_address, summary)
+             VALUES (?, 'system', 'MIGRATION', 'node_bootstrap_trust', 409, NULL, 'local', ?)`
+        );
+        const conflicts: Array<{ key: string; dropped: string }> = [];
+        this.db.transaction(() => {
+            const groups = new Map<string, NodeBootstrapTrust[]>();
+            for (const row of rows) {
+                const key = `${row.host.toLowerCase()}:${row.port}`;
+                const group = groups.get(key);
+                if (group) group.push(row);
+                else groups.set(key, [row]);
+            }
+            for (const row of rows) remove.run(row.host, row.port);
+            for (const [key, group] of groups) {
+                if (new Set(group.map((row) => row.fingerprint)).size > 1) {
+                    const dropped = group
+                        .map((row) => `${sanitizeForLog(row.fingerprint)} (approved by ${sanitizeForLog(row.approved_by)} at ${Number.isFinite(new Date(row.approved_at).getTime()) ? new Date(row.approved_at).toISOString() : row.approved_at})`)
+                        .join(', ');
+                    audit.run(Date.now(), `bootstrap.trust.conflict: host=${sanitizeForLog(key)} dropped=${dropped}`);
+                    conflicts.push({ key, dropped });
+                    continue;
+                }
+                const oldest = group[0];
+                const lastSeen = Math.max(...group.map((row) => row.last_seen_at));
+                insert.run(oldest.host.toLowerCase(), oldest.port, oldest.fingerprint, oldest.algorithm, oldest.approved_by, oldest.approved_at, lastSeen);
+            }
+        })();
+        for (const conflict of conflicts) {
+            console.warn(`[Bootstrap] Conflicting host key pins for ${sanitizeForLog(conflict.key)}: dropped ${conflict.dropped}. The next preflight asks for a fresh trust decision.`);
+        }
+    }
+
+    public upsertNodeBootstrapTrust(record: NodeBootstrapTrust): void {
+        this.db.prepare(
+            `INSERT INTO node_bootstrap_trust (host, port, fingerprint, algorithm, approved_by, approved_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(host, port) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                algorithm = excluded.algorithm,
+                approved_by = excluded.approved_by,
+                approved_at = excluded.approved_at,
+                last_seen_at = excluded.last_seen_at`
+        ).run(
+            record.host.toLowerCase(),
+            record.port,
+            record.fingerprint,
+            record.algorithm,
+            record.approved_by,
+            record.approved_at,
+            record.last_seen_at,
+        );
+    }
+
+    // --- Node bootstrap operations ---
+
+    /** Operations kept for history; older inactive rows are pruned on insert. */
+    public static readonly BOOTSTRAP_OPERATION_HISTORY = 50;
+    /** Events kept per operation; older rows are pruned on insert. */
+    public static readonly BOOTSTRAP_EVENTS_PER_OPERATION = 300;
+
+    /**
+     * Insert a new operation holding the per-target lock. Throws
+     * `BOOTSTRAP_LOCK_HELD` when another active operation holds the same
+     * target or host key; the partial unique indexes make the check atomic.
+     */
+    public insertNodeBootstrapOperation(op: NodeBootstrapOperation): void {
+        const columns = BOOTSTRAP_OPERATION_COLUMNS;
+        const insert = this.db.prepare(
+            `INSERT INTO node_bootstrap_operations (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+        );
+        try {
+            this.db.transaction(() => {
+                insert.run(...columns.map((column) => op[column]));
+                // Only finished runs are trimmed, newest kept, read through the finished index: the holds are never read.
+                const pruned = this.db.prepare(
+                    `DELETE FROM node_bootstrap_operations WHERE active = 0 AND id NOT IN (
+                        SELECT id FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?
+                    ) RETURNING id`
+                ).all(DatabaseService.BOOTSTRAP_OPERATION_HISTORY) as Array<{ id: string }>;
+                // The foreign key is declarative only, so the events of the runs just pruned go here, by the operation index.
+                const dropEvents = this.db.prepare('DELETE FROM node_bootstrap_events WHERE operation_id = ?');
+                for (const { id } of pruned) dropEvents.run(id);
+            })();
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : '';
+            if (message.includes('UNIQUE constraint failed')) {
+                throw Object.assign(new Error('Another bootstrap operation holds this target.'), { code: 'BOOTSTRAP_LOCK_HELD' });
+            }
+            throw error;
+        }
+    }
+
+    public getNodeBootstrapOperation(id: string): NodeBootstrapOperation | undefined {
+        return this.db.prepare('SELECT * FROM node_bootstrap_operations WHERE id = ?').get(id) as NodeBootstrapOperation | undefined;
+    }
+
+    /** The active operation holding a target or host key, if any. */
+    public getActiveNodeBootstrapOperation(targetKey: string, fingerprint: string | null): NodeBootstrapOperation | undefined {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_operations WHERE active = 1 AND (target_key = ? OR host_key_fingerprint = ?) ORDER BY created_at DESC LIMIT 1'
+        ).get(targetKey, fingerprint ?? '') as NodeBootstrapOperation | undefined;
+    }
+
+    /**
+     * One page of the operations that still hold their server, newest first,
+     * after the row named by `after` (a keyset on creation time and id, so a
+     * row that changes state or is released while an operator pages through
+     * never shifts the rows still to come). Every hold is reachable by paging;
+     * none is skipped.
+     */
+    public listActiveNodeBootstrapOperations(limit: number, after: { createdAt: number; id: string } | null = null): NodeBootstrapOperation[] {
+        if (after === null) {
+            return this.db.prepare(
+                'SELECT * FROM node_bootstrap_operations WHERE active = 1 ORDER BY created_at DESC, id DESC LIMIT ?'
+            ).all(limit) as NodeBootstrapOperation[];
+        }
+        // A row-value comparison, so the index is searched for the cursor instead of read from its newest end up to it.
+        return this.db.prepare(
+            `SELECT * FROM node_bootstrap_operations
+             WHERE active = 1 AND (created_at, id) < (?, ?)
+             ORDER BY created_at DESC, id DESC LIMIT ?`
+        ).all(after.createdAt, after.id, limit) as NodeBootstrapOperation[];
+    }
+
+    /** The latest operations that no longer hold their server. */
+    public listFinishedNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?'
+        ).all(limit) as NodeBootstrapOperation[];
+    }
+
+    public listNodeBootstrapOperationsInStates(states: readonly NodeBootstrapOperationState[]): NodeBootstrapOperation[] {
+        if (states.length === 0) return [];
+        return this.db.prepare(
+            `SELECT * FROM node_bootstrap_operations WHERE state IN (${states.map(() => '?').join(', ')})`
+        ).all(...states) as NodeBootstrapOperation[];
+    }
+
+    public updateNodeBootstrapOperation(id: string, updates: NodeBootstrapOperationProgress, now: number): void {
+        const { assignments, values } = bootstrapAssignments(updates);
+        assignments.push('updated_at = ?');
+        this.db.prepare(
+            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ?`
+        ).run(...values, now, id);
+    }
+
+    /**
+     * Compare-and-set the lifecycle state. Returns false when the row is no
+     * longer in one of `from`, so two writers can never both win a transition.
+     */
+    public transitionNodeBootstrapOperation(
+        id: string,
+        from: readonly NodeBootstrapOperationState[],
+        updates: NodeBootstrapOperationTransition,
+        now: number,
+        options: { stillActive?: boolean } = {},
+    ): boolean {
+        const { assignments, values } = bootstrapAssignments(updates);
+        assignments.push('updated_at = ?');
+        // `stillActive` keeps a release that lands first from being undone: the row is only moved while it still holds its server.
+        const result = this.db.prepare(
+            `UPDATE node_bootstrap_operations SET ${assignments.join(', ')} WHERE id = ? AND state IN (${from.map(() => '?').join(', ')})${options.stillActive ? ' AND active = 1' : ''}`
+        ).run(...values, now, id, ...from);
+        return result.changes === 1;
+    }
+
+    public appendNodeBootstrapEvent(event: Omit<NodeBootstrapEvent, 'id'>): void {
+        this.db.transaction(() => {
+            this.db.prepare(
+                `INSERT INTO node_bootstrap_events (operation_id, attempt, at, stage, step, status, message, detail)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(event.operation_id, event.attempt, event.at, event.stage, event.step, event.status, event.message, event.detail);
+            this.db.prepare(
+                `DELETE FROM node_bootstrap_events WHERE operation_id = ? AND id NOT IN (
+                    SELECT id FROM node_bootstrap_events WHERE operation_id = ? ORDER BY id DESC LIMIT ?
+                )`
+            ).run(event.operation_id, event.operation_id, DatabaseService.BOOTSTRAP_EVENTS_PER_OPERATION);
+        })();
+    }
+
+    public listNodeBootstrapEvents(operationId: string): NodeBootstrapEvent[] {
+        return this.db.prepare(
+            'SELECT * FROM node_bootstrap_events WHERE operation_id = ? ORDER BY id ASC'
+        ).all(operationId) as NodeBootstrapEvent[];
     }
 
     public deletePilotEnrollment(nodeId: number): void {
@@ -10817,6 +11230,13 @@ stmt.run('gitops_schema_version', '1');
         ).get(secretId) as SecretVersionRow | undefined;
     }
 
+    public getSecretVersion(secretId: number, version: number): SecretVersionRow | undefined {
+        return this.db.prepare(
+            `SELECT id, secret_id, version, encrypted_payload, key_count, created_at, created_by, note
+             FROM secret_versions WHERE secret_id = ? AND version = ?`
+        ).get(secretId, version) as SecretVersionRow | undefined;
+    }
+
     public createSecretWithVersion(input: {
         name: string;
         description: string;
@@ -10847,11 +11267,16 @@ stmt.run('gitops_schema_version', '1');
         keyCount: number;
         createdBy: string;
         note: string;
+        /** When set, the write is refused unless the bundle is still at this version. */
+        expectedVersion?: number;
     }): { version: number } {
         const now = Date.now();
         const txn = this.db.transaction(() => {
             const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
             if (!current) throw new Error('Secret not found');
+            if (input.expectedVersion !== undefined && current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
             const nextVersion = current.current_version + 1;
             this.db.prepare(
                 'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -10862,6 +11287,21 @@ stmt.run('gitops_schema_version', '1');
                 this.db.prepare('UPDATE secrets SET current_version = ?, description = ?, updated_at = ? WHERE id = ?').run(nextVersion, input.description, now, input.secretId);
             }
             return { version: nextVersion };
+        });
+        return txn();
+    }
+
+    /** Update bundle metadata only; a stale version is refused the same way. */
+    public updateSecretDescription(input: { secretId: number; description: string; expectedVersion: number }): { version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
+            if (!current) throw new Error('Secret not found');
+            if (current.current_version !== input.expectedVersion) {
+                throw new SecretVersionConflictError(current.current_version);
+            }
+            this.db.prepare('UPDATE secrets SET description = ?, updated_at = ? WHERE id = ?').run(input.description, now, input.secretId);
+            return { version: current.current_version };
         });
         return txn();
     }

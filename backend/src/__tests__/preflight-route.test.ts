@@ -325,6 +325,35 @@ describe('preflight responses redact credentials in findings and acknowledgement
     expect(read.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest').acknowledged).toBe(true);
   });
 
+  // The wire anchor gets the same image redaction as the finding: a token query
+  // value, a keyword-led secret, or a Bearer credential is hidden there too,
+  // including when Compose resolved the image from an environment variable.
+  it.each([
+    ['a token query value', 'https://user:pw@registry.example.com/app?token=SECRETTV1', 'SECRETTV1', '[redacted]@registry.example.com/app?token=[redacted]'],
+    ['a password keyword', 'password=SECRETPW9', 'SECRETPW9', 'password=[redacted]'],
+    ['a token keyword', 'token=SECRETTOK9', 'SECRETTOK9', 'token=[redacted]'],
+    ['an api_key keyword', 'registry.example.com/app?api_key=SECRETKEY9', 'SECRETKEY9', 'registry.example.com/app?api_key=[redacted]'],
+    ['a Bearer credential', 'Bearer SECRETBEARER9', 'SECRETBEARER9', 'Bearer [redacted]'],
+  ])('redacts the image anchor of an until_image_change acknowledgement for %s', async (_variant, image, secret, expected) => {
+    vi.restoreAllMocks();
+    stub(image);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), `services:\n  web:\n    image: "${image}"\n`);
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'image-latest');
+    expect(target).toBeTruthy();
+    const created = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service, reason: 'ok', expiryMode: 'until_image_change' });
+    expect(created.status).toBe(201);
+    expect(created.body.anchor_image_ref).toBe(expected);
+    expect(JSON.stringify(created.body)).not.toContain(secret);
+
+    const list = await get(`/api/stacks/${STACK}/preflight/acknowledgements`);
+    expect(list.body[0].anchor_image_ref).toBe(expected);
+    expect(JSON.stringify(list.body)).not.toContain(secret);
+  });
+
   // The anchor is quoted from the image's own grammar, so a password with a
   // slash or a space is dropped from it. The reason is operator text and stays
   // on the text rules, so it names no credential here.

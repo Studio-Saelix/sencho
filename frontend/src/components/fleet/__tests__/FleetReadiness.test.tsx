@@ -607,7 +607,7 @@ describe('FleetReadiness dismissals', () => {
     await screen.findByText('Node did not answer in time');
     expect(screen.queryByText('Stack is stopped')).toBeNull();
     expect(findingRows()).toHaveLength(1);
-    expect(screen.getByText(/1 finding · 1 dismissed/)).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Readiness summary' })).toHaveTextContent(/1 finding · 1 dismissed/);
     expect(screen.getByRole('button', { name: /1 dismissed/ })).toBeInTheDocument();
     // The cell still says what the evidence says: the dismissed stack is still counted.
     const matrix = await matrixRows();
@@ -666,13 +666,29 @@ describe('FleetReadiness dismissals', () => {
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/fleet/dismissals/7', { method: 'DELETE', localOnly: true });
   });
 
+  it('returns focus to the summary count after Escape closes the dismissed sheet', async () => {
+    const user = userEvent.setup();
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED)] }));
+    renderReadiness();
+
+    const opener = await screen.findByRole('button', { name: /1 dismissed/ });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it('restores from the dismissed list', async () => {
     mockServer(() => ({ ok: true, status: 204, json: async () => ({}) }) as Response, board({ dismissals: [dismissalFor(STOPPED)] }));
     renderReadiness();
 
     fireEvent.click(await screen.findByRole('button', { name: /1 dismissed/ }));
-    expect(await screen.findByText(/dismissed by alice/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    const sheet = await screen.findByRole('dialog');
+    expect(within(sheet).getByText(/dismissed by alice/)).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Restore' }));
 
     expect(await screen.findByText('Stack is stopped')).toBeInTheDocument();
   });
@@ -750,21 +766,32 @@ describe('FleetReadiness dismissals', () => {
     expect(screen.getByText('Stack is stopped')).toBeInTheDocument();
   });
 
-  it('opens the dismissed list when everything in view is dismissed', async () => {
+  it('says everything is dismissed, and keeps the list one click away in a sheet', async () => {
     mockResponse(board({ findings: [STOPPED], dismissals: [dismissalFor(STOPPED)] }));
     renderReadiness();
 
-    expect(await screen.findByText('Everything here is dismissed.')).toBeInTheDocument();
-    // The list opens by itself, because the table above it has nothing to show.
-    expect(screen.getByRole('button', { name: /1 dismissed/ })).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByText(/dismissed by alice/)).toBeInTheDocument();
+    expect(await screen.findByText('Everything is dismissed.')).toBeInTheDocument();
+    // Nothing is stacked under the table; the list lives behind the count.
+    expect(screen.queryByText(/dismissed by alice/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /1 dismissed/ }));
+    expect(within(await screen.findByRole('dialog')).getByText(/dismissed by alice/)).toBeInTheDocument();
+  });
+
+  it('lists every dismissal in the sheet whatever the findings filter says, and leaves Restore off for an account that cannot dismiss', async () => {
+    mockResponse(board({ dismissals: [dismissalFor(STOPPED), dismissalFor(SLOW, { id: 8, mode: 'days', expiresAt: Date.now() + 86_400_000 })] }));
+    renderReadiness({ canDismiss: candidate => candidate.id !== SLOW.id });
+
+    fireEvent.click(await screen.findByRole('button', { name: /2 dismissed/ }));
+    const sheet = await screen.findByRole('dialog');
+    expect(within(sheet).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(sheet).getAllByRole('button', { name: 'Restore' })).toHaveLength(1);
   });
 
   it('counts only the findings still in view, never a negative number', async () => {
     mockResponse(board({ dismissals: [dismissalFor(STOPPED), dismissalFor(SLOW, { id: 8, mode: 'days', expiresAt: Date.now() + 86_400_000 })] }));
     renderReadiness();
 
-    expect(await screen.findByText(/0 findings · 2 dismissed/)).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Readiness summary' })).toHaveTextContent(/0 findings · 2 dismissed/);
   });
 
   it('re-reads the list instead of reporting a failure when the server accepted a dismissal but the reply is unreadable', async () => {

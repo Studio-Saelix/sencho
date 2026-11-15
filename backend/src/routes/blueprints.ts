@@ -684,7 +684,7 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
             });
             return;
         }
-        if (result.code === 'docker_endpoint_protected') {
+        if (result.code === 'docker_endpoint_protected' || result.code === 'compose_inputs_refused') {
             res.status(409).json({ error: result.error, code: result.code });
             return;
         }

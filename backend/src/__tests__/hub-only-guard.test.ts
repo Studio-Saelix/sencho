@@ -266,10 +266,11 @@ describe('hubOnlyGuard', () => {
   });
 
   // Regression for Fleet Secrets: bundles are stored and decrypted per instance,
-  // and GET /api/secrets/:id returns plaintext values. A proxied secrets request
-  // would read a remote node's decrypted values as the node-proxy admin, and the
-  // routes' own requireAdmin gate lives in the local handler the proxy skips.
-  // Cover the collection (no trailing slash) and a sub-path.
+  // and the reveal endpoints hand one value to a signed-in admin. A proxied
+  // secrets request would reach a remote instance's bundles as the node-proxy
+  // admin, and the routes' own requireUserSession / requireAdmin gates live in
+  // the local handler the proxy skips. Cover the collection (no trailing slash)
+  // and a sub-path.
   it('rejects /api/secrets with 403 when nodeId targets a remote node', async () => {
     const res = await request(app)
       .get('/api/secrets')

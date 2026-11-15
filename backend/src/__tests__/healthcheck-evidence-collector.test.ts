@@ -29,11 +29,15 @@ function model(services: EffService[]): EffectiveModel {
 
 function mockDocker(opts: {
   list?: unknown[];
+  listError?: Error;
   inspectById?: Record<string, { Config?: { Image?: string; Healthcheck?: { Test?: unknown } } }>;
+  inspectError?: Error;
   image?: { Config?: { Healthcheck?: { Test?: unknown } } } | 'missing' | 'error';
+  imageError?: Error;
 }) {
   const getContainer = vi.fn((id: string) => ({
     inspect: vi.fn(async () => {
+      if (opts.inspectError) throw opts.inspectError;
       const hit = opts.inspectById?.[id];
       if (!hit) {
         const err = Object.assign(new Error('not found'), { statusCode: 404 });
@@ -42,9 +46,13 @@ function mockDocker(opts: {
       return hit;
     }),
   }));
-  const listContainers = vi.fn(async () => opts.list ?? []);
+  const listContainers = vi.fn(async () => {
+    if (opts.listError) throw opts.listError;
+    return opts.list ?? [];
+  });
   const getDocker = vi.fn(() => ({ listContainers, getContainer }));
   const inspectImage = vi.fn(async () => {
+    if (opts.imageError) throw opts.imageError;
     if (opts.image === 'missing' || opts.image === 'error') {
       throw Object.assign(new Error('No such image'), { statusCode: 404 });
     }
@@ -267,6 +275,357 @@ describe('collectServiceHealthcheckEvidence', () => {
       1, 'proj', model([svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })]), true,
     );
     expect(evidence.web.state).toBe('local-image-inherited');
+  });
+
+  it('never logs registry credentials from an image that cannot be inspected', async () => {
+    const image = 'user:Ab/cD+eF9xyz=:x@registry.example.com/app:latest';
+    // The message docker-modem builds from Docker 29.9.3's HTTP 400 body for
+    // this reference: it quotes only the repository name after the credential's
+    // first `/`, and a colon in the password cuts that quote at the prefix.
+    const dockerError = new Error(
+      '(HTTP code 400) unexpected - invalid reference format: repository name (cD+eF9xyz=) must be lowercase ',
+    );
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('Ab/cD+eF9xyz=');
+    expect(logged).not.toContain('cD+eF9xyz=');
+    expect(logged).not.toContain('eF9xyz');
+    expect(logged).toContain('must be lowercase');
+    expect(logged).toContain('[redacted]@registry.example.com/app:latest');
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe('[redacted]@registry.example.com/app:latest');
+    expect(String(imageWarn?.[2])).not.toContain('eF9xyz');
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
+  // Docker decodes the request path before its reference parser runs, and the
+  // parser normalizes a familiar Docker Hub name. The warning must not carry
+  // the credential in either the authored or the daemon's spelling.
+  it.each([
+    {
+      name: 'an encoded slash',
+      image: 'user:Ab%2fSuperSecret:x@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%2f'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded letter',
+      image: 'user:Ab/Super%53ecret:x@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%53'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded colon',
+      image: 'user:Ab/SuperSecret%3ax@registry.example.com/app:latest',
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%3a'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded token-only multi-segment prefix',
+      image: 't%6fkenonly/foo%2fSuperSecret:x@registry.example.com/app:latest',
+      quoted: 'tokenonly/foo/SuperSecret',
+      forbidden: ['SuperSecret', 'tokenonly/foo', '%2f', '%6f'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a colon-free token split by an encoded slash',
+      image: 'ghp_ab%2fSuperSecret@registry.example.com/app:latest',
+      quoted: 'ghp_ab/SuperSecret@registry.example.com/app',
+      forbidden: ['SuperSecret', 'ghp_ab/'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a closing parenthesis in the quoted name',
+      image: 'user:Ab%2fx)SuperSecret:y@registry.example.com/app:latest',
+      quoted: 'x)SuperSecret',
+      forbidden: ['SuperSecret', 'x)'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'normalization plus an encoded slash',
+      image: 'docker.io/Ab%2fPass:x@registry.example.com/app:latest',
+      quoted: 'Ab/Pass',
+      forbidden: ['Pass', 'Ab/'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a decoded byte Docker replaces before it quotes the name',
+      image: 'user:Ab%2f%FFSuperSecret:x@registry.example.com/app:latest',
+      quoted: '\uFFFDSuperSecret',
+      forbidden: ['SuperSecret', '%FF'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded credential on a digest pin',
+      image: `user:Ab%2fSuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      quoted: 'SuperSecret',
+      forbidden: ['SuperSecret', '%2f'],
+      rest: `registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+    },
+    {
+      name: 'a canonical Docker Hub name',
+      image: 'docker.io/Pass:x@registry.example.com',
+      quoted: 'library/Pass',
+      forbidden: ['Pass', 'library/Pass'],
+      rest: 'registry.example.com',
+    },
+    {
+      name: 'the legacy Docker Hub index domain',
+      image: 'index.docker.io/Pass:x@registry.example.com',
+      quoted: 'library/Pass',
+      forbidden: ['Pass', 'library/Pass'],
+      rest: 'registry.example.com',
+    },
+  ])('never logs a credential Docker decodes or normalizes for $name', async ({ image, quoted, forbidden, rest }) => {
+    const dockerError = new Error(
+      `(HTTP code 400) unexpected - invalid reference format: repository name (${quoted}) must be lowercase `,
+    );
+    const { inspectImage } = mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    expect(inspectImage).toHaveBeenCalledWith(image);
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    expect(logged).toContain('must be lowercase');
+    expect(logged).toContain(`[redacted]@${rest}`);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
+    expect(String(imageWarn?.[2])).not.toContain(quoted);
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
+  // A credential can spell the redaction marker itself. The warning must not
+  // let that text exempt the quoted name from redaction, including when the
+  // name holds a closing parenthesis or Docker has decoded or normalized it.
+  it.each([
+    {
+      name: 'a literal marker before the credential',
+      image: 'user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'an encoded marker',
+      image: 'user:Ab/%5Bredacted%5DSuperSecret:x@registry.example.com/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret', '%5B'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a marker with a closing parenthesis',
+      image: 'user:Ab/[redacted]x)SuperSecret:y@registry.example.com/app:latest',
+      quoted: '[redacted]x)SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'registry.example.com/app:latest',
+    },
+    {
+      name: 'a token-only marker credential',
+      image: '[redacted]SuperSecret@ghcr.io/x/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'ghcr.io/x/app:latest',
+    },
+    {
+      name: 'a token-only marker split by an encoded slash',
+      image: '[redacted]SuperSecret%2fTail@ghcr.io/x/app:latest',
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: 'ghcr.io/x/app:latest',
+    },
+    {
+      name: 'a marker on a digest pin',
+      image: `user:Ab/[redacted]SuperSecret:x@registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+      quoted: '[redacted]SuperSecret',
+      forbidden: ['SuperSecret'],
+      rest: `registry.example.com/app:latest@sha256:${'a'.repeat(64)}`,
+    },
+    {
+      name: 'a normalized marker credential',
+      image: 'docker.io/[redacted]Pass:x@registry.example.com',
+      quoted: 'library/[redacted]Pass',
+      forbidden: ['Pass', 'library/'],
+      rest: 'registry.example.com',
+    },
+    {
+      name: 'a marker beside an invalid byte',
+      image: 'user:Ab%2f%FF[redacted]SuperSecret:x@registry.example.com/app:latest',
+      quoted: '\uFFFD[redacted]SuperSecret',
+      forbidden: ['SuperSecret', '%FF'],
+      rest: 'registry.example.com/app:latest',
+    },
+  ])('never logs a credential containing the redaction marker for $name', async ({ image, quoted, forbidden, rest }) => {
+    const dockerError = new Error(
+      `(HTTP code 400) unexpected - invalid reference format: repository name (${quoted}) must be lowercase `,
+    );
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    expect(logged).toContain('must be lowercase');
+    expect(logged).toContain(`[redacted]@${rest}`);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(`[redacted]@${rest}`);
+    expect(String(imageWarn?.[2])).not.toContain(quoted);
+    expect(String(imageWarn?.[2])).toContain('must be lowercase');
+  });
+
+  it('never logs a marker-bearing name with no daemon suffix', async () => {
+    const image = 'user:Ab/[redacted])SuperSecret:x@registry.example.com/app:latest';
+    const dockerError = new Error('invalid reference format: repository name ([redacted])SuperSecret)');
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+
+    expect(logged).not.toContain('SuperSecret');
+    expect(logged).toContain('repository name ([redacted])');
+    expect(logged).toContain('[redacted]@registry.example.com/app:latest');
+  });
+
+  it('redacts an authored percent-encoded @ instead of keeping its password tail', async () => {
+    const image = 'user@pw%40host/app:latest';
+    const dockerError = new Error(`failed for ${image}: connect refused`);
+    mockDocker({ list: [], image: 'error', imageError: dockerError });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+
+    expect(logged).not.toContain('pw');
+    expect(logged).toContain('[redacted]@host/app:latest');
+  });
+
+  it('redacts an image credential whose @ is percent-encoded', async () => {
+    const image = 'user:pw%40registry.example.com/app:latest';
+    mockDocker({
+      list: [],
+      image: 'error',
+      imageError: new Error('(HTTP code 400) unexpected - invalid reference format '),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('user:pw');
+    expect(logged).not.toContain('pw%40');
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn?.[1]).toBe('[redacted]@registry.example.com/app:latest');
+    expect(String(imageWarn?.[2])).toContain('invalid reference format');
+  });
+
+  // The Doctor wire field does not stop at the URL userinfo: a token query
+  // value, a password=, token=, or api_key= pair, and a Bearer credential all
+  // reach the finding as [redacted]. The same value reaches the log line whether
+  // it was written literally or resolved from a .env variable before Doctor
+  // read it, so the log has to hide the same secret.
+  it.each([
+    {
+      name: 'a URL credential with a token query value',
+      image: 'https://SECRETUSR:SECRETPW1@registry.example.com/app?token=SECRETTOK1',
+      expected: '[redacted]@registry.example.com/app?token=[redacted]',
+      forbidden: ['SECRETUSR', 'SECRETPW1', 'SECRETTOK1'],
+    },
+    {
+      name: 'a password keyword',
+      image: 'password=SECRETPW2',
+      expected: 'password=[redacted]',
+      forbidden: ['SECRETPW2'],
+    },
+    {
+      name: 'a token keyword',
+      image: 'token=SECRETTOK3',
+      expected: 'token=[redacted]',
+      forbidden: ['SECRETTOK3'],
+    },
+    {
+      name: 'an api_key keyword',
+      image: 'registry.example.com/app?api_key=SECRETKEY4',
+      expected: 'registry.example.com/app?api_key=[redacted]',
+      forbidden: ['SECRETKEY4'],
+    },
+    {
+      name: 'a Bearer credential',
+      image: 'Bearer SECRETBEARER5',
+      expected: 'Bearer [redacted]',
+      forbidden: ['SECRETBEARER5'],
+    },
+  ])('never logs the $name the Doctor wire field redacts', async ({ image, expected, forbidden }) => {
+    mockDocker({
+      list: [],
+      image: 'error',
+      imageError: new Error(`failed for ${image}: connect refused`),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image })]), true,
+    );
+    expect(evidence.web.state).toBe('unverifiable');
+
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    for (const fragment of forbidden) expect(logged).not.toContain(fragment);
+    const imageWarn = warn.mock.calls.find(args => String(args[0]).includes('image inspect failed'));
+    expect(imageWarn).toBeDefined();
+    expect(imageWarn?.[1]).toBe(expected);
+    // Docker echoes the reference in its error, so the second argument has to
+    // lose the same secrets.
+    for (const fragment of forbidden) expect(String(imageWarn?.[2])).not.toContain(fragment);
+  });
+
+  it('never logs registry credentials from the compose project label', async () => {
+    mockDocker({ listError: new Error('daemon down'), image: { Config: {} } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const m: EffectiveModel = {
+      projectName: 'user:p4ssw0rdXYZ@registry.example.com/app',
+      services: [svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })],
+      networks: {},
+      volumes: {},
+    };
+    await collectServiceHealthcheckEvidence(1, 'proj', m, true);
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('p4ssw0rdXYZ');
+    expect(logged).toContain('[redacted]@registry.example.com/app');
+  });
+
+  it('never logs credentials carried by a replica inspect error', async () => {
+    mockDocker({
+      list: [{ Id: 'c1', Labels: { 'com.docker.compose.service': 'web' }, Image: 'nginx:1.27' }],
+      inspectError: new Error('inspect failed for token:tok3nvalue@registry.example.com/app:1.0'),
+      image: { Config: {} },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const evidence = await collectServiceHealthcheckEvidence(
+      1, 'proj', model([svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })]), true,
+    );
+    expect(evidence.web.state).toBe('absent');
+    const logged = warn.mock.calls.map(args => args.join(' ')).join('\n');
+    expect(logged).not.toContain('tok3nvalue');
+    expect(logged).toContain('[ComposeDoctor] Healthcheck container inspect failed');
   });
 });
 

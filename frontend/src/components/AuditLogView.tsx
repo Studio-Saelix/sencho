@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, Fragment, useMemo, type ReactNode } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Input } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/combobox';
 import { DatePicker } from '@/components/ui/date-picker';
@@ -293,16 +294,15 @@ export function AuditLogView({ headerActions }: AuditLogViewProps = {}) {
                 />
                 <div className="flex-1 min-h-0 overflow-y-auto p-4">
                     <div className="mb-3 flex justify-end">
-                        <Button
+                        <IconBusyButton
                             variant="outline"
                             size="sm"
-                            className="gap-1.5"
+                            icon={RefreshCw}
+                            label="Refresh"
+                            className="gap-1.5 [&_svg]:size-3.5"
                             onClick={() => { fetchLogs(); if (view === 'stream' && isPaid) fetchStats(); }}
-                            disabled={loading}
-                        >
-                            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
-                            Refresh
-                        </Button>
+                            pending={loading}
+                        />
                     </div>
                     {view === 'stream' ? (
                         <StreamView
@@ -373,10 +373,7 @@ export function AuditLogView({ headerActions }: AuditLogViewProps = {}) {
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             )}
-                            <Button variant="outline" size="sm" className="border-border" onClick={() => { fetchLogs(); if (view === 'stream' && isPaid) fetchStats(); }} disabled={loading}>
-                                <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
-                                Refresh
-                            </Button>
+                            <IconBusyButton variant="outline" size="sm" icon={RefreshCw} label="Refresh" className="border-border" onClick={() => { fetchLogs(); if (view === 'stream' && isPaid) fetchStats(); }} pending={loading} />
                         </div>
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">

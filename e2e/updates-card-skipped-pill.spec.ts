@@ -260,7 +260,11 @@ async function openSkippedCard(page: Page, ids: CardSelectors, desktop = false) 
   if (desktop) await page.getByRole('radio', { name: 'Cards' }).click();
   const card = page.getByTestId(ids.card).first();
   await expect(card.getByTestId('auto-pill')).toHaveText(/Auto: skipped/);
-  await expect(card.getByText('Skipped by update policy', { exact: true })).toBeVisible();
+  // The desktop card says it once, in the pill. The phone pill is terse, so its
+  // footer carries the sentence.
+  const footerSentence = card.getByText('Skipped by update policy', { exact: true });
+  if (desktop) await expect(footerSentence).toHaveCount(0);
+  else await expect(footerSentence).toBeVisible();
   return card;
 }
 

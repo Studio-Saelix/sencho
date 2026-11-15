@@ -11,9 +11,14 @@ import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 // stats; stub them with markers so this test focuses on segment behavior and the
 // mobile editing flow. Capture showServiceChips for wiring assertions.
 let lastShowServiceChips: boolean | undefined;
+// Capture the scoped deploy permission handed to the service lifecycle menus.
+let lastContainersHealthCanDeploy: boolean | undefined;
 vi.mock('./editor-view-blocks', () => ({
     StackIdentityHeader: () => <div>identity-header</div>,
-    ContainersHealth: () => <div>health-pane</div>,
+    ContainersHealth: ({ canDeploy }: { canDeploy: boolean }) => {
+        lastContainersHealthCanDeploy = canDeploy;
+        return <div>health-pane</div>;
+    },
     StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
         lastShowServiceChips = showServiceChips;
         return <div>logs-pane</div>;
@@ -159,6 +164,25 @@ describe('MobileStackDetail segments', () => {
         render(<MobileStackDetail {...makeProps({ onMobileBack })} />);
         fireEvent.click(screen.getByRole('button', { name: 'Back to stacks' }));
         expect(onMobileBack).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('MobileStackDetail service lifecycle permission', () => {
+    afterEach(() => { lastContainersHealthCanDeploy = undefined; });
+
+    it('passes the stack-and-node-scoped stack:deploy permission to the health pane', () => {
+        const can = vi.fn().mockReturnValue(true);
+        render(<MobileStackDetail {...makeProps({ can })} />);
+        fireEvent.click(screen.getByRole('tab', { name: 'Health' }));
+        expect(can).toHaveBeenCalledWith('stack:deploy', 'stack', 'web', undefined);
+        expect(lastContainersHealthCanDeploy).toBe(true);
+    });
+
+    it('propagates a denied stack:deploy to the health pane', () => {
+        const can = vi.fn().mockReturnValue(false);
+        render(<MobileStackDetail {...makeProps({ can })} />);
+        fireEvent.click(screen.getByRole('tab', { name: 'Health' }));
+        expect(lastContainersHealthCanDeploy).toBe(false);
     });
 });
 

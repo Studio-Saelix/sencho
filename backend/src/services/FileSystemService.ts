@@ -1171,8 +1171,16 @@ export class FileSystemService {
 
   async readFile(filePath: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
     this.assertWithinBase(filePath);
-    await this.assertRealWithinBase(filePath);
-    return fsPromises.readFile(filePath, encoding);
+    // Canonical js/path-injection barrier inline with the read sink: static
+    // analysis only credits the containment check when it sits here, the same
+    // pattern envExists and backupStackFiles use.
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, filePath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(safePath);
+    return fsPromises.readFile(safePath, encoding);
   }
 
   /**

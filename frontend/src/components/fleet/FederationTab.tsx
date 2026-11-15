@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Ban, Loader2, Pin, Server } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
-import { FleetTabHeading } from './FleetEmptyState';
 import {
     Select,
     SelectContent,
@@ -95,11 +94,6 @@ export function FederationTab({ canManage, canManageNode }: FederationTabProps) 
 
     return (
         <div className="space-y-6">
-            <FleetTabHeading
-                title="Placement control"
-                subtitle="Mark nodes unschedulable and pin blueprints to specific nodes."
-            />
-
             <section className="rounded-xl border border-card-border bg-card">
                 <div className="px-4 py-3 border-b border-card-border flex items-center justify-between">
                     <div className="flex items-center gap-2">

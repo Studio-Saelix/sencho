@@ -56,9 +56,11 @@ import { systemMaintenanceRouter } from './routes/systemMaintenance';
 import { volumesRouter } from './routes/volumes';
 import { templatesRouter } from './routes/templates';
 import { securityRouter } from './routes/security';
+import { socketRouter } from './routes/socket';
 import { dashboardRouter } from './routes/dashboard';
 import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
+import { nodeBootstrapRouter } from './routes/nodeBootstrap';
 import { stacksRouter } from './routes/stacks';
 import { stackObservationRouter } from './routes/stackObservation';
 import { stackActivityRouter } from './routes/stackActivity';
@@ -177,6 +179,9 @@ app.use('/api/system', systemMaintenanceRouter);
 app.use('/api/volumes', volumesRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/security', securityRouter);
+// Read-only Docker socket access discovery, computed by the node that owns the
+// Docker daemon (ordinary remote-proxy route, never hub-held).
+app.use('/api/socket', socketRouter);
 app.use('/api/containers', containersRouter);
 app.use('/api/ports', portsRouter);
 app.use('/api/dashboard', dashboardRouter);
@@ -184,6 +189,9 @@ app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/dependency-map', dependencyMapRouter);
 app.use('/api/networking', networkingRouter);
 app.use('/api/registry-delivery', registryDeliveryRouter);
+// Read-only bootstrap preflight. Mounted ahead of the nodes router so its exact
+// paths are not matched by `/api/nodes/:id`.
+app.use('/api/nodes/bootstrap', nodeBootstrapRouter);
 app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
 // Read-only AI observation projections; ahead of the generic stacks router so

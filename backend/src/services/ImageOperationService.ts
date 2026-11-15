@@ -1204,8 +1204,12 @@ export class ImageOperationService {
   private async atomicWrite(filePath: string, content: string): Promise<void> {
     const temporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
     await fs.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    // The rename publishes the file, so nothing slow may follow it. Callers
+    // release the endpoint claim only after persist() resolves, so a reader of
+    // the current-state file must not see a terminal state while the claim is
+    // still held.
+    await fs.chmod(temporary, 0o600);
     await fs.rename(temporary, filePath);
-    await fs.chmod(filePath, 0o600);
   }
 
   private async writeDockerConfig(

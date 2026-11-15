@@ -22,6 +22,7 @@ import { useVisualBusy } from '@/hooks/useVisualBusy';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { FleetMapState } from './useFleetMap';
 import { Button } from '@/components/ui/button';
+import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { Input } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -190,9 +191,6 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
   const { data, loading, progress, refresh, retryFailed } = map;
   // A fast answer never flashes the skeleton; the pane just holds still.
   const { showBusy } = useVisualBusy(!data);
-  // The Refresh icon spins only for a request that outlasts the busy delay, so
-  // a quiet revalidation on tab reopen never flashes it.
-  const { showBusy: refreshBusy } = useVisualBusy(loading);
   const [view, setView] = useState<ViewMode>('graph');
   const [search, setSearch] = useState('');
   const [nodeFilter, setNodeFilter] = useState<Set<number>>(new Set());
@@ -457,9 +455,15 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
             {progress.done} of {progress.total} nodes
           </span>
         )}
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading} className={cn('gap-2', !progress && 'ml-auto')}>
-          <RefreshCw className={cn('w-4 h-4', refreshBusy && 'animate-spin')} />Refresh
-        </Button>
+        <IconBusyButton
+          variant="outline"
+          size="sm"
+          icon={RefreshCw}
+          label="Refresh"
+          pending={loading}
+          onClick={refresh}
+          className={cn(!progress && 'ml-auto')}
+        />
       </div>
 
       {/* Unreachable-node banner */}

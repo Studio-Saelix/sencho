@@ -215,6 +215,16 @@ export const RECOVERY_REFUSAL_REASONS = [
   'confirmation_mismatch',
   'no_fence',
   'fence_released',
+  /** The point holds no snapshot to read: it is still capturing, failed, or was interrupted. */
+  'point_not_readable',
+  /** The requested path is not in the point. */
+  'path_not_found',
+  /** A browse named something that is not a directory. */
+  'not_a_directory',
+  /** The entry (a directory, symlink or special file) or the point kind has no read of that shape. */
+  'unsupported_entry_type',
+  /** The node is already running as many point reads as it allows at once. */
+  'read_capacity',
 ] as const;
 export type RecoveryRefusalReason = (typeof RECOVERY_REFUSAL_REASONS)[number];
 
@@ -356,7 +366,16 @@ export interface RecoveryNodeDescriptor {
    * widens what the hub will send it.
    */
   restoreModes: RestoreMode[];
+  /**
+   * The point reads this node serves. A node that predates the field is read as
+   * `[]`, so the hub refuses a browse or a download with `update_required`
+   * instead of sending it to a node that has no such route.
+   */
+  pointReads: PointReadKind[];
 }
+
+/** A read of a saved point's contents: one directory page, or one file body. */
+export type PointReadKind = 'list' | 'download';
 
 // --- Operations and locks ---------------------------------------------------
 
@@ -564,4 +583,137 @@ export interface BackupEngine {
     ctx: EngineExecutionContext,
   ): Promise<EngineResult<{ result: 'verified' | 'mismatch' }>>;
   restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>>;
+}
+
+// --- Point contents (read-only browse and download) -------------------------
+
+/**
+ * One entry inside a saved point. `path` is absolute within the point root
+ * (`/` is the root) and never names the helper's mount (`/data`).
+ */
+export interface PointEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  /** Bytes for a regular file; null for every other type and for a file record with no size. */
+  size: number | null;
+  /** Permission bits as four octal digits, such as `0644`, or null when the record has none. */
+  mode: string | null;
+  /** Modification time as restic recorded it (RFC 3339), or null when it is missing or invalid. */
+  mtime: string | null;
+  uid: number | null;
+  gid: number | null;
+  /** Only a regular file with a known size has a body a download can serve. */
+  downloadable: boolean;
+}
+
+/**
+ * Whether a point can be read at all, decided from stored records alone. It
+ * starts no helper and authorizes nothing: a caller that may not read the
+ * storage is refused before this is consulted.
+ */
+export type PointReadEligibility =
+  | { readable: true; point: ReadablePoint }
+  | {
+    readable: false;
+    reason: Extract<RecoveryRefusalReason, 'point_not_readable' | 'repository_replaced' | 'unsupported_entry_type'>;
+  };
+
+/** A finished point that recorded a snapshot: the only kind a read can open. */
+export type ReadablePoint = Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>;
+
+/** The point's own evidence beside a listing. */
+export interface PointReadEvidence {
+  id: string;
+  status: 'succeeded' | 'partial';
+  snapshotId: string;
+  storage: { id: string; locator: string; generation: number; state: StorageIdentity['state'] };
+  consistency: ConsistencyClass;
+  capture: CaptureSummary;
+  /** The capture left nothing out but policy exclusions. Never true for a partial point. */
+  complete: boolean;
+  /** The latest integrity check, by the rule coverage uses. A read never changes it. */
+  integrity: {
+    state: 'verified' | 'unverified' | 'mismatch';
+    method: IntegrityMethod | null;
+    verifiedAt: number | null;
+  };
+  completedAt: number;
+}
+
+/** One page of one directory of a point, with the point's evidence. */
+export interface PointListing {
+  point: PointReadEvidence;
+  path: string;
+  entries: PointEntry[];
+  /** What the capture left out directly inside this directory. */
+  skipped: Array<{ name: string; reason: ExclusionReason }>;
+  offset: number;
+  nextOffset: number | null;
+  limits: { pageSize: number; concurrentReads: number };
+}
+
+/** One directory read from the engine: the path's own record and one page of its children. */
+export type PointDirectoryRead =
+  | { found: false }
+  | { found: true; self: PointEntry; entries: PointEntry[]; nextOffset: number | null };
+
+/** What a content read needs from the engine. `path` is already validated and absolute. */
+export interface ContentReadRequest {
+  snapshotId: string;
+  repositoryId: string;
+  path: string;
+}
+
+/**
+ * Context for a read. Reads create no operation row and hold no lock: they are
+ * bounded, cancellable observations of an immutable snapshot.
+ */
+export interface ContentReadContext {
+  /** Correlation id for the helper container and the node-local log. */
+  operationId: string;
+  signal: AbortSignal;
+}
+
+/** Backpressure control a chunk sink uses when its destination is saturated. */
+export interface ContentChunkControl {
+  pause(): void;
+  resume(): void;
+}
+
+/** Receives raw file bytes in order. */
+export type ContentChunkSink = (chunk: Buffer, control: ContentChunkControl) => void;
+
+export interface ContentDump {
+  /** Bytes actually streamed to the sink. */
+  bytes: number;
+}
+
+/**
+ * The read half of the engine contract: what a saved point holds, without
+ * restoring it. Kept apart from `BackupEngine` because a read needs no lock,
+ * writes no operation and returns bytes to a caller rather than evidence to a
+ * store. A caller refuses `capability_unavailable` when the registered engine
+ * does not implement it.
+ */
+export interface PointContentReader {
+  /**
+   * The path's own record and one page of its immediate children, in the
+   * snapshot's tree order. `pageSize` 0 reads the record alone.
+   */
+  readDirectory(
+    request: ContentReadRequest,
+    page: { offset: number; pageSize: number },
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<PointDirectoryRead>>;
+  /**
+   * Stream one regular file's bytes. `expectedBytes` is what the record
+   * reported, so a short or overlong body is a failure, never a success.
+   */
+  dumpFile(
+    request: ContentReadRequest,
+    expectedBytes: number,
+    sink: ContentChunkSink,
+    ctx: ContentReadContext,
+  ): Promise<EngineResult<ContentDump>>;
 }

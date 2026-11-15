@@ -77,6 +77,7 @@ describe('NodeRegistry.fetchMetaForNode', () => {
       online: false,
       imagePinKind: null,
       updateBlocked: false, imageChannel: null,
+      selfUpdateUnavailable: null,
     });
     expect(axiosSpy).not.toHaveBeenCalled();
     db.deleteNode(nodeId);
@@ -154,6 +155,40 @@ describe('NodeRegistry.fetchMetaForNode', () => {
     expect(init.headers).toEqual({ Authorization: 'Bearer real-token' });
     expect(init.httpAgent).toBeDefined();
     expect(init.httpsAgent).toBeDefined();
+
+    db.deleteNode(nodeId);
+  });
+
+  it('keeps a known selfUpdateUnavailable code and drops an unknown one', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = db.addNode({
+      name: 'meta-code',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'https://remote.example.com:1852',
+      api_token: 'token',
+    });
+    vi.spyOn(reg, 'getProxyTarget').mockReturnValue({
+      apiUrl: 'https://remote.example.com:1852',
+      apiToken: 'token',
+      trustedLoopback: false,
+    });
+    const axiosSpy = vi.spyOn(axios, 'get');
+
+    axiosSpy.mockResolvedValueOnce({
+      data: { version: '0.98.2', capabilities: [], selfUpdateUnavailable: 'not_compose_managed' },
+    });
+    const known = await reg.fetchMetaForNode(nodeId);
+    expect(known.selfUpdateUnavailable).toBe('not_compose_managed');
+
+    axiosSpy.mockResolvedValueOnce({
+      data: { version: '0.98.2', capabilities: [], selfUpdateUnavailable: 'something the hub invented' },
+    });
+    const unknown = await reg.fetchMetaForNode(nodeId);
+    expect(unknown.selfUpdateUnavailable).toBeNull();
 
     db.deleteNode(nodeId);
   });

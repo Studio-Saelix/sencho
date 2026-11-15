@@ -100,7 +100,7 @@ interface StackStatus {
 }
 
 interface StackCounts {
-  [key: string]: { running: number; total: number } | undefined;
+  [key: string]: { running: number; total: number; restarting?: number } | undefined;
 }
 
 export interface RemoteResult {

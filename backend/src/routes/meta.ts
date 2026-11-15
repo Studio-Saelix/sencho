@@ -46,6 +46,10 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
   const completedAt = ImageOperationService.getInstance().getEndpointProviderCompletedAt();
   const updateBlocked = pin ? isRepinBlocked(pin.pinKind) : false;
   const runningRef = SelfIdentityService.getInstance().getBuildInfo().imageRef;
+  // Bounded (never free text) reason the node cannot recreate its own Compose
+  // configuration. Present only while self-update is unavailable, so an
+  // eligible node's public document is unchanged.
+  const selfUpdateUnavailable = selfUpdate.isAvailable() ? null : selfUpdate.getUnavailableCode();
   res.json({
     version: getSenchoVersion(),
     capabilities: getActiveCapabilities(),
@@ -59,6 +63,7 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
     // Like imagePinKind, this is a non-sensitive enum; no image reference is
     // ever exposed on this public endpoint.
     ...(runningRef ? { buildChannel: classifyBuildChannel(runningRef) } : {}),
+    ...(selfUpdateUnavailable ? { selfUpdateUnavailable } : {}),
     updateBlocked,
     ...(updateError ? { updateError } : {}),
     // A boolean only: tells the hub a Docker endpoint replacement is still being

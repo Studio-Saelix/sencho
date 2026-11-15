@@ -3,7 +3,15 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
-import { disableCapability } from './CapabilityRegistry';
+import { disableCapability, enableCapability } from './CapabilityRegistry';
+import SelfIdentityService from './SelfIdentityService';
+import { ImageOperationService } from './ImageOperationService';
+import {
+  SELF_UPDATE_RETRY_INITIAL_MS,
+  TRANSIENT_SELF_UPDATE_UNAVAILABLE_CODES,
+  nextSelfUpdateRetryDelay,
+  type SelfUpdateUnavailableCode,
+} from '../helpers/selfUpdateEligibility';
 import { resolveDockerEndpointProvider, type DockerEndpointContainer } from './DockerEndpointProvider';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -412,6 +420,11 @@ class SelfUpdateService {
   private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
   private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
+  /** Bounded reason the last detection refused, null while available. */
+  private unavailableCode: SelfUpdateUnavailableCode = 'detecting';
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDelayMs = SELF_UPDATE_RETRY_INITIAL_MS;
+  private stopped = false;
 
   public static getInstance(): SelfUpdateService {
     if (!SelfUpdateService.instance) {
@@ -420,73 +433,150 @@ class SelfUpdateService {
     return SelfUpdateService.instance;
   }
 
+  /**
+   * Boot-time detection. A transient failure (Docker not answering yet, an
+   * unresolved identity, a failed Compose CLI probe) arms the retry timer, so a
+   * node that was slow to start still gains self-management without a restart.
+   */
   async initialize(): Promise<void> {
-    const hostname = process.env.HOSTNAME;
-    if (!hostname) {
-      console.log('[SelfUpdate] HOSTNAME not set - self-update unavailable (not running in Docker?)');
-      disableCapability('self-update');
-      return;
+    if (this.canSelfUpdate) return;
+    this.applyDetection(await this.detect());
+  }
+
+  /** Timer lifecycle: resume a retry armed by a transient boot failure. */
+  start(): void {
+    this.stopped = false;
+    if (!this.canSelfUpdate && TRANSIENT_SELF_UPDATE_UNAVAILABLE_CODES.has(this.unavailableCode)) {
+      this.scheduleRetry();
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  /**
+   * Null while self-update is available, otherwise the bounded reason the last
+   * detection refused. Never free text: this crosses the public /api/meta
+   * boundary and the Fleet row.
+   */
+  getUnavailableCode(): SelfUpdateUnavailableCode | null {
+    return this.canSelfUpdate ? null : this.unavailableCode;
+  }
+
+  /**
+   * Resolve our own container and read the Compose labels off it. Resolution
+   * goes through SelfIdentityService first (HOSTNAME, then the cgroup full
+   * container id, then mountinfo), so a Compose `hostname:` override no longer
+   * hides the container from self-update. Returns the reason it refused, or
+   * null when the context is ready.
+   */
+  private async detect(): Promise<SelfUpdateUnavailableCode | null> {
+    const identity = SelfIdentityService.getInstance();
+    let resolvedId: string | null = null;
+    try {
+      const state = await identity.ensureResolved();
+      if (state === 'unresolved') {
+        console.log('[SelfUpdate] Could not identify own container yet - will retry');
+        return 'container_unidentified';
+      }
+      if (state === 'resolved') resolvedId = identity.getIdentity().containerId;
+    } catch (error) {
+      console.log('[SelfUpdate] Self identity probe failed - will retry:', (error as Error).message);
+      return 'container_unidentified';
     }
 
+    // Not in a container (dev / bare metal): keep the legacy HOSTNAME behaviour
+    // so an environment that never resolves an identity still refuses the same way.
+    const hostname = process.env.HOSTNAME;
+    const target = resolvedId ?? hostname;
+    if (!target) {
+      console.log('[SelfUpdate] HOSTNAME not set - self-update unavailable (not running in Docker?)');
+      return 'not_in_container';
+    }
+
+    let info: Awaited<ReturnType<ReturnType<ReturnType<typeof DockerController.prototype.getDocker>['getContainer']>['inspect']>>;
     try {
       const docker = DockerController.getInstance().getDocker();
-      const container = docker.getContainer(hostname);
-      const info = await container.inspect();
-      const labels = info.Config?.Labels ?? {};
-
-      const workingDir = labels['com.docker.compose.project.working_dir'];
-      const configFiles = labels['com.docker.compose.project.config_files'];
-      const serviceName = labels['com.docker.compose.service'];
-
-      if (!workingDir || !configFiles || !serviceName) {
-        console.log('[SelfUpdate] Container lacks Docker Compose labels - self-update unavailable');
-        disableCapability('self-update');
-        return;
+      info = await docker.getContainer(target).inspect();
+    } catch (error) {
+      const e = error as { statusCode?: number; message?: string };
+      if (e?.statusCode === 404) {
+        console.log('[SelfUpdate] Own container not found - self-update unavailable');
+        return resolvedId ? 'container_unidentified' : 'not_in_container';
       }
+      console.log('[SelfUpdate] Could not inspect own container - will retry:', e?.message || String(error));
+      return 'docker_unreachable';
+    }
 
-      // Verify docker compose CLI is available inside the container.
-      // execFileAsync (not Sync) so the parallel boot-task block in
-      // bootstrap/startup.ts can actually run TrivyService and DockerEventManager
-      // concurrently instead of waiting on a 5s blocking spawn here.
-      try {
-        await execFileAsync('docker', ['compose', 'version'], { timeout: 5000 });
-      } catch {
-        console.log('[SelfUpdate] docker compose CLI not available in container');
-        disableCapability('self-update');
-        return;
-      }
+    const labels = info.Config?.Labels ?? {};
+    const workingDir = labels['com.docker.compose.project.working_dir'];
+    const configFiles = labels['com.docker.compose.project.config_files'];
+    const serviceName = labels['com.docker.compose.service'];
 
-      // Read the container's own image name for the legacy (no target) pull and
-      // as a fallback ref. It is captured once here and can go stale if the
-      // compose file is edited later, so update decisions resolve the compose
-      // image fresh instead of trusting this value.
-      const imageName = info.Config?.Image;
-      if (!imageName) {
-        console.log('[SelfUpdate] Could not determine container image name');
-        disableCapability('self-update');
-        return;
-      }
+    if (!workingDir || !configFiles || !serviceName) {
+      console.log('[SelfUpdate] Container lacks Docker Compose labels - self-update unavailable');
+      return 'not_compose_managed';
+    }
 
-      // Collect all host bind mounts so the helper container can forward them.
-      // This lets docker compose resolve env_file, configs, secrets, and any
-      // other host-path references that live outside the compose working dir.
-      const rawMounts = (info.Mounts ?? []) as DockerMount[];
-      const hostBindMounts: HostMount[] = rawMounts
-        .filter(m => m.Type === 'bind' && m.Source && m.Destination)
-        .map(m => ({ source: m.Source, destination: m.Destination }));
+    // Verify docker compose CLI is available inside the container.
+    // execFileAsync (not Sync) so the parallel boot-task block in
+    // bootstrap/startup.ts can actually run TrivyService and DockerEventManager
+    // concurrently instead of waiting on a 5s blocking spawn here.
+    try {
+      await execFileAsync('docker', ['compose', 'version'], { timeout: 5000 });
+    } catch {
+      console.log('[SelfUpdate] docker compose CLI not available in container - will retry');
+      return 'compose_cli_unavailable';
+    }
 
-      const dataDirHost = findDataDirHost(rawMounts);
-      if (!dataDirHost) {
-        console.log('[SelfUpdate] /app/data mount not found - update error recovery and compose repin will be unavailable');
-      }
+    // Read the container's own image name for the legacy (no target) pull and
+    // as a fallback ref. It is captured once here and can go stale if the
+    // compose file is edited later, so update decisions resolve the compose
+    // image fresh instead of trusting this value.
+    const imageName = info.Config?.Image;
+    if (!imageName) {
+      console.log('[SelfUpdate] Could not determine container image name');
+      return 'image_unknown';
+    }
 
-      this.composeContext = {
-        workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts,
-        project: labels['com.docker.compose.project'] || null,
-        runningImageId: typeof info.Image === 'string' && info.Image ? info.Image : null,
-      };
+    // Collect all host bind mounts so the helper container can forward them.
+    // This lets docker compose resolve env_file, configs, secrets, and any
+    // other host-path references that live outside the compose working dir.
+    const rawMounts = (info.Mounts ?? []) as DockerMount[];
+    const hostBindMounts: HostMount[] = rawMounts
+      .filter(m => m.Type === 'bind' && m.Source && m.Destination)
+      .map(m => ({ source: m.Source, destination: m.Destination }));
+
+    const dataDirHost = findDataDirHost(rawMounts);
+    if (!dataDirHost) {
+      console.log('[SelfUpdate] /app/data mount not found - update error recovery and compose repin will be unavailable');
+    }
+
+    this.composeContext = {
+      workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts,
+      project: labels['com.docker.compose.project'] || null,
+      runningImageId: typeof info.Image === 'string' && info.Image ? info.Image : null,
+    };
+    console.log(`[SelfUpdate] Ready - service="${serviceName}" image="${imageName}" in ${workingDir}`);
+    return null;
+  }
+
+  /** Record a detection outcome and decide whether to keep retrying. */
+  private applyDetection(code: SelfUpdateUnavailableCode | null): void {
+    if (code === null) {
       this.canSelfUpdate = true;
-      console.log(`[SelfUpdate] Ready - service="${serviceName}" image="${imageName}" in ${workingDir}`);
+      this.unavailableCode = 'detecting';
+      enableCapability('self-update');
+      this.retryDelayMs = SELF_UPDATE_RETRY_INITIAL_MS;
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
 
       // Warm the pin-info cache in the background for diagnostics and the first
       // status/meta read. This is never a source of truth for an update
@@ -500,9 +590,72 @@ class SelfUpdateService {
       // Surface any error from a previous failed update attempt (persisted by
       // the helper container) so the new process can report it to the user.
       this.recoverPreviousError();
+      return;
+    }
+
+    this.canSelfUpdate = false;
+    this.composeContext = null;
+    this.unavailableCode = code;
+    disableCapability('self-update');
+    if (TRANSIENT_SELF_UPDATE_UNAVAILABLE_CODES.has(code)) {
+      this.scheduleRetry();
+    } else {
+      // A permanent reason is final for this process; a timer armed by an
+      // earlier transient result must not fire a probe that cannot change it.
+      this.retryDelayMs = SELF_UPDATE_RETRY_INITIAL_MS;
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+    }
+  }
+
+  /**
+   * Arm the next detection attempt. Only a transient result schedules one, and
+   * never while an endpoint replacement holds the Docker endpoint: that probe
+   * would read a half-moved connection and could cache the wrong context.
+   */
+  private scheduleRetry(): void {
+    if (this.stopped || this.canSelfUpdate || this.retryTimer) return;
+    if (ImageOperationService.getInstance().isEndpointProviderPending()) {
+      // Hold at the current backoff step: the endpoint is mid-replacement, so a
+      // probe now would read a half-moved connection. Check again afterwards.
+      this.armRetry(this.retryDelayMs, false);
+      return;
+    }
+    const delay = this.retryDelayMs;
+    this.armRetry(delay, true);
+  }
+
+  private armRetry(delayMs: number, growBackoff: boolean): void {
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.retryDetection();
+    }, delayMs);
+    this.retryTimer.unref?.();
+    if (growBackoff) this.retryDelayMs = nextSelfUpdateRetryDelay(delayMs);
+  }
+
+  private async retryDetection(): Promise<void> {
+    if (this.stopped || this.canSelfUpdate) return;
+    if (ImageOperationService.getInstance().isEndpointProviderPending()) {
+      // Still claimed: check again after the current backoff step instead of
+      // probing a half-moved Docker endpoint.
+      this.scheduleRetry();
+      return;
+    }
+    try {
+      this.applyDetection(await this.detect());
     } catch (error) {
-      console.log('[SelfUpdate] Could not inspect own container - self-update unavailable:', (error as Error).message);
+      // A retry must never take the process down, and an unexpected throw is
+      // itself evidence of a transient probe failure. Keep retrying rather than
+      // stranding the node on whatever it read last.
+      console.warn('[SelfUpdate] Detection retry failed:', (error as Error).message);
+      this.canSelfUpdate = false;
+      this.composeContext = null;
+      this.unavailableCode = 'detecting';
       disableCapability('self-update');
+      this.scheduleRetry();
     }
   }
 

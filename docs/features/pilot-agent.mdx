@@ -84,6 +84,17 @@ Pilot mode narrows the operator surface in a couple of places where parity with 
 
 Running the agent inside an LXC container needs one extra read-only mount so the node's CPU and memory usage is measured from the Docker host instead of the outer machine. See [Docker hosts inside an LXC or another container](/getting-started/configuration#docker-hosts-inside-an-lxc-or-another-container).
 
+### Default directories
+
+The guided [bootstrap preflight](/features/node-bootstrap) and manual enrollment share the same layout:
+
+- **Compose stacks directory:** `/opt/docker/sencho` by default. The agent mounts it at the same absolute path inside the container and sets `COMPOSE_DIR` to it.
+- **Agent installation directory:** `/opt/sencho-agent` by default. Holds the agent's `compose.yaml`, the optional hub CA and a bootstrap marker. It is separate from the stacks directory so the agent is never listed as a stack.
+
+The Agent installation directory is chosen only in the bootstrap workflow; it has no Settings field. The agent's persistent data is always the fixed Compose volume `sencho-agent-data` mounted at `/app/data`; Compose creates it under the project-qualified name `sencho-agent_sencho-agent-data`. There is no configurable data directory, because enrollment, self-update and recovery all depend on that named volume.
+
+Because self-update reads its compose context from the container's Compose labels, a custom Agent installation directory remains self-updateable: the compose file and service are read from the labels, not from a fixed path. The generated project and container name `sencho-agent` and service `agent` are what the bootstrap preflight uses to detect an existing Pilot, so keep them when you enroll manually.
+
 ### The control instance's public URL
 
 When the enrollment dialog generates the agent's compose file, it bakes the control instance's URL into `SENCHO_PRIMARY_URL` by reading the Host header on the admin's request. That works on a LAN, but it breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address: the baked-in URL is then unreachable from the pilot.

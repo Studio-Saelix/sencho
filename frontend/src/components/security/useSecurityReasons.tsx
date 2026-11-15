@@ -3,7 +3,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { toast } from '@/components/ui/toast-store';
-import type { DismissedItem } from '@/components/ui/dismissed-section';
+import type { DismissedItem } from '@/components/ui/dismissed-sheet';
 import { describeDismissal } from '@/components/fleet/readiness/describeDismissal';
 import { useNow } from '@/components/fleet/readiness/useNow';
 import { useNodeDismissals } from '@/hooks/useNodeDismissals';

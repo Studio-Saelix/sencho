@@ -65,6 +65,8 @@ interface HttpStreamState extends StreamMeta {
     kind: 'http';
     res: ServerResponse;
     headersWritten: boolean;
+    /** True while the agent has been asked (`http_res_pause`) to stop sending body for this stream. */
+    agentPaused: boolean;
 }
 
 interface WsStreamState extends StreamMeta {
@@ -363,7 +365,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         }
 
         const streamId = this.streamIds.allocate();
-        const state: HttpStreamState = { kind: 'http', res, headersWritten: false };
+        const state: HttpStreamState = { kind: 'http', res, headersWritten: false, agentPaused: false };
         this.streams.set(streamId, state);
         this.refreshIdleTimer(streamId, state);
 
@@ -642,8 +644,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                     try { s.res.writeHead(200); } catch { /* ignore */ }
                     s.headersWritten = true;
                 }
-                try { s.res.write(frame.payload); } catch { /* ignore */ }
+                let flushed = true;
+                try { flushed = s.res.write(frame.payload); } catch { /* ignore */ }
                 this.refreshIdleTimer(frame.streamId, s);
+                if (!flushed) this.pauseAgentResponse(frame.streamId, s);
                 break;
             }
             case BinaryFrameType.WsMessageBinary: {
@@ -715,6 +719,24 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     }
 
     // --- Helpers ---
+
+    /**
+     * The client response's write buffer is full: ask the agent to stop
+     * reading the loopback response until it drains. Without this, a large
+     * download to a slow client piles up in this process's memory. One pause
+     * per stall; the next pause can only go out after the resume.
+     */
+    private pauseAgentResponse(streamId: number, state: HttpStreamState): void {
+        if (state.agentPaused) return;
+        state.agentPaused = true;
+        this.sendJson({ t: 'http_res_pause', s: streamId });
+        state.res.once('drain', () => {
+            if (this.streams.get(streamId) !== state) return;
+            state.agentPaused = false;
+            this.refreshIdleTimer(streamId, state);
+            this.sendJson({ t: 'http_res_resume', s: streamId });
+        });
+    }
 
     private pauseRequest(streamId: number, req: IncomingMessage): void {
         if (this.pausedReqs.has(streamId)) return;
@@ -815,7 +837,11 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                     state.res.writeHead(502, { 'content-type': 'text/plain' });
                     state.res.end('pilot tunnel closed');
                 } else {
-                    state.res.end();
+                    // The status line and part of the body are already on
+                    // the wire, so a clean end would hand the client a
+                    // truncated body that looks complete. Destroying the
+                    // socket makes the client see an aborted response.
+                    state.res.destroy();
                 }
             } catch { /* ignore */ }
         } else if (state.kind === 'ws') {

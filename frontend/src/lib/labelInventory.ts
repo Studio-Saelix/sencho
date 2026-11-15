@@ -8,6 +8,7 @@ import {
   type SenchoLabelState,
 } from './senchoLabels';
 import { RETIRED_URL_LABEL } from './serviceUrlLabel';
+import { isFileHash, isUsableAuthoredLocation, normalizeStackPath } from './authoredLocation';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -87,10 +88,31 @@ export interface StackLabelReplica {
   inspectFailed?: boolean;
 }
 
+/**
+ * The authored origin of one Compose-declared label. Values never appear here.
+ * Optional so a node that predates the source model still renders.
+ */
+export interface LabelAuthoredOrigin {
+  /** Omitted when only an ambiguity is known. */
+  source?: 'inline' | 'label-file';
+  file?: string;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  /** sha256 of the file content the range was computed against. Required for
+   *  an acting origin: navigation never applies a range without it. */
+  fileHash?: string;
+  shared?: boolean;
+  overridden?: boolean;
+  ambiguity?: 'duplicate-key' | 'unparsed-source' | 'interpolated' | 'outside-boundary' | 'multiple-sources' | 'compose-tag';
+}
+
 export interface StackServiceLabelRow {
   service: string;
   declaredLabels: LabelValue[];
   replicas: StackLabelReplica[];
+  authored?: Record<string, LabelAuthoredOrigin>;
 }
 
 export interface StackLabelInventory {
@@ -228,6 +250,59 @@ export function readLabelBehavior(source: LabelSource, key: string, raw: unknown
   };
 }
 
+const AUTHORED_AMBIGUITIES: ReadonlySet<string> = new Set([
+  'duplicate-key', 'unparsed-source', 'interpolated', 'outside-boundary', 'multiple-sources', 'compose-tag',
+]);
+
+/**
+ * Read the optional authored map from a proxied payload. An entry is dropped
+ * unless its source and (for an acting origin) its file and range are valid, so
+ * a malformed body cannot render a link that opens nothing.
+ */
+export function readAuthoredOrigins(raw: unknown, declaredKeys: ReadonlySet<string>): Record<string, LabelAuthoredOrigin> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  // A null prototype keeps a document key such as `__proto__` as an own data
+  // entry; assigning it on `{}` would change the prototype instead.
+  const out: Record<string, LabelAuthoredOrigin> = Object.create(null) as Record<string, LabelAuthoredOrigin>;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!declaredKeys.has(key) || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const entry = value as Record<string, unknown>;
+    const source = entry.source === 'inline' || entry.source === 'label-file' ? entry.source : undefined;
+    const ambiguity = typeof entry.ambiguity === 'string' && AUTHORED_AMBIGUITIES.has(entry.ambiguity)
+      ? entry.ambiguity as LabelAuthoredOrigin['ambiguity']
+      : undefined;
+    if (!ambiguity && !source) continue;
+    const candidate = {
+      file: entry.file,
+      line: entry.line,
+      column: entry.column,
+      endLine: entry.endLine,
+      endColumn: entry.endColumn,
+      fileHash: entry.fileHash,
+    };
+    const acting = isUsableAuthoredLocation(candidate)
+      && normalizeStackPath(candidate.file as string) !== null
+      && isFileHash(candidate.fileHash);
+    if (!acting && !ambiguity) continue;
+    if (acting && !source) continue;
+    out[key] = {
+      ...(source ? { source } : {}),
+      ...(acting ? {
+        file: normalizeStackPath(candidate.file as string)!,
+        line: candidate.line as number,
+        column: candidate.column as number,
+        endLine: candidate.endLine as number,
+        endColumn: candidate.endColumn as number,
+        fileHash: candidate.fileHash as string,
+      } : {}),
+      ...(entry.shared === true ? { shared: true } : {}),
+      ...(entry.overridden === true ? { overridden: true } : {}),
+      ...(ambiguity ? { ambiguity } : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function readLabelValues(labels: LabelValue[]): LabelValue[] {
   return labels.map(({ behavior, ...rest }) => {
     const read = readLabelBehavior(rest.source, rest.key, behavior);
@@ -247,11 +322,18 @@ export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInv
   }
   return {
     ...inventory,
-    services: inventory.services.map(svc => ({
-      ...svc,
-      declaredLabels: readLabelValues(svc.declaredLabels),
-      replicas: svc.replicas.map(rep => ({ ...rep, runtimeLabels: readLabelValues(rep.runtimeLabels) })),
-    })),
+    services: inventory.services.map(svc => {
+      const declaredLabels = readLabelValues(svc.declaredLabels);
+      const authored = readAuthoredOrigins(svc.authored, new Set(declaredLabels.map(label => label.key)));
+      // Build the row explicitly: spreading `svc` would carry a rejected
+      // `authored` map through when every entry fails validation.
+      return {
+        service: svc.service,
+        declaredLabels,
+        replicas: svc.replicas.map(rep => ({ ...rep, runtimeLabels: readLabelValues(rep.runtimeLabels) })),
+        ...(authored ? { authored } : {}),
+      };
+    }),
   };
 }
 

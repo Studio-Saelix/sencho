@@ -275,3 +275,31 @@ describe('POST /api/templates/deploy when the rollback teardown is refused', () 
     expect(await FileSystemService.getInstance().getStacks()).toContain('refused-down');
   });
 });
+
+describe('POST /api/templates/deploy refused by the alias-expansion guard', () => {
+  const REFUSAL = 'Compose file "compose.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
+
+  it('does not read the refused rollback down as a failed rollback: nothing was started, so the files go', async () => {
+    const { ComposeExpansionRefusal } = await import('../helpers/composeExpansionGuard');
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'none_declared', autoCreateEnabled: false, stackName: 'refused-template', networks: [], declaredExternalCount: 0,
+    });
+    vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new ComposeExpansionRefusal(REFUSAL));
+    // The guard refuses the down as well: downStack no longer swallows it.
+    const downStack = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(new ComposeExpansionRefusal(REFUSAL));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'refused-template', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('nested YAML aliases');
+    expect(downStack).toHaveBeenCalled();
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('refused-template');
+    expect(res.body.rolledBack).toBe(true);
+  });
+});

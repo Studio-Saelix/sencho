@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { apiFetch } from '@/lib/api';
+import { readComposeInputsRefusal } from '@/lib/composeInputsRefusal';
 import { toast } from '@/components/ui/toast-store';
 import { LabelDot } from '../LabelPill';
 import type { Label as StackLabel } from '../label-types';
@@ -87,7 +88,8 @@ export function StackSection({ stackName, nodeId, onNavigate, labelMap }: {
                 if (res.ok) {
                     setContainers(await res.json());
                 } else {
-                    toast.error('Failed to load containers for ' + stackName);
+                    const refusal = await readComposeInputsRefusal(res);
+                    toast.error(refusal ?? 'Failed to load containers for ' + stackName);
                 }
             } catch (error) {
                 console.error('Failed to load containers for', stackName, error);

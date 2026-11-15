@@ -173,6 +173,16 @@ describe('interactive remote read deadline', () => {
       expect(remoteReadTimeoutMs('GET', '/stacks')).toBe(INTERACTIVE_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/system/docker-df')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/system/resources')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      // The socket inventory route allows itself 15 s and inspects each listed
+      // container up to its bound, so the hub must give it a slow-read budget
+      // too.
+      expect(remoteReadTimeoutMs('GET', '/socket/inventory')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      expect(remoteReadTimeoutMs('GET', '/socket/inventory/')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      expect(remoteReadTimeoutMs('GET', '/socket/inventory?x=1')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      expect(remoteReadTimeoutMs('HEAD', '/socket/inventory')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
+      // Express routes and the remote proxy's inventory gate are
+      // case-insensitive, so an upper-case spelling must get the same budget.
+      expect(remoteReadTimeoutMs('GET', '/SOCKET/INVENTORY')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/volumes/app_data/list')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/volumes/app_data/read?path=x')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
       expect(remoteReadTimeoutMs('GET', '/stacks/import/scan?path=/srv')).toBe(SLOW_REMOTE_READ_TIMEOUT_MS);
@@ -400,6 +410,26 @@ describe('interactive remote read deadline', () => {
 
       const res = await request(app)
         .get('/api/system/docker-df')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(200);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
+    }, 20_000);
+
+    it('waits past the interactive budget for the socket inventory read', async () => {
+      // The node that owns the daemon allows 15 s; the hub must not cut a remote
+      // Proxy or Pilot node off at the 5 s interactive budget first.
+      responder = (_req, res) => {
+        setTimeout(() => {
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ schemaVersion: 1, status: 'complete' }));
+        }, INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 1_000);
+      };
+
+      const res = await request(app)
+        .get('/api/socket/inventory')
         .set('Authorization', authHeader)
         .set('x-node-id', String(remoteNodeId));
 

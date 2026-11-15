@@ -401,6 +401,38 @@ describe('NodeUpdatesSheet', () => {
       if (hint) expect(hint).toHaveClass('basis-0');
     });
 
+    it('explains an unavailable Reapply with the bounded reason', () => {
+      render(<NodeUpdatesSheet {...baseProps({
+        updateStatuses: [{
+          ...DARK,
+          online: true,
+          version: '1.1.0',
+          canReapplyCompose: false,
+          reapplyUnavailableReason: 'not_compose_managed',
+        }],
+      })} />);
+      expect(screen.getByText('Reapply unavailable')).toHaveAttribute(
+        'title',
+        'Dark is not managed by Docker Compose, so it cannot recreate itself from a Compose file. Deploy Sencho from a Docker Compose project so its container carries the Compose labels.',
+      );
+    });
+
+    it('falls back to a generic sentence when the hub reported no reason', () => {
+      render(<NodeUpdatesSheet {...baseProps({
+        updateStatuses: [{
+          ...DARK,
+          online: true,
+          version: '1.1.0',
+          canReapplyCompose: false,
+          reapplyUnavailableReason: null,
+        }],
+      })} />);
+      expect(screen.getByText('Reapply unavailable')).toHaveAttribute(
+        'title',
+        'Sencho could not confirm that this node can recreate its own Compose configuration.',
+      );
+    });
+
     it.each([
       ['updating', 'Updating'],
       ['failed', 'Failed'],

@@ -37,6 +37,21 @@ export interface RuleHit {
  */
 export type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
 
+/** The authored source of a finding: stack-relative file plus a 1-based range. */
+export interface PreflightSourceLocation {
+  file: string;
+  /** Authored dot path, when the rule names one. */
+  path?: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  /** sha256 of the file content the range was computed against. A range is
+   *  only shown by a reader that can verify the opened content still hashes to
+   *  it; absent means the location cannot be verified and is not sent. */
+  fileHash?: string;
+}
+
 /** A single deterministic finding. Never carries an environment value. */
 export interface PreflightFinding {
   ruleId: string;
@@ -51,6 +66,12 @@ export interface PreflightFinding {
   remediation?: string;
   /** Service the finding is scoped to, when applicable. */
   service?: string;
+  /** Where the operator wrote the declaration, when the finding's source can be
+   *  decided. A conflict across services carries the first participating
+   *  declaration in the rendered configuration's service order (not the
+   *  file's), and only when every participant resolves to a single authored
+   *  item; otherwise it is absent. */
+  location?: PreflightSourceLocation;
   /** True when an active acknowledgement covers this finding. */
   acknowledged?: boolean;
   acknowledgementId?: number;
@@ -167,6 +188,12 @@ export interface PreflightContext {
   /** Whether the source file could be read; gates source-derived checks so an
    *  unreadable source cannot be mistaken for an empty one. */
   sourceReadable: boolean;
+  /** False when the source was read but its declared service set could not be
+   *  determined (for example a parse the authored model also refused). Gates
+   *  `effective-model-expanded` so "unknown" is never read as "no services".
+   *  Absent means the caller has no separate answer and `sourceReadable`
+   *  already decides. */
+  sourceServicesKnown?: boolean;
   nodePorts: NodePortBinding[];
   existingNetworkNames: Set<string>;
   existingVolumeNames: Set<string>;

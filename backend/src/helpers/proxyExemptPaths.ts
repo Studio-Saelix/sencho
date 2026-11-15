@@ -83,6 +83,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/api-tokens/',
   '/api/user-preferences/',
   '/api/cloud-backup/',
+  '/api/nodes/bootstrap/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

@@ -9,6 +9,19 @@ import { ComposeEnvFiles, DEFAULT_PATH_SEPARATOR, type ComposeEnvLookup } from '
 import { getErrorMessage } from './errors';
 
 /**
+ * A stored deploy spec entry that the spawn sink refuses before any `docker compose`
+ * run: an invalid, absolute, or escaping file path, or an escaping context directory.
+ * Callers that only read a rendered model may treat this as a failed render, while
+ * deploy paths keep refusing the operation.
+ */
+export class DeploySpecRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeploySpecRefusedError';
+  }
+}
+
+/**
  * Build the `docker compose` global-flag prefix (`-f` per file, `-p <project>`,
  * `--project-directory`) for a stack's authored multi-file deploy spec.
  *
@@ -51,10 +64,10 @@ function composeFileArgsFromSpec(
   const args: string[] = [];
   for (const file of spec.files) {
     if (!file || !isValidRelativeStackPath(file)) {
-      throw new Error(`Invalid compose file path in deploy spec for stack "${stackName}"`);
+      throw new DeploySpecRefusedError(`Invalid compose file path in deploy spec for stack "${stackName}"`);
     }
     if (!isPathWithinBase(path.resolve(stackDir, file), stackDir)) {
-      throw new Error(`Compose file path escapes the stack directory for stack "${stackName}"`);
+      throw new DeploySpecRefusedError(`Compose file path escapes the stack directory for stack "${stackName}"`);
     }
     args.push('-f', file);
   }
@@ -63,11 +76,11 @@ function composeFileArgsFromSpec(
 
   if (spec.contextDir) {
     if (!isValidRelativeStackPath(spec.contextDir)) {
-      throw new Error(`Invalid context directory in deploy spec for stack "${stackName}"`);
+      throw new DeploySpecRefusedError(`Invalid context directory in deploy spec for stack "${stackName}"`);
     }
     const ctxAbs = path.resolve(stackDir, spec.contextDir);
     if (!isPathWithinBase(ctxAbs, stackDir)) {
-      throw new Error(`Context directory escapes the stack directory for stack "${stackName}"`);
+      throw new DeploySpecRefusedError(`Context directory escapes the stack directory for stack "${stackName}"`);
     }
     args.push('--project-directory', ctxAbs);
   }

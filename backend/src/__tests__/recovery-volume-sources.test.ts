@@ -243,6 +243,8 @@ describe('dependents', () => {
     expect([...stacks]).toEqual(['stack-dir']);
     expect(resolution.dependents).toContainEqual({ stackName: 'stack-dir', serviceName: 'db' });
     expect(resolution.mountedByContainer).toBe(true);
+    // Everything here was found now, so the current list is the same set.
+    expect(resolution.current).toEqual(resolution.dependents);
   });
 
   it('covers an external volume declared by a stopped stack', async () => {
@@ -260,6 +262,8 @@ describe('dependents', () => {
     expect(resolution.kind).toBe('resolved');
     if (resolution.kind !== 'resolved') return;
     expect(resolution.dependents).toEqual([{ stackName: 'stopped-stack', serviceName: null }]);
+    // A rendered model declaring the volume is a current dependent.
+    expect(resolution.current).toEqual([{ stackName: 'stopped-stack', serviceName: null }]);
     expect(resolution.mountedByContainer).toBe(false);
   });
 
@@ -313,6 +317,32 @@ describe('dependents', () => {
     expect(resolution.kind).toBe('resolved');
     if (resolution.kind !== 'resolved') return;
     expect(resolution.dependents).toEqual([{ stackName: 'was-using-it', serviceName: null }]);
+    // A recorded row is not a dependent today: nothing found now names the volume.
+    expect(resolution.current).toEqual([]);
+  });
+
+  it('keeps recorded rows out of the current list when a model cannot be rendered', async () => {
+    storageIdentity.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: ENGINE,
+      kind: 'named_volume',
+      locator: 'recorded_broken',
+      generationToken: 't1',
+      dependents: [{ stackName: 'deleted-stack', serviceName: null }],
+    });
+    renderResults.set('broken', { rendered: null, stderr: 'syntax error', timedOut: false });
+    const resolution = await volumeSources.resolveVolumeDependents({
+      nodeId: 1,
+      ownerNodeKey: ENGINE,
+      knownStackNames: ['broken'],
+      volumeName: 'recorded_broken',
+      volumeLabels: { 'com.docker.compose.project': 'deleted-stack' },
+      render: true,
+      docker: { listContainers: async () => [] } as unknown as Docker,
+    });
+    expect(resolution.kind).toBe('unrenderable');
+    expect(resolution.dependents).toEqual([{ stackName: 'deleted-stack', serviceName: null }]);
+    // The label names a project no known stack runs under, so it is not current either.
+    expect(resolution.current).toEqual([]);
   });
 });
 

@@ -109,7 +109,13 @@ function proxyEnv(project: string, dir: string): string[] {
   return JSON.parse(raw) as string[];
 }
 
-function composeFile(hostPort: number, dataDir: string, brokenProvider: boolean, subnetIndex: number): string {
+function composeFile(
+  hostPort: number,
+  dataDir: string,
+  brokenProvider: boolean,
+  subnetIndex: number,
+  hostname?: string,
+): string {
   const providerEnvFile = [
     '    env_file:',
     // Only resolvable through the project name, never the directory name.
@@ -152,6 +158,7 @@ function composeFile(hostPort: number, dataDir: string, brokenProvider: boolean,
     'services:',
     '  sencho:',
     `    image: ${IMAGE}`,
+    ...(hostname ? [`    hostname: ${hostname}`] : []),
     '    environment:',
     '      DATA_DIR: /app/data',
     '      PORT: "1852"',
@@ -228,7 +235,11 @@ async function meta(fix: Fixture): Promise<Record<string, unknown>> {
   return await res.json() as Record<string, unknown>;
 }
 
-async function fixture(kind: string, brokenProvider = false): Promise<Fixture> {
+async function fixture(
+  kind: string,
+  brokenProvider = false,
+  options: { hostname?: string; startSenchoOnly?: boolean } = {},
+): Promise<Fixture> {
   const project = `${PROJECT_PREFIX}${startedProjects.length}${kind}`.toLowerCase();
   const dir = path.join(rootDir, kind);
   const dataDir = path.join(rootDir, `${kind}-data`);
@@ -237,9 +248,19 @@ async function fixture(kind: string, brokenProvider = false): Promise<Fixture> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
   startedProjects.push({ project, dir });
-  await fs.writeFile(path.join(dir, 'compose.yaml'), composeFile(hostPort, dataDir, brokenProvider, subnetIndex), 'utf8');
+  await fs.writeFile(
+    path.join(dir, 'compose.yaml'),
+    composeFile(hostPort, dataDir, brokenProvider, subnetIndex, options.hostname),
+    'utf8',
+  );
   await fs.writeFile(path.join(dir, `${project}.env`), 'SENCHO_E2E_ENV_FILE_MARKER=present\n', 'utf8');
-  compose(project, dir, ['up', '-d', '--pull', 'never']);
+  if (options.startSenchoOnly) {
+    // The proxy is deliberately absent at boot so the node has to recover its
+    // self-update eligibility after the endpoint comes back.
+    compose(project, dir, ['up', '-d', '--pull', 'never', '--no-deps', 'sencho']);
+  } else {
+    compose(project, dir, ['up', '-d', '--pull', 'never']);
+  }
   const fix: Fixture = { project, dir, dataDir, hostPort, subnetIndex, baseUrl: `http://127.0.0.1:${hostPort}`, cookie: '' };
   await waitFor(() => health(fix));
   const setup = await fetch(`${fix.baseUrl}/api/auth/setup`, {
@@ -413,5 +434,46 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('actual Sencho Docke
     const metaAfter = await meta(fix);
     expect(metaAfter.updateError).toBe('endpoint_provider_restored');
     expect(metaAfter.endpointProviderPending).toBeUndefined();
+  }, 300_000);
+
+  it('advertises self-update behind the socket proxy when Compose overrides the hostname', async () => {
+    // HOSTNAME is `sencho-custom`, not the container ID, so only the identity
+    // chain (cgroup) can find the container that carries the Compose labels.
+    const fix = await fixture('hostname', false, { hostname: 'sencho-custom' });
+
+    const info = await meta(fix);
+    expect(info.capabilities, JSON.stringify(info)).toContain('self-update');
+    expect(info.selfUpdateUnavailable).toBeUndefined();
+
+    // The confirmation path the editor opens for an eligible self stack: an
+    // endpoint-only reapply completes and leaves Sencho running.
+    const senchoBefore = serviceId(fix.project, fix.dir, 'sencho');
+    const started = await composeReapply(fix, { replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(started.status, await started.text()).toBe(202);
+    const operation = await settledOperation(fix);
+    expect(operation.state, JSON.stringify(operation)).toBe('succeeded');
+    expect(serviceId(fix.project, fix.dir, 'sencho')).toBe(senchoBefore);
+    expect(await health(fix)).toBe(true);
+  }, 300_000);
+
+  it('recovers self-update after the socket proxy comes back, without a Sencho restart', async () => {
+    const fix = await fixture('lateproxy', false, { startSenchoOnly: true });
+
+    const before = await meta(fix);
+    expect(before.capabilities, JSON.stringify(before)).not.toContain('self-update');
+    // The first probe cannot settle an identity through an absent endpoint.
+    expect(['container_unidentified', 'docker_unreachable']).toContain(before.selfUpdateUnavailable);
+    const processStartedAt = before.startedAt;
+
+    compose(fix.project, fix.dir, ['up', '-d', 'socket-proxy']);
+
+    await waitFor(async () => {
+      const capabilities = (await meta(fix)).capabilities as string[];
+      return capabilities.includes('self-update');
+    }, 90_000);
+    const after = await meta(fix);
+    expect(after.selfUpdateUnavailable).toBeUndefined();
+    // Same process: the capability came from the retry, not from a restart.
+    expect(after.startedAt).toBe(processStartedAt);
   }, 300_000);
 });

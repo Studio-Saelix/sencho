@@ -16,6 +16,7 @@ import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortS
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
+import { PROXY_API_FLAG_KEYS } from '../../helpers/socketProxyIdentity';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -29,7 +30,7 @@ export interface EffPortSpec {
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published and
    *  exposure counts it; conflict and documented-port checks skip the unknown
-   *  host number (`fixedPorts` in composePortSpec and `portsOf` in rules).
+   *  host number (`fixedPorts` and `enumeratedHostPorts` in composePortSpec).
    *  Drift matches it to the runtime container port by the target below. */
   dynamic?: true;
   /** Container port range this publication targets, for a `dynamic` entry.
@@ -382,15 +383,6 @@ function forEachEnvEntry(env: unknown, visit: (key: string, value: unknown) => v
     }
   }
 }
-
-/**
- * Docker socket-proxy API group / verb env keys recognized for topology and
- * mutation detection. Only names whose rendered value is exactly `1` are kept
- * on the model (see `enabledProxyApiFlagsOf`).
- */
-const PROXY_API_FLAG_KEYS: ReadonlySet<string> = new Set([
-  'CONTAINERS', 'IMAGES', 'INFO', 'EVENTS', 'NETWORKS', 'VOLUMES', 'POST', 'DELETE',
-]);
 
 /**
  * Whitelisted proxy API flag names whose rendered value is exactly `1` (after

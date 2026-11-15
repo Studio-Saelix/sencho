@@ -208,6 +208,20 @@ export interface ImageExposureContextSummary {
   allKnownIntentional: boolean;
 }
 
+/**
+ * States the contexts beyond the display cap may still hold. The server sorts
+ * before it slices, so this is captured once from the server's slice and kept
+ * across in-place saves, which change the visible ranks the cap inference used.
+ * It lasts while contexts remain beyond the list; a saved hidden context joins
+ * the list, and the flags go once none is left.
+ * Set only by the frontend save projection; server responses never carry it.
+ */
+export interface ImageExposureContextHidden {
+  conflict: boolean;
+  unclassified: boolean;
+  unavailable: boolean;
+}
+
 export interface ScanSummary {
   image_ref: string;
   highest_severity: VulnSeverity | null;
@@ -231,6 +245,10 @@ export interface ScanSummary {
   exposure_contexts_truncated?: boolean;
   /** Aggregates over the full list before cap; prefer for banner/row conclusions. */
   exposure_context_summary?: ImageExposureContextSummary;
+  /** States the capped remainder may hold, kept by the in-place save projection. */
+  exposure_context_hidden?: ImageExposureContextHidden;
+  /** Contexts (`stack\0service`) the save projection stopped counting as exposed, kept so a later save of one is not mistaken for a hidden context. Set only by the frontend. */
+  exposure_context_settled?: string[];
 }
 
 export interface ScanPolicy {

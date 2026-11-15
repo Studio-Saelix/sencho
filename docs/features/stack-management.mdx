@@ -200,7 +200,7 @@ The header answers two questions at a glance:
 
 The action row below the title keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, Mute, and Delete; the next sections cover both surfaces.
 
-If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node Update** to upgrade Sencho. Compose Doctor flags the condition during preflight.
+If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node management → Node updates** to upgrade Sencho. Compose Doctor flags the condition during preflight.
 
 ### Image source links
 
@@ -405,6 +405,19 @@ The stack header groups actions by frequency of use. The most common action is t
 | Overflow | **Mute** | Creates a mute rule | Quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications). |
 | Overflow | **Delete** | `down --remove-orphans` + removes files | Stops and removes containers, then deletes the stack directory. Volumes are removed only when the operator opts in from the confirmation dialog, and never for a stack that declares a [recovery repository volume](/operations/volume-recovery-points#growth-and-retention): that request answers `423` and nothing is stopped. On a node too old to guarantee that (see [Node Compatibility](/features/node-compatibility)), the dialog says so and volumes are always removed. |
 
+**When restarting:**
+
+A container that keeps crashing under a restart policy spends most of its time in Docker's `restarting` state rather than running, so the stack header reports `restarting` instead of `exited`. Start and Restart do not break a loop: `docker compose up -d` leaves the looping container alone and a restart races the restart policy. The header therefore offers the one action that ends it.
+
+| Placement | Button | Command | What it does |
+|-----------|--------|---------|--------------|
+| Primary | **Stop** | `docker compose stop` | Stops every container and cancels the pending restart, so the loop ends. State is preserved and **Start** brings the stack back. |
+| Secondary | **Take down** | `docker compose down` | Same as Take down when running. The permanent option when a container's restart policy would bring it back after a daemon restart. |
+| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Same as Update when running. |
+| Overflow | Same as **When running** | | Rollback, Scan config, Monitor, Mute, and Delete. |
+
+A stack with one running container and one container restarting shows `running · restarting` and keeps the **When running** set, because Stop is present in both.
+
 **When stopped:**
 
 | Placement | Button | Command | What it does |
@@ -454,7 +467,7 @@ Inside the stack detail view, container cards expose quick actions (View logs, I
 - **Inspect image**: opens the same image detail sheet as [Resources](/features/resources#inspect-image) for that container's image. Used by shows the current stack only from this entry point.
 - **Monitor**: opens the stack **Monitor** sheet with that Compose service preferred in the add forms. Shown only when the container reports a Compose service name.
 - **Restart service**: stops and starts all containers for that service.
-- **Stop service**: stops all containers for that service. Only shown when the service is running.
+- **Stop service**: stops all containers for that service and cancels any pending restart. Shown when the service is running, paused, or restarting.
 - **Start service**: starts all containers for that service. Only shown when the service is stopped or exited.
 
 A service row also carries an **Update** button when a registry update is confirmed for that service. Updating one service refreshes only that service, and it is how a `manual` service moves forward without a whole-stack update. A `disabled` service has no available update: its **Update** button is disabled and explains why.
@@ -516,8 +529,8 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 
 **lifecycle**
 
-- **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart.
-- **Stop** (`⌘.`): shown when running.
+- **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart. Hidden when the stack's containers are restarting, since deploying would leave the loop running.
+- **Stop** (`⌘.`): shown when running or restarting.
 - **Restart** (`⌘R`): shown when running.
 - **Update** (`⌘↑`): pulls the latest image tags and redeploys.
 - **Take down** (`⌘↓`): shown when the stack has been deployed (running, partial, or exited). Opens a confirmation dialog; optional volume removal is offered when the active node supports it. Disabled for the stack running Sencho itself.

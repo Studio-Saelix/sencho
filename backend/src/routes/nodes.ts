@@ -1,6 +1,4 @@
 import { Router, type Request, type Response } from 'express';
-import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import path from 'path';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
@@ -29,8 +27,8 @@ import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } from '../utils/outboundTarget';
-import { isNativeTlsEnabled, loadNativeTlsMaterial, rewriteHttpUrlToHttps } from '../helpers/nativeTls';
-import { buildPilotEnrollmentCompose } from '../helpers/pilotEnrollmentCompose';
+import { mintPilotEnrollment as mintPilotEnrollmentForNode } from '../helpers/pilotEnrollment';
+import { resolvePrimaryUrl } from '../helpers/primaryUrl';
 import { isArchiveStorableName } from '../services/cloudBackupArchive';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
@@ -51,68 +49,20 @@ function normalizePilotComposeDir(value: unknown): string | null {
   const raw = typeof value === 'string' ? value.trim() : '';
   const candidate = raw || DEFAULT_PILOT_COMPOSE_DIR;
   if (!path.posix.isAbsolute(candidate) || /[\0\r\n]/.test(candidate)) return null;
-  return path.posix.normalize(candidate);
+  // normalize keeps a trailing slash, so `/opt/x/` would otherwise read as a
+  // different directory from `/opt/x` (a no-op save then trips the connected-Pilot lock).
+  const normalized = path.posix.normalize(candidate);
+  let end = normalized.length;
+  while (end > 1 && normalized[end - 1] === '/') end -= 1;
+  return normalized.slice(0, end);
 }
 
-/**
- * Pick the URL the pilot agent should dial. SENCHO_PUBLIC_URL wins when set
- * and well-formed, because the request Host header is only reachable from
- * the network the operator opened the dialog from. Pilots on a public cloud
- * cannot dial a LAN or loopback address, so an explicit public URL is the
- * only thing that lets the enrolled YAML work unmodified.
- *
- * When the hub itself terminates TLS, an http:// URL would open a cleartext
- * connection to an HTTPS listener. Rewrite the scheme so enrollment matches
- * the listener even if SENCHO_PUBLIC_URL was left on http.
- */
-function resolvePrimaryUrl(req: Request): string {
-  const override = process.env.SENCHO_PUBLIC_URL?.trim();
-  let url = `${req.protocol}://${req.get('host') || 'localhost:1852'}`;
-  if (override) {
-    const check = isValidRemoteUrl(override);
-    if (check.valid) url = override.replace(/\/$/, '');
-    else console.warn(`[Enrollment] SENCHO_PUBLIC_URL is set but invalid (${check.reason}); falling back to request host.`);
-  }
-  return isNativeTlsEnabled() ? rewriteHttpUrlToHttps(url) : url;
-}
-
-function mintPilotEnrollment(nodeId: number, req: Request): {
-  token: string;
-  expiresAt: number;
-  composeYaml: string;
-  caPem?: string;
-} {
-  const db = DatabaseService.getInstance();
-  const node = db.getNode(nodeId);
+function mintPilotEnrollment(nodeId: number, req: Request): ReturnType<typeof mintPilotEnrollmentForNode> {
+  const node = DatabaseService.getInstance().getNode(nodeId);
   if (!node) throw new Error('Node not found');
   const composeDir = normalizePilotComposeDir(node.compose_dir);
   if (!composeDir) throw new Error('Pilot compose directory must be an absolute path');
-  const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
-  if (!jwtSecret) throw new Error('JWT secret not configured');
-
-  const ttlSeconds = 15 * 60;
-  const expiresAt = Date.now() + ttlSeconds * 1000;
-  const enrollNonce = crypto.randomUUID();
-  const token = jwt.sign(
-    { scope: 'pilot_enroll', nodeId, enrollNonce },
-    jwtSecret,
-    { expiresIn: ttlSeconds },
-  );
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  db.createPilotEnrollment(nodeId, tokenHash, expiresAt);
-
-  const primaryUrl = resolvePrimaryUrl(req);
-  const caPem = isNativeTlsEnabled() ? loadNativeTlsMaterial()?.caPem : undefined;
-  const composeYaml = buildPilotEnrollmentCompose({
-    primaryUrl,
-    token,
-    composeDir,
-    caPem,
-  });
-
-  return caPem
-    ? { token, expiresAt, composeYaml, caPem }
-    : { token, expiresAt, composeYaml };
+  return mintPilotEnrollmentForNode(nodeId, resolvePrimaryUrl(req), composeDir);
 }
 
 export const nodesRouter = Router();
@@ -380,6 +330,18 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       const composeDir = normalizePilotComposeDir(updates.compose_dir);
       if (!composeDir) {
         return res.status(400).json({ error: 'Pilot compose directory must be an absolute path' });
+      }
+      // After the Pilot has connected, its compose directory is a deployed bind
+      // mount. Changing it through an ordinary save would leave the running
+      // agent pointing at the old path, so the change is refused and relocation
+      // stays a separate, previewed operation. An unchanged value still saves,
+      // as does an edit to any other field.
+      const currentComposeDir = normalizePilotComposeDir(existingNode.compose_dir) ?? DEFAULT_PILOT_COMPOSE_DIR;
+      if (existingNode.pilot_last_seen != null && composeDir !== currentComposeDir) {
+        return res.status(409).json({
+          error: 'This Pilot has already connected. Changing its Compose directory is a relocation, which is a separate operation.',
+          code: 'PILOT_COMPOSE_DIR_LOCKED',
+        });
       }
       updates.compose_dir = composeDir;
     }

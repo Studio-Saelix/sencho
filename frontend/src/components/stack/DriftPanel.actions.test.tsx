@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
@@ -280,7 +281,7 @@ describe('DriftPanel dismissals', () => {
     const post = vi.mocked(apiFetch).mock.calls.find(([path]) => path === '/stacks/web/drift/dismissals');
     expect(post?.[1]).toMatchObject({ method: 'POST', localOnly: false });
     expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ findingId: f.id, fingerprint: f.fingerprint, count: 1, mode: 'until_change' });
-    expect(screen.getByTestId('dismissed-section')).toHaveTextContent('1 dismissed');
+    expect(screen.getByRole('button', { name: '1 dismissed' })).toBeInTheDocument();
   });
 
   it('keeps counting a dismissed finding and leaves the verdict alone', async () => {
@@ -299,7 +300,7 @@ describe('DriftPanel dismissals', () => {
     mockReads(report([f], { dismissals: [dismissal(f, { fingerprint: 'fp-old' })] }));
     renderPanel();
     expect(await screen.findByTestId('drift-finding')).toBeInTheDocument();
-    expect(screen.queryByTestId('dismissed-section')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /dismissed/ })).not.toBeInTheDocument();
   });
 
   it('restores a dismissed finding through the stack route by id', async () => {
@@ -311,6 +312,32 @@ describe('DriftPanel dismissals', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
     await waitFor(() => expect(screen.getByTestId('drift-finding')).toBeInTheDocument());
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/stacks/web/drift/dismissals/7', { method: 'DELETE', localOnly: false });
+  });
+
+  it('returns focus to the count after Escape closes the dismissed sheet', async () => {
+    const user = userEvent.setup();
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f], { dismissals: [dismissal(f)] }));
+    renderPanel();
+    const opener = await screen.findByRole('button', { name: /1 dismissed/ });
+    opener.focus();
+    await user.keyboard('{Enter}');
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('closes the dismissed sheet when the stack changes, so it does not reopen on the next stack', async () => {
+    const f = finding('ports-mismatch', 'web');
+    mockReads(report([f], { dismissals: [dismissal(f)] }));
+    const view = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: /1 dismissed/ }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    view.rerender(<DriftPanel stackName="other" onRedeploy={onRedeploy} onEditCompose={onEditCompose} onOpenGitSource={onOpenGitSource} />);
+    await screen.findByRole('button', { name: /1 dismissed/ });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('offers no Dismiss on a managed-path conflict', async () => {

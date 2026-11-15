@@ -439,9 +439,10 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
                 onTabChange={(id) => setSheetTab(id as 'essentials' | 'advanced')}
                 primaryAction={selectedTemplate ? {
                     label: isDeploying ? 'Deploying…' : `Deploy ${selectedTemplate.title}`,
-                    icon: isDeploying ? Loader2 : Rocket,
+                    icon: Rocket,
                     onClick: handleDeploy,
-                    disabled: isDeploying || !stackName.trim() || !can('stack:create') || !can('stack:deploy'),
+                    pending: isDeploying,
+                    disabled: !stackName.trim() || !can('stack:create') || !can('stack:deploy'),
                 } : undefined}
                 footerContext={isDeploying ? 'This may take a few minutes for large images.' : undefined}
                 size="md"

@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "date": "2026-11-10T02:01:03.058Z",
+    "revision": "6534c1e8ce64cda0da3546cee3780455872ed3d2",
+    "node": "v26.13.0",
+    "runner": "github-actions",
+    "stacks": 200,
+    "remoteNodes": 10
+  },
+  "series": {
+    "stacks": {
+      "samples": 30,
+      "minMs": 7.7,
+      "medianMs": 8.4,
+      "p95Ms": 11.1,
+      "maxMs": 12.7
+    },
+    "statuses-miss": {
+      "samples": 5,
+      "minMs": 527.9,
+      "medianMs": 610.4,
+      "p95Ms": 827.5,
+      "maxMs": 827.5
+    },
+    "statuses-hit": {
+      "samples": 30,
+      "minMs": 1.5,
+      "medianMs": 1.8,
+      "p95Ms": 3.3,
+      "maxMs": 5.9
+    },
+    "fleet-overview": {
+      "samples": 30,
+      "minMs": 581.1,
+      "medianMs": 668.4,
+      "p95Ms": 1027.7,
+      "maxMs": 1046.5
+    }
+  }
+}

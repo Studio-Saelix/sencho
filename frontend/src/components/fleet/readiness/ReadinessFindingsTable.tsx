@@ -20,10 +20,7 @@ import {
 import { ALL, EMPTY_FINDINGS_FILTER, VERDICT_OPTIONS, filterFindings, type FindingsFilter } from './findingsFilter';
 import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, codeRemediation, domainMeta, stateMeta } from '../readinessMeta';
 import { FindingRowActions } from '@/components/ui/finding-row-actions';
-import { DismissedSection, type DismissedItem } from '@/components/ui/dismissed-section';
-import type { DismissalMode, FindingDismissal } from '@/types/findingDismissal';
-import type { DismissedFinding } from '@/lib/findingDismissals';
-import { describeDismissal } from './describeDismissal';
+import type { DismissalMode } from '@/types/findingDismissal';
 
 const HEAD = 'text-[10px] uppercase tracking-[0.18em]';
 const PRIMARY_ACTION = 'h-auto min-h-7 max-w-[min(8rem,100%)] whitespace-normal px-2 py-1 text-right text-xs leading-tight';
@@ -155,11 +152,8 @@ interface ReadinessFindingsTableProps {
   canDismiss: (finding: ReadinessFinding) => boolean;
   onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
   isDismissing: (finding: ReadinessFinding) => boolean;
-  /** Findings a dismissal still covers, listed under the table with a Restore. They follow the filter. */
-  dismissed: DismissedFinding<ReadinessFinding>[];
-  onRestore: (dismissal: FindingDismissal) => void;
-  isRestoring: (dismissal: FindingDismissal) => boolean;
-  now: number;
+  /** Findings a dismissal still covers. They are listed in the dismissed sheet, not here. */
+  dismissedCount: number;
 }
 
 /**
@@ -178,10 +172,7 @@ export function ReadinessFindingsTable({
   canDismiss,
   onDismiss,
   isDismissing,
-  dismissed,
-  onRestore,
-  isRestoring,
-  now,
+  dismissedCount,
 }: ReadinessFindingsTableProps) {
   // The page belongs to the filter it was chosen under, so any filter change,
   // including one made from the matrix, starts again at the first page.
@@ -194,20 +185,6 @@ export function ReadinessFindingsTable({
   const safePage = Math.min(page, totalPages - 1);
   const pageItems = visible.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
   const filtered = visible.length !== findings.length;
-  // The dismissed list answers to the same filter, so a node filter does not
-  // list the rest of the fleet's dismissals under one node's findings.
-  const visibleDismissedIds = new Set(filterFindings(dismissed.map(item => item.finding), filter, nodeNames).map(item => item.id));
-  const dismissedItems: DismissedItem[] = dismissed
-    .filter(item => visibleDismissedIds.has(item.finding.id))
-    .map(({ finding, dismissal }) => ({
-      id: dismissal.id,
-      title: `${codeCopy(finding.code)} · ${[nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`, finding.stack].filter(Boolean).join(' / ')}`,
-      meta: describeDismissal(dismissal, now),
-      onRestore: canDismiss(finding) ? () => onRestore(dismissal) : undefined,
-      restoring: isRestoring(dismissal),
-    }));
-  const onlyDismissedHere = visible.length === 0 && dismissedItems.length > 0;
-
   return (
     <section aria-label="Readiness findings" className="min-w-0 space-y-2">
       <div className="flex items-baseline justify-between gap-3">
@@ -251,10 +228,10 @@ export function ReadinessFindingsTable({
         </Table>
         {pageItems.length === 0 && (
           <div className="py-12 text-center text-sm text-muted-foreground">
-            {onlyDismissedHere
-              ? 'Everything here is dismissed.'
-              : findings.length > 0 || dismissed.length > 0
-                ? 'No finding matches the current filters.'
+            {findings.length > 0
+              ? 'No finding matches the current filters.'
+              : dismissedCount > 0
+                ? 'Everything is dismissed.'
                 : 'Nothing needs attention across this fleet.'}
           </div>
         )}
@@ -268,7 +245,6 @@ export function ReadinessFindingsTable({
           Clear filters
         </button>
       )}
-      <DismissedSection items={dismissedItems} forceOpen={onlyDismissedHere} />
       {visible.length > PAGE_SIZE && (
         <div className="flex items-center justify-end gap-1">
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0} aria-label="Previous page">

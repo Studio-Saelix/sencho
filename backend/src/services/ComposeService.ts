@@ -40,6 +40,10 @@ import {
   authoredComposeEnvFileArgs,
   composeEnvFilesFromProcess,
 } from '../utils/authoredComposeArgs';
+import {
+  assertComposeInputsWithinExpansionLimits,
+  ComposeExpansionRefusal,
+} from '../helpers/composeExpansionGuard';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -336,10 +340,12 @@ export class ComposeService {
           const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
           if (result.rendered) return result.rendered;
           // The guard refuses what it cannot see, so say why the render failed. The
-          // diagnostics are withheld for an overlay render (they quote secrets).
-          const why = result.timedOut ? 'docker compose config timed out'
-            : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
-              : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+          // diagnostics are withheld for an overlay render (they quote secrets);
+          // Sencho's own refusal names the file and the reason, so it is safe.
+          const why = result.refusal ? result.refusal
+            : result.timedOut ? 'docker compose config timed out'
+              : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+                : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
           throw new Error(why);
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
@@ -384,11 +390,18 @@ export class ComposeService {
    * service `env_file:` entries or enforce required interpolation), so a project
    * `config` rejects can still be one `down --volumes` removes volumes from. Removing what cannot be seen is not a pass.
    * Callers that must still tear such a stack down do it without removing volumes.
+   * The exception is an input Sencho refused to hand to Compose: that throws
+   * `ComposeExpansionRefusal` instead, because the same guard refuses the down
+   * without volumes too.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declared: string[] | null = null;
     try {
       const result = await this.renderConfig(stackName);
+      // Sencho's own refusal says why the volumes cannot be read, which is a
+      // different answer from "they could not be checked": name the refused
+      // input instead of the generic unverified-volumes wording.
+      if (result.refusal) throw new ComposeExpansionRefusal(result.refusal);
       if (result.rendered !== null) {
         const parsed: unknown = JSON.parse(result.rendered);
         // The model parser tolerates anything and returns an empty model, which
@@ -405,6 +418,7 @@ export class ComposeService {
         );
       }
     } catch (error) {
+      if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
     if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
@@ -593,6 +607,14 @@ export class ComposeService {
       refuseIfUnreadable || action.includes('up') || action.includes('create'),
     );
     args.push(...action);
+    // Every command built here runs Compose, which expands YAML aliases with
+    // no bound. The check is last, after every layer is appended, so it sees
+    // the files, env selection, and project directory in the argv the CLI is
+    // about to read.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
+      invocation: args,
+    });
     return args;
   }
 
@@ -2063,7 +2085,11 @@ export class ComposeService {
       } catch (err) {
         if (!isClosed && ws.readyState === WebSocket.OPEN) {
           if (!isWaitingForActivity) {
-            ws.send(`\r\n\x1b[31m[Sencho] Error tracking containers. Retrying...\x1b[0m\r\n`);
+            // A refusal names the file and the reason; "Retrying" alone would
+            // hide why no container is ever found.
+            ws.send(err instanceof ComposeExpansionRefusal
+              ? `\r\n\x1b[33m[Sencho] ${err.message} Retrying...\x1b[0m\r\n`
+              : `\r\n\x1b[31m[Sencho] Error tracking containers. Retrying...\x1b[0m\r\n`);
             isWaitingForActivity = true;
           }
           setTimeout(startStream, 2000);
@@ -2260,6 +2286,14 @@ export class ComposeService {
       action.includes('up') || action.includes('create'),
     );
     out.push(...action);
+    // A captured recovery invocation builds its file set without the authored
+    // prefix, so the check has to run here as well: a restored generation can
+    // name a compose layer that was never validated by this guard. Its captured
+    // env selection and project directory travel in the same argv.
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDirOverride ?? path.join(this.baseDir, stackName),
+      invocation: out,
+    });
     return out;
   }
 
@@ -3143,12 +3177,19 @@ export class ComposeService {
       const args = options?.removeVolumes
         ? ['down', '--volumes', '--remove-orphans']
         : ['down', '--remove-orphans'];
+      // Resolve the arguments first, as runDown does: a refused stack costs no
+      // live gate, and stack deletion keeps a stack that still runs.
+      const composeArgs = await this.authoredComposeArgs(stackName, args);
       // Teardown removes the containers a gate would be observing (stack deletion,
       // and the rollback down of a failed template deploy), so it ends the gates
       // first, for the same reason runDown does.
       await this.supersedeGatesForContainerOp(stackName, 'the stack was torn down during the observation');
-      await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackPath, undefined, false);
+      await this.execute('docker', composeArgs, stackPath, undefined, false);
     } catch (error) {
+      // Sencho's refusal to run Compose is not "nothing to clean up": the stack
+      // may be running, and the caller decides what is left (stack deletion
+      // keeps the files, a template rollback has nothing started to remove).
+      if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }
   }
@@ -3182,6 +3223,10 @@ export class ComposeService {
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, fileAndEnvPrefix);
     }
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      invocation: fileAndEnvPrefix,
+    });
     const stdout = await this.captureCompose([...fileAndEnvPrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];
@@ -3295,7 +3340,12 @@ export class ComposeService {
       throw err instanceof Error ? err : new Error(String(err));
     }
     const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
-    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config'], {
+    const renderArgs = ['compose', ...filePrefix, ...envFileArgs];
+    await assertComposeInputsWithinExpansionLimits({
+      cwd: stackDir,
+      invocation: renderArgs,
+    });
+    const child = spawn('docker', [...renderArgs, 'config'], {
       cwd: stackDir,
       env: {
         ...process.env,
@@ -3400,7 +3450,7 @@ export class ComposeService {
   public async renderConfig(
     stackName: string,
     opts?: { stackDirOverride?: string; composePrefix?: string[] },
-  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }> {
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean; refusal?: string }> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
     }
@@ -3462,6 +3512,28 @@ export class ComposeService {
     const cwdResolved = path.resolve(stackDir);
     if (!cwdResolved.startsWith(allowedRoot + path.sep)) {
       throw new Error('Invalid stack path');
+    }
+    try {
+      await assertComposeInputsWithinExpansionLimits({
+        cwd: cwdResolved,
+        invocation: composeArgs,
+      });
+    } catch (err) {
+      if (err instanceof ComposeExpansionRefusal) {
+        // The refusal is Sencho's own text, so it is safe to hand back where a
+        // Compose diagnostic would have gone. It is kept apart from `stderr`
+        // because everything reading that field treats it as Compose's words,
+        // which can quote interpolated secrets.
+        return {
+          rendered: null,
+          stderr: '',
+          code: null,
+          timedOut: false,
+          refusal: err.message,
+          ...(withholdDiagnostics ? { withheld: true } : {}),
+        };
+      }
+      throw err;
     }
     const child = spawn('docker', composeArgs, {
       cwd: cwdResolved,
