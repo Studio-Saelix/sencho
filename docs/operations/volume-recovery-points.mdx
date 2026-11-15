@@ -1,9 +1,9 @@
 ---
 title: Volume Recovery Points
-description: Capture, verify, and restore the data inside one named Docker volume, and understand exactly what a recovery point does and does not protect.
+description: Capture, verify, and restore the data inside a named Docker volume or a directory a stack binds, and understand exactly what a recovery point does and does not protect.
 ---
 
-A volume recovery point is a snapshot of the bytes inside one named Docker volume, stored in a recovery repository on the node that holds that volume. Sencho creates points, checks their integrity, and restores them into a new volume. This page covers the storage rules behind those actions and the HTTP calls that drive them.
+A recovery point is a snapshot of the bytes inside one named Docker volume, or inside one directory a stack binds or keeps its source in, stored in a recovery repository on the node that holds that data. Sencho creates points, checks their integrity, and restores them into a new volume or back over the data they came from. This page covers the storage rules behind those actions and the HTTP calls that drive them.
 
 <Note>
   Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations passes the scope check for a Read Only, Deploy Only, or Full Admin token; the role the token maps to still decides which records it may read. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`. An Observe Only token is refused every recovery call.
@@ -14,9 +14,9 @@ A volume recovery point is a snapshot of the bytes inside one named Docker volum
 Sencho recovers two different kinds of thing, and neither one restores the other:
 
 - **Configuration recovery** brings back compose files. [Fleet Snapshots](/features/fleet-backups), their [Snapshot Vault](/features/fleet-backups#snapshot-vault) copies, and the recovery generations behind [Atomic Deployments](/features/atomic-deployments) rollback all restore authored files.
-- **A volume recovery point** brings back the bytes inside one named volume: database files, uploads, queue state, and anything else the application wrote there.
+- **A recovery point** brings back the bytes inside one named volume or one directory a stack binds: database files, uploads, queue state, and anything else the application wrote there.
 
-Restoring compose files does not refill a database, and restoring a volume does not bring back a compose edit. A working recovery plan covers both.
+Restoring compose files does not refill a database, and restoring a volume does not bring back a compose edit. A point of a stack's own source directory holds its Compose files as data you can browse, download or restore into a new volume, but it never restores them over the stack: that stays with configuration recovery. A working recovery plan covers both.
 
 ## Points live on the same node as the data
 
@@ -51,9 +51,63 @@ Shared storage is one volume with several stacks behind it, not one volume per s
 
 Locks do not follow the volume. Every operation takes the node's repository lock, so one capture, verification, or restore runs at a time on a node, whichever volumes are involved. Replacing the repository takes the same lock for as long as it builds the new repository, so a replacement cannot start while a capture, verification, or restore runs, and none of them can start while it builds. A second request answers `409 lock_held` ("Another recovery operation is running on this node") and is not recorded, so the same request with the same idempotency key can be sent again once the first one ends. A capture also takes a lock for its volume.
 
+## Directories a stack binds or keeps its source in
+
+A host directory gets the same points, repository, key, locks, operations and results as a named volume. Two kinds of directory qualify, and both come only from what a stack declares, never from a path you type:
+
+- a **bind directory**: a host directory a service in the stack mounts, such as `./data:/var/lib/app` or `/srv/media:/media`;
+- the **stack source directory**: the stack's own directory under the compose directory, with its Compose and environment files.
+
+These are the same directories the Files & Volumes explorer shows for the stack. A capture names the stack and the root id the storage listing returned for the directory. Sencho derives the stack's directories again when the request arrives and matches the id, so a stale or forged id, a path, a `..` segment, or a symlink that leads out of an allowed directory never widens what is captured, read or restored.
+
+### Which directories are refused
+
+Every directory a stack declares is listed, and one Sencho will not protect is listed with its reason:
+
+| Directory | `ineligibleReason` |
+|-----------|--------------------|
+| A path Sencho cannot reach: not bound into the Sencho container, or absent | `host_path_unreachable` |
+| `/`, an OS directory such as `/etc`, `/usr` or `/proc`, or the Docker socket | `protected_host_path` |
+| A directory that overlaps the compose directory, Sencho's data directory, its application files or its temporary credential files | `sencho_managed_path` |
+| A bind of a single file | `not_a_directory` |
+| A directory no mount of the Sencho container covers, so the host path for it is unknown | `path_mapping_unknown` |
+| A directory inside Docker's data root, which holds named volumes and the recovery repository | `docker_data_path` |
+| A stack directory that resolves outside the compose directory, through a symlink | `outside_compose_base` |
+
+A bind directory inside the stack's own directory, such as `./data`, is its own root and is not refused for overlapping the compose directory.
+
+### The host path is proven, not assumed
+
+When Sencho runs in a container, the path it sees for a directory and the path the Docker daemon uses for the same directory can differ. That is common for a Pilot agent whose compose directory is mounted at another path. Sencho translates its own path through its container's mounts, then proves the translation before it records anything: a helper binds the host path read-only and reports the directory's device and inode, and only when they equal Sencho's own view of the directory is the root proven. Each path the stack declares for the directory that is spelled differently from the host path (a symlink, for example) is proven the same way, because that is the path the workload's container really binds. A directory declared under more than 16 different spellings is refused.
+
+A proof that does not match, or that cannot run, answers `409 identity_unknown` with `reason: "path_mapping_unproven"`, records nothing, and the directory never reads Protected. If Sencho cannot read its own container mounts at that moment, the same answer says to try again shortly.
+
+Every helper that reads or writes the directory afterwards checks the same device and inode again inside its own container, before the capture or the swap runs. A directory or symlink swapped in after the proof is refused with `identity_unknown`, and nothing is written.
+
+### What a point of a directory holds
+
+- **Mounts below the directory are left out.** A capture reads the directory without following mounts, so a filesystem mounted inside it is not captured. Each mount point is recorded as an exclusion with reason `nested_mount`, which stores the point `partial`, so such a directory never reads Protected. A mount that appears during the capture is not captured and not reported. A directory with more than 64 mounts below it cannot be described and is refused with `identity_unknown`.
+- **Symlinks are stored as links and never followed.** Hard links, owners, modes and extended attributes, POSIX ACLs included, are captured and restored by restic. An entry the helper cannot read is skipped and makes the point `partial`; attributes that cannot be applied on restore end it `partial` with `attributes_not_restored`.
+- **The consistency label** describes containers that depend on the directory, observed before and after the capture, exactly as for a volume. For a stack source directory it describes containers only: an edit made in Sencho's own editor during the capture is not observed.
+- **A rootless or user-namespace-remapped daemon, and an SELinux-confined host,** can deny the helper access to a directory. The outcome is a failed or `partial` point; Sencho never relabels a directory to make a capture work.
+
+### Generations and shared directories
+
+A directory's generation token is its inode and birth time when the filesystem reports a birth time, and its device and inode otherwise. A directory deleted and recreated is a new generation, and the storage listing sees it from Sencho's own view without starting a helper, so its old points stop counting at once. Without a birth time, a directory recreated on the same inode keeps its generation until the next capture; this is the same residual risk a volume recreated within one second has.
+
+A directory is one protected root however many stacks use it. Two stacks that bind the same directory, two declared spellings of it, and two host paths of it (a host symlink, or two mounts of the Sencho container) all resolve to one storage identity, with one lock and every stack as a dependent.
+
+A stack depends on a directory when it declares, or a container mounts, the directory or a path inside it, read-only or not, or an ancestor of it that it can write. A read-only ancestor, such as a monitoring agent that binds `/` read-only, is not a dependent: it is shown in an overwrite preview as an observer and is never stopped. Sencho's own container, which mounts the compose directory, is never a dependent. A container that depends on the directory and belongs to no stack Sencho knows holds the caller to the access check for the whole node.
+
+Two nodes that mount the same network export are two identities. Sencho cannot prove they are the same bytes, so each node protects its own.
+
+### Overlapping directories
+
+A directory and a directory inside it have their own points, but they never run at the same time: a capture or an overwrite of a directory answers `409 lock_held` while a capture holds, or an overwrite of, a directory that contains it or is inside it. That is also why a capture of a parent never holds a child's half-finished restore.
+
 ## What "Protected" means
 
-A volume is Protected when one point satisfies all of the following:
+A volume, or a directory a stack declares, is Protected when one point satisfies all of the following:
 
 - It is a root point: a capture of the whole volume, not of a single path. A capture skips a hidden `.sencho-restore-<intent-id>` work directory at the volume root, which is Sencho's own and not the volume's data. An entry with that prefix and any other name, such as `.sencho-restore-notes`, is captured like any other file.
 - It belongs to the volume's current generation. A volume deleted and recreated under the same name is a new generation, and points of the old bytes stop counting. Reading coverage compares Docker's creation time for the volume with the one the generation was recorded with, so a recreated volume stops reading Protected right away, with reason `older_generation`, and does not wait for the next capture. A volume recreated within the same second keeps its creation time; the next capture reads the volume's root inode and opens the new generation.
@@ -159,6 +213,23 @@ A request refused at admission with `409` is not recorded as an operation. A nod
 
 An operation ends in `succeeded`, `partial`, `failed`, `cancelled`, or `completion_unknown`. A `partial` capture still produced a point, and that point never counts toward Protected. `completion_unknown` means Sencho lost the process mid-run; it is neither success nor a silent retry. You can stop a running capture with `POST /api/recovery/operations/{id}/cancel`, which settles the point as failed before it settles the operation. A repository provisioning operation cannot be cancelled.
 
+### Capture a directory
+
+A directory is captured by the stack that declares it and the `rootId` the storage listing returned for it (`stack-source` for the stack's own directory, `bind:<id>` for a bind directory):
+
+```bash
+curl -X POST https://your-sencho-instance:1852/api/recovery/storage/roots/points \
+  -H "Authorization: Bearer $SENCHO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stackName": "web",
+    "rootId": "bind:9c2e41a07b3d5f18",
+    "idempotencyKey": "point-web-media-2026-11-13"
+  }'
+```
+
+The admission is the volume's, in the same order: the stacks that depend on the directory are resolved with a fresh render of every stack, the caller is checked against all of them, the directory's eligibility is checked, and the host path is proven. Only then is anything recorded. The answer and the operation are the same shape as a volume capture.
+
 ## Verify a point
 
 Verification runs a restic check over the whole repository, so its result covers every point in it, not just the one you name. The default method checks metadata; `engine_check_read_data` also reads every pack file back, which takes much longer and costs real disk reads.
@@ -227,6 +298,23 @@ Sencho records a restore intent before any byte moves, creates the target with t
 
 If the restore fails, Sencho removes only the volume it created, and only when it still carries the intent's label and no container mounts it. A volume that something started using is left in place and the operation ends `completion_unknown` rather than deleting data under a workload. The same reconciliation runs at startup, so a crash mid-restore is settled the same way.
 
+### Restore one path
+
+`POST /api/recovery/points/:pointId/restore/path` restores one file or directory of a point into a new volume, at its own place in the tree, and nothing else. It takes the same target name rules, and a `path` in the browse grammar (`/db/data.sqlite`, absolute within the point). The path must be in the point: Sencho reads the point's own record of it before anything is created, and a path the point does not hold answers `400 invalid_request` with `reason: "path_not_found"`. The point's root is restored with the whole-point route instead. A path inside one of Sencho's own restore work directories is refused. It works for a point of a volume and a point of a directory alike.
+
+```bash
+curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60-4a63-8f38-0f7f1d2c3a44/restore/path \
+  -H "Authorization: Bearer $SENCHO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetVolumeName": "web_db_restore_20261113",
+    "path": "/db/data.sqlite",
+    "idempotencyKey": "restore-web-db-2026-11-13"
+  }'
+```
+
+A point of a directory restores into a new volume the same way a point of a volume does. Restoring to a host path you name is not available: the safe new location is a new volume, and putting the data back where it came from goes through the overwrite below.
+
 Some extended attributes cannot be applied: file capabilities (`security.capability`) and SELinux labels are the usual cases. When those are the only failures, the operation reports `partial` with `errorClass: "attributes_not_restored"`, the restore result carries an `xattrWarnings` count, and the volume is kept, because the files are there and only part of their metadata is not.
 
 A restore only works against the active repository. A point in a repository that has been replaced answers `503` with `errorClass: "repository_unavailable"` and `reason: "repository_replaced"`. Restore it before replacing, or take a new point.
@@ -234,6 +322,8 @@ A restore only works against the active repository. A point in a repository that
 ## Restore over the existing volume
 
 Restoring a point over its own volume puts the captured bytes back on the volume the data came from. The data stays on the same volume, so every stack that mounts it keeps its mount and its Compose file, and the volume keeps its name, its driver and its labels.
+
+A bind directory can be restored over itself through the same steps; see [Overwrite a directory](#overwrite-a-directory). A stack source directory cannot: its Compose files belong to configuration recovery, and a Git-managed stack would diverge from its source, so its points restore into a new volume and are readable by browse and download.
 
 This is the destructive recovery path. Restoring to a new volume is the safer option: it never touches the running data, and it is the right choice when you can move a stack to a new volume. Use an overwrite when the data has to stay where it is.
 
@@ -354,9 +444,20 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/restores/3f4a9c1e-7b
   -d '{ "action": "retry" }'
 ```
 
-The audit log words each request by what it did: a preview is `Previewed a restore over the existing volume`, an admitted overwrite is `Started a restore over the existing volume`, and the two actions are `Retried a restore over the existing volume` and `Released the fence of a restore over the existing volume`. A request that was not served says so with its status instead: `refused` for a 4xx and `failed` for a 5xx, for example `Release of a restore fence refused (409)`. A hub forwards a request to a remote node without reading its body, so the hub's entry for a resolve on a remote node reads `Resolved a restore over the existing volume` without the action; the node's own audit log has the action.
+The audit log words each request by what it did: a preview is `Previewed a restore over the existing data`, an admitted overwrite is `Started a restore over the existing data`, and the two actions are `Retried a restore over the existing data` and `Released the fence of a restore over the existing data`, for a volume and a directory alike. A request that was not served says so with its status instead: `refused` for a 4xx and `failed` for a 5xx, for example `Release of a restore fence refused (409)`. A hub forwards a request to a remote node without reading its body, so the hub's entry for a resolve on a remote node reads `Resolved a restore over the existing data` without the action; the node's own audit log has the action.
 
 Both actions need the same access as the overwrite itself, held to every stack the restore stopped, including one that has since stopped using the volume, and both are refused while the operation is still running. Cancelling the operation is held to the same set of stacks.
+
+### Overwrite a directory
+
+A bind directory goes through every step above, with these differences:
+
+- The directory must be one a stack declares now as a bind it may write. A directory no stack declares any more, or that every stack declares read-only, is refused with `reason: "root_not_authorized"`; a stack source directory with `reason: "unsupported_target"`; a directory with a mount below it with `reason: "nested_mount"`; and a directory whose host path cannot be proven with `reason: "path_mapping_unproven"`.
+- The host path is proven at the preview and the admission, and again before each step that touches the directory, including a `retry` and the reconciliation at startup. A proof that cannot run, or that answers a different directory, leaves the fence held and the restore `completion_unknown`; `retry` proves it again.
+- The preview's `target` carries `kind: "bind_root"` and the `hostPath`, and `volumeName` is null. `dependents.observers` names the containers that only read the directory through a read-only ancestor, and `nestedMounts` lists any mount below it. The confirmation token also binds the dependent stacks, the host path, the declared spellings and the mounts below it, so a stack that starts declaring the directory between the preview and the confirm answers `409 precondition_failed`, and a caller who may not restore that stack is refused with `403`.
+- The confirmation types back the host path: send `confirmHostPath` instead of `confirmVolumeName`. It is compared with the directory Sencho derived; it never chooses what is written.
+- The fence also refuses a container start that would write the directory (a bind of it, of a path inside it, or of a writable ancestor), and the stack file routes refuse reading or writing a directory that overlaps it with `409` and `code: "data_restore"`.
+- The operation result names the target as `{ "kind": "bind_root", "hostPath": "..." }`.
 
 ### While the overwrite runs
 
@@ -385,7 +486,7 @@ Deploying to a dependent stack during the overwrite is refused rather than queue
 
 The API answers a failed operation with its class only. The cause is in the node's Sencho log. A restore or capture helper that fails logs restic's own message and the exit code. A swap step that fails logs the helper's refusal. A restore that ends in a running Sencho, other than `succeeded` or a cancel you asked for, then logs one line naming it, its end state and class, the step it was in (staging the point, fencing the workloads, taking the pre-restore point, copying the point into the volume, swapping) and the intent and fence state at that moment. Read the lines around that one. What a restart's reconciliation settles is logged by the reconciliation.
 
-`GET /api/recovery/operations/:id` for an overwrite adds a `restore` block to the intent: `mode`, `phase`, `fenceState`, `preRestorePointId`, `stagedVerified`, `filesRestored`, `bytesRestored` and `outcomeClass`. It names volumes and counts, never a host path or the contents of a file.
+`GET /api/recovery/operations/:id` for an overwrite adds a `restore` block to the intent: `mode`, `phase`, `fenceState`, `preRestorePointId`, `stagedVerified`, `filesRestored`, `bytesRestored` and `outcomeClass`. The intent's `target` names a volume by name, or a directory by its host path, and `pathScope` names the one path a path restore brought back. It never carries the contents of a file.
 
 The outcomes are distinct: `succeeded`, `failed` with an error class, `cancelled` only before the swap starts, `partial` with `errorClass: "cleanup_failed"` when the data is committed but the work directory could not be removed, `partial` with `errorClass: "fence_unavailable"` when the data is committed but the restart policies could not be restored, and `completion_unknown` when the state could not be proven. A `failed` operation whose staging volume could not be removed ends `failed` with `errorClass: "cleanup_failed"` when the removal itself was the failure, and with its own class otherwise; either way the restore's `outcomeClass` reads `cleanup_failed` until the staging volume is gone.
 
@@ -485,7 +586,9 @@ A recovery request for a remote node runs on that node. The control instance for
 
 A role assigned on the node itself covers every volume on that node, including a volume shared by several stacks and a volume no stack declares, whether the request runs on that node directly or is relayed by the control instance. A role assigned on a single stack covers only a volume that stack alone uses, and only when the request runs on that node directly: a stack-scoped grant is refused over a relay, so give the operator a node-wide grant to use recovery on a remote node.
 
-Reading points requires read access to the stacks that use the volume. Capturing and restoring require edit access to those stacks. Provisioning or replacing the repository, and releasing the repository lock, are administrator actions.
+A node that predates host directory points or path restores is refused a directory capture or a path restore by the control instance, with `409 UPDATE_REQUIRED`, before the request reaches it, over the direct connection and over a Pilot tunnel alike. Every other call on a directory is addressed by a storage, point or restore id such a node cannot hold.
+
+Reading points requires read access to the stacks that use the volume or directory. Capturing and restoring require edit access to those stacks. Provisioning or replacing the repository, and releasing the repository lock, are administrator actions.
 
 ## The HTTP surface
 
@@ -511,9 +614,11 @@ curl https://your-sencho-instance:1852/api/recovery/node \
 }
 ```
 
+The descriptor also lists `restoreModes`, `pointReads`, `storageKinds` (`named_volume`, and `bind_root` for a node that protects directories) and `restoreScopes` (`root`, and `path` for a node that restores one path). A node that predates a list is read as what it can do: `["named_volume"]` and `["root"]`.
+
 `state` is `available`, `unavailable`, `update_required`, or `unknown`. An `unavailable` node names why: `engine_not_installed`, `schema_newer_than_build`, `recovery_store_unavailable`, `engine_starting`, `helper_unavailable`, `repository_not_initialized`, `repository_unavailable`, or `repository_key_unavailable`. `operationId` echoes the dispatch id when a control instance relays the read, and is null for a direct call.
 
-### List the volumes a stack uses
+### List the volumes and directories a stack uses
 
 ```bash
 curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
@@ -524,6 +629,7 @@ curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
 {
   "roots": [
     {
+      "kind": "named_volume",
       "volumeName": "web_data",
       "storageId": null,
       "eligible": true,
@@ -532,11 +638,27 @@ curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
       "coveringPointId": null
     },
     {
+      "kind": "named_volume",
       "volumeName": "web_nfs_data",
       "eligible": false,
       "ineligibleReason": "driver_options",
       "reason": "This volume has driver options (a bind, NFS or tmpfs mount), which this release does not capture.",
       "coverage": "unsupported"
+    },
+    {
+      "kind": "bind_root",
+      "rootId": "bind:9c2e41a07b3d5f18",
+      "role": "bind",
+      "stackName": "web",
+      "label": "/var/lib/media",
+      "hostPath": "/srv/media",
+      "aliases": [],
+      "storageId": null,
+      "eligible": true,
+      "ineligibleReason": null,
+      "reason": null,
+      "coverage": "no_point",
+      "coveringPointId": null
     }
   ],
   "verdict": {
@@ -556,7 +678,9 @@ curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
 }
 ```
 
-Without `?stack=`, every volume on the node is considered. `stack` is one stack name: a stack that does not exist lists nothing, and a repeated parameter or a name that is not a valid stack name answers `400 invalid_request`. A root the caller may not read appears as `{ "access": "inaccessible" }` with no name, and it still counts against the verdict: an unreadable root must never make a partly protected stack read as protected. A root's `storageId` is null until the volume has been observed, which happens when its first point is captured.
+With `?stack=`, the stack's source directory and every directory it binds are listed with `kind: "bind_root"`, a `role` (`stack_source` or `bind`), the `rootId` a capture names, the `hostPath`, and any other declared spelling of the directory in `aliases`. Listing never starts a helper and never renders another stack.
+
+Without `?stack=`, every volume on the node is considered, and only the directories that already have a recorded identity are listed, with `fsRootsScope: "recorded_only"`, because finding the rest would render every stack. Their `rootId`, `role` and `stackName` are null there. `stack` is one stack name: a stack that does not exist lists nothing, and a repeated parameter or a name that is not a valid stack name answers `400 invalid_request`. A root the caller may not read appears as `{ "kind": "named_volume", "access": "inaccessible" }` (or `bind_root`) with no name or path, and it still counts against the verdict: an unreadable root must never make a partly protected stack read as protected. A root's `storageId` is null until the volume has been observed, which happens when its first point is captured.
 
 ### List a volume's points
 
@@ -703,14 +827,14 @@ A restart does not leave the node closed. When Sencho starts it removes the help
 | Route | Body | Answers |
 | --- | --- | --- |
 | `POST /api/recovery/points/:pointId/overwrite/preview` | none | `200` with the facts and, when the target is eligible, the confirmation token. Writes no row and changes nothing. |
-| `POST /api/recovery/points/:pointId/overwrite` | `idempotencyKey`, `confirmationToken`, `confirmVolumeName` | `202` with the operation, or `200` on a replay. A refusal writes no row. |
+| `POST /api/recovery/points/:pointId/overwrite` | `idempotencyKey`, `confirmationToken`, and `confirmVolumeName` for a volume or `confirmHostPath` for a directory | `202` with the operation, or `200` on a replay. A refusal writes no row. |
 | `POST /api/recovery/restores/:intentId/resolve` | `action`, either `retry` or `release_fence` | `200` with the outcome the reconciler reached. |
 
 The preview needs the access that restoring the volume's stacks requires, and the overwrite and resolve need the same. The overwrite refuses a target that is not eligible: `400 invalid_request` for a missing volume or a leftover work directory, and `409 precondition_failed` with `reason: "generation_changed"` for a volume recreated after the point. The preview answers `200` with `eligible: false`, the reason, and no confirmation token. A volume that no longer exists, or one recreated after the point was captured, is not eligible: the point no longer describes the bytes there, and the preview recomputes the live volume's creation time and root device/inode to see it. Once a new capture records the recreated volume, the old point's generation is superseded and the preview refuses it as an unknown storage identity instead. A preview that cannot read the live generation at all is also not eligible and issues no token. A volume that still holds the hidden `.sencho-restore-<id>` directory of an earlier restore that did not settle (for example one parked `completion_unknown` whose fence you released) is not eligible: the reason names the directory, which may hold the data that restore replaced and which a point of the volume does not include. Copy out anything you need, remove it from the volume, and preview again. A top-level user entry with that prefix but not an intent-id name is not a work directory and does not make the volume ineligible. The check reads the volume root even when an application user owns it, as a database does with mode `0700` or `2750`. When the preview cannot list the volume root at all, it says so in `warnings` and the swap's own refusal is the backstop: it rolls back and starts the containers again. A token that does not match the volume as it is now answers `409 precondition_failed` with `reason: "confirmation_mismatch"`, whether the token came from another preview or the containers or the repository changed since the preview, and `reason: "generation_changed"` when the volume was recreated. A target without room for the restored copy answers `507 insufficient_space`. A restore whose operation is still running in this process answers `409 lock_held`. The walkthrough, including what stops, the non-atomic window, and the crash table, is in [Restore over the existing volume](#restore-over-the-existing-volume).
 
 ### Error responses
 
-Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `generation_changed`, `confirmation_mismatch`, `wrong_route`, `no_fence`, `fence_released`, `point_not_readable`, `path_not_found`, `not_a_directory`, `unsupported_entry_type`, or `read_capacity`.
+Every error from these routes has the same shape, except the `403 SCOPE_DENIED` that an API token of the wrong scope gets before the request reaches a route: that body carries `error` and `code` only, with no `errorClass`. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, `generation_changed`, `confirmation_mismatch`, `wrong_route`, `no_fence`, `fence_released`, `point_not_readable`, `path_not_found`, `not_a_directory`, `unsupported_entry_type`, `read_capacity`, `path_mapping_unproven`, `nested_mount`, `unsupported_target`, or `root_not_authorized`.
 
 ```json
 {

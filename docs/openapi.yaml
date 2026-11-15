@@ -1880,7 +1880,11 @@ components:
             the point), `not_a_directory` (a browse named a file, link or special file),
             `unsupported_entry_type` (a download named a directory, link or special file, or the
             point kind has no read), and `read_capacity` (the node already runs its bound of reads;
-            the answer carries `Retry-After`).
+            the answer carries `Retry-After`). Host directories add `path_mapping_unproven` (the
+            host path the Docker daemon uses is not proven to be the directory the stack declares,
+            `409 identity_unknown`), `nested_mount` (a mount below the directory refuses an
+            overwrite), `unsupported_target` (a stack source directory is never overwritten), and
+            `root_not_authorized` (no stack declares the directory now as a bind it may write).
 
     RecoveryOperation:
       type: object
@@ -1956,9 +1960,17 @@ components:
             transport: { type: string }
         target:
           type: object
-          required: [volumeName, storageKey, generation, generationToken, eligible, ineligibleReason]
+          required: [kind, volumeName, hostPath, storageKey, generation, generationToken, eligible, ineligibleReason]
           properties:
-            volumeName: { type: string }
+            kind:
+              type: string
+              enum: [named_volume, bind_root]
+            volumeName:
+              type: ["string", "null"]
+              description: The volume's name; null for a host directory.
+            hostPath:
+              type: ["string", "null"]
+              description: A host directory's path, which the confirmation types back; null for a volume.
             storageKey: { type: string }
             generation: { type: integer }
             generationToken: { type: string }
@@ -1966,11 +1978,15 @@ components:
             ineligibleReason: { type: ["string", "null"] }
         dependents:
           type: object
-          required: [stacks, containers]
+          required: [stacks, containers, observers]
           description: What the overwrite would stop. Each container is restarted afterwards only if it was running.
           properties:
             stacks:
               type: array
+              items: { type: string }
+            observers:
+              type: array
+              description: Containers that only read a host directory through a read-only ancestor. They are never stopped.
               items: { type: string }
             containers:
               type: array
@@ -1989,6 +2005,10 @@ components:
         inUse:
           type: boolean
           description: Whether any dependent container is running now.
+        nestedMounts:
+          type: array
+          description: Mount points below a host directory, relative to it. Any one of them refuses the overwrite.
+          items: { type: string }
         swap:
           type: object
           required: [method, atomic, supported, reason]
@@ -2097,7 +2117,7 @@ components:
               path: { type: string }
               reason:
                 type: string
-                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type]
+                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type, nested_mount]
         completedAt: { type: ["integer", "null"] }
         failureClass:
           type: ["string", "null"]
@@ -2223,7 +2243,7 @@ components:
               name: { type: string }
               reason:
                 type: string
-                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type]
+                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type, nested_mount]
         offset: { type: integer }
         nextOffset:
           type: ["integer", "null"]
@@ -2267,16 +2287,37 @@ components:
     RecoveryStorageRoot:
       type: object
       description: |
-        One volume considered for protection. A root the caller may not read appears
-        as `{ "access": "inaccessible" }` with no name, and still counts against the
-        verdict.
+        One volume or host directory considered for protection, told apart by `kind`. A
+        root the caller may not read appears as `{ "kind": ..., "access": "inaccessible" }`
+        with no name or path, and still counts against the verdict. A host directory is a
+        stack's own source directory or a directory it binds; `rootId` is what a capture
+        names. In a node-wide listing only directories with a recorded identity appear, and
+        their `rootId`, `role` and `stackName` are null.
       properties:
+        kind:
+          type: string
+          enum: [named_volume, bind_root]
         volumeName: { type: string }
+        rootId:
+          type: ["string", "null"]
+          description: The server-minted root id, `stack-source` or `bind:<16 hex>`.
+        role:
+          type: ["string", "null"]
+          enum: [stack_source, bind, null]
+        stackName: { type: ["string", "null"] }
+        label: { type: ["string", "null"] }
+        hostPath:
+          type: ["string", "null"]
+          description: The path the Docker daemon uses for the directory, when it is known.
+        aliases:
+          type: array
+          description: Other spellings the stack declares for the directory, each proven at capture.
+          items: { type: string }
         storageId: { type: ["string", "null"] }
         eligible: { type: boolean }
         ineligibleReason:
           type: ["string", "null"]
-          enum: [volume_missing, reserved_name, repository_volume, sencho_volume, anonymous_volume, non_local_driver, driver_options, null]
+          enum: [volume_missing, reserved_name, repository_volume, sencho_volume, anonymous_volume, non_local_driver, driver_options, host_path_unreachable, protected_host_path, sencho_managed_path, not_a_directory, path_mapping_unknown, docker_data_path, outside_compose_base, null]
         reason:
           type: ["string", "null"]
           description: The sentence shown for a refused volume.
@@ -6480,6 +6521,25 @@ paths:
                     items:
                       type: string
                       enum: [list, download]
+                  storageKinds:
+                    type: array
+                    description: |
+                      The storage this node captures. A node that omits the field is read as
+                      `[named_volume]`, and a control instance answers a host directory capture
+                      for it with `409 update_required`. A name a control instance does not know
+                      is ignored.
+                    items:
+                      type: string
+                      enum: [named_volume, bind_root]
+                  restoreScopes:
+                    type: array
+                    description: |
+                      How much of a point this node restores. A node that omits the field is read
+                      as `[root]`, and a control instance answers a path restore for it with
+                      `409 update_required`.
+                    items:
+                      type: string
+                      enum: [root, path]
                   operationId:
                     type: ["string", "null"]
                     description: The dispatch id a control instance sent, echoed back, or null for a direct call.
@@ -6598,10 +6658,12 @@ paths:
     get:
       operationId: getRecoveryStorage
       tags: [Recovery]
-      summary: List volumes and their coverage
+      summary: List volumes and directories and their coverage
       description: |
-        With `?stack=`, returns the volumes that stack's rendered model declares. Without
-        it, considers every volume on the node. Each root carries its eligibility, its
+        With `?stack=`, returns the volumes that stack's rendered model declares, its own
+        source directory, and every directory it binds. Without it, considers every volume
+        on the node and the host directories that already have a recorded identity, and
+        answers `fsRootsScope: recorded_only`; it renders no stack. Each root carries its eligibility, its
         coverage reason, and the covering point when there is one. A root the caller may
         not read appears as `{"access": "inaccessible"}` with its name withheld, and it
         still counts against the verdict. A volume recreated since its last capture reads
@@ -6630,6 +6692,10 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/RecoveryStorageRoot"
+                  fsRootsScope:
+                    type: string
+                    enum: [recorded_only]
+                    description: Present on a node-wide listing, which lists only directories with a recorded identity.
                   verdict:
                     $ref: "#/components/schemas/RecoveryCoverageVerdict"
                   capability:
@@ -6891,6 +6957,71 @@ paths:
         "500":
           $ref: "#/components/responses/RecoveryInternalError"
 
+  /api/recovery/storage/roots/points:
+    post:
+      operationId: createRecoveryDirectoryPoint
+      tags: [Recovery]
+      summary: Create a point of a directory a stack declares
+      description: |
+        Admits a root capture of a stack's own source directory or a directory it binds,
+        named by the stack and the `rootId` the storage listing returned, never by a path.
+        The stack's directories are derived again with a fresh render and the id is matched
+        against them. Every stack that depends on the directory is authorized, then the
+        directory's eligibility is checked, then the host path the Docker daemon uses is
+        proven to be the directory Sencho sees (device and inode), and only then is anything
+        recorded. A proof that fails answers `409 identity_unknown` with
+        `reason: path_mapping_unproven`. A directory inside or around one another operation
+        holds answers `409 lock_held`. Mounts below the directory are recorded as
+        `nested_mount` exclusions, so such a point is `partial`. A node that predates this
+        route is refused by the control instance with `409 update_required`.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stackName, rootId, idempotencyKey]
+              properties:
+                stackName:
+                  type: string
+                  description: The stack that declares the directory.
+                rootId:
+                  type: string
+                  pattern: '^(?:stack-source|bind:[0-9a-f]{16})$'
+                  description: The root id the storage listing returned for the directory.
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "202":
+          description: Capture admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
   /api/recovery/points/{pointId}/verify:
     post:
       operationId: verifyRecoveryPoint
@@ -7011,6 +7142,84 @@ paths:
                     restoring over a point's own volume is
                     `POST /api/recovery/points/{pointId}/overwrite`; `new_path` is not available.
                   default: new_volume
+      responses:
+        "202":
+          description: Restore admitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/restore/path:
+    post:
+      operationId: restoreRecoveryPointPath
+      tags: [Recovery]
+      summary: Restore one path of a point into a new volume
+      description: |
+        Restores one file or directory of a point into a volume Sencho creates, at its own
+        place in the tree, and nothing else. The target name follows the same rules as a
+        whole-point restore. `path` uses the browse grammar and must be in the point: the
+        point's own record of it is read before anything is created, and a path it does not
+        hold answers `400 invalid_request` with `reason: path_not_found`. The point's root
+        (`/`) is restored with `POST /api/recovery/points/{pointId}/restore`. A node that
+        predates this route is refused by the control instance with `409 update_required`,
+        so it never restores the whole point instead.
+        Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetVolumeName, path, idempotencyKey]
+              properties:
+                targetVolumeName:
+                  type: string
+                  minLength: 2
+                  maxLength: 255
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]+$'
+                path:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: Absolute within the point, such as `/db/data.sqlite`.
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
       responses:
         "202":
           description: Restore admitted.
@@ -7170,7 +7379,8 @@ paths:
           application/json:
             schema:
               type: object
-              required: [confirmationToken, confirmVolumeName, idempotencyKey]
+              required: [confirmationToken, idempotencyKey]
+              description: Exactly one of `confirmVolumeName` (a volume) and `confirmHostPath` (a host directory).
               properties:
                 confirmationToken:
                   type: string
@@ -7181,6 +7391,11 @@ paths:
                   minLength: 1
                   maxLength: 255
                   description: The target volume's name, typed back exactly.
+                confirmHostPath:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: A host directory's path as the preview showed it, typed back exactly.
                 idempotencyKey:
                   type: string
                   minLength: 1
