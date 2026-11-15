@@ -88,6 +88,23 @@ describe('a host directory capture', () => {
     expect(result.ok && result.evidence.exclusions).toEqual([{ path: 'cache', reason: 'nested_mount' }]);
   });
 
+  it('leaves out Sencho\'s restore work directories at any depth, for a directory only', async () => {
+    const { engine, specs } = engineWith(() => OK);
+    await capture(engine);
+    const cmd = specs.find((spec) => spec.profile === 'backup')!.cmd as string[];
+    const excludes = cmd.flatMap((arg, i) => (arg === '--exclude' ? [cmd[i + 1]] : []));
+    expect(excludes).toHaveLength(2);
+    expect(excludes[0]).toMatch(/^\/data\/\.sencho-restore-/);
+    expect(excludes[1]).toMatch(/^\/data\/\*\*\/\.sencho-restore-/);
+    const volume = engineWith(() => OK);
+    await volume.engine.createPoint(
+      { storage: { ...STORAGE, kind: 'named_volume', locator: 'app_data' }, repository: REPOSITORY, trigger: 'manual', actor: 'admin', kind: 'root' },
+      context(),
+    );
+    const volumeCmd = volume.specs.find((spec) => spec.profile === 'backup')!.cmd as string[];
+    expect(volumeCmd.filter((arg) => arg.includes('**'))).toEqual([]);
+  });
+
   it('ends identity_unknown when the guard refuses the root, and records no snapshot', async () => {
     const { engine } = engineWith((spec) => (spec.profile === 'backup' ? { ...OK, exitCode: 86, guardRefused: true } : OK));
     expect(await capture(engine)).toEqual({ ok: false, errorClass: 'identity_unknown' });

@@ -293,6 +293,14 @@ describe('listing host directories', () => {
     expect(body.verdict).toMatchObject({ state: expect.not.stringMatching(/^protected$/) });
   });
 
+  it('lists an unrenderable stack\'s binds as unknown, so its source directory alone never reads Protected', async () => {
+    stackDir('broken');
+    const body = await listing('broken');
+    const unknown = body.roots.find((r) => r.kind === 'bind_root' && r.coverage === 'identity_unknown');
+    expect(unknown).toMatchObject({ role: 'bind', stackName: 'broken', eligible: false });
+    expect(body.verdict).toMatchObject({ state: expect.not.stringMatching(/^protected$/) });
+  });
+
   it('withholds the path of a directory the caller may not read, and still counts it', async () => {
     const dir = path.join(shared, 'listing');
     fs.mkdirSync(dir, { recursive: true });
@@ -439,17 +447,35 @@ describe('capturing a host directory', () => {
     expect(helperRuns).toHaveLength(0);
   });
 
-  it('puts a second host spelling of the same directory on the identity the first created', async () => {
+  it('puts a second host spelling of the same directory on the identity the first created, once it proves', async () => {
     const data = dataDir('web');
     models.byStack.web = [{ source: data, target: '/data' }];
     const stat = fs.statSync(data, { bigint: true });
+    // A host symlink is another spelling of the same directory.
+    const spelling = path.join(shared, `spelling-${randomUUID().slice(0, 8)}`);
+    fs.symlinkSync(data, spelling);
     const existing = identityStore.StorageIdentityStore.getInstance().observe({
-      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: '/host/other/spelling',
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: spelling,
       generationToken: `fs|${stat.ino}|1700000000.000000001`, dependents: [{ stackName: 'web', serviceName: null }],
     });
     const res = await capture('web', await rootIdOf('web'));
     expect(res.status).toBe(202);
     expect(res.body.operation.storageId).toBe(existing.id);
+  });
+
+  it('does not merge onto a recorded spelling that no longer proves to this directory', async () => {
+    const data = dataDir('web');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const stat = fs.statSync(data, { bigint: true });
+    // The directory was moved: its old path keeps the token but is gone.
+    const moved = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: path.join(shared, 'moved-away'),
+      generationToken: `fs|${stat.ino}|1700000000.000000001`, dependents: [],
+    });
+    const res = await capture('web', await rootIdOf('web'));
+    expect(res.status).toBe(202);
+    expect(res.body.operation.storageId).not.toBe(moved.id);
+    expect(identityStore.StorageIdentityStore.getInstance().getById(res.body.operation.storageId)?.locator).toBe(data);
   });
 
   it('answers a replay with the same operation and refuses the key for a different request', async () => {
@@ -621,8 +647,9 @@ describe('overwriting a host directory', () => {
     StackFileRoots.StackFileRootsService.invalidateNode(nodeId);
     const undeclared = await request(app).post(`/api/recovery/points/${pointId}/overwrite`).set('Cookie', adminCookie)
       .send({ idempotencyKey: randomUUID(), confirmationToken: 'a'.repeat(64), confirmHostPath: '/x' });
-    expect(undeclared.status).toBe(400);
-    expect(undeclared.body.reason).toBe('root_not_authorized');
+    // A stack that stopped declaring the directory is a state that moved since the preview.
+    expect(undeclared.status).toBe(409);
+    expect(undeclared.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'root_not_authorized' });
   });
 
   it('answers precondition_failed when another stack starts declaring the directory after the preview', async () => {
@@ -646,5 +673,159 @@ describe('overwriting a host directory', () => {
     // A caller who may not restore the stack that now depends on it is refused outright.
     const fresh = await preview(point.id, await editorOf('web'));
     expect(fresh.status).toBe(403);
+  });
+});
+
+/**
+ * A staged overwrite of `dir` whose operation has already ended and whose
+ * storage lock is gone, with its fence held: the state only the intent records.
+ */
+function fencedOverwriteOf(dir: string, dependentStacks: string[] = []): string {
+  const db = recoveryDbModule.recoveryDb();
+  const storage = identityStore.StorageIdentityStore.getInstance().observe({
+    ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: dir,
+    generationToken: `fs|${randomUUID()}|1700000000.000000001`, dependents: [],
+  });
+  const repositoryId = repositories.RecoveryRepositoryStore.getInstance().getActive()!.id;
+  const operationId = randomUUID();
+  db.prepare(`INSERT INTO recovery_operations (id, idempotency_key, kind, storage_id, actor, transport, state, error_class, process_epoch, created_at, updated_at)
+    VALUES (?, ?, 'restore', ?, 'admin', 'local', 'completion_unknown', 'interrupted', 'old', 1, 1)`).run(operationId, randomUUID(), storage.id);
+  const point = points.RecoveryPointStore.getInstance().begin({
+    kind: 'root', storageId: storage.id, expectedGenerationToken: storage.generationToken, repositoryId,
+    trigger: 'manual', actor: 'admin', sourceOperationId: operationId, sourceNodeKey: 'docker-engine:engine-fs', engineId: 'restic',
+  });
+  points.RecoveryPointStore.getInstance().finalize(point.id, {
+    status: 'succeeded',
+    evidence: { snapshotId: 's', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+  });
+  const store = intentsStore();
+  const intent = store.recordOverwrite({
+    operationId, pointId: point.id, targetVolume: `fs:${storage.storageKey}`,
+    targetPaths: { senchoPath: dir, hostPath: dir, aliases: [] }, actor: 'admin', processEpoch: 'old',
+    stagingVolume: `sencho-recovery-stage-${randomUUID()}`, expectedGenerationToken: storage.generationToken,
+    dependentStacks,
+  });
+  for (const step of ['staging', 'staged_verified', 'fenced'] as const) store.advance(intent.id, step);
+  store.setFenceState(intent.id, 'held');
+  return intent.id;
+}
+
+let intentsModule: typeof import('../services/recovery/restoreIntents') | null = null;
+function intentsStore() {
+  return intentsModule!.RestoreIntentStore.getInstance();
+}
+
+describe('the fence on a host directory, at the routes', () => {
+  beforeAll(async () => {
+    intentsModule = await import('../services/recovery/restoreIntents');
+  });
+
+  it('refuses file reads and writes that overlap a fenced directory, for the stack source and a bind root', async () => {
+    const data = dataDir('web');
+    fs.writeFileSync(path.join(data, 'a.txt'), 'x');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    fencedOverwriteOf(data, ['web']);
+    const source = await request(app).get('/api/stacks/web/files').set('Cookie', adminCookie);
+    expect(source.status).toBe(409);
+    expect(source.body.code).toBe('data_restore');
+    const bindRead = await request(app).get(`/api/stacks/web/files?rootId=${encodeURIComponent(bindId)}`).set('Cookie', adminCookie);
+    expect(bindRead.status).toBe(409);
+    expect(bindRead.body.code).toBe('data_restore');
+    const bindWrite = await request(app).delete(`/api/stacks/web/files?rootId=${encodeURIComponent(bindId)}&path=a.txt`).set('Cookie', adminCookie);
+    expect(bindWrite.status).toBe(409);
+    expect(fs.existsSync(path.join(data, 'a.txt'))).toBe(true);
+    // A stack whose directories do not overlap the fenced one is untouched.
+    stackDir('other');
+    expect((await request(app).get('/api/stacks/other/files').set('Cookie', adminCookie)).status).toBe(200);
+  });
+
+  it('refuses a Compose lifecycle on a stack the fenced directory recorded', async () => {
+    const data = dataDir('web');
+    fencedOverwriteOf(data, ['web']);
+    const res = await request(app).post('/api/stacks/web/start').set('Cookie', adminCookie).send({});
+    expect(res.status).toBe(409);
+  });
+
+  it('refuses a capture of a parent directory while a child overwrite still holds its fence, with no lock left', async () => {
+    const data = dataDir('web');
+    const inner = path.join(data, 'inner');
+    fs.mkdirSync(inner);
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const outer = await rootIdOf('web');
+    fencedOverwriteOf(fs.realpathSync(inner));
+    // The repository lock is free: only the overlap check can refuse this.
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_locks').get()).toEqual({ n: 0 });
+    const res = await capture('web', outer);
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('lock_held');
+    expect(res.body.error).toMatch(/contains this one or is inside it/);
+  });
+});
+
+describe('a directory overwrite confirmed against a state that moved', () => {
+  async function previewed() {
+    const { pointId, data } = await capturedPoint();
+    const res = await request(app).post(`/api/recovery/points/${pointId}/overwrite/preview`).set('Cookie', adminCookie).send({});
+    expect(res.body.target.eligible).toBe(true);
+    return { pointId, data, token: res.body.confirmation.token as string };
+  }
+  const confirm = (pointId: string, token: string, hostPath: string) => request(app)
+    .post(`/api/recovery/points/${pointId}/overwrite`).set('Cookie', adminCookie)
+    .send({ idempotencyKey: randomUUID(), confirmationToken: token, confirmHostPath: hostPath });
+  const intentCount = () => recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get();
+
+  it('answers precondition_failed when a mount appears below it', async () => {
+    const { pointId, data, token } = await previewed();
+    nestedMounts = ['cache'];
+    const res = await confirm(pointId, token, data);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'nested_mount' });
+    expect(intentCount()).toEqual({ n: 0 });
+  });
+
+  it('answers precondition_failed when a container starts depending on it', async () => {
+    const { pointId, data, token } = await previewed();
+    containers = [{ Id: 'late', Names: ['/late'], State: 'running', Labels: {}, Mounts: [{ Type: 'bind', Source: data, RW: true }] }];
+    const res = await confirm(pointId, token, data);
+    expect(res.status).toBe(409);
+    expect(res.body.errorClass).toBe('precondition_failed');
+    expect(intentCount()).toEqual({ n: 0 });
+  });
+
+  it('answers precondition_failed when the directory was made again', async () => {
+    const { pointId, data, token } = await previewed();
+    const replacement = path.join(shared, `replacement-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(replacement);
+    fs.rmSync(data, { recursive: true });
+    fs.renameSync(replacement, data);
+    const res = await confirm(pointId, token, data);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ errorClass: 'precondition_failed', reason: 'generation_changed' });
+    expect(intentCount()).toEqual({ n: 0 });
+  });
+});
+
+describe('reading a directory\'s points', () => {
+  it('browses a point of a declared directory under the stack read, and one no stack declares only as an administrator', async () => {
+    const { pointId } = await capturedPoint();
+    const browse = (cookie: string) => request(app).get(`/api/recovery/points/${pointId}/browse?path=/db.sqlite`).set('Cookie', cookie);
+    // The fake engine answers the path as a file, so a browse of it is a not-a-directory refusal: it reached the read.
+    const admin = await browse(adminCookie);
+    expect(admin.status).toBe(400);
+    expect(admin.body.reason).toBe('not_a_directory');
+    // A HEAD answers the download's headers and reads no bytes.
+    const download = await request(app).head(`/api/recovery/points/${pointId}/download?path=/db.sqlite`).set('Cookie', adminCookie);
+    expect(download.status).toBe(200);
+    expect(download.headers['content-length']).toBe('1');
+    // The stack is deleted: no stack declares the directory or holds it in its
+    // source directory now, so its points are detached. (While the stack exists,
+    // its writable source directory is an ancestor of ./data and keeps it a dependent.)
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, 'web'), { recursive: true, force: true });
+    models.byStack.web = [];
+    StackFileRoots.StackFileRootsService.invalidateNode(nodeId);
+    const viewer = await editorOf('web');
+    expect((await browse(viewer)).status).toBe(403);
+    expect((await browse(adminCookie)).status).toBe(400);
   });
 });

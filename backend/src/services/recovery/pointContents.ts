@@ -78,17 +78,17 @@ export function parsePageOffset(raw: unknown): number {
  * routes call it before a helper starts, and the views that offer Browse ask it
  * instead of guessing from a point's status.
  *
- * Only a finished root point of a named volume, in the repository this node
- * uses now, holds a snapshot a read can open. A path point and a bind root have
- * no read yet; a pending, failed or interrupted point holds no snapshot; a point
- * in a replaced repository is kept, not served.
+ * Only a finished root point, of a named volume or of a host directory a stack
+ * declares, in the repository this node uses now, holds a snapshot a read can
+ * open. A path point has no read yet; a pending, failed or interrupted point
+ * holds no snapshot; a point in a replaced repository is kept, not served.
  */
 export function pointReadEligibility(
   point: RecoveryPoint,
   storage: Pick<StorageIdentity, 'kind'>,
   repository: { id: string; active: boolean },
 ): PointReadEligibility {
-  if (point.kind !== 'root' || storage.kind !== 'named_volume') {
+  if (point.kind !== 'root' || (storage.kind !== 'named_volume' && storage.kind !== 'bind_root')) {
     return { readable: false, reason: 'unsupported_entry_type' };
   }
   if ((point.status !== 'succeeded' && point.status !== 'partial') || !point.snapshotId) {

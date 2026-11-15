@@ -21,6 +21,7 @@ import type { HelperMountSource, ProvenHostRoot } from '../hostRoots';
 import { consistencyFromObservations, type InUseObservation } from '../volumeSources';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
 import { RECOVERY_WORK_DIR_GLOB, isRecoveryWorkDirName } from '../restoreIntents';
+import { isFsTargetKey } from '../fsTargets';
 import {
   classifyContentRun,
   contentSnapshotPath,
@@ -149,6 +150,11 @@ export class ResticEngine implements BackupEngine, PointContentReader {
     // excluded path as a skipped one, so the preview tells the operator that a
     // point does not carry the directory.
     const args = ['backup', '/data', '--json', '--host', 'sencho', '--exclude', `/data/${RECOVERY_WORK_DIR_GLOB}`];
+    // A host directory can contain another root that was overwritten (a stack
+    // source holds `./data`), and a restore of that child keeps its work
+    // directory inside the child. It is never the parent's own data, at any
+    // depth, so a parent capture leaves it out too.
+    if (request.storage.kind === 'bind_root') args.push('--exclude', `/data/**/${RECOVERY_WORK_DIR_GLOB}`);
     for (const tag of tags) args.push('--tag', tag);
     const parent = this.deps.parentSnapshot(request.storage, request.repository.id);
     if (parent) args.push('--parent', parent);
@@ -286,7 +292,11 @@ export class ResticEngine implements BackupEngine, PointContentReader {
       // The live root may belong to the application, which a plain root cannot write.
       profile = 'materialize';
       // A host directory is written only through the proven root, so the guard
-      // checks it inside the materialize container.
+      // checks it inside the materialize container. The pair must agree: an
+      // `fs:` key without a root, or a root beside a volume name, is refused.
+      if (isFsTargetKey(intent.target.volumeName) !== (intent.target.hostRoot !== undefined)) {
+        return { ok: false, errorClass: 'identity_unknown' };
+      }
       target = intent.target.hostRoot ?? intent.target.volumeName;
     } else {
       return { ok: false, errorClass: 'invalid_request' };

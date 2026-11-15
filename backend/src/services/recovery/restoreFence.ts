@@ -210,14 +210,20 @@ export class RestoreFenceStore {
   liveFencedFsTargets(): FsTargetPaths[] {
     try {
       const rows = recoveryDb().prepare(`
-        SELECT target_paths_json AS paths FROM recovery_restore_intents
+        SELECT id, target_paths_json AS paths FROM recovery_restore_intents
         WHERE target_mode = 'staged_overwrite'
-          AND target_paths_json IS NOT NULL
+          AND target_volume LIKE 'fs:%'
           AND fence_state IN ${LIVE_FENCE_STATE}
-      `).all() as Array<{ paths: string }>;
-      return rows
-        .map((row) => parseFsTargetPaths(row.paths))
-        .filter((paths): paths is FsTargetPaths => paths !== null);
+      `).all() as Array<{ id: string; paths: string | null }>;
+      return rows.map((row) => {
+        const paths = parseFsTargetPaths(row.paths);
+        if (paths) return paths;
+        // A fenced directory whose record cannot be read is still fenced. It
+        // stands for every host path, so nothing that binds one starts and no
+        // file route touches one until the restore is resolved.
+        console.warn('[Recovery] The paths of fenced restore %s cannot be read; refusing every host directory until it is resolved', sanitizeForLog(row.id));
+        return { senchoPath: '/', hostPath: '/', aliases: [] };
+      });
     } catch (err) {
       warnStoreUnreadable(err);
       return [];
@@ -556,7 +562,7 @@ export async function startContainerUnderFence<T>(
   const recheck = (): DataRestoreFenceError | null => {
     if (!bindsHostPath) return null;
     const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets().find((target) => !checked.has(target.hostPath));
-    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'container', 'directory') : null;
+    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'container', 'directory', true) : null;
   };
   return startUnderFence(names, start, 'container', recheck);
 }

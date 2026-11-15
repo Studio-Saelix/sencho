@@ -209,7 +209,7 @@ describe('candidates', () => {
 
   it('keeps a mapping that cannot be read as retryable, not as unsupported', async () => {
     const candidate = await candidateFor(declaration(), { ownMounts: 'unreadable' });
-    expect(candidate.mappingUnreadable).toBe(true);
+    expect(candidate.status).toBe('mapping_unreadable');
     expect(candidate.hostPath).toBeNull();
     expect(candidate.ineligibleReason).toBeNull();
   });
@@ -223,13 +223,23 @@ describe('candidates', () => {
     const base = dir('compose-base');
     const inside = dir('compose-base/web');
     const outside = dir('elsewhere/web');
-    const ok = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: inside }), { base, dockerRoot: null });
+    const ok = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: inside }), { base });
     expect(ok.ineligibleReason).toBeNull();
-    const escaped = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: outside }), { base, dockerRoot: null });
+    const escaped = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: outside }), { base });
     expect(escaped.ineligibleReason).toBe('outside_compose_base');
     // The compose base itself is not a stack source.
-    const baseItself = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: base }), { base, dockerRoot: null });
+    const baseItself = await candidateFor(declaration({ role: 'stack_source', rootId: 'stack-source', senchoPath: base }), { base });
     expect(baseItself.ineligibleReason).toBe('outside_compose_base');
+  });
+
+  it('refuses every directory while Docker does not say where its data root is', async () => {
+    // A socket proxy that refuses system info must not turn "could not ask" into
+    // "not Docker's data": a bind of /var/lib/docker/volumes would pass otherwise.
+    for (const senchoPath of ['/var/lib/docker/volumes/app/_data', '/srv/app/data']) {
+      const candidate = await candidateFor(declaration({ senchoPath }), { dockerRoot: null });
+      expect(candidate.ineligibleReason, senchoPath).toBe('docker_root_unknown');
+      expect(candidate.status, senchoPath).toBe('ineligible');
+    }
   });
 
   it('counts a bind as writable only when one declaration may write it', async () => {
@@ -316,7 +326,14 @@ describe('the generation token', () => {
   it('sees a recreated directory from Sencho\'s own stat, without a helper', async () => {
     const real = dir('generation');
     const stat = fs.statSync(real, { bigint: true });
-    expect(await roots.fsGenerationChanged(`fs|${stat.ino}|1700000000.000000001`, real)).toBe(false);
+    const btime = stat.birthtimeNs > 0n
+      ? `${stat.birthtimeNs / 1_000_000_000n}.${(stat.birthtimeNs % 1_000_000_000n).toString().padStart(9, '0')}`
+      : null;
+    if (btime) {
+      expect(await roots.fsGenerationChanged(`fs|${stat.ino}|${btime}`, real)).toBe(false);
+      // The same inode with another birth time is a directory made again on a reused inode.
+      expect(await roots.fsGenerationChanged(`fs|${stat.ino}|1700000000.000000001`, real)).toBe(true);
+    }
     expect(await roots.fsGenerationChanged(`fs|${stat.dev}:${stat.ino}`, real)).toBe(false);
     expect(await roots.fsGenerationChanged(`fs|${stat.dev}:${stat.ino + 1n}`, real)).toBe(true);
     fs.rmSync(real, { recursive: true });
@@ -393,5 +410,37 @@ describe('overlap', () => {
     expect(roots.pathsOverlap('/srv/app', '/srv/app/data')).toBe(true);
     expect(roots.pathsOverlap('/srv/app/data/db', '/srv/app/data')).toBe(true);
     expect(roots.pathsOverlap('/srv/app/data', '/srv/app/database')).toBe(false);
+  });
+});
+
+describe('the engine pins the directory admission authorized', () => {
+  it('refuses to read a directory swapped in after admission, even when both namespaces agree on it', async () => {
+    const SelfIdentityService = (await import('../services/SelfIdentityService')).default;
+    const spy = vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    const { hostRootEngineDeps } = await import('../services/recovery/storageAdapters');
+    const parent = dir('pin');
+    const data = path.join(parent, 'data');
+    fs.mkdirSync(data);
+    const foreign = dir('pin-foreign');
+    const stat = fs.statSync(data, { bigint: true });
+    const storage = {
+      id: 's', authorityId: 'a', ownerNodeKey: 'docker-engine:a', kind: 'bind_root' as const, locator: data,
+      storageKey: 'k', generation: 1, generationToken: `fs|${stat.ino}|1700000000.000000001`, lineageParentId: null,
+      state: 'current' as const, firstSeenAt: 1, lastSeenAt: 1,
+    };
+    const ctx = {
+      operationId: 'op', pointId: 'p', signal: new AbortController().signal, onProgress: () => undefined,
+      lock: { scope: 'repository' as const, resourceKey: 'r', ownerOperationId: 'op', processEpoch: 'e', acquiredAt: 1, staleSince: null },
+    };
+    const helperRun = fakeHelper();
+    const deps = hostRootEngineDeps({ docker: {} as never, runner: () => helperRun.runner });
+    // Admitted directory in place: the proof matches the stored token.
+    await expect(deps.prepareSource(storage, ctx)).resolves.toMatchObject({ exclusions: [] });
+    // Swapped for a symlink to another directory: the daemon and Sencho both
+    // follow it and agree, so only the stored identity tells it apart.
+    fs.rmSync(data, { recursive: true });
+    fs.symlinkSync(foreign, data);
+    await expect(deps.prepareSource(storage, ctx)).rejects.toMatchObject({ errorClass: 'identity_unknown' });
+    spy.mockRestore();
   });
 });

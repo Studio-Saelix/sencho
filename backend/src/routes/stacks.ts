@@ -3910,7 +3910,7 @@ async function resolveRootForOp(
   // legacy behaviour. Return a synthetic stack-source root without touching the
   // roots service, so plain stack-source ops never trigger a compose render.
   if (rootId === STACK_SOURCE_ROOT_ID) {
-    const stackDir = path.join(FileSystemService.getInstance(req.nodeId).getBaseDir(), stackName);
+    const stackDir = () => path.join(FileSystemService.getInstance(req.nodeId).getBaseDir(), stackName);
     if (await refuseUnderDirectoryRestore(res, stackDir)) return null;
     return stackSourceFileRoot();
   }
@@ -3937,7 +3937,7 @@ async function resolveRootForOp(
     res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
     return null;
   }
-  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName)) return null;
+  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, () => root.hostPathOrName)) return null;
   return root;
 }
 
@@ -3946,9 +3946,10 @@ async function resolveRootForOp(
  * overwriting: reading it would show a half-swapped tree, and writing it would
  * change data the restore is replacing. One query when no such restore is live.
  */
-async function refuseUnderDirectoryRestore(res: Response, dir: string): Promise<boolean> {
+async function refuseUnderDirectoryRestore(res: Response, dirOf: () => string): Promise<boolean> {
   const { RestoreFenceStore, fsFenceRefusalFor } = await import('../services/recovery/restoreFence');
   if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return false;
+  const dir = dirOf();
   let canonical = path.resolve(dir);
   try {
     canonical = await fsp.realpath(dir);

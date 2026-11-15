@@ -1459,10 +1459,9 @@ export function requiredPointReadFor(method: string, path: string): PointReadKin
 /**
  * The storage kind or restore scope a recovery request needs the node to
  * advertise. Capturing a host directory and restoring one path of a point are
- * the only routes an older node lacks while still answering a neighbour: its
- * whole-point restore would bring back more than the path asked for. Every other
- * directory call is addressed by a storage, point or intent id an older node
- * cannot hold.
+ * routes an older node does not have, so it would answer a bare 404; the hub
+ * answers `UPDATE_REQUIRED` instead. Every other directory call is addressed by
+ * a storage, point or intent id an older node cannot hold.
  */
 export function requiredRecoveryScopeFor(
   method: string,

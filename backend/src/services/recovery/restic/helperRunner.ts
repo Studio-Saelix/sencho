@@ -299,7 +299,7 @@ export interface HelperRunResult {
    * directory the daemon bound is not the one Sencho proved, and the real
    * command never started.
    */
-  guardRefused?: boolean;
+  guardRefused: boolean;
 }
 
 /** Longest stdout line a listener receives before the rest of that line is dropped. */

@@ -3,6 +3,7 @@ import { RecoveryError } from './redaction';
 import { RECOVERY_WORK_DIR_PREFIX } from './restoreIntents';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import type { ProvenHostRoot } from './hostRoots';
+import { isFsTargetKey } from './fsTargets';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import { helperFailureNote } from './restic/resticOutput';
 
@@ -119,6 +120,12 @@ export async function runSwapStep(input: {
   action: SwapAction;
   signal?: AbortSignal;
 }): Promise<SwapRunResult> {
+  // An `fs:` target is a host directory and is only ever reached through its
+  // proven root; a proven root is only ever an `fs:` target. A mismatched pair
+  // is refused here rather than handed to Docker as a volume name.
+  if (isFsTargetKey(input.volumeName) !== (input.hostRoot !== undefined)) {
+    return { ok: false, report: null, errorClass: 'identity_unknown' };
+  }
   const lines: string[] = [];
   let result;
   try {

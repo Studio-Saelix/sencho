@@ -30,6 +30,7 @@ import {
   describeFsIneligible,
   fsTargetKey,
   listStackFsRootCandidates,
+  locateStoredFsRoot,
   proveHostRoot,
   readFsRootEnvironment,
   resolveFsRootDependents,
@@ -733,15 +734,16 @@ export class RecoveryEngineService {
     if (!input.authorize({ storageKey: keyForCheck, dependents: resolution.dependents })) {
       throw new RecoveryError('permission_denied');
     }
-    if (candidate.mappingUnreadable) {
+    if (candidate.status === 'mapping_unreadable') {
       throw new RecoveryError('identity_unknown', {
         reason: 'path_mapping_unproven',
         detail: 'Sencho could not read its own container mounts, so it cannot tell which host path holds this directory. Try again shortly.',
       });
     }
-    if (candidate.ineligibleReason !== null || hostPath === null) {
+    if (candidate.status === 'ineligible') {
       throw new RecoveryError('invalid_request', { detail: describeFsIneligible(candidate.ineligibleReason) ?? undefined });
     }
+    if (hostPath === null) throw new RecoveryError('identity_unknown');
 
     const proven = await proveHostRoot({
       runner: this.helperRunner(),
@@ -755,7 +757,14 @@ export class RecoveryEngineService {
     // with this token under another locator is the one this point belongs to,
     // and its recorded dependents join the access check.
     const store = StorageIdentityStore.getInstance();
-    const alias = store.findCurrentByGenerationToken(ownerNodeKey, 'bind_root', proven.generationToken);
+    const tokenMatch = store.findCurrentByGenerationToken(ownerNodeKey, 'bind_root', proven.generationToken);
+    // An equal token is a candidate, not proof: a moved directory keeps its
+    // token, and a clone can share inode and birth time with its origin. The
+    // recorded spelling is proven now and must be this very directory.
+    const alias = tokenMatch && tokenMatch.locator !== hostPath
+      && await this.isSameDirectory(tokenMatch.locator, proven.root.identity())
+      ? tokenMatch
+      : null;
     const locator = alias ? alias.locator : hostPath;
     if (alias && alias.locator !== hostPath) {
       if (!input.authorize({ storageKey: keyForCheck === null ? null : alias.storageKey, dependents: resolution.dependents })) {
@@ -815,6 +824,26 @@ export class RecoveryEngineService {
     const point = started.setup;
     this.schedule(operationId, () => this.runCreatePoint(operationId, point.id, observed.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /** Whether a recorded host path is, proven now, the directory with this identity. */
+  private async isSameDirectory(locator: string, identity: string): Promise<boolean> {
+    try {
+      const location = await locateStoredFsRoot(locator);
+      const proven = await proveHostRoot({
+        runner: this.helperRunner(),
+        operationId: randomUUID(),
+        senchoPath: location.senchoPath,
+        hostPath: location.hostPath,
+        followSenchoPath: true,
+      });
+      return proven.root.identity() === identity;
+    } catch (err) {
+      // A recorded spelling that cannot be proven is not this directory; the
+      // capture records its own identity under its own path instead.
+      console.warn('[Recovery] A recorded spelling of this directory could not be proven:', errorMessageForLog(err));
+      return false;
+    }
   }
 
   /** Verify a point. The check itself is repository-wide evidence. */

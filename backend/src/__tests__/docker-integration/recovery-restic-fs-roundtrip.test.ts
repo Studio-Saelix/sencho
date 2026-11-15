@@ -281,7 +281,35 @@ describeIf('host directory recovery against the real helper', () => {
       intentId: randomUUID(), action: 'status',
     });
     expect(swap).toMatchObject({ ok: false, errorClass: 'identity_unknown' });
+    // The writing steps are refused the same way, and nothing lands in the impostor.
+    const intentId = randomUUID();
+    const materialize = await engineFor({ senchoPath: dir, hostPath: dir }).restore({
+      id: intentId, operationId: 'fs-swap-materialize', pointId: 'p', repositoryId: repository.id, snapshotId: 'latest',
+      target: {
+        mode: 'staged_overwrite', storageId: 's', expectedGenerationToken: proven.generationToken,
+        workDir: `.sencho-restore-${intentId}/incoming`, volumeName: 'fs:unused', hostRoot: proven.root,
+      },
+      pathScope: null, phase: 'materializing', actor: 'integration', createdAt: Date.now(),
+    }, context('fs-swap-materialize'));
+    expect(materialize).toEqual({ ok: false, errorClass: 'identity_unknown' });
+    const prepared = await runSwapStep({
+      runner: runner(), operationId: 'fs-swap-prepare', volumeName: 'fs:unused', hostRoot: proven.root, intentId, action: 'prepare',
+    });
+    expect(prepared).toMatchObject({ ok: false, errorClass: 'identity_unknown' });
     expect(fs.readdirSync(dir)).toEqual(['b.txt']);
+  }, 300_000);
+
+  it('leaves a restore work directory at any depth out of a capture of a directory', async () => {
+    const dir = hostDir('nested-workdir');
+    const workDir = `.sencho-restore-${randomUUID()}`;
+    inDirectory(dir, `mkdir -p child/${workDir}/original && printf "replaced" > child/${workDir}/original/old.txt && printf "keep" > child/live.txt && mkdir -p child/.sencho-restore-notes && printf "mine" > child/.sencho-restore-notes/n.txt`);
+    const captured = await captureDirectory(dir);
+    const volume = await restoreIntoNewVolume(captured.snapshotId);
+    const restored = inVolume(volume, 'find . -mindepth 1 | sort').trim().split('\n');
+    expect(restored).toContain('./child/live.txt');
+    // A user's entry with the prefix and any other name is ordinary data.
+    expect(restored).toContain('./child/.sencho-restore-notes/n.txt');
+    expect(restored.some((entry) => entry.includes(workDir))).toBe(false);
   }, 300_000);
 
   it('proves a directory Sencho sees at another path through its real container mounts, and refuses a wrong translation', async () => {

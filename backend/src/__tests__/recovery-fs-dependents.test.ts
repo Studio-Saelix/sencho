@@ -337,3 +337,31 @@ describe('the fence on a host directory', () => {
     ]);
   });
 });
+
+describe('the fence when nothing was fenced at the match', () => {
+  it('refuses a start when the first directory fence lands while the container is inspected', async () => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    // A volume fence keeps the fast path off; no directory is fenced at the match.
+    const docker = {
+      getContainer: () => ({
+        inspect: async () => {
+          fencedDirectory({ senchoPath: '/srv/data', hostPath: '/srv/data' });
+          return { Mounts: [{ Type: 'bind', Source: '/srv/data', RW: true }] };
+        },
+      }),
+    } as unknown as Pick<Docker, 'getContainer'>;
+    vi.spyOn(fence.RestoreFenceStore.getInstance(), 'liveFencedVolumeNames').mockReturnValue(['some_volume']);
+    const start = vi.fn(async () => 'started');
+    await expect(fence.startContainerUnderFence(docker, 'c1', start)).rejects.toMatchObject({ code: 'data_restore' });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('treats a fenced directory whose record cannot be read as fencing every host path', () => {
+    const intentId = fencedDirectory({ senchoPath: '/srv/data', hostPath: '/srv/data' });
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_paths_json = '{broken' WHERE id = ?").run(intentId);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(fence.RestoreFenceStore.getInstance().liveFencedFsTargets()).toEqual([{ senchoPath: '/', hostPath: '/', aliases: [] }]);
+    expect(fence.fsFenceRefusalFor('/srv/anything')).not.toBeNull();
+    expect(warn).toHaveBeenCalled();
+  });
+});

@@ -18,6 +18,7 @@ import {
   type DependentResolution,
   type InUseObservation,
 } from './volumeSources';
+import { RecoveryError } from './redaction';
 import type { ResticHostRootDeps } from './restic/ResticEngine';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import type { StorageIdentity, StorageKind } from './types';
@@ -148,8 +149,17 @@ export function hostRootEngineDeps(ctx: { docker: Docker; runner: () => Recovery
         operationId: engineCtx.operationId,
         senchoPath: location.senchoPath,
         hostPath: location.hostPath,
+        followSenchoPath: true,
         signal: engineCtx.signal,
       });
+      // The fresh proof says the two namespaces agree on what is at the path
+      // now. The guard must pin the directory admission authorized, not whatever
+      // was swapped in since, so the proof's identity has to be this storage's.
+      if (proven.generationToken !== storage.generationToken) {
+        throw new RecoveryError('identity_unknown', {
+          detail: 'The directory at this path is not the one this point was admitted for. It was replaced or recreated, so nothing was read.',
+        });
+      }
       const exclusions = await nestedMountExclusions({
         runner: ctx.runner(),
         operationId: engineCtx.operationId,
@@ -165,6 +175,7 @@ export function hostRootEngineDeps(ctx: { docker: Docker; runner: () => Recovery
         operationId: engineCtx.operationId,
         senchoPath: location.senchoPath,
         hostPath: location.hostPath,
+        followSenchoPath: true,
         signal: engineCtx.signal,
       });
       return proven.generationToken;

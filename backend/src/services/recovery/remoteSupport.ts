@@ -166,8 +166,8 @@ export type RecoveryPreflight =
  *
  * `requirements.storageKind` and `requirements.restoreScope` cover a host
  * directory capture and a path restore. A node that never advertised them has
- * no capture route for a directory, and its whole-point restore route would
- * restore more than one path, so both are refused here as an update.
+ * neither route and would answer a bare 404, so both are refused here as an
+ * update.
  */
 export async function preflightRecoveryRequest(
   nodeId: number,

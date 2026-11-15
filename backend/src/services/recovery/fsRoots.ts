@@ -20,7 +20,7 @@ import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import { HELPER_SOURCE_MOUNT, type RecoveryHelperRunner } from './restic/helperRunner';
 import { StorageIdentityStore } from './storageIdentity';
 import { parseFsTargetPaths } from './fsTargets';
-import type { DependentResolution, InUseObservation } from './volumeSources';
+import { mapLimited, RENDER_CONCURRENCY, type DependentResolution, type InUseObservation } from './volumeSources';
 import type { PointExclusion, StorageDependent } from './types';
 
 /**
@@ -57,6 +57,8 @@ export type FsRootIneligibleReason =
   | 'path_mapping_unknown'
   /** Inside Docker's data root, which holds named volumes and the recovery repository. */
   | 'docker_data_path'
+  /** Docker would not say where its data root is, so the directory cannot be shown to be outside it. */
+  | 'docker_root_unknown'
   /** The stack directory resolves outside the compose base (a symlink out of it). */
   | 'outside_compose_base';
 
@@ -65,25 +67,34 @@ export const MAX_DECLARED_ALIASES = 16;
 /** Mount points below a root the probe reports at most (`maxReportedMounts` in the probe). */
 export const MAX_NESTED_MOUNTS = 64;
 
-/** A derived root. Never built from client input. */
-export interface FsRootCandidate {
+/** What every derived root carries, whatever its verdict. */
+interface FsRootCandidateBase {
   stackName: string;
   rootId: string;
   role: FsRootRole;
   label: string;
   /** The directory as Sencho sees it. */
   senchoPath: string;
-  /** The daemon's path for it, a textual translation that the proof still has to confirm. Null when unknown. */
-  hostPath: string | null;
   /** Declared source strings that differ from `hostPath`, each probed at capture. */
   aliases: string[];
   /** True when at least one declaration may write the directory. */
   writable: boolean;
   mounts: RootMount[];
-  ineligibleReason: FsRootIneligibleReason | null;
-  /** Sencho's own mounts could not be read just now, so the mapping is unknown until they can (retryable). */
-  mappingUnreadable: boolean;
 }
+
+/**
+ * A derived root. Never built from client input. `status` decides what the rest
+ * may hold: only an eligible root has a host path the proof can be asked to
+ * confirm, and a root whose mapping could not be read has neither a host path
+ * nor a refusal (it is retryable, not unsupported).
+ */
+export type FsRootCandidate = FsRootCandidateBase & (
+  /** `hostPath` is the daemon's path, a translation the proof still has to confirm. */
+  | { status: 'eligible'; hostPath: string; ineligibleReason: null }
+  | { status: 'ineligible'; hostPath: string | null; ineligibleReason: FsRootIneligibleReason }
+  /** Sencho's own mounts could not be read just now. */
+  | { status: 'mapping_unreadable'; hostPath: null; ineligibleReason: null }
+);
 
 /** One stack's candidates, with how its model was read. */
 export interface FsRootCandidates {
@@ -161,6 +172,30 @@ export function dependsOnRoot(relation: PathRelation, writable: boolean): boolea
   return relation === 'equal' || relation === 'inside' || (relation === 'ancestor' && writable);
 }
 
+/** A directory's device and inode as Sencho sees it, or null when it cannot be read. */
+async function identityOf(target: string): Promise<string | null> {
+  try {
+    const stat = await fsPromises.stat(target, { bigint: true });
+    return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+  } catch {
+    // An unreadable path is matched by its spelling alone.
+    return null;
+  }
+}
+
+/**
+ * `relatePath`, plus identity: two spellings of one directory (a directory
+ * Sencho reaches through two of its own mounts, say) are lexically unrelated, so
+ * an unrelated pair is compared by device and inode as well. Only equality is
+ * found this way; a parent reached under another spelling is matched lexically
+ * or not at all.
+ */
+async function relateWithIdentity(candidate: string, root: string, rootIdentity: string | null): Promise<PathRelation> {
+  const relation = relatePath(candidate, root);
+  if (relation !== 'unrelated' || rootIdentity === null) return relation;
+  return (await identityOf(candidate)) === rootIdentity ? 'equal' : 'unrelated';
+}
+
 /** True when two host paths overlap (equal, or one inside the other). */
 export function pathsOverlap(a: string, b: string): boolean {
   return relatePath(a, b) !== 'unrelated';
@@ -232,24 +267,27 @@ export async function candidatesFromListing(input: {
     }
     if (hostPath !== null && reason === null) {
       if (hostPath === '/' || isDangerousHostPath(hostPath)) reason = 'protected_host_path';
-      else if (input.dockerRoot && pathsOverlap(hostPath, input.dockerRoot)) reason = 'docker_data_path';
+      // An unanswered question is not a "no": without Docker's data root, a
+      // directory inside it cannot be told apart, so none is offered.
+      else if (input.dockerRoot === null) reason = 'docker_root_unknown';
+      else if (pathsOverlap(hostPath, input.dockerRoot)) reason = 'docker_data_path';
     }
     const aliases = root.declaredSources
       .map((declared) => normalizeAbsolute(declared))
       .filter((declared): declared is string => declared !== null && declared !== hostPath);
-    candidates.push({
+    const base: FsRootCandidateBase = {
       stackName: input.stackName,
       rootId: root.rootId,
       role: root.role,
       label: root.label,
       senchoPath: root.senchoPath,
-      hostPath,
       aliases: [...new Set(aliases)].sort(),
       writable: root.role === 'stack_source' ? true : !root.readonly,
       mounts: root.mounts,
-      ineligibleReason: reason,
-      mappingUnreadable,
-    });
+    };
+    if (reason !== null) candidates.push({ ...base, status: 'ineligible', hostPath, ineligibleReason: reason });
+    else if (mappingUnreadable || hostPath === null) candidates.push({ ...base, status: 'mapping_unreadable', hostPath: null, ineligibleReason: null });
+    else candidates.push({ ...base, status: 'eligible', hostPath, ineligibleReason: null });
   }
   return candidates;
 }
@@ -404,15 +442,37 @@ async function probeHostPath(input: {
 }
 
 /** Sencho's own view of a directory: its device and inode as exact strings. */
-export async function statSenchoView(senchoPath: string): Promise<{ dev: string; ino: string }> {
+export async function statSenchoView(
+  senchoPath: string,
+  options: { follow: boolean } = { follow: true },
+): Promise<{ dev: string; ino: string; btime: string | null }> {
   let stat;
   try {
-    stat = await fsPromises.stat(senchoPath, { bigint: true });
+    // A freshly derived root was resolved when it was derived, so a symlink at
+    // its last component now is a swap, not the directory: it is not followed.
+    // A recorded spelling may itself be a symlink; its proof is pinned to the
+    // stored token instead, which a swap cannot match.
+    stat = options.follow
+      ? await fsPromises.stat(senchoPath, { bigint: true })
+      : await fsPromises.lstat(senchoPath, { bigint: true });
   } catch (err) {
     throw mappingUnproven(`stat failed: ${(err as NodeJS.ErrnoException).code ?? 'unknown'}`);
   }
   if (!stat.isDirectory()) throw mappingUnproven('not a directory');
-  return { dev: stat.dev.toString(), ino: stat.ino.toString() };
+  return { dev: stat.dev.toString(), ino: stat.ino.toString(), btime: birthTimeOf(stat.birthtimeNs) };
+}
+
+/**
+ * The birth time Node read with statx, in the probe's `<seconds>.<nanoseconds>`
+ * form, or null when the filesystem reported none (zero). Compared only with a
+ * token that carries a birth time, which the probe wrote from the same kernel
+ * call, so a filesystem without one never produces a false change.
+ */
+function birthTimeOf(nanoseconds: bigint): string | null {
+  if (nanoseconds <= 0n) return null;
+  const seconds = nanoseconds / 1_000_000_000n;
+  const rest = nanoseconds % 1_000_000_000n;
+  return `${seconds}.${rest.toString().padStart(9, '0')}`;
 }
 
 export interface ProvenFsRoot {
@@ -439,7 +499,13 @@ export async function proveHostRoot(input: {
    * process; the different-namespace fixture stats it inside the container that
    * plays Sencho.
    */
-  statView?: (senchoPath: string) => Promise<{ dev: string; ino: string }>;
+  statView?: (senchoPath: string) => Promise<{ dev: string; ino: string; btime?: string | null }>;
+  /**
+   * Follow a symlink at Sencho's path. False for a root derived just now (its
+   * path is already resolved); true for a recorded spelling, whose caller then
+   * compares the proven token with the stored one.
+   */
+  followSenchoPath?: boolean;
 }): Promise<ProvenFsRoot> {
   const aliases = input.aliases ?? [];
   if (aliases.length > MAX_DECLARED_ALIASES) {
@@ -448,7 +514,7 @@ export async function proveHostRoot(input: {
       detail: `This directory is declared under more than ${MAX_DECLARED_ALIASES} different paths, which is more than Sencho proves. Declare it under fewer paths.`,
     });
   }
-  const view = await (input.statView ?? statSenchoView)(input.senchoPath);
+  const view = await (input.statView ?? ((target: string) => statSenchoView(target, { follow: input.followSenchoPath === true })))(input.senchoPath);
   const report = await probeHostPath({
     runner: input.runner,
     operationId: input.operationId,
@@ -537,16 +603,18 @@ export async function findDeclaredFsRoot(input: {
   senchoPath: string;
 }): Promise<{ candidates: FsRootCandidate[]; unrenderable: string | null }> {
   const candidates: FsRootCandidate[] = [];
-  for (const stackName of input.knownStackNames) {
-    const listed = await listStackFsRootCandidates({
-      nodeId: input.nodeId,
-      stackName,
-      fresh: true,
-      environment: input.environment,
-    });
-    if (listed.outcome === 'unrenderable') return { candidates, unrenderable: stackName };
+  const rootIdentity = await identityOf(input.senchoPath);
+  const listings = await mapLimited([...input.knownStackNames], RENDER_CONCURRENCY, (stackName) => listStackFsRootCandidates({
+    nodeId: input.nodeId,
+    stackName,
+    fresh: true,
+    environment: input.environment,
+  }));
+  for (let index = 0; index < listings.length; index += 1) {
+    const listed = listings[index];
+    if (listed.outcome === 'unrenderable') return { candidates, unrenderable: input.knownStackNames[index] };
     for (const candidate of listed.candidates) {
-      if (relatePath(candidate.senchoPath, input.senchoPath) === 'equal') candidates.push(candidate);
+      if (await relateWithIdentity(candidate.senchoPath, input.senchoPath, rootIdentity) === 'equal') candidates.push(candidate);
     }
   }
   return { candidates, unrenderable: null };
@@ -567,21 +635,24 @@ export function fsGenerationToken(report: Pick<FsProbeReport, 'dev' | 'ino' | 'b
 
 /**
  * Whether a stored token no longer describes the directory, from Sencho's own
- * `stat` alone (a listing starts no helper). The inode is compared, and the
- * device too when the token carries it. A directory that cannot be read is a
- * change: its old points must stop reading Protected.
+ * `stat` alone (a listing starts no helper). The inode is compared, with the
+ * birth time when the token carries one and the device when it carries that
+ * instead. A directory that cannot be read is a change: its old points must stop
+ * reading Protected.
  */
 export async function fsGenerationChanged(token: string, senchoPath: string): Promise<boolean> {
-  const parsed = /^fs\|(?:([0-9]+)\|[0-9]+\.[0-9]{9}|([0-9]+):([0-9]+))$/.exec(token);
+  const parsed = /^fs\|(?:([0-9]+)\|([0-9]+\.[0-9]{9})|([0-9]+):([0-9]+))$/.exec(token);
   if (!parsed) return true;
-  let view: { dev: string; ino: string };
+  let view: { dev: string; ino: string; btime: string | null };
   try {
     view = await statSenchoView(senchoPath);
   } catch {
     return true;
   }
-  if (parsed[1] !== undefined) return parsed[1] !== view.ino;
-  return parsed[2] !== view.dev || parsed[3] !== view.ino;
+  // A directory removed and made again often gets its inode back (ext4 does);
+  // its birth time is what tells them apart.
+  if (parsed[1] !== undefined) return parsed[1] !== view.ino || (view.btime !== null && view.btime !== parsed[2]);
+  return parsed[3] !== view.dev || parsed[4] !== view.ino;
 }
 
 // --- Dependents -------------------------------------------------------------
@@ -621,12 +692,16 @@ export async function matchContainerToRoot(
 ): Promise<ContainerRootMatch> {
   let depends = false;
   let observes = false;
+  let rootIdentity: string | null | undefined;
   for (const mount of container.Mounts ?? []) {
     if (mount.Type !== 'bind' || typeof mount.Source !== 'string') continue;
     const writable = mount.RW !== false;
     const relations: PathRelation[] = [root.hostPath, ...root.aliases].map((spelling) => relatePath(mount.Source as string, spelling));
     const senchoView = hostToSenchoPath(mount.Source, ownMounts);
-    if (senchoView !== null) relations.push(relatePath(await canonicalOrSelf(senchoView), root.senchoPath));
+    if (senchoView !== null) {
+      if (rootIdentity === undefined) rootIdentity = await identityOf(root.senchoPath);
+      relations.push(await relateWithIdentity(await canonicalOrSelf(senchoView), root.senchoPath, rootIdentity));
+    }
     for (const relation of relations) {
       if (dependsOnRoot(relation, writable)) depends = true;
       else if (relation === 'ancestor') observes = true;
@@ -710,15 +785,16 @@ export async function resolveFsRootDependents(input: {
     else unownedContainer = true;
   }
 
-  const stacks = input.onlyStacks ?? input.knownStackNames;
-  for (const stackName of stacks) {
-    if (!input.knownStackNames.includes(stackName)) continue;
-    let listed: FsRootCandidates;
+  const stacks = (input.onlyStacks ?? input.knownStackNames).filter((name) => input.knownStackNames.includes(name));
+  const rootIdentity = await identityOf(input.root.senchoPath);
+  // Each stack's roots are read at most four at a time, the same bound the
+  // volume resolution renders under: a fresh read shells out to Compose.
+  const listings = await mapLimited(stacks, RENDER_CONCURRENCY, async (stackName): Promise<FsRootCandidates | null> => {
     try {
       if (input.cachedOnly) {
         const cached = StackFileRootsService.getInstance(input.nodeId).peekFsRoots(stackName);
-        if (!cached) return unrenderable(stackName);
-        listed = {
+        if (!cached) return null;
+        return {
           outcome: cached.outcome,
           candidates: await candidatesFromListing({
             stackName,
@@ -728,21 +804,27 @@ export async function resolveFsRootDependents(input: {
             dockerRoot: input.environment.dockerRoot,
           }),
         };
-      } else {
-        listed = await listStackFsRootCandidates({
-          nodeId: input.nodeId,
-          stackName,
-          fresh: input.render,
-          environment: input.environment,
-        });
       }
+      return await listStackFsRootCandidates({
+        nodeId: input.nodeId,
+        stackName,
+        fresh: input.render,
+        environment: input.environment,
+      });
     } catch (err) {
       console.warn('[Recovery] Could not list the roots of stack %s:', sanitizeForLog(stackName), errorMessageForLog(err));
-      return unrenderable(stackName);
+      return null;
     }
-    if (listed.outcome === 'unrenderable') return unrenderable(stackName);
+  });
+  for (let index = 0; index < stacks.length; index += 1) {
+    const stackName = stacks[index];
+    const listed = listings[index];
+    // Nothing cached, a failed read, or a model that would not render: the
+    // set is unknown.
+    if (!listed || listed.outcome === 'unrenderable') return unrenderable(stackName);
     for (const candidate of listed.candidates) {
-      if (dependsOnRoot(relatePath(candidate.senchoPath, input.root.senchoPath), candidate.writable)) {
+      const relation = await relateWithIdentity(candidate.senchoPath, input.root.senchoPath, rootIdentity);
+      if (dependsOnRoot(relation, candidate.writable)) {
         add(stackName, null);
         break;
       }
@@ -870,6 +952,8 @@ export function describeFsIneligible(reason: FsRootIneligibleReason | null): str
       return 'No mount of the Sencho container covers this directory, so Sencho cannot tell which host path holds it.';
     case 'docker_data_path':
       return 'This directory is inside Docker\'s data root, which holds named volumes and the recovery repository.';
+    case 'docker_root_unknown':
+      return 'Docker did not say where its data root is, so Sencho cannot show this directory is outside it. Check that the Docker endpoint answers system info, then try again.';
     case 'outside_compose_base':
       return 'This stack directory resolves outside the compose directory, so it is not protected as a stack source.';
   }

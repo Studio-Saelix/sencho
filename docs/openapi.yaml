@@ -1883,8 +1883,11 @@ components:
             the answer carries `Retry-After`). Host directories add `path_mapping_unproven` (the
             host path the Docker daemon uses is not proven to be the directory the stack declares,
             `409 identity_unknown`), `nested_mount` (a mount below the directory refuses an
-            overwrite), `unsupported_target` (a stack source directory is never overwritten), and
-            `root_not_authorized` (no stack declares the directory now as a bind it may write).
+            overwrite), `unsupported_target` (a stack source directory is never overwritten,
+            `400`), and `root_not_authorized` (no stack declares the directory now as a bind it
+            may write). An overwrite confirm of a directory answers `nested_mount`,
+            `root_not_authorized` and `path_mapping_unproven` with `409 precondition_failed`,
+            because each is a state that moved since the preview.
 
     RecoveryOperation:
       type: object
@@ -2317,7 +2320,7 @@ components:
         eligible: { type: boolean }
         ineligibleReason:
           type: ["string", "null"]
-          enum: [volume_missing, reserved_name, repository_volume, sencho_volume, anonymous_volume, non_local_driver, driver_options, host_path_unreachable, protected_host_path, sencho_managed_path, not_a_directory, path_mapping_unknown, docker_data_path, outside_compose_base, null]
+          enum: [volume_missing, reserved_name, repository_volume, sencho_volume, anonymous_volume, non_local_driver, driver_options, host_path_unreachable, protected_host_path, sencho_managed_path, not_a_directory, path_mapping_unknown, docker_data_path, docker_root_unknown, outside_compose_base, null]
         reason:
           type: ["string", "null"]
           description: The sentence shown for a refused volume.
@@ -7188,8 +7191,8 @@ paths:
         point's own record of it is read before anything is created, and a path it does not
         hold answers `400 invalid_request` with `reason: path_not_found`. The point's root
         (`/`) is restored with `POST /api/recovery/points/{pointId}/restore`. A node that
-        predates this route is refused by the control instance with `409 update_required`,
-        so it never restores the whole point instead.
+        predates this route has no such route, so the control instance answers
+        `409 update_required` for it instead of forwarding the request.
         Only a Full Admin API token may call it; any other scope is refused with `403 SCOPE_DENIED`.
       parameters:
         - name: pointId

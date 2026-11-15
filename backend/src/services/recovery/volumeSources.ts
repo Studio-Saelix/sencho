@@ -370,9 +370,9 @@ export type DependentResolution =
     };
 
 /** How many stack models to render at once. Rendering shells out to Compose. */
-const RENDER_CONCURRENCY = 4;
+export const RENDER_CONCURRENCY = 4;
 
-async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array<R>(items.length);
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {

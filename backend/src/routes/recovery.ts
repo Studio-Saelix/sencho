@@ -258,9 +258,10 @@ const repositoryBody = idempotencyBody.extend({
 });
 
 /**
- * The overwrite confirmation: the token the preview answered with and the volume
- * name typed back. A 255-character bound matches the name Docker accepts, so a
- * pasted sentence is refused here rather than compared against a real name.
+ * The overwrite confirmation: the token the preview answered with, and exactly
+ * one of the volume name or the directory's host path typed back. The volume
+ * name is bounded at the 255 characters Docker accepts and the host path at 4096,
+ * so a pasted sentence is refused here rather than compared with a real target.
  */
 const overwriteBody = idempotencyBody.extend({
   confirmationToken: z.string().trim().regex(/^[0-9a-f]{64}$/),
@@ -557,6 +558,8 @@ async function listFsRootEntries(req: Request, input: {
     storageKey: string | null;
     location: { senchoPath: string; hostPath: string; aliases: string[] } | null;
     candidate: FsRootCandidate | null;
+    /** The stacks that depend on it cannot be found (Sencho cannot place it in its own namespace). */
+    dependentsUnknown?: boolean;
   }): Promise<void> => {
     const base = {
       kind: 'bind_root' as const,
@@ -586,7 +589,7 @@ async function listFsRootEntries(req: Request, input: {
     const authorized = authorizeStorageAccess(
       req,
       'read',
-      resolution && requiresNodeWideCheck(resolution)
+      entry.dependentsUnknown || (resolution && requiresNodeWideCheck(resolution))
         ? null
         : { storageKey: entry.storageKey ?? `unmapped:${entry.candidate?.senchoPath ?? ''}`, liveDependents: dependents },
     ).allowed;
@@ -598,7 +601,7 @@ async function listFsRootEntries(req: Request, input: {
     const label = entry.candidate?.label ?? entry.identity?.locator ?? null;
     const hostPath = entry.location?.hostPath ?? entry.candidate?.hostPath ?? null;
     const aliases = entry.location?.aliases ?? [];
-    if (entry.candidate?.mappingUnreadable) {
+    if (entry.candidate?.status === 'mapping_unreadable') {
       roots.push({
         ...base, label, hostPath: null, aliases, storageId: null, eligible: false, ineligibleReason: null,
         reason: 'Sencho could not read its own container mounts just now, so this directory\'s host path is unknown.',
@@ -607,7 +610,7 @@ async function listFsRootEntries(req: Request, input: {
       coverageInputs.push({ storage: null, access: 'unknown', points: [], verifications: new Map() });
       return;
     }
-    if (entry.candidate && entry.candidate.ineligibleReason !== null) {
+    if (entry.candidate?.status === 'ineligible') {
       roots.push({
         ...base, label, hostPath, aliases, storageId: null, eligible: false,
         ineligibleReason: entry.candidate.ineligibleReason,
@@ -648,6 +651,17 @@ async function listFsRootEntries(req: Request, input: {
       environment,
     });
     const current = store.listCurrent(input.ownerNodeKey, 'bind_root');
+    if (listed.outcome === 'unrenderable') {
+      // The binds are unknown, not absent: the stack's verdict must not read
+      // Protected on the strength of its source directory alone.
+      roots.push({
+        kind: 'bind_root', rootId: null, role: 'bind', stackName: input.stackName, label: null, hostPath: null, aliases: [],
+        storageId: null, eligible: false, ineligibleReason: null,
+        reason: 'This stack\'s Compose model could not be rendered, so the directories it binds are not known.',
+        coverage: 'identity_unknown' satisfies RootCoverageReason, coveringPointId: null,
+      });
+      coverageInputs.push({ storage: null, access: 'unknown', points: [], verifications: new Map() });
+    }
     for (const candidate of listed.candidates) {
       const hostPath = candidate.hostPath;
       const storageKey = hostPath
@@ -664,11 +678,15 @@ async function listFsRootEntries(req: Request, input: {
   } else {
     for (const identity of recorded) {
       const senchoPath = await storedFsRootSenchoPath(identity.locator, environment);
+      // A root Sencho cannot place in its own namespace (its mounts are
+      // unreadable, or none covers it) cannot be matched against any stack, so
+      // it is held to the node-wide check, as every other route holds it.
       await describe({
         identity,
         storageKey: identity.storageKey,
         location: { senchoPath: senchoPath ?? identity.locator, hostPath: identity.locator, aliases: [] },
         candidate: null,
+        dependentsUnknown: senchoPath === null,
       });
     }
   }
@@ -1319,7 +1337,9 @@ function operationResult(operation: RecoveryOperation): unknown {
 }
 
 /** What a restore wrote into, as a client may see it: a volume by name, a directory by its host path. */
-function restoreTargetOf(intent: { targetVolume: string | null; targetPaths: { hostPath: string } | null }): unknown {
+type RestoreTargetView = { kind: 'bind_root'; hostPath: string | null } | { kind: 'named_volume'; volumeName: string } | null;
+
+function restoreTargetOf(intent: { targetVolume: string | null; targetPaths: { hostPath: string } | null }): RestoreTargetView {
   if (isFsTargetKey(intent.targetVolume)) {
     return { kind: 'bind_root', hostPath: intent.targetPaths?.hostPath ?? null };
   }
