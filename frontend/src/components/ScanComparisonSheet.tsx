@@ -235,8 +235,11 @@ export function ScanComparisonSheet({
 
   const meta = data ? `#${data.scanA.id} → #${data.scanB.id}` : (loading ? 'Loading…' : '');
 
+  // Set only when the server cut the comparison off, so the summary, the marker and the empty states agree on the limit.
+  const truncatedLimit = data?.truncated ? (data.row_limit ?? 1000) : null;
+
   const summary = addedCounts && removedCounts
-    ? summarizeDelta(addedCounts, removedCounts, data?.truncated ? (data.row_limit ?? 1000) : null)
+    ? summarizeDelta(addedCounts, removedCounts, truncatedLimit)
     : null;
 
   return (
@@ -263,8 +266,8 @@ export function ScanComparisonSheet({
                   detail: crossImage
                     ? 'You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.'
                     : null,
-                  marker: data.truncated
-                    ? `partial · first ${data.row_limit ?? 1000} findings per scan, so this may be incomplete`
+                  marker: truncatedLimit !== null
+                    ? `partial · first ${truncatedLimit} findings per scan, so this may be incomplete`
                     : undefined,
                 }}
                 stages={[]}
@@ -357,11 +360,25 @@ export function ScanComparisonSheet({
             <ScrollArea block className="h-[60vh] max-md:h-auto">
               {pageItems.length === 0 ? (
                 <div className="flex flex-col items-center justify-center text-center py-16 gap-2">
-                  <ShieldCheck className="w-8 h-8 text-success" strokeWidth={1.5} />
+                  <ShieldCheck
+                    className={cn('w-8 h-8', truncatedLimit === null ? 'text-success' : 'text-muted-foreground')}
+                    strokeWidth={1.5}
+                  />
                   <div className="text-sm text-muted-foreground">
-                    {filter === 'added' && 'No new findings. Nothing regressed between these scans.'}
-                    {filter === 'removed' && 'No findings were resolved between these scans.'}
-                    {filter === 'unchanged' && 'No findings are shared between the two scans.'}
+                    {truncatedLimit === null ? (
+                      <>
+                        {filter === 'added' && 'No new findings. Nothing regressed between these scans.'}
+                        {filter === 'removed' && 'No findings were resolved between these scans.'}
+                        {filter === 'unchanged' && 'No findings are shared between the two scans.'}
+                      </>
+                    ) : (
+                      <>
+                        {filter === 'added' && `No new findings among the first ${truncatedLimit} per scan.`}
+                        {filter === 'removed' && `No resolved findings among the first ${truncatedLimit} per scan.`}
+                        {filter === 'unchanged' && `No shared findings among the first ${truncatedLimit} per scan.`}
+                        {' '}Findings beyond that were not compared.
+                      </>
+                    )}
                   </div>
                 </div>
               ) : (

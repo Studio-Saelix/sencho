@@ -496,6 +496,45 @@ describe('ScanComparisonSheet', () => {
       expect(await screen.findByTestId('status-marker')).toHaveTextContent(/first 1000 findings per scan/i);
     });
 
+    it('qualifies each empty bucket of a truncated comparison with the limit instead of claiming nothing is there', async () => {
+      const user = userEvent.setup();
+      show(result({ truncated: true, row_limit: 500 }));
+      await answer();
+
+      expect(screen.getByText(/No new findings among the first 500 per scan\./)).toBeInTheDocument();
+      expect(screen.getByText(/Findings beyond that were not compared\./)).toBeInTheDocument();
+      expect(screen.queryByText(/Nothing regressed/i)).toBeNull();
+
+      await user.click(screen.getByRole('button', { name: /Removed \(0\)/ }));
+      expect(screen.getByText(/No resolved findings among the first 500 per scan\./)).toBeInTheDocument();
+      expect(screen.queryByText(/No findings were resolved/i)).toBeNull();
+
+      await user.click(screen.getByRole('button', { name: /Unchanged \(0\)/ }));
+      expect(screen.getByText(/No shared findings among the first 500 per scan\./)).toBeInTheDocument();
+      expect(screen.queryByText(/No findings are shared/i)).toBeNull();
+    });
+
+    it('uses the default limit in a truncated empty bucket when the response omits it', async () => {
+      show(result({ truncated: true }));
+      await answer();
+
+      expect(screen.getByText(/No new findings among the first 1000 per scan\./)).toBeInTheDocument();
+    });
+
+    it('keeps the definitive empty-bucket wording for a complete comparison', async () => {
+      const user = userEvent.setup();
+      show(result({ truncated: false }));
+      await answer();
+
+      expect(screen.getByText('No new findings. Nothing regressed between these scans.')).toBeInTheDocument();
+      expect(screen.queryByText(/not compared/i)).toBeNull();
+
+      await user.click(screen.getByRole('button', { name: /Removed \(0\)/ }));
+      expect(screen.getByText('No findings were resolved between these scans.')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /Unchanged \(0\)/ }));
+      expect(screen.getByText('No findings are shared between the two scans.')).toBeInTheDocument();
+    });
+
     it('does not call a truncated comparison an improvement, in word or in tone', async () => {
       show(result({ truncated: true, row_limit: 1000, removed: [vuln({ vulnerability_id: 'CVE-R', severity: 'HIGH' })] }));
 
