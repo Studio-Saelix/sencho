@@ -23,7 +23,7 @@ import { NotificationService } from './NotificationService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
-import { sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
@@ -336,7 +336,7 @@ export class DeployedStackDeletionService {
           console.warn(
             '[DeployedStackDeletion] Compose down failed or no-op for %s:',
             sanitizeForLog(stackName),
-            downErr,
+            errorMessageForLog(downErr),
           );
         }
       }
