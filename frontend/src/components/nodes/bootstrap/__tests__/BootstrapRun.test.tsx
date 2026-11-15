@@ -15,9 +15,11 @@ import {
   runBootstrapPreflight,
   startBootstrapOperation,
 } from '../bootstrapApi';
-import { operationAnswer, operationStages } from '../operationStatus';
+import { operationAnswer, operationStages, operationStateWord } from '../operationStatus';
+import { BootstrapRunStep } from '../BootstrapRunStep';
 import { OPERATION_POLL_MS, SETTLE_POLL_MS, useBootstrapOperation } from '../useBootstrapOperation';
 import type {
+  NodeReadiness,
   BootstrapHostKeyResult,
   BootstrapOperationDetail,
   BootstrapPlan,
@@ -154,7 +156,8 @@ function operation(overrides: Partial<BootstrapOperationDetail> = {}): Bootstrap
     createdAt: Date.now(),
     updatedAt: Date.now(),
     finishedAt: null,
-    actions: { cancel: true, retry: false, release: false },
+    actions: { cancel: true, retry: false, release: false, verify: false },
+    readiness: null,
     plan: PLAN,
     events: [{ at: Date.now(), attempt: 1, stage: 'docker_packages', step: 'install-docker-packages', status: 'started', message: 'Install the missing Docker packages', detail: null }],
     ...overrides,
@@ -164,7 +167,7 @@ function operation(overrides: Partial<BootstrapOperationDetail> = {}): Bootstrap
 const STOPPED = operation({
   state: 'partial',
   error: { code: 'STEP_FAILED', message: '"Install the missing Docker packages" failed (exit 100).' },
-  actions: { cancel: false, retry: true, release: true },
+  actions: { cancel: false, retry: true, release: true, verify: false },
   finishedAt: Date.now(),
 });
 
@@ -176,8 +179,8 @@ beforeEach(() => {
   vi.mocked(startBootstrapOperation).mockResolvedValue(operation({ state: 'rechecking', stage: null, step: null }));
   vi.mocked(retryBootstrapOperation).mockResolvedValue(operation({ state: 'rechecking', stage: null, step: null, attempt: 2 }));
   vi.mocked(fetchBootstrapOperation).mockResolvedValue(operation());
-  vi.mocked(cancelBootstrapOperation).mockResolvedValue(operation({ cancelRequested: true, actions: { cancel: false, retry: false, release: false } }));
-  vi.mocked(releaseBootstrapOperation).mockResolvedValue({ ...STOPPED, active: false, actions: { cancel: false, retry: false, release: false } });
+  vi.mocked(cancelBootstrapOperation).mockResolvedValue(operation({ cancelRequested: true, actions: { cancel: false, retry: false, release: false, verify: false } }));
+  vi.mocked(releaseBootstrapOperation).mockResolvedValue({ ...STOPPED, active: false, actions: { cancel: false, retry: false, release: false, verify: false } });
 });
 
 afterEach(() => {
@@ -202,23 +205,92 @@ describe('operation status mapping', () => {
     const op = operation();
     expect(operationAnswer(op)).toMatchObject({ tone: 'brand', title: 'Running', line: 'Running: Install the missing Docker packages.' });
     expect(operationStages(op).map((stage) => [stage.id, stage.word])).toEqual([
-      ['recheck', 'done'], ['docker', 'running'], ['files', 'pending'], ['start', 'pending'], ['enroll', 'pending'],
+      ['recheck', 'done'], ['docker', 'running'], ['files', 'pending'], ['start', 'pending'], ['enroll', 'pending'], ['verify', 'pending'],
     ]);
   });
 
   it('omits the Docker phase when the plan has no Docker stage', () => {
     const op = operation({ plan: { ...PLAN, stages: PLAN.stages.slice(1) }, stage: 'agent_dir' });
-    expect(operationStages(op).map((stage) => stage.id)).toEqual(['recheck', 'files', 'start', 'enroll']);
+    expect(operationStages(op).map((stage) => stage.id)).toEqual(['recheck', 'files', 'start', 'enroll', 'verify']);
   });
 
   it('says an enrolled node is not verified yet, and a stopped run that changed things undid nothing', () => {
-    const enrolled = operation({ state: 'enrolled', stage: 'enroll' });
-    expect(operationAnswer(enrolled).line).toContain('only executed the plan and enrolled the Pilot');
-    expect(operationAnswer(enrolled).line).toContain('did not verify that the node is ready for deployments');
-    expect(operationStages(enrolled).every((stage) => stage.tone === 'success')).toBe(true);
+    const enrolled = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('provisional') });
+    expect(operationAnswer(enrolled)).toMatchObject({ title: 'Connected, unverified', status: 'provisional' });
+    expect(operationAnswer(enrolled).line).toContain('checks it for readiness once its tunnel is up');
+    const stages = operationStages(enrolled);
+    expect(stages.filter((stage) => stage.id !== 'verify').every((stage) => stage.tone === 'success')).toBe(true);
+    expect(stages.find((stage) => stage.id === 'verify')).toMatchObject({ word: 'pending', tone: 'neutral' });
     expect(operationAnswer(STOPPED)).toMatchObject({ tone: 'warning', title: 'Stopped partway', detail: 'Steps that ran stay on the host. Nothing was undone.' });
     expect(operationStages(STOPPED).find((stage) => stage.id === 'docker')).toMatchObject({ word: 'stopped', tone: 'warning' });
     expect(operationStages(STOPPED).find((stage) => stage.id === 'enroll')?.word).toBe('not run');
+  });
+});
+
+function readiness(state: NodeReadiness['state'], gates: NodeReadiness['gates'] = []): NodeReadiness {
+  return { state, operationId: 'op-1', checkedAt: state === 'provisional' ? null : Date.now(), agentVersion: state === 'provisional' ? null : '0.98.2', gates };
+}
+
+describe('readiness of an enrolled run', () => {
+  const FAILED_GATES: NodeReadiness['gates'] = [
+    { id: 'tunnel', label: 'Pilot tunnel', status: 'pass', summary: 'Connected.' },
+    { id: 'docker_compose', label: 'Docker Compose', status: 'unknown', summary: 'The Pilot did not report this check.', remediation: 'Install the Docker Compose v2 plugin.' },
+    { id: 'compose_dir', label: 'Compose directory', status: 'fail', summary: 'The Pilot manages /srv/other.', remediation: 'Set COMPOSE_DIR in the sencho-agent project.' },
+  ];
+
+  it('never reads a connected tunnel as ready: only a passed check does', () => {
+    const verifying = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('verifying') });
+    expect(operationAnswer(verifying)).toMatchObject({ tone: 'brand', title: 'Verifying', status: 'verifying' });
+    expect(operationStages(verifying).find((stage) => stage.id === 'verify')).toMatchObject({ word: 'checking', tone: 'brand' });
+    const ready = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('ready') });
+    expect(operationAnswer(ready)).toMatchObject({ tone: 'success', title: 'Ready', status: 'ready' });
+    expect(operationAnswer(ready).line).toContain('ready for deployments');
+    expect(operationStages(ready).every((stage) => stage.tone === 'success')).toBe(true);
+  });
+
+  it('leads a failed check with the first failed gate and its remediation', () => {
+    const op = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('not_ready', FAILED_GATES) });
+    expect(operationAnswer(op)).toMatchObject({
+      tone: 'warning',
+      title: 'Connected, unverified',
+      line: 'Compose directory: The Pilot manages /srv/other.',
+      detail: 'Set COMPOSE_DIR in the sencho-agent project. 1 more check failed.',
+    });
+    expect(operationStages(op).find((stage) => stage.id === 'verify')).toMatchObject({ word: 'unverified', tone: 'warning' });
+    expect(operationStateWord(op)).toEqual({ tone: 'warning', word: 'Unverified' });
+  });
+
+  it('says so when this run no longer speaks for the node', () => {
+    const op = operation({ state: 'enrolled', stage: 'enroll', readiness: null });
+    expect(operationAnswer(op)).toMatchObject({ tone: 'neutral', title: 'Enrolled' });
+    expect(operationStages(op).find((stage) => stage.id === 'verify')).toMatchObject({ word: 'not recorded' });
+  });
+
+  it('shows each gate with its remediation and verifies again from the Answer', async () => {
+    const onVerify = vi.fn();
+    const op = operation({
+      state: 'enrolled', stage: 'enroll', active: false, finishedAt: Date.now(),
+      readiness: readiness('not_ready', FAILED_GATES),
+      actions: { cancel: false, retry: false, release: false, verify: true },
+    });
+    const user = userEvent.setup();
+    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={onVerify} />);
+    await user.click(screen.getByRole('button', { name: 'Verify again' }));
+    expect(onVerify).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: /Activity/ }));
+    const gates = screen.getAllByTestId('bootstrap-readiness-gate');
+    expect(gates.map((gate) => gate.getAttribute('data-state'))).toEqual(['pass', 'unknown', 'fail']);
+    expect(gates[2]).toHaveTextContent('Set COMPOSE_DIR in the sencho-agent project.');
+    expect(gates[0]).not.toHaveTextContent('Install');
+  });
+
+  it('offers Verify now before the first check, and no verb while one runs', () => {
+    const provisional = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('provisional'), actions: { cancel: false, retry: false, release: false, verify: true } });
+    const { rerender } = render(<BootstrapRunStep operation={provisional} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Verify now' })).toBeInTheDocument();
+    const verifying = { ...provisional, readiness: readiness('verifying'), actions: { ...provisional.actions, verify: false } };
+    rerender(<BootstrapRunStep operation={verifying} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /Verify/ })).not.toBeInTheDocument();
   });
 });
 
@@ -327,7 +399,7 @@ describe('progress polling', () => {
     const stopped = { ...STOPPED, state, nodeId: 4 };
     vi.mocked(fetchBootstrapOperation)
       .mockResolvedValueOnce({ ...stopped })
-      .mockResolvedValueOnce({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false } });
+      .mockResolvedValueOnce({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false, verify: false } });
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     act(() => result.current.show(stopped));
     expect(result.current.settling).toBe(true);
@@ -371,7 +443,7 @@ describe('progress polling', () => {
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
 
     // The retry is shown while the read is in flight; the read then answers with the old stopped run.
-    act(() => result.current.show({ ...stopped, state: 'rechecking', attempt: 2, actions: { cancel: true, retry: false, release: false } }));
+    act(() => result.current.show({ ...stopped, state: 'rechecking', attempt: 2, actions: { cancel: true, retry: false, release: false, verify: false } }));
     await act(async () => { answer({ ...stopped }); });
     expect(result.current.operation).toMatchObject({ state: 'rechecking', attempt: 2 });
   });
@@ -381,7 +453,7 @@ describe('progress polling', () => {
     const stopped = { ...STOPPED, nodeId: 4 };
     let answer: (detail: BootstrapOperationDetail) => void = () => {};
     vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
-    vi.mocked(releaseBootstrapOperation).mockResolvedValueOnce({ ...stopped, active: false, actions: { cancel: false, retry: false, release: false } });
+    vi.mocked(releaseBootstrapOperation).mockResolvedValueOnce({ ...stopped, active: false, actions: { cancel: false, retry: false, release: false, verify: false } });
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     act(() => result.current.show(stopped));
     await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
@@ -395,7 +467,7 @@ describe('progress polling', () => {
     const listed = { ...STOPPED, nodeId: 4 };
     vi.mocked(listBootstrapOperations)
       .mockResolvedValueOnce({ operations: [listed], nextCursor: null })
-      .mockResolvedValueOnce({ operations: [{ ...listed, state: 'enrolled', active: false, actions: { cancel: false, retry: false, release: false } }], nextCursor: null });
+      .mockResolvedValueOnce({ operations: [{ ...listed, state: 'enrolled', active: false, actions: { cancel: false, retry: false, release: false, verify: false } }], nextCursor: null });
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(result.current.operations[0].state).toBe('partial');
@@ -531,7 +603,7 @@ describe('a run dialog left open on a stopped run', () => {
     vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
     vi.mocked(fetchBootstrapOperation)
       .mockResolvedValueOnce({ ...stopped })
-      .mockResolvedValue({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false } });
+      .mockResolvedValue({ ...stopped, state: 'enrolled', active: false, error: null, actions: { cancel: false, retry: false, release: false, verify: false } });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     render(<BootstrapServerDialog open onOpenChange={() => {}} />);
     const row = await screen.findByTestId(`bootstrap-run-${stopped.id}`);
@@ -621,7 +693,7 @@ describe('run controls and degraded reads', () => {
   });
 
   it('shows a state this build does not know as stopped instead of failing', () => {
-    const unknown = operation({ state: 'paused' as BootstrapOperationDetail['state'], actions: { cancel: false, retry: false, release: false } });
+    const unknown = operation({ state: 'paused' as BootstrapOperationDetail['state'], actions: { cancel: false, retry: false, release: false, verify: false } });
     expect(operationAnswer(unknown)).toMatchObject({ tone: 'neutral', title: 'Stopped' });
     expect(() => operationStages(unknown)).not.toThrow();
   });
@@ -648,7 +720,7 @@ describe('held runs arrive a page at a time', () => {
     id: `held-${index}`,
     targetName: `server-${index}`,
     state: 'partial',
-    actions: { cancel: false, retry: true, release: true },
+    actions: { cancel: false, retry: true, release: true, verify: false },
     finishedAt: Date.now(),
   });
   const firstPage = Array.from({ length: 20 }, (_, index) => held(24 - index));

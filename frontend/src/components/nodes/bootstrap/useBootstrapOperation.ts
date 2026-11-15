@@ -6,8 +6,9 @@ import {
   fetchBootstrapOperation,
   listBootstrapOperations,
   releaseBootstrapOperation,
+  verifyBootstrapOperation,
 } from './bootstrapApi';
-import { canSettleOnRead, isOperationRunning } from './operationStatus';
+import { awaitsReadiness, canSettleOnRead, isOperationRunning } from './operationStatus';
 import type { BootstrapOperation, BootstrapOperationDetail } from './types';
 
 /**
@@ -19,7 +20,9 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * polling, but one the hub can still settle on a read (stopped partway, outcome
  * unknown, cancelled, with a node whose Pilot may connect late) is read every
  * few seconds, so the open dialog learns it became enrolled instead of offering
- * Retry and Release for a connected node. Nothing polls while the dialog is closed.
+ * Retry and Release for a connected node. An enrolled run whose node the hub has
+ * not finished checking for readiness is read at the same slower pace, so the
+ * verdict appears without a reload. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -33,10 +36,11 @@ export interface UseBootstrapOperationOptions {
     list: typeof listBootstrapOperations;
     cancel: typeof cancelBootstrapOperation;
     release: typeof releaseBootstrapOperation;
+    verify?: typeof verifyBootstrapOperation;
   };
 }
 
-type OperationBusy = 'open' | 'cancel' | 'release' | null;
+type OperationBusy = 'open' | 'cancel' | 'release' | 'verify' | null;
 
 export function useBootstrapOperation({ open, api }: UseBootstrapOperationOptions) {
   const client = api ?? {
@@ -44,6 +48,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     list: listBootstrapOperations,
     cancel: cancelBootstrapOperation,
     release: releaseBootstrapOperation,
+    verify: verifyBootstrapOperation,
   };
   const [operation, setOperation] = useState<BootstrapOperationDetail | null>(null);
   const [operations, setOperations] = useState<BootstrapOperation[]>([]);
@@ -192,7 +197,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   const running = operation !== null && isOperationRunning(operation);
   const settling = operation !== null && canSettleOnRead(operation);
-  const polling = running || settling;
+  const polling = running || settling || (operation !== null && awaitsReadiness(operation));
   const operationId = operation?.id ?? null;
   // A run that no longer exists (or a session that ended) will not come back on the next tick.
   const [pollStopped, setPollStopped] = useState(false);
@@ -268,18 +273,22 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     setPollStopped(false);
   }
 
-  const act = useCallback(async (kind: 'cancel' | 'release') => {
+  const act = useCallback(async (kind: 'cancel' | 'release' | 'verify') => {
     if (!operationId) return;
     setBusy(kind);
     viewEpoch.current += 1;
     try {
-      const detail = kind === 'cancel' ? await client.cancel(operationId) : await client.release(operationId);
+      const verify = client.verify ?? verifyBootstrapOperation;
+      const detail = kind === 'cancel'
+        ? await client.cancel(operationId)
+        : kind === 'release' ? await client.release(operationId) : await verify(operationId);
       viewEpoch.current += 1;
       if (shownRef.current === detail.id) setOperation(detail);
       if (kind === 'release') toast.success('Server released. Nothing on it was changed.');
       void refreshList();
     } catch (error: unknown) {
-      toast.error(error instanceof Error ? error.message : `The bootstrap could not be ${kind === 'cancel' ? 'cancelled' : 'released'}.`);
+      const verb = kind === 'cancel' ? 'cancelled' : kind === 'release' ? 'released' : 'checked for readiness';
+      toast.error(error instanceof Error ? error.message : `The bootstrap could not be ${verb}.`);
     } finally {
       setBusy(null);
     }
@@ -303,6 +312,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     refreshList,
     cancel: () => act('cancel'),
     release: () => act('release'),
+    verify: () => act('verify'),
   };
 }
 

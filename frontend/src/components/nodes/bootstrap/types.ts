@@ -209,7 +209,31 @@ export interface BootstrapOperation {
   updatedAt: number;
   finishedAt: number | null;
   /** The verbs the hub offers for this operation right now. */
-  actions: { cancel: boolean; retry: boolean; release: boolean };
+  actions: { cancel: boolean; retry: boolean; release: boolean; verify: boolean };
+  /** The hub's readiness verdict for the node this run enrolled; null until it registered one. */
+  readiness: NodeReadiness | null;
+}
+
+/** Readiness of a bootstrapped node, as the hub judged it from the Pilot's own report. */
+export type NodeReadinessState = 'provisional' | 'verifying' | 'ready' | 'not_ready';
+
+export type ReadinessGateStatus = 'pass' | 'warn' | 'fail' | 'unknown';
+
+export interface ReadinessGate {
+  id: string;
+  label: string;
+  status: ReadinessGateStatus;
+  summary: string;
+  /** Present on every verdict but pass. */
+  remediation?: string;
+}
+
+export interface NodeReadiness {
+  state: NodeReadinessState;
+  operationId: string | null;
+  checkedAt: number | null;
+  agentVersion: string | null;
+  gates: ReadinessGate[];
 }
 
 export interface BootstrapOperationDetail extends BootstrapOperation {

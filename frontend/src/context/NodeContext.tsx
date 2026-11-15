@@ -22,6 +22,17 @@ export interface Node {
   sealingKeyFingerprint?: string | null;
   pilot_last_seen?: number | null;
   pilot_agent_version?: string | null;
+  /**
+   * Set only for a node the bootstrap registered: the hub's readiness verdict
+   * and the state of the run that registered it. Null (or absent) for every
+   * other node, whose status keeps its usual meaning.
+   */
+  readiness?: {
+    state: 'provisional' | 'verifying' | 'ready' | 'not_ready';
+    checkedAt: number | null;
+    operationId: string | null;
+    operationState: string | null;
+  } | null;
 }
 
 export type ImagePinKind = 'floating' | 'semver' | 'digest' | 'unknown';

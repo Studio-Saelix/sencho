@@ -6,7 +6,7 @@ import { StatusPath } from '@/components/ui/status-path';
 import { STATUS_DOT_CLASS, type StatusTone } from '@/lib/statusTone';
 import { cn } from '@/lib/utils';
 import { operationAnswer, operationStages } from './operationStatus';
-import type { BootstrapOperationDetail, BootstrapOperationEvent } from './types';
+import type { BootstrapOperationDetail, BootstrapOperationEvent, NodeReadiness, ReadinessGateStatus } from './types';
 
 const EVENT_TONE: Record<BootstrapOperationEvent['status'], StatusTone> = {
   started: 'brand',
@@ -15,6 +15,20 @@ const EVENT_TONE: Record<BootstrapOperationEvent['status'], StatusTone> = {
   info: 'neutral',
   failed: 'destructive',
   unknown: 'warning',
+};
+
+const GATE_TONE: Record<ReadinessGateStatus, StatusTone> = {
+  pass: 'success',
+  warn: 'warning',
+  fail: 'destructive',
+  unknown: 'warning',
+};
+
+const GATE_WORD: Record<ReadinessGateStatus, string> = {
+  pass: 'pass',
+  warn: 'warning',
+  fail: 'failed',
+  unknown: 'unknown',
 };
 
 function time(at: number): string {
@@ -30,7 +44,33 @@ function Fact({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** The evidence behind the Answer: what was approved, and every recorded event. */
+/** Each gate of the last readiness check, with its remediation where it did not pass. */
+function ReadinessChecks({ readiness }: { readiness: NodeReadiness }) {
+  if (readiness.gates.length === 0) return null;
+  return (
+    <section aria-label="Readiness checks" className="space-y-1.5">
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+        Readiness{readiness.checkedAt !== null ? ` · ${new Date(readiness.checkedAt).toISOString()}` : ''}{readiness.agentVersion ? ` · Pilot ${readiness.agentVersion}` : ''}
+      </p>
+      <ul className="space-y-1.5">
+        {readiness.gates.map((gate) => (
+          <li key={gate.id} className="text-xs" data-testid="bootstrap-readiness-gate" data-state={gate.status}>
+            <div className="flex items-start gap-2">
+              <span aria-hidden className={cn('mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full', STATUS_DOT_CLASS[GATE_TONE[gate.status]])} />
+              <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-stat-subtitle">{GATE_WORD[gate.status]}</span>
+              <span className="text-foreground/80"><span className="font-medium">{gate.label}.</span> {gate.summary}</span>
+            </div>
+            {gate.remediation && gate.status !== 'pass' && (
+              <p className="ml-3.5 mt-0.5 text-[11px] text-muted-foreground">{gate.remediation}</p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** The evidence behind the Answer: what was approved, the readiness checks, and every recorded event. */
 function OperationProof({ operation }: { operation: BootstrapOperationDetail }) {
   return (
     <div className="space-y-3">
@@ -41,6 +81,7 @@ function OperationProof({ operation }: { operation: BootstrapOperationDetail }) 
         <Fact label="Host key" value={operation.hostKeyFingerprint} />
         {operation.nodeId !== null && <Fact label="Node" value={`#${operation.nodeId}`} />}
       </dl>
+      {operation.readiness && <ReadinessChecks readiness={operation.readiness} />}
       <ol className="space-y-1.5" aria-label="Activity">
         {operation.events.map((event, index) => (
           <li key={`${event.at}-${index}`} className="text-xs" data-testid="bootstrap-event">
@@ -64,8 +105,9 @@ function OperationProof({ operation }: { operation: BootstrapOperationDetail }) 
 
 /**
  * Step 4: the approved run. One Answer carries the verbs the hub offers for
- * the operation now (cancel while running; retry or release once stopped),
- * the Path shows how far it got, and the Activity holds the record.
+ * the operation now (cancel while running; retry or release once stopped;
+ * verify again once enrolled), the Path shows how far it got, and the
+ * Activity holds the readiness checks and the record.
  */
 export function BootstrapRunStep({
   operation,
@@ -73,17 +115,31 @@ export function BootstrapRunStep({
   onCancel,
   onRetry,
   onRelease,
+  onVerify,
 }: {
   operation: BootstrapOperationDetail;
-  busy: 'open' | 'cancel' | 'release' | null;
+  busy: 'open' | 'cancel' | 'release' | 'verify' | null;
   onCancel: () => void;
   onRetry: () => void;
   onRelease: () => Promise<void>;
+  onVerify: () => void;
 }) {
   const [confirmRelease, setConfirmRelease] = useState(false);
   const { actions } = operation;
-  const verbs = (actions.cancel || actions.retry || actions.release) ? (
+  const verbs = (actions.cancel || actions.retry || actions.release || actions.verify) ? (
     <div className="flex flex-wrap items-center gap-2">
+      {actions.verify && (
+        <BusyButton
+          size="sm"
+          variant={operation.readiness?.state === 'ready' ? 'outline' : 'default'}
+          pending={busy === 'verify'}
+          busyLabel="Verifying"
+          disabled={busy !== null && busy !== 'verify'}
+          onClick={onVerify}
+        >
+          {operation.readiness?.state === 'provisional' ? 'Verify now' : 'Verify again'}
+        </BusyButton>
+      )}
       {actions.retry && (
         <Button size="sm" onClick={onRetry} disabled={busy !== null}>Retry</Button>
       )}

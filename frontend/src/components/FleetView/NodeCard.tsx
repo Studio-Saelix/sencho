@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { NodeReadinessBadge } from '../nodes/NodeReadinessBadge';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
     Layers, WifiOff, AlertTriangle, Download, Loader2,
@@ -97,6 +98,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
     const hasManageMenuItems = canEdit || canDelete || canCordon || (nodeMuteActions.canMute && Boolean(onOpenMuteRulesWithPrefill));
 
     const isOnline = node.status === 'online';
+    const readiness = registryNode?.readiness ?? null;
     const isLocal = node.type === 'local';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
@@ -190,6 +192,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                         <div className="min-w-0">
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                <NodeReadinessBadge readiness={readiness} />
                                 {!isOnline && (
                                     <Badge variant="secondary" size="compact">
                                         <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
