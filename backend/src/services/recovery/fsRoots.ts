@@ -305,6 +305,8 @@ export interface FsProbeReport {
   /** Mount points strictly below the root, relative to it; null unless asked for. */
   mounts: string[] | null;
   mountsTruncated: boolean;
+  /** Restore work directories at the root; null unless asked for. */
+  workDirs: string[] | null;
 }
 
 const DECIMAL = /^[0-9]+$/;
@@ -330,6 +332,8 @@ export function parseFsProbeReport(line: string): FsProbeReport | null {
   const free = record.free;
   const mounts = record.mounts;
   if (mounts !== undefined && (!Array.isArray(mounts) || mounts.some((m) => typeof m !== 'string'))) return null;
+  const workDirs = record.work_dirs;
+  if (workDirs !== undefined && (!Array.isArray(workDirs) || workDirs.some((m) => typeof m !== 'string'))) return null;
   return {
     dev: record.dev_s,
     ino: record.ino_s,
@@ -337,6 +341,7 @@ export function parseFsProbeReport(line: string): FsProbeReport | null {
     free: typeof free === 'number' && Number.isSafeInteger(free) && free >= 0 ? free : null,
     mounts: Array.isArray(mounts) ? (mounts as string[]) : null,
     mountsTruncated: record.mounts_truncated === true,
+    workDirs: Array.isArray(workDirs) ? (workDirs as string[]) : null,
   };
 }
 
@@ -366,19 +371,19 @@ async function probeHostPath(input: {
   runner: RecoveryHelperRunner;
   operationId: string;
   source: UnprovenHostPath | ProvenHostRoot;
-  mounts?: boolean;
+  /** `mounts` lists the mounts below the root (a recursive bind); `work_dirs` the restore work directories. */
+  listing?: 'mounts' | 'work_dirs';
   signal?: AbortSignal;
 }): Promise<FsProbeReport> {
   const lines: string[] = [];
+  const flag = input.listing === 'mounts' ? ['--mounts'] : input.listing === 'work_dirs' ? ['--work-dirs'] : [];
   let result;
   try {
     result = await input.runner.run({
       profile: 'probe',
       operationId: input.operationId,
-      cmd: input.mounts
-        ? [RECOVERY_HELPER_PROBE_PATH, HELPER_SOURCE_MOUNT, '--mounts']
-        : [RECOVERY_HELPER_PROBE_PATH, HELPER_SOURCE_MOUNT],
-      mounts: { source: input.source, recursiveSource: input.mounts === true },
+      cmd: [RECOVERY_HELPER_PROBE_PATH, HELPER_SOURCE_MOUNT, ...flag],
+      mounts: { source: input.source, recursiveSource: input.listing === 'mounts' },
       signal: input.signal,
       onStdoutLine: (line) => {
         if (lines.length === 0) lines.push(line);
@@ -485,7 +490,7 @@ export async function nestedMountExclusions(input: {
   root: ProvenHostRoot;
   signal?: AbortSignal;
 }): Promise<PointExclusion[]> {
-  const report = await probeHostPath({ ...input, source: input.root, mounts: true });
+  const report = await probeHostPath({ ...input, source: input.root, listing: 'mounts' });
   if (report.mounts === null || report.mountsTruncated) {
     throw new RecoveryError('identity_unknown', {
       detail: 'Sencho could not list every mount below this directory, so it cannot say what a point of it would leave out.',
@@ -498,6 +503,47 @@ export async function nestedMountExclusions(input: {
     exclusions.push({ path: normalized, reason: 'nested_mount' });
   }
   return exclusions;
+}
+
+/**
+ * The free space and the restore work directories at a proven root, read
+ * through the guard, for an overwrite preview and admission.
+ */
+export async function probeProvenRoot(input: {
+  runner: RecoveryHelperRunner;
+  operationId: string;
+  root: ProvenHostRoot;
+}): Promise<{ free: number | null; workDirs: string[] | null }> {
+  const report = await probeHostPath({ ...input, source: input.root, listing: 'work_dirs' });
+  return { free: report.free, workDirs: report.workDirs };
+}
+
+/**
+ * Every stack's current declaration of a directory, from a fresh render of each
+ * stack. An overwrite may only write a directory some stack declares now, as a
+ * bind it may write; `unrenderable` names a stack whose model would not render,
+ * which makes the answer unknown.
+ */
+export async function findDeclaredFsRoot(input: {
+  nodeId: number;
+  knownStackNames: readonly string[];
+  environment: FsRootEnvironment;
+  senchoPath: string;
+}): Promise<{ candidates: FsRootCandidate[]; unrenderable: string | null }> {
+  const candidates: FsRootCandidate[] = [];
+  for (const stackName of input.knownStackNames) {
+    const listed = await listStackFsRootCandidates({
+      nodeId: input.nodeId,
+      stackName,
+      fresh: true,
+      environment: input.environment,
+    });
+    if (listed.outcome === 'unrenderable') return { candidates, unrenderable: stackName };
+    for (const candidate of listed.candidates) {
+      if (relatePath(candidate.senchoPath, input.senchoPath) === 'equal') candidates.push(candidate);
+    }
+  }
+  return { candidates, unrenderable: null };
 }
 
 // --- Generation -------------------------------------------------------------
@@ -603,6 +649,9 @@ const IN_USE_STATES: ReadonlySet<string> = new Set(['running', 'paused', 'restar
  *
  * `onlyStacks` limits the declared-roots pass to the named stacks (a listing
  * for one stack); the recorded rows and the containers are still read.
+ * `cachedOnly` reads only roots already in the cache and never renders: a stack
+ * whose roots are not cached makes the answer unknown, so the caller falls back
+ * to the node-wide check rather than trusting a stale recorded set.
  */
 export async function resolveFsRootDependents(input: {
   nodeId: number;
@@ -611,6 +660,7 @@ export async function resolveFsRootDependents(input: {
   root: FsRootLocation;
   render: boolean;
   onlyStacks?: readonly string[];
+  cachedOnly?: boolean;
   docker: Pick<Docker, 'listContainers'>;
   environment: FsRootEnvironment;
 }): Promise<FsDependentResolution> {
@@ -659,12 +709,27 @@ export async function resolveFsRootDependents(input: {
     if (!input.knownStackNames.includes(stackName)) continue;
     let listed: FsRootCandidates;
     try {
-      listed = await listStackFsRootCandidates({
-        nodeId: input.nodeId,
-        stackName,
-        fresh: input.render,
-        environment: input.environment,
-      });
+      if (input.cachedOnly) {
+        const cached = StackFileRootsService.getInstance(input.nodeId).peekFsRoots(stackName);
+        if (!cached) return unrenderable(stackName);
+        listed = {
+          outcome: cached.outcome,
+          candidates: await candidatesFromListing({
+            stackName,
+            listing: cached,
+            composeBaseDir: input.environment.composeBaseDir,
+            ownMounts: input.environment.ownMounts,
+            dockerRoot: input.environment.dockerRoot,
+          }),
+        };
+      } else {
+        listed = await listStackFsRootCandidates({
+          nodeId: input.nodeId,
+          stackName,
+          fresh: input.render,
+          environment: input.environment,
+        });
+      }
     } catch (err) {
       console.warn('[Recovery] Could not list the roots of stack %s:', sanitizeForLog(stackName), errorMessageForLog(err));
       return unrenderable(stackName);

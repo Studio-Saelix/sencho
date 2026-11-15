@@ -264,8 +264,10 @@ const repositoryBody = idempotencyBody.extend({
  */
 const overwriteBody = idempotencyBody.extend({
   confirmationToken: z.string().trim().regex(/^[0-9a-f]{64}$/),
-  confirmVolumeName: volumeNameField,
-});
+  confirmVolumeName: volumeNameField.optional(),
+  /** A host directory's confirmation: its host path, exactly as the preview showed it. */
+  confirmHostPath: z.string().min(1).max(4096).optional(),
+}).refine((body) => (body.confirmVolumeName === undefined) !== (body.confirmHostPath === undefined));
 
 const resolveBody = z.object({
   action: z.enum(['retry', 'release_fence']),
@@ -569,7 +571,12 @@ async function listFsRootEntries(req: Request, input: {
         knownStackNames: input.knownStackNames,
         root: entry.location,
         render: false,
-        onlyStacks: input.stackName ? [input.stackName] : [],
+        // A stack listing reads that stack's roots, as a volume listing reads that
+        // stack's model. Node-wide, every stack's cached roots are read and none is
+        // rendered: a stack with nothing cached makes the set unknown, and the
+        // root is then held to the node-wide check instead of the recorded rows.
+        onlyStacks: input.stackName ? [input.stackName] : undefined,
+        cachedOnly: !input.stackName,
         docker: input.docker,
         environment,
       })
@@ -1134,11 +1141,12 @@ recoveryRouter.post('/points/:pointId/overwrite', handle(async (req, res) => {
     pointId,
     confirmationToken: body.confirmationToken,
     confirmVolumeName: body.confirmVolumeName,
+    confirmHostPath: body.confirmHostPath,
     actor: actorOf(req),
     idempotencyKey: body.idempotencyKey,
     // The token is part of the request identity: a re-confirmation after the
     // state moved is a different request, not a replay of the refused one.
-    requestDigest: sha256Digest(['staged_overwrite', pointId, body.confirmationToken, body.confirmVolumeName]),
+    requestDigest: sha256Digest(['staged_overwrite', pointId, body.confirmationToken, body.confirmVolumeName ?? body.confirmHostPath ?? '']),
     transport: req.machineAuthScope ?? 'local',
     authorizeStack: (stackName) => checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
     authorizeGlobal: () => authorizeNodeWide(req, 'restore'),

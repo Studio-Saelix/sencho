@@ -2,6 +2,7 @@ import type Docker from 'dockerode';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { DataRestoreFenceError, type FenceSubject } from '../../helpers/dataRestoreFenceError';
 import { recoveryDb } from './recoveryDb';
+import { parseFsTargetPaths, type FsTargetPaths } from './fsTargets';
 import { RecoveryError } from './redaction';
 import type { RestoreFenceState } from './restoreIntents';
 
@@ -203,6 +204,27 @@ export class RestoreFenceStore {
   }
 
   /**
+   * The host directories a live overwrite holds, with where each lives. Empty in
+   * the common case, so the callers that check it pay one query.
+   */
+  liveFencedFsTargets(): FsTargetPaths[] {
+    try {
+      const rows = recoveryDb().prepare(`
+        SELECT target_paths_json AS paths FROM recovery_restore_intents
+        WHERE target_mode = 'staged_overwrite'
+          AND target_paths_json IS NOT NULL
+          AND fence_state IN ${LIVE_FENCE_STATE}
+      `).all() as Array<{ paths: string }>;
+      return rows
+        .map((row) => parseFsTargetPaths(row.paths))
+        .filter((paths): paths is FsTargetPaths => paths !== null);
+    } catch (err) {
+      warnStoreUnreadable(err);
+      return [];
+    }
+  }
+
+  /**
    * Whether a stack has a container under a live fence. Both the stack directory
    * name and its Compose project name are matched, because callers key by either.
    */
@@ -281,7 +303,7 @@ interface InspectableContainer {
     Name?: string;
     State?: { Running?: boolean };
     HostConfig?: { RestartPolicy?: RestartPolicy };
-    Mounts?: Array<{ Type?: string; Name?: string }>;
+    Mounts?: Array<{ Type?: string; Name?: string; Source?: string; RW?: boolean }>;
   }>;
   update(options: { RestartPolicy: RestartPolicy }): Promise<unknown>;
   stop(options?: { t?: number }): Promise<unknown>;
@@ -491,7 +513,7 @@ export async function startContainerUnderFence<T>(
   start: () => Promise<T>,
 ): Promise<T> {
   if (RestoreFenceStore.getInstance().liveFencedVolumeNames().length === 0) return startUnderFence([], start);
-  let mounts: Array<{ Type?: string; Name?: string }>;
+  let mounts: Array<{ Type?: string; Name?: string; Source?: string; RW?: boolean }>;
   try {
     const inspected = await (docker.getContainer(containerId) as unknown as InspectableContainer).inspect();
     mounts = inspected.Mounts ?? [];
@@ -502,7 +524,43 @@ export async function startContainerUnderFence<T>(
   const names = mounts
     .filter((m) => m.Type === 'volume' && m.Name !== undefined)
     .map((m) => m.Name as string);
+  // A host directory under a fence is matched by the dependency rule: a bind of
+  // it, of a path inside it, or of an ancestor that can write it. A read-only
+  // ancestor (a monitoring agent) still starts.
+  const fsTargets = RestoreFenceStore.getInstance().liveFencedFsTargets();
+  if (fsTargets.length > 0 && mounts.some((m) => m.Type === 'bind')) {
+    const { matchContainerToRoot, readOwnMounts } = await import('./fsRoots');
+    // Without Sencho's own mounts the host paths are still compared as they
+    // are; only the mapped spelling of a symlink is lost.
+    const ownMounts = await readOwnMounts().catch(() => null);
+    for (const target of fsTargets) {
+      if ((await matchContainerToRoot({ Mounts: mounts }, target, ownMounts)).depends) {
+        return Promise.reject(new DataRestoreFenceError(target.hostPath, 'container', 'directory'));
+      }
+    }
+  }
   return startUnderFence(names, start);
+}
+
+/**
+ * The refusal a stack file operation gets when the directory it reads or writes
+ * overlaps a host directory a live overwrite holds, or null. Compared in Sencho's
+ * own namespace, where the file routes work.
+ */
+export function fsFenceRefusalFor(senchoPath: string): DataRestoreFenceError | null {
+  const targets = RestoreFenceStore.getInstance().liveFencedFsTargets();
+  for (const target of targets) {
+    if (pathsOverlapLexically(senchoPath, target.senchoPath)) {
+      return new DataRestoreFenceError(target.hostPath, 'browse', 'directory');
+    }
+  }
+  return null;
+}
+
+function pathsOverlapLexically(a: string, b: string): boolean {
+  const left = a.replace(/\/+$/, '') || '/';
+  const right = b.replace(/\/+$/, '') || '/';
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`) || left === '/' || right === '/';
 }
 
 /**

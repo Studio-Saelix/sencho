@@ -564,6 +564,16 @@ export class StackFileRootsService {
   }
 
   /**
+   * The cached recovery roots of a stack, or null when none are cached. Never
+   * renders, so a node-wide read can use what other requests already paid for
+   * and fall back to the node-wide check for the rest.
+   */
+  peekFsRoots(stackName: string): FsRootListing | null {
+    const cached = fsRootsCache.get(this.cacheKey(stackName));
+    return cached && cached.expiresAt > Date.now() ? cached.listing : null;
+  }
+
+  /**
    * The directories a stack's recovery points may cover: the stack source and
    * every bind group, each with the explorer's own verdicts. Never a client
    * path: the caller matches a server-minted `rootId` against this list.

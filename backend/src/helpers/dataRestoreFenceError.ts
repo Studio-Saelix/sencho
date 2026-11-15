@@ -11,18 +11,25 @@ export const DATA_RESTORE_FENCE_CODE = 'data_restore';
 /** Who was refused, which decides the wording: a container is started, a volume is opened. */
 export type FenceSubject = 'container' | 'browse';
 
+/** What the restore is overwriting: a named volume, or a host directory a stack binds. */
+export type FencedTargetKind = 'volume' | 'directory';
+
 export class DataRestoreFenceError extends Error {
   readonly code = DATA_RESTORE_FENCE_CODE;
   /**
    * `browse` is the Files & Volumes browser, which opens the volume and starts no
    * container of the operator's, so it must not say a container will not start.
    */
-  constructor(readonly volumeName: string, subject: FenceSubject = 'container') {
+  constructor(readonly volumeName: string, subject: FenceSubject = 'container', target: FencedTargetKind = 'volume') {
+    const noun = target === 'directory' ? 'directory' : 'volume';
     super(
       subject === 'browse'
-        ? `The volume "${volumeName}" is being overwritten by a data restore. `
-          + 'Sencho will not open it until that restore has been resolved.'
-        : `This container uses the volume "${volumeName}", which a data restore is overwriting. `
+        ? target === 'directory'
+          ? `This location overlaps the directory "${volumeName}", which a data restore is overwriting. `
+            + 'Sencho will not open it until that restore has been resolved.'
+          : `The volume "${volumeName}" is being overwritten by a data restore. `
+            + 'Sencho will not open it until that restore has been resolved.'
+        : `This container uses the ${noun} "${volumeName}", which a data restore is overwriting. `
           + 'Sencho will not start it until that restore has been resolved.',
     );
     this.name = 'DataRestoreFenceError';

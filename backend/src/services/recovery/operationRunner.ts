@@ -1026,7 +1026,9 @@ export class RecoveryEngineService {
   async admitOverwrite(input: {
     pointId: string;
     confirmationToken: string;
-    confirmVolumeName: string;
+    /** The volume name typed back; a host directory takes `confirmHostPath` instead. */
+    confirmVolumeName?: string;
+    confirmHostPath?: string;
     actor: string;
     idempotencyKey: string;
     requestDigest: string;
@@ -1055,6 +1057,7 @@ export class RecoveryEngineService {
       pointId: input.pointId,
       confirmationToken: input.confirmationToken,
       confirmVolumeName: input.confirmVolumeName,
+      confirmHostPath: input.confirmHostPath,
     });
     this.requireRepositoryStillActive(repository.id);
 
@@ -1099,17 +1102,23 @@ export class RecoveryEngineService {
         ],
         // One implementation of the admission rows: the intent, the source hold
         // and the exact fence set, written inside the operation's transaction.
-        (operation) => recordOverwriteIntent(deps, {
-          intentId,
-          operationId: operation.id,
-          pointId: admitted.point.id,
-          targetVolume: admitted.storage.locator,
-          actor: input.actor,
-          processEpoch: this.processEpoch,
-          expectedGenerationToken: admitted.liveGenerationToken,
-          fenceMembers: admitted.fenceMembers,
-          dependentStacks: admitted.stacks,
-        }),
+        (operation) => {
+          // A host directory inside or around one another operation holds is
+          // refused here, inside the admission, where no other admission can race it.
+          if (admitted.targetPaths) assertNoOverlappingFsWork(admitted.targetPaths.hostPath, admitted.storageKey);
+          return recordOverwriteIntent(deps, {
+            intentId,
+            operationId: operation.id,
+            pointId: admitted.point.id,
+            targetVolume: admitted.targetVolume,
+            targetPaths: admitted.targetPaths,
+            actor: input.actor,
+            processEpoch: this.processEpoch,
+            expectedGenerationToken: admitted.liveGenerationToken,
+            fenceMembers: admitted.fenceMembers,
+            dependentStacks: admitted.stacks,
+          });
+        },
       );
     } catch (err) {
       releaseStacks();

@@ -3910,6 +3910,8 @@ async function resolveRootForOp(
   // legacy behaviour. Return a synthetic stack-source root without touching the
   // roots service, so plain stack-source ops never trigger a compose render.
   if (rootId === STACK_SOURCE_ROOT_ID) {
+    const stackDir = path.join(FileSystemService.getInstance(req.nodeId).getBaseDir(), stackName);
+    if (await refuseUnderDirectoryRestore(res, stackDir)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3935,7 +3937,28 @@ async function resolveRootForOp(
     res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
     return null;
   }
+  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName)) return null;
   return root;
+}
+
+/**
+ * Refuse a file operation on a directory that overlaps one a data restore is
+ * overwriting: reading it would show a half-swapped tree, and writing it would
+ * change data the restore is replacing. One query when no such restore is live.
+ */
+async function refuseUnderDirectoryRestore(res: Response, dir: string): Promise<boolean> {
+  const { RestoreFenceStore, fsFenceRefusalFor } = await import('../services/recovery/restoreFence');
+  if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return false;
+  let canonical = path.resolve(dir);
+  try {
+    canonical = await fsp.realpath(dir);
+  } catch {
+    // A directory that cannot be resolved is compared as written.
+  }
+  const refusal = fsFenceRefusalFor(canonical);
+  if (!refusal) return false;
+  res.status(409).json({ error: refusal.message, code: DATA_RESTORE_FENCE_CODE });
+  return true;
 }
 
 /** Drop the cached root allowlist after a stack-source mutation that can change declared mounts. */
