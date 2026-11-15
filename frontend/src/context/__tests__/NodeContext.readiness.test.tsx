@@ -113,4 +113,80 @@ describe('NodeContext readiness refresh', () => {
       error.mockRestore();
     }
   });
+
+  describe('capabilities after readiness', () => {
+    const ANNOUNCE = () => window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
+
+    /** A hub whose node 2 is provisional until `becomeReady`, and whose metadata read follows `meta`. */
+    function hub(meta: (call: number) => Promise<unknown>) {
+      let state: 'provisional' | 'ready' = 'provisional';
+      let metaCalls = 0;
+      apiFetch.mockImplementation((path: string) => {
+        if (path === '/nodes') return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+        if (path === '/nodes/2/meta') { metaCalls += 1; return meta(metaCalls); }
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      });
+      return { becomeReady: () => { state = 'ready'; }, metaCalls: () => metaCalls };
+    }
+    const offline = () => Promise.resolve({ ok: false, json: async () => ({}) });
+    const online = () => Promise.resolve({ ok: true, json: async () => ({ version: '1.0.0', capabilities: ['stacks', 'containers'], online: true }) });
+
+    it('recovers the capabilities of a selected node whose first metadata read failed once it becomes ready', async () => {
+      localStorage.setItem('sencho-active-node', '2');
+      const h = hub((call) => (call === 1 ? offline() : online()));
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(result.current.activeNodeMeta?.capabilities).toEqual([]));
+      expect(result.current.hasCapability('stacks')).toBe(false);
+
+      h.becomeReady();
+      act(() => { ANNOUNCE(); });
+      // Not switching nodes and not testing the connection: the readiness announcement alone brings the capabilities back.
+      await waitFor(() => expect(result.current.hasCapability('stacks')).toBe(true), { timeout: 3000 });
+      expect(result.current.activeNodeMeta?.version).toBe('1.0.0');
+    });
+
+    it('reads the metadata of a node that became ready once for a burst of announcements, and not for a list that changed nothing', async () => {
+      localStorage.setItem('sencho-active-node', '2');
+      const h = hub((call) => (call === 1 ? offline() : online()));
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(result.current.activeNodeMeta).not.toBeNull());
+      h.becomeReady();
+      act(() => { ANNOUNCE(); ANNOUNCE(); });
+      await waitFor(() => expect(result.current.hasCapability('stacks')).toBe(true), { timeout: 3000 });
+      expect(h.metaCalls()).toBe(2);
+
+      // Ready stays ready: the list is read again and the cached metadata is left alone.
+      act(() => { ANNOUNCE(); });
+      await waitFor(() => expect(apiFetch.mock.calls.filter(([path]) => path === '/nodes').length).toBeGreaterThanOrEqual(3), { timeout: 3000 });
+      expect(h.metaCalls()).toBe(2);
+    });
+
+    it('does not let an older metadata read that answers last put the stale reading back', async () => {
+      localStorage.setItem('sencho-active-node', '2');
+      let releaseFirst: (() => void) | null = null;
+      const h = hub((call) => (call === 1
+        ? new Promise((resolve) => { releaseFirst = () => resolve({ ok: false, json: async () => ({}) }); })
+        : online()));
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(h.metaCalls()).toBe(1));
+      h.becomeReady();
+      act(() => { ANNOUNCE(); });
+      // No metadata is cached yet, so hasCapability is optimistic; wait for the forced read to land.
+      await waitFor(() => expect(result.current.activeNodeMeta?.capabilities).toEqual(['stacks', 'containers']), { timeout: 3000 });
+      expect(h.metaCalls()).toBe(2);
+      await act(async () => { releaseFirst?.(); });
+      expect(result.current.activeNodeMeta?.capabilities).toEqual(['stacks', 'containers']);
+      expect(result.current.hasCapability('stacks')).toBe(true);
+    });
+
+    it('leaves the metadata of a node that has none cached and is not selected alone', async () => {
+      const h = hub(() => online());
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(result.current.nodes).toHaveLength(2));
+      h.becomeReady();
+      act(() => { ANNOUNCE(); });
+      await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready'), { timeout: 3000 });
+      expect(h.metaCalls()).toBe(0);
+    });
+  });
 });

@@ -95,6 +95,8 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     beginNodeSession(activeNode.id);
   }
 
+  const metaSeqRef = useRef<Map<number, number>>(new Map());
+
   const fetchNodeMeta = useCallback(async (nodeId: number, force = false) => {
     const cached = nodeMetaRef.current.get(nodeId);
     if (cached && !force) {
@@ -106,12 +108,18 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       if (Date.now() - cached.fetchedAt < ttl) return;
     }
 
-    const setMeta = (meta: NodeMeta) =>
+    // Reads for one node can overlap (a selection, a forced refresh after a readiness change). Only the newest
+    // read may write, so a slow older answer cannot put an offline or stale reading back over a newer one.
+    const seq = (metaSeqRef.current.get(nodeId) ?? 0) + 1;
+    metaSeqRef.current.set(nodeId, seq);
+    const setMeta = (meta: NodeMeta) => {
+      if (metaSeqRef.current.get(nodeId) !== seq) return;
       setNodeMeta(prev => {
         const next = new Map(prev);
         next.set(nodeId, meta);
         return next;
       });
+    };
 
     try {
       const res = await apiFetch(`/nodes/${nodeId}/meta`, { localOnly: true });
@@ -145,6 +153,7 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
   // fails or has not answered yet.
   const nodesRequestSeqRef = useRef(0);
   const nodesAppliedSeqRef = useRef(0);
+  const appliedNodesRef = useRef<Node[]>([]);
 
   const refreshNodes = useCallback(async () => {
     const seq = ++nodesRequestSeqRef.current;
@@ -154,7 +163,16 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json();
         if (seq < nodesAppliedSeqRef.current) return;
         nodesAppliedSeqRef.current = seq;
+        const before = appliedNodesRef.current;
+        appliedNodesRef.current = data;
         setNodes(data);
+        // A node that just became ready is usable now: what the hub cached about it while it was provisional (a failed
+        // read, no capabilities, an older release) is stale, so its metadata is read again without waiting out the cache.
+        for (const node of data as Node[]) {
+          if (node.readiness?.state !== 'ready') continue;
+          if (before.find((previous) => previous.id === node.id)?.readiness?.state === 'ready') continue;
+          if (nodeMetaRef.current.has(node.id) || activeNodeRef.current?.id === node.id) void fetchNodeMeta(node.id, true);
+        }
 
         const currentActive = activeNodeRef.current;
         if (!currentActive) {

@@ -22,12 +22,18 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * few seconds, so the open dialog learns it became enrolled instead of offering
  * Retry and Release for a connected node. An enrolled run whose node the hub has
  * not finished checking for readiness is read at the same slower pace, so the
- * verdict appears without a reload. Nothing polls while the dialog is closed.
+ * verdict appears without a reload, and so is a listed one. A verdict that was
+ * already in is not final: the hub announces every change of a node's readiness
+ * (a dropped tunnel, a new check), and the open dialog then reads the shown
+ * enrolled run, or the listed enrolled runs, once more, so a node that stopped
+ * being ready is not still called ready. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
 /** The slower read of a stopped run that may still be settled by a late Pilot. */
 export const SETTLE_POLL_MS = 5_000;
+/** How long a burst of readiness announcements is gathered before the open views are read once. */
+export const READINESS_REFRESH_DELAY_MS = 500;
 
 export interface UseBootstrapOperationOptions {
   open: boolean;
@@ -75,12 +81,30 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // before then is older than that answer and is dropped, so it cannot put the
   // previous state (a stopped run's Retry and Release) back on screen.
   const viewEpoch = useRef(0);
+  // Reads of the shown run's detail overlap (a poll and a readiness read). Each takes a number when it starts, and an
+  // answer older than one already applied is dropped, so a slow earlier read cannot bring back a verdict a later one replaced.
+  const detailReadSeq = useRef(0);
+  const detailAppliedSeq = useRef(0);
+  // The same rule for reads of the list (a settle read and a readiness read).
+  const listReadSeq = useRef(0);
+  const listAppliedSeq = useRef(0);
+  const operationRef = useRef<BootstrapOperationDetail | null>(null);
+  // A readiness read of the shown run failed: what is on screen may be stale, so it is read again until one answers.
+  const [readinessReadFailed, setReadinessReadFailed] = useState(false);
 
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
     viewEpoch.current += 1;
     shownRef.current = detail?.id ?? null;
+    operationRef.current = detail;
     setOperation(detail);
     setPollFailures(0);
+    setReadinessReadFailed(false);
+  }, []);
+
+  /** Put an answer for the shown run on screen. Every write of the shown run goes through here, so the ref cannot drift from the state. */
+  const apply = useCallback((detail: BootstrapOperationDetail) => {
+    operationRef.current = detail;
+    setOperation(detail);
   }, []);
 
   const refreshList = useCallback(async (signal?: AbortSignal) => {
@@ -143,9 +167,10 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
    * released) and a run on a later page that may still settle are read one by one. An answer that a page load or another
    * read of the list overtook is dropped (the next tick tries again); the read itself never invalidates a page load in flight.
    */
-  const refreshSettling = useCallback(async (signal: AbortSignal) => {
+  const refreshSettling = useCallback(async (signal: AbortSignal, readinessChanged = false) => {
     const pages = extraPages.current;
     const generation = listGeneration.current;
+    const seq = ++listReadSeq.current;
     try {
       const page = await client.list(signal);
       const firstIds = new Set(page.operations.map((operation) => operation.id));
@@ -154,15 +179,20 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         ? []
         : operationsRef.current.filter((operation) => !firstIds.has(operation.id));
       const reread = new Map<string, BootstrapOperation>();
-      await Promise.all(tail.filter((operation) => before.has(operation.id) || canSettleOnRead(operation)).map(async (operation) => {
+      // A row on a later page is read one by one when it was on page one, may still be settled by a late Pilot, awaits its
+      // first verdict, or (after a readiness announcement) is enrolled, since its verdict may have changed.
+      await Promise.all(tail.filter((operation) => before.has(operation.id) || canSettleOnRead(operation) || awaitsReadiness(operation)
+        || (readinessChanged && operation.state === 'enrolled')).map(async (operation) => {
         try {
           reread.set(operation.id, await client.get(operation.id, signal));
         } catch {
           // The row keeps what it showed; the next tick reads it again.
         }
       }));
-      // Another read of the list (open, release, cancel) overtook this one, or a page was loaded meanwhile.
-      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current) return;
+      // Another read of the list (open, release, cancel) overtook this one, a page was loaded meanwhile, or a newer read of
+      // these rows already answered.
+      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current || seq < listAppliedSeq.current) return;
+      listAppliedSeq.current = seq;
       firstPageIds.current = firstIds;
       const kept = tail
         .map((operation) => reread.get(operation.id) ?? operation)
@@ -197,7 +227,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   const running = operation !== null && isOperationRunning(operation);
   const settling = operation !== null && canSettleOnRead(operation);
-  const polling = running || settling || (operation !== null && awaitsReadiness(operation));
+  const polling = running || settling || readinessReadFailed || (operation !== null && awaitsReadiness(operation));
   const operationId = operation?.id ?? null;
   // A run that no longer exists (or a session that ended) will not come back on the next tick.
   const [pollStopped, setPollStopped] = useState(false);
@@ -214,11 +244,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         setPollTick((tick) => tick + 1);
         return;
       }
+      const seq = ++detailReadSeq.current;
       void client.get(operationId, controller.signal)
         .then((detail) => {
-          if (epoch !== viewEpoch.current) return;
-          if (shownRef.current === detail.id) setOperation(detail);
+          if (epoch !== viewEpoch.current || seq < detailAppliedSeq.current) return;
+          detailAppliedSeq.current = seq;
+          if (shownRef.current === detail.id) apply(detail);
           setPollFailures(0);
+          setReadinessReadFailed(false);
         })
         .catch((error: unknown) => {
           if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -244,7 +277,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // The list is the other place a stopped run is shown. While no run is open and one of its rows may still be
   // settled by a late Pilot, it is read again, so a row does not keep offering Retry for a node that is enrolled.
   useEffect(() => { operationsRef.current = operations; }, [operations]);
-  const listSettling = operation === null && operations.some(canSettleOnRead);
+  const listSettling = operation === null && operations.some((entry) => canSettleOnRead(entry) || awaitsReadiness(entry));
   const [listTick, setListTick] = useState(0);
   useEffect(() => {
     if (!open || !listSettling) return;
@@ -266,6 +299,55 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, listSettling, listTick]);
 
+  // The hub announces every change of a node's readiness. A verdict already on screen is then read again: the shown
+  // enrolled run once, and, when no run is shown, the listed enrolled runs (and loaded later pages' enrolled rows) once.
+  // Announcements within one window share the read; the events say nothing a read would not, so an announcement for
+  // another node costs one read and changes nothing on screen.
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
+    const readNow = async () => {
+      const shown = operationRef.current;
+      if (shown) {
+        if (shown.state !== 'enrolled') return;
+        const epoch = viewEpoch.current;
+        const seq = ++detailReadSeq.current;
+        try {
+          const detail = await client.get(shown.id, controller.signal);
+          if (epoch !== viewEpoch.current || seq < detailAppliedSeq.current || shownRef.current !== detail.id) return;
+          detailAppliedSeq.current = seq;
+          apply(detail);
+          setPollFailures(0);
+          setReadinessReadFailed(false);
+        } catch (error: unknown) {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          // What is on screen may be stale. The shown run is read again on the slower pace until one read answers.
+          console.warn('Bootstrap readiness could not be refreshed:', error);
+          if (epoch === viewEpoch.current) setReadinessReadFailed(true);
+        }
+        return;
+      }
+      if (operationsRef.current.some((entry) => entry.state === 'enrolled')) await refreshSettling(controller.signal, true);
+    };
+    const onInvalidate = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
+      if (detail?.scope !== 'node-readiness' || timer !== null) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void readNow();
+      }, READINESS_REFRESH_DELAY_MS);
+    };
+    window.addEventListener('sencho:state-invalidate', onInvalidate);
+    return () => {
+      window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      if (timer !== null) clearTimeout(timer);
+      controller.abort();
+    };
+    // client.* is stable module API unless a test injects it; apply and refreshSettling are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   // A newly shown operation polls again.
   const [pollFor, setPollFor] = useState<string | null>(null);
   if (pollFor !== operationId) {
@@ -283,7 +365,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         ? await client.cancel(operationId)
         : kind === 'release' ? await client.release(operationId) : await verify(operationId);
       viewEpoch.current += 1;
-      if (shownRef.current === detail.id) setOperation(detail);
+      if (shownRef.current === detail.id) apply(detail);
       if (kind === 'release') toast.success('Server released. Nothing on it was changed.');
       void refreshList();
     } catch (error: unknown) {
