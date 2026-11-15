@@ -506,6 +506,26 @@ describe('capturing a host directory', () => {
     expect(res.body.operation.storageId).toBe(later.id);
   });
 
+  it('keeps a spelling\'s own identity when an older spelling of the same directory also proves', async () => {
+    const data = dataDir('web');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const stat = fs.statSync(data, { bigint: true });
+    const token = `fs|${stat.ino}|1700000000.000000001`;
+    const store = identityStore.StorageIdentityStore.getInstance();
+    const spelling = path.join(shared, `older-${randomUUID().slice(0, 8)}`);
+    fs.symlinkSync(data, spelling);
+    const older = store.observe({
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: spelling, generationToken: token, dependents: [],
+    });
+    recoveryDbModule.recoveryDb().prepare('UPDATE recovery_storage_identities SET first_seen_at = 1 WHERE id = ?').run(older.id);
+    const own = store.observe({
+      ownerNodeKey: 'docker-engine:engine-fs', kind: 'bind_root', locator: data, generationToken: token, dependents: [],
+    });
+    const res = await capture('web', await rootIdOf('web'));
+    expect(res.status).toBe(202);
+    expect(res.body.operation.storageId).toBe(own.id);
+  });
+
   it('answers a capture as retryable while Docker does not say where its data root is', async () => {
     dataDir('web');
     models.byStack.web = [{ source: path.join(stackDir('web'), 'data'), target: '/data' }];

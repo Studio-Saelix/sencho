@@ -7,7 +7,7 @@
  * every access check. Sencho's own container mounts the compose base, which is
  * an ancestor of every stack source, so it is never one of them.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -328,6 +328,71 @@ describe('overlapping work', () => {
       operationId: 'x', pointId: 'y', targetVolume: 'fs:abc', actor: 'a', processEpoch: 'e',
       stagingVolume: 'sencho-recovery-stage-1', expectedGenerationToken: 't',
     })).toThrow();
+  });
+});
+
+describe('work directories left inside a directory', () => {
+  let base: string;
+  beforeEach(() => {
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fsdeps-leftover-')));
+  });
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+
+  function settledChild(child: { senchoPath: string; hostPath: string; aliases?: string[] }): string {
+    const intentId = fencedDirectory(child);
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET phase = 'completion_unknown', fence_state = 'released' WHERE id = ?").run(intentId);
+    return intentId;
+  }
+
+  it('finds one left by a restore strictly inside, at any depth, and none for the directory itself or a parent', async () => {
+    const parent = { senchoPath: path.join(base, 'data'), hostPath: '/host/data' };
+    fs.mkdirSync(path.join(base, 'data/a/b'), { recursive: true });
+    const grandchild = settledChild({ senchoPath: path.join(base, 'data/a/b'), hostPath: '/host/data/a/b' });
+    fs.mkdirSync(path.join(base, `data/a/b/.sencho-restore-${grandchild}`));
+    const self = settledChild({ senchoPath: parent.senchoPath, hostPath: parent.hostPath });
+    fs.mkdirSync(path.join(base, `data/.sencho-restore-${self}`));
+    const ancestor = settledChild({ senchoPath: base, hostPath: '/host' });
+    fs.mkdirSync(path.join(base, `.sencho-restore-${ancestor}`));
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([`a/b/.sencho-restore-${grandchild}`]);
+  });
+
+  it('places a child recorded under another host spelling by Sencho\'s own path', async () => {
+    const parent = { senchoPath: path.join(base, 'data'), hostPath: '/host/data' };
+    fs.mkdirSync(path.join(base, 'data/inner'), { recursive: true });
+    const child = settledChild({ senchoPath: path.join(base, 'data/inner'), hostPath: '/other-mount/data/inner' });
+    fs.mkdirSync(path.join(base, `data/inner/.sencho-restore-${child}`));
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([`inner/.sencho-restore-${child}`]);
+    // And by a declared spelling under the parent's host path.
+    const aliased = settledChild({ senchoPath: '/elsewhere/inner2', hostPath: '/other-mount/inner2', aliases: ['/host/data/inner2'] });
+    fs.mkdirSync(path.join(base, `data/inner2/.sencho-restore-${aliased}`), { recursive: true });
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toContain(`inner2/.sencho-restore-${aliased}`);
+  });
+
+  it('counts a work directory it cannot look at as present, and none where the child is no longer a directory', async () => {
+    const parent = { senchoPath: path.join(base, 'data'), hostPath: '/host/data' };
+    fs.mkdirSync(parent.senchoPath, { recursive: true });
+    const replaced = settledChild({ senchoPath: path.join(base, 'data/file'), hostPath: '/host/data/file' });
+    fs.writeFileSync(path.join(base, 'data/file'), 'now a file');
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([]);
+    const hidden = settledChild({ senchoPath: path.join(base, 'data/locked'), hostPath: '/host/data/locked' });
+    const originalLstat = fs.promises.lstat.bind(fs.promises);
+    vi.spyOn(fs.promises, 'lstat').mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
+      if (String(target).includes(`.sencho-restore-${hidden}`)) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return originalLstat(target, options);
+    }) as unknown as typeof fs.promises.lstat);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([`locked/.sencho-restore-${hidden}`]);
+    expect(replaced).toBeTruthy();
+  });
+
+  it('skips a restore whose paths cannot be read, and says so once', async () => {
+    const intentId = settledChild({ senchoPath: path.join(base, 'data/inner'), hostPath: '/host/data/inner' });
+    recoveryDbModule.recoveryDb().prepare("UPDATE recovery_restore_intents SET target_paths_json = '{broken' WHERE id = ?").run(intentId);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const parent = { senchoPath: path.join(base, 'data'), hostPath: '/host/data' };
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([]);
+    expect(await roots.nestedLeftoverWorkDirs(parent)).toEqual([]);
+    expect(warn.mock.calls.filter((call) => String(call[0]).includes('cannot be read'))).toHaveLength(1);
   });
 });
 

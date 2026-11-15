@@ -19,7 +19,7 @@ import { RecoveryError } from './redaction';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import { HELPER_SOURCE_MOUNT, type RecoveryHelperRunner } from './restic/helperRunner';
 import { StorageIdentityStore } from './storageIdentity';
-import { parseFsTargetPaths } from './fsTargets';
+import { parseFsTargetPaths, type FsTargetPaths } from './fsTargets';
 import { RECOVERY_WORK_DIR_PREFIX } from './restoreIntents';
 import { mapLimited, RENDER_CONCURRENCY, type DependentResolution, type InUseObservation } from './volumeSources';
 import type { PointExclusion, StorageDependent } from './types';
@@ -173,6 +173,9 @@ export function dependsOnRoot(relation: PathRelation, writable: boolean): boolea
   return relation === 'equal' || relation === 'inside' || (relation === 'ancestor' && writable);
 }
 
+/** Paths whose identity could not be read, logged once each (bounded). */
+const warnedIdentityPaths = new Set<string>();
+
 /** A directory's device and inode as Sencho sees it, or null when it cannot be read. */
 async function identityOf(target: string): Promise<string | null> {
   try {
@@ -180,7 +183,10 @@ async function identityOf(target: string): Promise<string | null> {
     return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
   } catch (err) {
     // An unreadable path is matched by its spelling alone.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && !warnedIdentityPaths.has(target)) {
+      // Matching runs on every check, so a path that stays unreadable is logged once.
+      if (warnedIdentityPaths.size >= 256) warnedIdentityPaths.clear();
+      warnedIdentityPaths.add(target);
       console.warn('[Recovery] Could not read the identity of %s:', sanitizeForLog(target), errorMessageForLog(err));
     }
     return null;
@@ -942,7 +948,15 @@ export function assertNoOverlappingFsWork(hostPath: string, ownStorageKey: strin
  * already moved out. An overwrite of the parent would move that directory into
  * its own work directory and delete it at cleanup, and the parent's pre-restore
  * point leaves work directories out at any depth, so each one found refuses the
- * parent overwrite. A path Sencho cannot stat counts as present.
+ * parent overwrite. A path Sencho cannot stat counts as present; one whose
+ * parent is not a directory any more (`ENOTDIR`) cannot exist.
+ *
+ * The child is placed inside the parent by Sencho's own path first, then by
+ * its recorded host path or any declared spelling, so a child recorded under
+ * another spelling of the same tree is still found. A restore whose recorded
+ * paths cannot be read cannot be placed and is skipped with a log line: refusing
+ * every directory overwrite for it would never clear, and the restore's own
+ * pre-restore point still holds what it replaced.
  */
 export async function nestedLeftoverWorkDirs(parent: { senchoPath: string; hostPath: string }): Promise<string[]> {
   const rows = recoveryDb().prepare(`
@@ -953,21 +967,40 @@ export async function nestedLeftoverWorkDirs(parent: { senchoPath: string; hostP
   for (const row of rows) {
     const paths = parseFsTargetPaths(row.paths);
     if (!paths) {
-      console.warn('[Recovery] The paths of restore %s cannot be read; its work directory is not looked for', sanitizeForLog(row.id));
+      if (!warnedUnplaceableIntents.has(row.id)) {
+        warnedUnplaceableIntents.add(row.id);
+        console.warn('[Recovery] The paths of restore %s cannot be read; its work directory is not looked for', sanitizeForLog(row.id));
+      }
       continue;
     }
-    if (relatePath(paths.hostPath, parent.hostPath) !== 'inside') continue;
-    const relative = path.posix.join(path.posix.relative(parent.hostPath, paths.hostPath), `${RECOVERY_WORK_DIR_PREFIX}${row.id}`);
+    const childDir = childPathInside(paths, parent);
+    if (childDir === null) continue;
+    const relative = path.posix.join(childDir, `${RECOVERY_WORK_DIR_PREFIX}${row.id}`);
     try {
       await fsPromises.lstat(path.join(parent.senchoPath, relative));
       found.push(relative);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       console.warn('[Recovery] Could not look for the work directory %s:', sanitizeForLog(relative), errorMessageForLog(err));
       found.push(relative);
     }
   }
   return found;
+}
+
+/** Restores whose recorded paths could not be read, each logged once. */
+const warnedUnplaceableIntents = new Set<string>();
+
+/** Where a recorded target lies strictly inside `parent`, relative to it, or null. */
+function childPathInside(child: FsTargetPaths, parent: { senchoPath: string; hostPath: string }): string | null {
+  if (relatePath(child.senchoPath, parent.senchoPath) === 'inside') {
+    return path.posix.relative(parent.senchoPath, child.senchoPath);
+  }
+  for (const spelling of [child.hostPath, ...child.aliases]) {
+    if (relatePath(spelling, parent.hostPath) === 'inside') return path.posix.relative(parent.hostPath, spelling);
+  }
+  return null;
 }
 
 function overlapRefusal(): RecoveryError {

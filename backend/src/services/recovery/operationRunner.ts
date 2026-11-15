@@ -143,7 +143,7 @@ const HEALTH_TTL_MS = 60_000;
  * token are rare (a directory moved, a second Sencho mount); this bounds the
  * probes a capture can start.
  */
-const MAX_ALIAS_IDENTITIES = 8;
+const MAX_ALIAS_IDENTITIES = 4;
 
 export interface AdmissionResult {
   operation: RecoveryOperation;
@@ -778,8 +778,11 @@ export class RecoveryEngineService {
     // recorded spelling is proven now, oldest first, and must be this very
     // directory; one that cannot be proven (a mount since removed) is passed
     // over, so a directory recorded under it can still join a later spelling.
+    // This spelling's own current identity with the same token is the directory
+    // already; it is looked up by its key, so the cap on the list never hides it.
+    const own = naturalKey ? store.getCurrent(naturalKey) : null;
     let alias: StorageIdentity | null = null;
-    if (!tokenMatches.some((match) => match.locator === hostPath)) {
+    if (own?.generationToken !== proven.generationToken) {
       for (const match of tokenMatches) {
         if (await this.isSameDirectory(match.locator, proven.root.identity())) {
           alias = match;

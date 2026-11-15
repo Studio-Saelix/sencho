@@ -7281,6 +7281,9 @@ paths:
         `confirmation.token: null`) and names the directory in `target.ineligibleReason`; the
         overwrite is refused with `400 invalid_request` for the same reason. A capture skips that
         directory, so it is not in any point: copy out what you need, remove it, and preview again.
+        For a host directory the same refusal covers a work directory that an earlier overwrite of
+        a directory inside it left behind (one settled with `release_fence`); the reason names its
+        path relative to the directory, because the swap would remove it with the rest.
         A top-level entry with the prefix but not an intent-id name is a user's own data: it is
         captured, listed as content, and never treated as a work directory. A volume that does not
         exist, or that was recreated after the point was captured, is also not eligible: the

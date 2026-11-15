@@ -256,6 +256,17 @@ function describeWorkDirs(names: readonly string[], noun: 'volume' | 'directory'
   return `A restore that did not finish left ${label} in this ${noun}, and it may hold the data that restore replaced. A point of this ${noun} does not include it, so copy out anything you need, remove it from the ${noun}, then preview again. Until then another overwrite of this ${noun} would stop the containers and fail.`;
 }
 
+/**
+ * Work directories an overwrite of a directory inside this one left behind,
+ * shown in a sentence. The swap would not refuse them: it would move them with
+ * the rest of the data and remove them, which is why the overwrite is refused.
+ */
+function describeNestedWorkDirs(paths: readonly string[]): string {
+  const shown = paths.map((entry) => (/^[\x20-\x7e]{1,4096}$/.test(entry) ? entry : `…/${RECOVERY_WORK_DIR_PREFIX}…`));
+  const label = shown.length === 1 ? `a work directory (${shown[0]})` : `work directories (${shown.join(', ')})`;
+  return `A restore of a directory inside this one did not finish and left ${label}, and it may hold the data that restore replaced. A point of this directory does not include it, and overwriting this directory would remove it, so copy out anything you need, remove it, then preview again.`;
+}
+
 function requirePoint(deps: OverwriteDeps, pointId: string): TargetObservation["point"] {
   const point = deps.points.get(pointId);
   if (!point) throw new RecoveryError('invalid_request');
@@ -697,6 +708,7 @@ async function observeFsTarget(
   let freeBytes: number | null = null;
   let workDirsChecked = false;
   let leftoverWorkDirs: string[] = [];
+  let nestedLeftovers: string[] = [];
   let nestedMounts: string[] = [];
   if (refusalReason === undefined && location) {
     try {
@@ -731,7 +743,7 @@ async function observeFsTarget(
       }
       // A directory inside this one that was overwritten keeps its own work
       // directory, below the top level the probe lists.
-      leftoverWorkDirs.push(...await nestedLeftoverWorkDirs(location));
+      nestedLeftovers = await nestedLeftoverWorkDirs(location);
     } catch (err) {
       console.warn('[Recovery] Could not prove the directory %s for an overwrite:', sanitizeForLog(storage.locator), errorMessageForLog(err));
       refuse('path_mapping_unproven', FS_UNPROVEN_REASON);
@@ -752,6 +764,8 @@ async function observeFsTarget(
       : 'This directory is mounted by the container that runs the Docker endpoint, so overwriting it would take Sencho offline with it.';
   } else if (leftoverWorkDirs.length > 0) {
     plainRefusal = describeWorkDirs(leftoverWorkDirs, 'directory');
+  } else if (nestedLeftovers.length > 0) {
+    plainRefusal = describeNestedWorkDirs(nestedLeftovers);
   }
   if (plainRefusal !== null && ineligibleReason === null) ineligibleReason = plainRefusal;
   const eligible = refusalReason === undefined && plainRefusal === null && liveGenerationToken !== null;
