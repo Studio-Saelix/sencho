@@ -521,6 +521,18 @@ export async function waitForStartsInFlight(timeoutMs = startDrainTimeoutMs): Pr
 }
 
 /**
+ * Wait for the work a fence just recorded must not run under: every container
+ * start in flight, and, for a host directory, every stack file operation on it
+ * (see `waitForFsWorkOn`). Null when all of it has finished; otherwise which kind
+ * did not, and the fence is refused.
+ */
+export async function waitForWorkBeforeFence(fsTarget: FsTargetPaths | null): Promise<'start' | 'file_operation' | null> {
+  if (!await waitForStartsInFlight()) return 'start';
+  if (fsTarget && !await waitForFsWorkOn(fsTarget)) return 'file_operation';
+  return null;
+}
+
+/**
  * Start or restart one container unless a volume it mounts is fenced. Called
  * from `DockerController`, through which every single-container start and
  * restart of the Sencho process passes. The mounts are read only while a fence is live, so
@@ -623,6 +635,13 @@ export interface FsWorkLease {
    * before each one, so a fence waiting for it does not wait for the rest.
    */
   recheck(): DataRestoreFenceError | null;
+  /**
+   * How to cut this work off instead of waiting for it, or null when it must be
+   * waited for. A read, or an upload still receiving its body, writes nothing
+   * the restore replaces, so a fence ends it at once rather than letting a slow
+   * client hold the restore off; a write already under way is waited for.
+   */
+  setAbort(abort: (() => void) | null): void;
   /** The work has finished. Idempotent. */
   release(): void;
 }
@@ -632,6 +651,7 @@ interface FsWorkEntry {
   startedAt: number;
   /** Fenced directories this work is proven clear of; a fence's drain adds to it. */
   checked: Set<string>;
+  abort: (() => void) | null;
   done: Promise<void>;
 }
 
@@ -652,7 +672,11 @@ function uncheckedFsFence(checked: ReadonlySet<string>): DataRestoreFenceError |
  * work either sees a directory fenced after its match and is refused, or is
  * registered before the fence exists and is waited for by `waitForFsWorkOn`.
  */
-export function admitFsWork(senchoPath: string, checked: ReadonlySet<string>): FsWorkLease | DataRestoreFenceError {
+export function admitFsWork(
+  senchoPath: string,
+  checked: ReadonlySet<string>,
+  abort: (() => void) | null = null,
+): FsWorkLease | DataRestoreFenceError {
   const late = uncheckedFsFence(checked);
   if (late) return late;
   let settle: () => void = () => undefined;
@@ -660,11 +684,13 @@ export function admitFsWork(senchoPath: string, checked: ReadonlySet<string>): F
     senchoPath,
     startedAt: performance.now(),
     checked: new Set(checked),
+    abort,
     done: new Promise<void>((resolve) => { settle = resolve; }),
   };
   fsWorkInFlight.add(entry);
   return {
     recheck: () => (fsWorkInFlight.has(entry) ? uncheckedFsFence(entry.checked) : null),
+    setAbort: (next) => { entry.abort = next; },
     release: () => {
       if (!fsWorkInFlight.delete(entry)) return;
       settle();
@@ -679,7 +705,8 @@ export function fsWorkInFlightCountForTests(): number {
 
 /**
  * Wait until every stack file operation that overlaps `target`, or whose
- * relationship to it cannot be proven, has finished. Called after the fence on
+ * relationship to it cannot be proven, has finished; one that can be cut off
+ * (a read, an upload still receiving its body) is cut off instead. Called after the fence on
  * `target` is recorded, so no operation can be admitted on it from then on and
  * the set looked at here is complete. An operation proven clear of it is marked
  * so, and its rechecks pass. False means one was still running when the cap ran
@@ -698,7 +725,18 @@ export async function waitForFsWorkOn(target: FsTargetPaths, timeoutMs = startDr
     if (await relateToFencedDirectory(entry.senchoPath, target, ownMounts) === 'unrelated') entry.checked.add(key);
     else pending.push(entry);
   }
-  const live = pending.filter((entry) => fsWorkInFlight.has(entry));
+  // Work that writes nothing yet is cut off, not waited for: a client that reads
+  // slowly, or sends an upload slowly, cannot hold the restore off that way.
+  for (const entry of pending) {
+    const abort = entry.abort;
+    if (!abort || !fsWorkInFlight.has(entry)) continue;
+    try {
+      abort();
+    } catch (err) {
+      console.warn('[Recovery] Could not cut off a file operation on the directory:', errorMessageForLog(err));
+    }
+  }
+  const live = pending.filter((entry) => fsWorkInFlight.has(entry) && entry.abort === null);
   if (live.length === 0) return true;
   const now = performance.now();
   if (live.some((entry) => now - entry.startedAt >= hungStartAfterMs)) {

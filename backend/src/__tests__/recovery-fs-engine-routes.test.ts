@@ -996,7 +996,7 @@ describe('file work already running when a directory is fenced', () => {
     expect(fence.fsWorkInFlightCountForTests()).toBe(0);
   });
 
-  it('refuses an upload whose body was still arriving when the directory was fenced, and writes nothing', async () => {
+  it('cuts off an upload whose body was still arriving when the directory was fenced, without waiting for it, and writes nothing', async () => {
     const data = dataDir('web');
     models.byStack.web = [{ source: data, target: '/data' }];
     const bindId = await rootIdOf('web');
@@ -1009,7 +1009,8 @@ describe('file work already running when a directory is fenced', () => {
       const boundary = 'fencetestboundary';
       const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="late.txt"\r\nContent-Type: text/plain\r\n\r\n`;
       const tail = `late bytes\r\n--${boundary}--\r\n`;
-      const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      let drained: boolean | undefined;
+      const outcome = await new Promise<string>((resolve) => {
         const req = http.request({
           host: '127.0.0.1', port, method: 'POST',
           path: `/api/stacks/web/files/upload?rootId=${encodeURIComponent(bindId)}`,
@@ -1019,31 +1020,55 @@ describe('file work already running when a directory is fenced', () => {
             'Content-Length': Buffer.byteLength(head) + Buffer.byteLength(tail),
           },
         }, (res) => {
-          let body = '';
-          res.on('data', (chunk) => { body += String(chunk); });
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+          res.resume();
+          res.on('end', () => resolve(`answered ${res.statusCode}`));
+          res.on('error', () => resolve('cut off'));
         });
-        req.on('error', reject);
+        req.on('error', () => resolve('cut off'));
         req.write(head);
         // The upload has been admitted and is waiting for the rest of its body.
         void (async () => {
           for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
           fencedOverwriteOf(data, ['web']);
-          vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-          // The overwrite waits for the upload rather than fencing under it.
-          expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 50)).toBe(false);
+          // The overwrite does not wait on the slow client.
+          drained = await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000);
           req.end(tail);
-        })().catch(reject);
+        })();
       });
-      const answered = await response;
-      expect(answered.status).toBe(409);
-      expect(JSON.parse(answered.body).code).toBe('data_restore');
+      expect(drained).toBe(true);
+      expect(outcome).toBe('cut off');
       expect(fs.existsSync(path.join(data, 'late.txt'))).toBe(false);
       for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
       expect(fence.fsWorkInFlightCountForTests()).toBe(0);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('cuts off a read of the directory that is still running when it is fenced, without waiting for it', async () => {
+    const data = dataDir('web');
+    fs.writeFileSync(path.join(data, 'a.txt'), 'a');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    const proto = await gateway();
+    const original = proto.read;
+    let entered!: () => void;
+    const inRead = new Promise<void>((resolve) => { entered = resolve; });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(proto, 'read').mockImplementation(async function (this: unknown, ...args: Parameters<typeof original>) {
+      entered();
+      await held;
+      return original.apply(this, args);
+    });
+    const reading = request(app).get(`/api/stacks/web/files/content?rootId=${encodeURIComponent(bindId)}&path=a.txt`)
+      .set('Cookie', adminCookie).then(() => 'answered', () => 'cut off');
+    await inRead;
+    const fence = await fenceModule();
+    fencedOverwriteOf(data, ['web']);
+    expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+    finish();
+    expect(await reading).toBe('cut off');
   });
 
   it('refuses file work on a stack directory reached through a second own bind destination of the fenced tree', async () => {

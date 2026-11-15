@@ -3919,7 +3919,7 @@ async function resolveRootForOp(
       res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
       return null;
     }
-    if (await refuseUnderDirectoryRestore(res, stackDir)) return null;
+    if (await refuseUnderDirectoryRestore(res, stackDir, mode)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3948,7 +3948,7 @@ async function resolveRootForOp(
   // A browsable or writable bind root's path is already canonical: the roots
   // service resolved it with realpath when it listed the root, and the file
   // gateway refuses a root swapped for a link since then (SYMLINK_ESCAPE).
-  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName)) return null;
+  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName, mode)) return null;
   return root;
 }
 
@@ -3961,10 +3961,12 @@ async function resolveRootForOp(
  * for it before it captures or swaps anything. One query when no such restore
  * is live.
  */
-async function refuseUnderDirectoryRestore(res: Response, dir: string): Promise<boolean> {
+async function refuseUnderDirectoryRestore(res: Response, dir: string, mode: 'read' | 'write'): Promise<boolean> {
   const { matchFsWorkToFences, admitFsWork } = await import('../services/recovery/restoreFence');
   const match = await matchFsWorkToFences(dir);
-  const admitted = match.refusal ?? admitFsWork(dir, match.checked);
+  // A read is cut off when a fence lands rather than waited for, so a slow
+  // reader cannot hold a restore off; a write is waited for.
+  const admitted = match.refusal ?? admitFsWork(dir, match.checked, mode === 'read' ? () => cutOffFileOp(res) : null);
   if (isDataRestoreFenceError(admitted)) {
     res.status(409).json({ error: admitted.message, code: DATA_RESTORE_FENCE_CODE });
     return true;
@@ -4021,6 +4023,24 @@ function fileOpRecheck(res: Response): { message: string } | null {
     if (refusal) return refusal;
   }
   return null;
+}
+
+/**
+ * End a request whose file operation a restore fence cut off. The connection is
+ * closed rather than answered, because the handler is still running and may
+ * answer or stream on its own; a retry is refused with the fence's reason.
+ */
+function cutOffFileOp(res: Response): void {
+  res.destroy();
+}
+
+/**
+ * Whether the fence may cut this request's file operation off instead of
+ * waiting for it: true while it writes nothing yet (an upload receiving its
+ * body), false once its write is under way.
+ */
+function setFileOpAbortable(res: Response, abortable: boolean): void {
+  for (const lease of fileOpScopes.get(res)?.leases ?? []) lease.setAbort(abortable ? () => cutOffFileOp(res) : null);
 }
 
 /** Run a stack file route handler inside its request's file operation scope. */
@@ -4307,6 +4327,9 @@ stacksRouter.post(
     const root = await resolveRootForOp(req, res, stackName, 'write');
     if (!root) return;
     (req as UploadStartedReq)._fileUploadRoot = root;
+    // Until the body has arrived the upload writes nothing in the directory, so a
+    // fence cuts it off instead of waiting on a slow client.
+    setFileOpAbortable(res, true);
     next();
   }),
   (req: Request, res: Response, next: NextFunction) => {
@@ -4378,8 +4401,9 @@ stacksRouter.post(
     // Date.now() defensively in case the wrapper was bypassed in a test.
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
-    // The body took its time to arrive; a directory fenced meanwhile is waiting
-    // for this upload, so it is refused here instead of written under the fence.
+    // From here the upload writes, so a fence waits for it; one recorded while
+    // the body was arriving is refused here instead of written under.
+    setFileOpAbortable(res, false);
     const fenced = fileOpRecheck(res);
     if (fenced) {
       recordFileOp(req.nodeId, 'upload', startedAt, false);

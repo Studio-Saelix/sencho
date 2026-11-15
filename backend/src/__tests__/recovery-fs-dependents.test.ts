@@ -652,6 +652,21 @@ describe('file work admitted before a directory fence', () => {
     lease.release();
   });
 
+  it('cuts off work that can be cut off instead of waiting for it', async () => {
+    const target = { senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data'), aliases: [] };
+    const abort = vi.fn();
+    const lease = fence.admitFsWork(path.join(dir, 'data'), new Set(), abort);
+    if (!('release' in lease)) throw new Error('not admitted');
+    fencedDirectory(target);
+    expect(await fence.waitForFsWorkOn(target, 5_000)).toBe(true);
+    expect(abort).toHaveBeenCalledTimes(1);
+    // Once its write is under way it is waited for again.
+    lease.setAbort(null);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await fence.waitForFsWorkOn(target, 30)).toBe(false);
+    lease.release();
+  });
+
   it('refuses work cleared before a fence was recorded and registered after it', () => {
     fencedDirectory({ senchoPath: path.join(dir, 'data'), hostPath: path.join(dir, 'data') });
     const refused = fence.admitFsWork(path.join(dir, 'other'), new Set());

@@ -9,6 +9,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'crypto';
 import { format } from 'util';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import {
   container,
@@ -30,6 +32,7 @@ let intents: typeof import('../services/recovery/restoreIntents');
 let fence: typeof import('../services/recovery/restoreFence');
 let overwrite: typeof import('../services/recovery/overwriteRestore');
 let DockerController: typeof import('../services/DockerController').default;
+let SelfIdentityService: typeof import('../services/SelfIdentityService').default;
 
 let tmpDir: string;
 const ENGINE = 'docker-engine:overwrite-runner';
@@ -46,6 +49,7 @@ beforeAll(async () => {
   fence = await import('../services/recovery/restoreFence');
   overwrite = await import('../services/recovery/overwriteRestore');
   DockerController = (await import('../services/DockerController')).default;
+  SelfIdentityService = (await import('../services/SelfIdentityService')).default;
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -75,6 +79,8 @@ interface Seeded {
 function seed(input: {
   createdAt: string;
   members: Array<Parameters<typeof container>[0]>;
+  /** A host directory to overwrite instead of the volume, with the token its probe answers. */
+  directory?: { path: string; generationToken: string };
 }): Seeded {
   const repository = repositories.RecoveryRepositoryStore.getInstance().register({
     ownerNodeKey: ENGINE,
@@ -83,11 +89,11 @@ function seed(input: {
     failureDomain: 'same_failure_domain',
   });
   repositories.RecoveryRepositoryStore.getInstance().setActive(repository.id);
-  const generationToken = `${input.createdAt}|63:42`;
+  const generationToken = input.directory?.generationToken ?? `${input.createdAt}|63:42`;
   const storage = identityStore.StorageIdentityStore.getInstance().observe({
     ownerNodeKey: ENGINE,
-    kind: 'named_volume',
-    locator: VOLUME,
+    kind: input.directory ? 'bind_root' : 'named_volume',
+    locator: input.directory?.path ?? VOLUME,
     generationToken,
     dependents: [],
   });
@@ -119,7 +125,9 @@ function seed(input: {
   const intent = intents.RestoreIntentStore.getInstance().recordOverwrite({
     operationId,
     pointId: point.id,
-    targetVolume: VOLUME,
+    ...(input.directory
+      ? { targetVolume: `fs:${storage.storageKey}`, targetPaths: { senchoPath: input.directory.path, hostPath: input.directory.path, aliases: [] } }
+      : { targetVolume: VOLUME }),
     actor: 'admin',
     processEpoch: 'e',
     stagingVolume: overwrite.stagingVolumeFor(randomUUID()),
@@ -2021,6 +2029,48 @@ describe('the fence window between the first recheck and the stop', () => {
       await start;
     }
     expect(fake.calls.filter((call) => call.endsWith(':c1'))).toEqual([]);
+    const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+    expect(intent?.phase).toBe('rolled_back');
+    expect(intent?.fenceState).toBe('none');
+  });
+});
+
+describe('file work on a fenced directory', () => {
+  it('refuses the fence, before stopping anything, while a file operation on the directory does not finish', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'fenced-dir-')));
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    const roots = await import('../services/recovery/fsRoots');
+    // The directory's probe answers with its real device and inode, as the daemon would.
+    const stat = fs.statSync(dir, { bigint: true });
+    const probeLine = JSON.stringify({
+      dev: 1, ino: 1, uid: 0, gid: 0, mode: 16877, free: 10 ** 9,
+      dev_s: stat.dev.toString(), ino_s: stat.ino.toString(), btime: '1700000000.000000001',
+    });
+    const scripted = successHelper();
+    const helper = {
+      ...scripted.helper,
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        if (spec.profile !== 'probe') return scripted.helper.run(spec as never);
+        spec.onStdoutLine?.(probeLine);
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+    } as unknown as typeof scripted.helper;
+    const fake = fakeDocker({ volumes: [], containers: [] });
+    const generationToken = roots.fsGenerationToken(roots.parseFsProbeReport(probeLine)!);
+    const seeded = seed({ createdAt: '', members: [], directory: { path: dir, generationToken } });
+    // A write admitted before the fence, still running.
+    const lease = fence.admitFsWork(path.join(dir, 'sub'), new Set());
+    if (!('release' in lease)) throw new Error('not admitted');
+    fence.setStartDrainTimeoutForTests(30);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { outcomes } = await run({ fake, helper: { ...scripted, helper }, engine: scriptedEngine(), seeded });
+      expect(outcomes).toEqual([{ state: 'failed', errorClass: 'fence_unavailable' }]);
+    } finally {
+      fence.setStartDrainTimeoutForTests(120_000);
+      lease.release();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
     const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
     expect(intent?.phase).toBe('rolled_back');
     expect(intent?.fenceState).toBe('none');

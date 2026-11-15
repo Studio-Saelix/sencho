@@ -14,8 +14,7 @@ import {
   fenceIdentityFor,
   releaseRestoreFence,
   RestoreFenceStore,
-  waitForFsWorkOn,
-  waitForStartsInFlight,
+  waitForWorkBeforeFence,
   type FenceMember,
   type FenceMemberInput,
   type RestartPolicy,
@@ -1351,24 +1350,22 @@ async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): P
   // Sencho path that could start or browse one is refused from this record.
   deps.fence.setFenceState(state.intent.id, 'held');
   // A start that passed its check before the fence was recorded is still on its
-  // way; the observation below has to see its result, so it is waited for first.
-  const drained = await waitForStartsInFlight();
+  // way, and so may be a stack file operation on the directory: the observation
+  // below has to see the start's result, and the pre-restore point and the swap
+  // must not run under the file work, so both are waited for first.
+  const unfinished = await waitForWorkBeforeFence(
+    isFsTargetKey(state.intent.targetVolume) ? state.intent.targetPaths : null,
+  );
   // Nothing has been stopped or re-pinned yet, so an abort from here puts the
   // fence back to `none`: a release would otherwise restore the admission-time
   // policies and start members an operator stopped since, or fail on a member
   // that no longer exists and leave the volume fenced for good.
-  if (!drained) {
-    console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', sanitizeForLog(state.intent.id));
-    deps.fence.setFenceState(state.intent.id, 'none');
-    await settleRollback(ctx, state, 'fence_unavailable');
-    return false;
-  }
-  // The same for a stack file operation on the directory: one admitted before
-  // the fence was recorded may still be writing it, and the pre-restore point and
-  // the swap must not run under it. Every one admitted after is refused.
-  if (state.intent.targetPaths && isFsTargetKey(state.intent.targetVolume)
-    && !await waitForFsWorkOn(state.intent.targetPaths)) {
-    console.warn('[Recovery] A file operation on the directory is still running; refusing the fence on %s.', sanitizeForLog(state.intent.id));
+  if (unfinished !== null) {
+    console.warn(
+      '[Recovery] A %s is still unanswered; refusing the fence on %s.',
+      unfinished === 'start' ? 'container start' : 'file operation on the directory',
+      sanitizeForLog(state.intent.id),
+    );
     deps.fence.setFenceState(state.intent.id, 'none');
     await settleRollback(ctx, state, 'fence_unavailable');
     return false;
