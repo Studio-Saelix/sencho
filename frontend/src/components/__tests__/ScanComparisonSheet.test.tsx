@@ -503,6 +503,8 @@ describe('ScanComparisonSheet', () => {
 
       expect(screen.getByText(/No new findings among the first 500 per scan\./)).toBeInTheDocument();
       expect(screen.getByText(/Findings beyond that were not compared\./)).toBeInTheDocument();
+      expect(document.querySelector('svg.lucide-shield-check')).toHaveClass('text-muted-foreground');
+      expect(document.querySelector('svg.lucide-shield-check')).not.toHaveClass('text-success');
       expect(screen.queryByText(/Nothing regressed/i)).toBeNull();
 
       await user.click(screen.getByRole('button', { name: /Removed \(0\)/ }));
@@ -512,6 +514,19 @@ describe('ScanComparisonSheet', () => {
       await user.click(screen.getByRole('button', { name: /Unchanged \(0\)/ }));
       expect(screen.getByText(/No shared findings among the first 500 per scan\./)).toBeInTheDocument();
       expect(screen.queryByText(/No findings are shared/i)).toBeNull();
+    });
+
+    it('qualifies the empty bucket the user switched to, and only that one, when another bucket has rows', async () => {
+      const user = userEvent.setup();
+      show(result({ truncated: true, row_limit: 500, added: [vuln({ vulnerability_id: 'CVE-A', severity: 'HIGH' })] }));
+      await answer();
+
+      expect(screen.getByText('CVE-A')).toBeInTheDocument();
+      expect(screen.queryByText(/not compared/i)).toBeNull();
+
+      await user.click(screen.getByRole('button', { name: /Removed \(0\)/ }));
+      expect(screen.getByText(/No resolved findings among the first 500 per scan\./)).toBeInTheDocument();
+      expect(screen.queryByText('CVE-A')).toBeNull();
     });
 
     it('uses the default limit in a truncated empty bucket when the response omits it', async () => {
@@ -528,6 +543,7 @@ describe('ScanComparisonSheet', () => {
 
       expect(screen.getByText('No new findings. Nothing regressed between these scans.')).toBeInTheDocument();
       expect(screen.queryByText(/not compared/i)).toBeNull();
+      expect(document.querySelector('svg.lucide-shield-check')).toHaveClass('text-success');
 
       await user.click(screen.getByRole('button', { name: /Removed \(0\)/ }));
       expect(screen.getByText('No findings were resolved between these scans.')).toBeInTheDocument();
