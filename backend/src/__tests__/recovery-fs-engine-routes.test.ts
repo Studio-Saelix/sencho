@@ -964,6 +964,62 @@ describe('file work already running when a directory is fenced', () => {
     expect(fs.existsSync(path.join(data, 'b.txt'))).toBe(true);
   });
 
+  const routeCases: Array<{
+    name: string;
+    kind: 'write' | 'read';
+    hold: 'writeIfUnchanged' | 'deletePath' | 'mkdir' | 'rename' | 'chmod' | 'listDir' | 'download' | 'getMode' | 'stat';
+    send: (root: string) => import('supertest').Test;
+  }> = [
+    { name: 'PUT files/content', kind: 'write', hold: 'writeIfUnchanged', send: (q) => request(app).put(`/api/stacks/web/files/content?${q}&path=a.txt`).send({ content: 'x' }) },
+    { name: 'DELETE files', kind: 'write', hold: 'deletePath', send: (q) => request(app).delete(`/api/stacks/web/files?${q}&path=a.txt`) },
+    { name: 'POST files/folder', kind: 'write', hold: 'mkdir', send: (q) => request(app).post(`/api/stacks/web/files/folder?${q}&path=new`) },
+    { name: 'PATCH files/rename', kind: 'write', hold: 'rename', send: (q) => request(app).patch(`/api/stacks/web/files/rename?${q}`).send({ from: 'a.txt', to: 'b.txt' }) },
+    { name: 'PUT files/permissions', kind: 'write', hold: 'chmod', send: (q) => request(app).put(`/api/stacks/web/files/permissions?${q}&path=a.txt`).send({ mode: 0o644 }) },
+    { name: 'GET files', kind: 'read', hold: 'listDir', send: (q) => request(app).get(`/api/stacks/web/files?${q}`) },
+    { name: 'GET files/download', kind: 'read', hold: 'download', send: (q) => request(app).get(`/api/stacks/web/files/download?${q}&path=a.txt`) },
+    { name: 'GET files/permissions', kind: 'read', hold: 'getMode', send: (q) => request(app).get(`/api/stacks/web/files/permissions?${q}&path=a.txt`) },
+    { name: 'GET files/bulk-download', kind: 'read', hold: 'stat', send: (q) => request(app).get(`/api/stacks/web/files/bulk-download?${q}&path=a.txt`) },
+  ];
+
+  for (const route of routeCases) {
+    it(`${route.kind === 'write' ? 'waits for' : 'cuts off'} ${route.name} already running when the directory is fenced`, async () => {
+      const data = dataDir('web');
+      fs.writeFileSync(path.join(data, 'a.txt'), 'a');
+      models.byStack.web = [{ source: data, target: '/data' }];
+      const query = `rootId=${encodeURIComponent(await rootIdOf('web'))}`;
+      const proto = await gateway() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      const original = proto[route.hold];
+      let entered!: () => void;
+      const inside = new Promise<void>((resolve) => { entered = resolve; });
+      let finish!: () => void;
+      const held = new Promise<void>((resolve) => { finish = resolve; });
+      vi.spyOn(proto, route.hold).mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        entered();
+        await held;
+        return original.apply(this, args);
+      });
+      const pending = route.send(query).set('Cookie', adminCookie).then(() => 'answered', () => 'cut off');
+      await inside;
+      const fence = await fenceModule();
+      fencedOverwriteOf(data, ['web']);
+      const target = { senchoPath: data, hostPath: data, aliases: [] };
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      if (route.kind === 'write') {
+        expect(await fence.waitForFsWorkOn(target, 50)).toBe(false);
+        const drained = fence.waitForFsWorkOn(target, 5_000);
+        finish();
+        expect(await pending).toBe('answered');
+        expect(await drained).toBe(true);
+      } else {
+        expect(await fence.waitForFsWorkOn(target, 5_000)).toBe(true);
+        finish();
+        expect(await pending).toBe('cut off');
+      }
+      for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+    });
+  }
+
   it('keeps a fence waiting while a copy into the directory is running, and lets it go once the copy has answered', async () => {
     const data = dataDir('web');
     fs.writeFileSync(path.join(data, 'a.txt'), 'a');
@@ -1041,6 +1097,59 @@ describe('file work already running when a directory is fenced', () => {
       for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
       expect(fence.fsWorkInFlightCountForTests()).toBe(0);
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('writes nothing for an upload cut off after its whole body was sent but before it was spooled', async () => {
+    const data = dataDir('web');
+    models.byStack.web = [{ source: data, target: '/data' }];
+    const bindId = await rootIdOf('web');
+    const fence = await fenceModule();
+    // The spool directory is made late, so the body has fully arrived and the
+    // write is still to come when the fence cuts the upload off.
+    let openSpool!: () => void;
+    const spoolHeld = new Promise<void>((resolve) => { openSpool = resolve; });
+    let spoolAsked = false;
+    const originalMkdir = fs.promises.mkdir.bind(fs.promises);
+    vi.spyOn(fs.promises, 'mkdir').mockImplementation((async (target: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+      if (String(target).includes('upload')) {
+        spoolAsked = true;
+        await spoolHeld;
+      }
+      return originalMkdir(target, options);
+    }) as unknown as typeof fs.promises.mkdir);
+    const http = await import('http');
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (server.address() as import('net').AddressInfo).port;
+      const boundary = 'fencetestboundary';
+      const body = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="late.txt"\r\nContent-Type: text/plain\r\n\r\nlate bytes\r\n--${boundary}--\r\n`;
+      const outcome = new Promise<string>((resolve) => {
+        const req = http.request({
+          host: '127.0.0.1', port, method: 'POST',
+          path: `/api/stacks/web/files/upload?rootId=${encodeURIComponent(bindId)}`,
+          headers: { Cookie: adminCookie, 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': Buffer.byteLength(body) },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(`answered ${res.statusCode}`));
+          res.on('error', () => resolve('cut off'));
+        });
+        req.on('error', () => resolve('cut off'));
+        req.end(body);
+      });
+      for (let i = 0; i < 200 && !spoolAsked; i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(spoolAsked).toBe(true);
+      fencedOverwriteOf(data, ['web']);
+      expect(await fence.waitForFsWorkOn({ senchoPath: data, hostPath: data, aliases: [] }, 5_000)).toBe(true);
+      expect(await outcome).toBe('cut off');
+      openSpool();
+      for (let i = 0; i < 100 && fence.fsWorkInFlightCountForTests() > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 200));
+      expect(fs.existsSync(path.join(data, 'late.txt'))).toBe(false);
+    } finally {
+      openSpool();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

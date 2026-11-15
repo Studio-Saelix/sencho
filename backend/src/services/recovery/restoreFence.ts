@@ -22,7 +22,9 @@ import type { RestoreFenceState } from './restoreIntents';
  *
  * Every Sencho path that can start a workload consults this module: a Compose
  * lifecycle through `StackOpLockService`, a single container start or restart
- * through `DockerController`, and the Files & Volumes browser. The fence matches
+ * through `DockerController`, and the Files & Volumes browser. The stack file
+ * routes register each operation on a host directory here as well, so a fence
+ * on a directory waits for (or cuts off) the file work already running on it. The fence matches
  * containers by what they mount, never by comparing a Compose project label to a
  * stack name: the two can differ (a `name:` key, or case), and an old container
  * from an earlier project would be missed.
@@ -705,8 +707,9 @@ export function fsWorkInFlightCountForTests(): number {
 
 /**
  * Wait until every stack file operation that overlaps `target`, or whose
- * relationship to it cannot be proven, has finished; one that can be cut off
- * (a read, an upload still receiving its body) is cut off instead. Called after the fence on
+ * relationship to it cannot be proven, has finished. One that can be cut off
+ * (a read, an upload still receiving its body) is cut off instead, and one
+ * whose cut-off fails is waited for. Called after the fence on
  * `target` is recorded, so no operation can be admitted on it from then on and
  * the set looked at here is complete. An operation proven clear of it is marked
  * so, and its rechecks pass. False means one was still running when the cap ran
@@ -727,16 +730,19 @@ export async function waitForFsWorkOn(target: FsTargetPaths, timeoutMs = startDr
   }
   // Work that writes nothing yet is cut off, not waited for: a client that reads
   // slowly, or sends an upload slowly, cannot hold the restore off that way.
+  // One whose cut-off failed is waited for like a write.
+  const cutOff = new Set<FsWorkEntry>();
   for (const entry of pending) {
     const abort = entry.abort;
     if (!abort || !fsWorkInFlight.has(entry)) continue;
     try {
       abort();
+      cutOff.add(entry);
     } catch (err) {
       console.warn('[Recovery] Could not cut off a file operation on the directory:', errorMessageForLog(err));
     }
   }
-  const live = pending.filter((entry) => fsWorkInFlight.has(entry) && entry.abort === null);
+  const live = pending.filter((entry) => fsWorkInFlight.has(entry) && !cutOff.has(entry));
   if (live.length === 0) return true;
   const now = performance.now();
   if (live.some((entry) => now - entry.startedAt >= hungStartAfterMs)) {

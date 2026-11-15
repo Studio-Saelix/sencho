@@ -4402,8 +4402,15 @@ stacksRouter.post(
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     // From here the upload writes, so a fence waits for it; one recorded while
-    // the body was arriving is refused here instead of written under.
+    // the body was arriving is refused here instead of written under. A response
+    // that has already closed (a fence cut the upload off, or the client went
+    // away) has released its fence registration, so nothing is written for it.
     setFileOpAbortable(res, false);
+    if (fileOpScopes.get(res)?.closed) {
+      recordFileOp(req.nodeId, 'upload', startedAt, false);
+      await cleanupUploadTemp(req);
+      return;
+    }
     const fenced = fileOpRecheck(res);
     if (fenced) {
       recordFileOp(req.nodeId, 'upload', startedAt, false);

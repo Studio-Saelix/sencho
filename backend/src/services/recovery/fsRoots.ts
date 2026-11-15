@@ -209,9 +209,9 @@ async function identityChain(target: string): Promise<Array<string | null>> {
  * `relatePath`, plus identity: two spellings of one directory (a directory
  * Sencho reaches through two of its own mounts, say) are lexically unrelated, so
  * an unrelated pair is compared by device and inode as well, along both paths'
- * ancestors. A candidate whose own directory or an ancestor is the root is
- * equal to it or inside it; a candidate that is an ancestor of the root under
- * another spelling contains it.
+ * ancestors. A candidate that is the root, or has the root as an ancestor
+ * under another spelling, is equal to it or inside it; a candidate that is an
+ * ancestor of the root under another spelling contains it.
  */
 async function relateWithIdentity(candidate: string, root: string, rootIdentity: string | null): Promise<PathRelation> {
   const relation = relatePath(candidate, root);
