@@ -407,11 +407,16 @@ export default function PreflightPanel({
     }
   };
 
+  const scopeKey = `${nodeId ?? ''}:${stackName}`;
+  const loadedScope = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
-      // loadError stays up while a retry is in flight, so Retry shows as locked
-      // instead of the Answer vanishing; a successful read clears it below.
+      // loadError stays up while a retry of the same stack is in flight, so Retry
+      // shows as locked instead of the Answer vanishing. Another stack or node
+      // starts clean; a successful read clears it below.
+      if (loadedScope.current !== scopeKey) setLoadError(false);
+      loadedScope.current = scopeKey;
       setLoading(true);
       try {
         const res = await apiFetch(`/stacks/${stackName}/preflight`);

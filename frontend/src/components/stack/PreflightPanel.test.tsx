@@ -489,19 +489,43 @@ describe('PreflightPanel', () => {
     expect(screen.getByTestId('preflight-run-btn')).toBeInTheDocument();
   });
 
-  it('retries a failed load from the error Answer', async () => {
+  it('retries a failed load from the error Answer and keeps Retry locked meanwhile', async () => {
+    let release: (r: Response) => void = () => {};
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonRes(null, false))
-      .mockResolvedValueOnce(jsonRes(report({ status: 'pass' })));
+      .mockReturnValueOnce(new Promise<Response>(r => { release = r; }));
     render(<PreflightPanel stackName="web" />);
-    let release: (r: Response) => void = () => {};
-    vi.mocked(apiFetch).mockReset();
-    vi.mocked(apiFetch).mockReturnValueOnce(new Promise<Response>(r => { release = r; }));
     fireEvent.click(await screen.findByTestId('preflight-retry-btn'));
     // The error Answer stays, with Retry locked, until the retry resolves.
     expect(screen.getByTestId('preflight-retry-btn')).toBeDisabled();
     release(jsonRes(report({ status: 'pass' })));
     expect(await screen.findByTestId('preflight-status')).toHaveTextContent('all clear');
+  });
+
+  it('does not carry one stack\'s load error onto the next stack', async () => {
+    let release: (r: Response) => void = () => {};
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes(null, false))
+      .mockReturnValueOnce(new Promise<Response>(r => { release = r; }));
+    const view = render(<PreflightPanel stackName="web" />);
+    await screen.findByTestId('preflight-retry-btn');
+    view.rerender(<PreflightPanel stackName="api" />);
+    await waitFor(() => expect(screen.queryByTestId('preflight-retry-btn')).not.toBeInTheDocument());
+    release(jsonRes(report({ stack: 'api', status: 'pass' })));
+    expect(await screen.findByTestId('preflight-status')).toBeInTheDocument();
+  });
+
+  it('shows the render error in the Answer when its finding is acknowledged', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      renderable: false, status: 'unrenderable', highestSeverity: 'blocker',
+      renderError: 'yaml: line 3: bad indent',
+      findings: [{
+        ruleId: 'render-failed', severity: 'blocker', title: 'Compose model could not be rendered',
+        message: 'yaml: line 3: bad indent', acknowledged: true, acknowledgementId: 7,
+      }],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    expect(await screen.findByTestId('preflight-status')).toHaveTextContent('yaml: line 3: bad indent');
   });
 
   it('shows a layout-matched skeleton only once the first load is slow', async () => {
