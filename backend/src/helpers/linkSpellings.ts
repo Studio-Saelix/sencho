@@ -23,8 +23,9 @@ const MAX_LINK_HOPS = 40;
  */
 export async function linkSpellings(abs: string, baseDir: string): Promise<string[]> {
   const baseResolved = path.resolve(baseDir);
-  const spellings = [path.resolve(abs)];
-  let pending = path.resolve(abs).split(path.sep).filter(Boolean);
+  const absResolved = path.resolve(abs);
+  const spellings = [absResolved];
+  let pending = absResolved.split(path.sep).filter(Boolean);
   let resolved: string = path.sep;
   let hops = 0;
   while (pending.length > 0) {

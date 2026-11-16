@@ -518,11 +518,11 @@ export class FileSystemService {
 
   /**
    * Run `step`, which resolves or checks a stack's compose file before its
-   * read or write is admitted, or is that admitted read itself. When it fails for any reason while a root
-   * compose file of the stack sits in, or links into, a directory a data
-   * restore is overwriting, the fence's refusal is thrown instead: a link
-   * that dangles there mid-swap is not a link out of the stack, and a file
-   * missing there is not gone. A check that could not run while a fence is
+   * read or write is admitted, or is that admitted read itself. When it fails
+   * for any reason while a root compose file of the stack sits in, or links
+   * into, a directory a data restore is overwriting, the fence's refusal is
+   * thrown instead: a link that dangles there mid-swap is not a link out of
+   * the stack, and a file missing there is not gone. A check that could not run while a fence is
    * held is answered as the fence's `unproven` refusal. Otherwise the step's
    * own error is kept.
    */
