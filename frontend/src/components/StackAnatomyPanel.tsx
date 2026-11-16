@@ -194,6 +194,8 @@ export default function StackAnatomyPanel({
   if (revealIdentitySeen !== revealIdentity) {
     setRevealIdentitySeen(revealIdentity);
     setShowHiddenServices(false);
+    // The scan strip remounts per stack; do not let the last stack's state tone this one.
+    setScanBannerShown(false);
   }
 
   useEffect(() => {
@@ -457,9 +459,9 @@ export default function StackAnatomyPanel({
     ? 'danger'
     : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
   // One toned block per view. The update banner and the incomplete-check notice are
-  // the tab's Answer; the post-deploy scan strip is toned only when it is the
-  // louder of the two (a green "safe to apply" banner does not outrank a scan
-  // warning), and is quiet otherwise.
+  // the tab's Answer, so the post-deploy scan strip goes quiet under either. The one
+  // exception is a green update banner (severity ok): it does not outrank a scan
+  // warning, so it goes plain and the strip keeps the tone.
   const updateBannerQuiet = showUpdateBanner && scanBannerShown && bannerSeverity === 'ok';
   const scanBannerQuiet = scanBannerShown && !updateBannerQuiet && (showUpdateBanner || showCheckStatusBanner);
   const bannerTone = updateBannerQuiet
@@ -740,7 +742,7 @@ export default function StackAnatomyPanel({
           </div>
         )}
         {showUpdateBanner && updatePreview && (
-          <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
+          <div data-testid="update-available-banner" data-tone={updateBannerQuiet ? 'neutral' : bannerSeverity === 'danger' ? 'destructive' : bannerSeverity === 'warn' ? 'warning' : 'success'} className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-mono text-xs uppercase tracking-wide">

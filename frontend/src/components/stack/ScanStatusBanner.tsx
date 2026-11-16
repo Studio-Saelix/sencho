@@ -27,17 +27,23 @@ interface ScanStatusBannerProps {
   stackName: string;
   nodeId: number | undefined;
   /**
-   * Render without the warning tint. The host sets it when another louder block
-   * on the same view already carries the tone, so the view has one toned block.
-   * The words, Rescan and Dismiss are unchanged.
+   * Render without the warning tint. The host sets it while another block on the
+   * same view (a tinted update banner or check notice) carries the tone, so the
+   * view has one toned block. The words, Rescan and Dismiss are unchanged.
    */
   quiet?: boolean;
-  /** Reports whether the strip is showing, so the host can decide who is toned. */
+  /**
+   * Reports whether the strip is showing, so the host can decide who is toned.
+   * It also reports false before every change and on unmount, and the strip
+   * re-reports whenever the callback identity changes, so pass a stable one
+   * (a state setter).
+   */
   onShownChange?: (shown: boolean) => void;
 }
 
 /**
- * The amber strip that says the last post-deploy scan did not finish cleanly.
+ * The strip that says the last post-deploy scan did not finish cleanly (amber, or
+ * plain when `quiet`).
  * Rescan runs the same scan again on the node that owns the stack and the strip
  * follows it to the new result; Dismiss hides this result until a scan changes
  * it. Rescan is offered only to an account that can deploy the stack, the same
@@ -122,13 +128,14 @@ export function ScanStatusBanner({ stackName, nodeId, quiet = false, onShownChan
     }
   };
 
-  const shown = Boolean(scan?.status) && scan?.status !== 'ok' && !dismissed;
+  const visibleScan = scan && scan.status && scan.status !== 'ok' && !dismissed ? scan : null;
+  const shown = visibleScan !== null;
   useEffect(() => {
     onShownChange?.(shown);
     return () => onShownChange?.(false);
   }, [shown, onShownChange]);
 
-  if (!scan || !scan.status || scan.status === 'ok' || dismissed) return null;
+  if (!visibleScan || !visibleScan.status || visibleScan.status === 'ok') return null;
 
   return (
     <div
@@ -138,12 +145,12 @@ export function ScanStatusBanner({ stackName, nodeId, quiet = false, onShownChan
         quiet ? 'border-muted bg-card/40 text-stat-subtitle' : 'border-warning/40 bg-warning/[0.06] text-warning',
       )}
       role="status"
-      title={scan.errorMessage ?? undefined}
+      title={visibleScan.errorMessage ?? undefined}
     >
       <span className="font-mono text-[9px] uppercase tracking-wide shrink-0 mt-0.5">scan</span>
       <span className="flex-1">
-        {HEADLINE[scan.status]}
-        {scan.errorMessage ? ` ${scan.errorMessage}` : ''}
+        {HEADLINE[visibleScan.status]}
+        {visibleScan.errorMessage ? ` ${visibleScan.errorMessage}` : ''}
       </span>
       {canRescan && (
         <BusyButton

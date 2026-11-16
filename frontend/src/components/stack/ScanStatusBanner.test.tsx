@@ -245,5 +245,22 @@ describe('ScanStatusBanner quiet mode and visibility report', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(false));
   });
+
+  it.each([['partial'], ['skipped'], ['failed']])('reports shown for a %s result and hidden for ok', async (outcome) => {
+    serve([{ status: outcome, attemptedAt: 100, errorMessage: null, scanning: false }]);
+    const onShownChange = vi.fn();
+    const view = render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(true));
+    view.unmount();
+    expect(onShownChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports hidden for a clean result', async () => {
+    serve([{ status: 'ok', attemptedAt: 100, errorMessage: null, scanning: false }]);
+    const onShownChange = vi.fn();
+    render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    expect(onShownChange).not.toHaveBeenCalledWith(true);
+  });
 });
 
