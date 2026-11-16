@@ -528,6 +528,30 @@ describe('StackNetworkingPanel: one answer', () => {
     expect(screen.getAllByText(/runtime not checked/)).toHaveLength(1);
   });
 
+  it('names the one service whose runtime was not read when the others were', async () => {
+    mockApi(facts({ services: [
+      service('api', { detected: detected() }),
+      service('job', { detected: detected({ runtimeChecked: false }) }),
+    ] }), [{ service: '', intent: 'internal' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('1 service has exposure that could not be fully determined');
+    const notes = screen.getAllByText(/^runtime not checked, so a running container may reach more than the file says\.$/);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].closest('div[class*="flex-col"]')?.textContent).toContain('job');
+  });
+
+  it('names a service the node reported no exposure for when others have detection', async () => {
+    mockApi(facts({ services: [
+      service('api', { detected: detected() }),
+      service('legacy'),
+    ] }), [{ service: '', intent: 'internal' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByTestId('networking-answer');
+    const note = screen.getByText('exposure not reported for this service.');
+    expect(note.closest('div[class*="flex-col"]')?.textContent).toContain('legacy');
+  });
+
   it('says the intent is unreadable on the Answer with a Retry that refetches', async () => {
     vi.mocked(apiFetch).mockImplementation((url: string) => {
       if (url === '/stacks/web/networking') return Promise.resolve(jsonRes(facts({ services: [service('api', { detected: detected() })] })));

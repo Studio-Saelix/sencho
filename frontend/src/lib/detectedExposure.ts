@@ -156,6 +156,13 @@ export function runtimeUnchecked(services: readonly Pick<ExposureAnswerInput, 'd
   return services.some(service => service.detected && !service.detected.runtimeChecked);
 }
 
+/** True when the runtime was read for some services but not others. Then the Answer's marker
+ *  cannot say which, so each unread service's own proof line must. When no service was read
+ *  the marker already says it for the whole stack. */
+export function runtimeUncheckedMixed(services: readonly Pick<ExposureAnswerInput, 'detected'>[]): boolean {
+  return runtimeUnchecked(services) && services.some(service => service.detected?.runtimeChecked);
+}
+
 /** Detection that could not be fully established: undetermined, partly undetermined, a connector
  *  in another stack that could reach it (the service's proof line says so), a runtime that was
  *  never read (the file alone cannot show a running container's reach), or not reported at all. */

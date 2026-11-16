@@ -13,7 +13,7 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import { conflictChip, exposureAnswer, proofLine, runtimeUnchecked, type ExposureAnswer } from '@/lib/detectedExposure';
+import { conflictChip, exposureAnswer, proofLine, runtimeUnchecked, runtimeUncheckedMixed, type ExposureAnswer } from '@/lib/detectedExposure';
 import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
 import type {
   DetectedPath, DetectedServiceExposure, ExposureIntent, ServiceTunnelExposure, TunnelConnector,
@@ -332,6 +332,8 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     detected: svc.detected,
     effectiveIntent: intentFor(svc.name) ?? stackIntent,
   }));
+  // Each partly determined service is counted by the Answer, so its row must name it.
+  const nameUnreadRuntime = runtimeUncheckedMixed(answerInputs);
   const drift = facts.drift;
   const hasDrift = drift.runtimeOnlyAttachments.length > 0 || drift.foreignNetworkAttachments.length > 0
     || drift.declaredButUnused.length > 0 || drift.missingFromRuntime.length > 0;
@@ -437,7 +439,9 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         <div className={LABEL_CLASS}>services</div>
         <div className="flex flex-col gap-2">
           {facts.services.map(svc => {
-            const proof = svc.detected ? proofLine(svc.detected, { includeRuntimeNote: false }) : null;
+            const proof = svc.detected
+              ? proofLine(svc.detected, { includeRuntimeNote: nameUnreadRuntime })
+              : answerInputs.some(input => input.detected) ? 'exposure not reported for this service.' : null;
             return (
               <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
               <div className="flex items-center gap-2">

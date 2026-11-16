@@ -4,7 +4,7 @@
  * safety; the last test asserts that over every string this module builds.
  */
 import { describe, it, expect } from 'vitest';
-import { conflictChip, conflictChipText, exposureAnswer, proofLine, runtimeUnchecked, strongestConflict } from './detectedExposure';
+import { conflictChip, conflictChipText, exposureAnswer, proofLine, runtimeUnchecked, runtimeUncheckedMixed, strongestConflict } from './detectedExposure';
 import type { DetectedPath, DetectedServiceExposure, ExposureIntent, IntentConflict } from '@/types/networking';
 
 const EMPTY_CONFLICTS: Record<ExposureIntent, IntentConflict[]> = {
@@ -290,6 +290,15 @@ describe('exposureAnswer', () => {
       { detected: withConflict('possible'), effectiveIntent: 'internal' },
       { detected: withConflict('possible'), effectiveIntent: 'internal' },
     ])?.line).toBe('2 services may conflict with the declared exposure intent.');
+  });
+
+  it('reports a mixed runtime only when some services were read and others not', () => {
+    const read = { detected: detected() };
+    const unread = { detected: detected({ runtimeChecked: false }) };
+    expect(runtimeUncheckedMixed([read, unread])).toBe(true);
+    expect(runtimeUncheckedMixed([unread, unread])).toBe(false);
+    expect(runtimeUncheckedMixed([read, read])).toBe(false);
+    expect(runtimeUncheckedMixed([unread, {}])).toBe(false);
   });
 
   it('omits the runtime note from the proof line only when asked', () => {
