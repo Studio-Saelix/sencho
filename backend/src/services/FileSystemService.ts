@@ -518,7 +518,7 @@ export class FileSystemService {
 
   /**
    * Run `step`, which resolves or checks a stack's compose file before its
-   * read or write is admitted. When it fails for any reason while a root
+   * read or write is admitted, or is that admitted read itself. When it fails for any reason while a root
    * compose file of the stack sits in, or links into, a directory a data
    * restore is overwriting, the fence's refusal is thrown instead: a link
    * that dangles there mid-swap is not a link out of the stack, and a file
@@ -794,14 +794,17 @@ export class FileSystemService {
    * (getStackContent, getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged
    * and the conflict read it answers with, writeFileIfUnchanged,
    * createFileExclusive, readFile, writeFile, saveEnvContent) and by
-   * deleteStack; the Files routes have their own admission. One query when
-   * nothing is fenced.
+   * deleteStack; the Files routes have their own admission. When nothing is
+   * fenced it costs one query and a readlink per path component under the
+   * compose root.
    *
    * `target` is matched and registered by every spelling a link on the way to
    * it gives it, not by its own path alone: a link whose target a restore moved
    * aside after the caller's checks resolves to nothing, and by its own path
    * would look unrelated to the directory it points into, so a write would
-   * recreate the file inside that directory or replace the link itself.
+   * recreate the file inside that directory or replace the link itself. The
+   * spellings are worked out even when nothing is fenced, because a fence
+   * recorded while the work runs compares them in its drain.
    */
   private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
     const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');

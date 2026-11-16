@@ -1,8 +1,8 @@
 /**
- * The paths a file under the compose root has on the way to what it names,
- * read link by link so a target that has been moved aside still has one.
- * Kept free of service imports: the fence admission in FileSystemService and
- * the env file resolution both use it.
+ * The paths a file or directory under the compose root has on the way to what
+ * it names, read link by link so a target that has been moved aside still has
+ * one. Kept free of service imports so the fence checks can use it from
+ * FileSystemService as well as from the helpers that FileSystemService loads.
  */
 
 import path from 'path';

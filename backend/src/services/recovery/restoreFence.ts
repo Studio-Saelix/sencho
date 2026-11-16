@@ -619,8 +619,8 @@ function spellingsOf(senchoPaths: string | readonly string[]): readonly string[]
 
 /**
  * How one piece of file work, known by each of `spellings`, sits relative to a
- * fenced directory: an overlap by any spelling is an overlap, and one no
- * spelling overlaps but one cannot be placed is unknown.
+ * fenced directory: `overlap` when any spelling overlaps it, else `unknown`
+ * when any spelling cannot be placed, else `unrelated`.
  */
 async function relateSpellingsToFencedDirectory(
   spellings: readonly string[],

@@ -36,6 +36,7 @@ import { getErrorMessage } from '../utils/errors';
 import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
 import { resolveStackEnvSources, type StackEnvSources } from '../helpers/envFileResolution';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { isSelfStack } from '../helpers/selfStackGuard';
 import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
 import { listNodeContainers } from '../helpers/dockerEndpointGuard';
@@ -217,6 +218,10 @@ export class ComposeDoctorService {
     try {
       source = await fsSvc.getStackContent(stackName);
     } catch (err) {
+      // A compose file in, or linked into, a directory a data restore is
+      // overwriting is refused, not unreadable: a run recorded without it would
+      // replace the last good run with one that has no source hashes.
+      if (isDataRestoreFenceError(err)) throw err;
       // An unreadable source is logged here (not silently swallowed) so a later
       // skipped hash or source comparison is traceable.
       console.warn('[ComposeDoctor] Source unreadable for %s; source-derived checks skipped:',

@@ -2039,6 +2039,10 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
     const report = await ComposeDoctorService.getInstance().runPreflight(req.nodeId, stackName, req.user?.username ?? null);
     res.json(report);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to run preflight' });
@@ -2604,6 +2608,12 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
       skippedBuildBacked: result.skippedBuildBacked,
     });
   } catch (error: unknown) {
+    // The compose file sits in, or links into, a directory a data restore is
+    // overwriting: nothing was pulled, and the answer is the fence's.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     // A failed compose step reports the output it accumulated, so collapse the
     // line breaks into a visible separator before the sanitizer deletes them
     // outright: this entry is the only durable record of the failure, and
@@ -3410,6 +3420,13 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
+    // The compose file sits in, or links into, a directory a data restore is
+    // overwriting, so the update was refused before anything was pulled or
+    // recreated.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     // A policy refusal raised after the check passed: either a caller handed the
     // orchestrator a result that does not allow this update, or the label
     // changed while the images were being pulled. Answer it as a refusal.
