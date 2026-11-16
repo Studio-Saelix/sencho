@@ -3418,15 +3418,15 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
-    console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
-    if (sendIfDockerEndpointProtected(res, error)) return;
     // The compose file sits in, or links into, a directory a data restore is
     // overwriting, so the update was refused before anything was pulled or
-    // recreated.
+    // recreated: a refusal, not a failure to log.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
       return;
     }
+    console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     // A policy refusal raised after the check passed: either a caller handed the
     // orchestrator a result that does not allow this update, or the label
     // changed while the images were being pulled. Answer it as a refusal.

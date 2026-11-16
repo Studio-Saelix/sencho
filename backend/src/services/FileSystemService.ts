@@ -522,9 +522,9 @@ export class FileSystemService {
    * for any reason while a root compose file of the stack sits in, or links
    * into, a directory a data restore is overwriting, the fence's refusal is
    * thrown instead: a link that dangles there mid-swap is not a link out of
-   * the stack, and a file missing there is not gone. A check that could not run while a fence is
-   * held is answered as the fence's `unproven` refusal. Otherwise the step's
-   * own error is kept.
+   * the stack, and a file missing there is not gone. A check that could not
+   * run while a fence is held is answered as the fence's `unproven` refusal.
+   * Otherwise the step's own error is kept.
    */
   private async composeStepUnderFences<T>(stackName: string, step: () => Promise<T>): Promise<T> {
     try {
