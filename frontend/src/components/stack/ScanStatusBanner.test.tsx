@@ -259,7 +259,10 @@ describe('ScanStatusBanner quiet mode and visibility report', () => {
     serve([{ status: 'ok', attemptedAt: 100, errorMessage: null, scanning: false }]);
     const onShownChange = vi.fn();
     render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    // Let the read settle: the mock resolves on the next microtask turns.
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText(/post-deploy scan/i)).not.toBeInTheDocument();
     expect(onShownChange).not.toHaveBeenCalledWith(true);
   });
 });
