@@ -28,7 +28,9 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * (a dropped tunnel, a new check), and the open dialog then reads the shown
  * enrolled run, or the listed enrolled runs, once more, and so does the
  * notification socket coming back after a drop (announcements sent while it was
- * down are lost), so a node that stopped being ready is not still called ready. A change announced while a first read of the list or of an opened run was still out is followed by a read of its own. Nothing polls while the dialog is closed.
+ * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
+ * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
+ * a loaded later page's row that fails is retried like a failed read of the list. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -159,6 +161,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const loadMore = useCallback(async () => {
     if (nextCursor === null || loadingMore) return;
     const generation = listGeneration.current;
+    const signals = readinessSignals.current;
     setLoadingMore(true);
     try {
       const page = await client.list(undefined, nextCursor);
@@ -169,6 +172,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       });
       extraPages.current += 1;
       setNextCursor(page.nextCursor);
+      // A readiness change arrived while this page was out: its enrolled rows may carry a verdict that predates it, and the
+      // read of the loaded rows that followed the change finished without them. They are read with the rest, until one applies.
+      if (readinessSignals.current !== signals && page.operations.some((entry) => entry.state === 'enrolled')) setListReadPending(true);
     } catch (error: unknown) {
       if (generation !== listGeneration.current) return;
       // The cursor is kept, so the same button tries the same page again.
@@ -189,6 +195,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     const pages = extraPages.current;
     const generation = listGeneration.current;
     const seq = ++listReadSeq.current;
+    const signals = readinessSignals.current;
     try {
       const page = await client.list(signal);
       const firstIds = new Set(page.operations.map((operation) => operation.id));
@@ -197,14 +204,19 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         ? []
         : operationsRef.current.filter((operation) => !firstIds.has(operation.id));
       const reread = new Map<string, BootstrapOperation>();
+      // A row that could not be read keeps what it showed, and the list stays owed a read of it.
+      let unreadRows = false;
       // A row on a later page is read one by one when it was on page one, may still be settled by a late Pilot, awaits its
       // first verdict, or (after a readiness announcement) is enrolled, since its verdict may have changed.
       await Promise.all(tail.filter((operation) => before.has(operation.id) || canSettleOnRead(operation) || awaitsReadiness(operation)
         || (readinessChanged && operation.state === 'enrolled')).map(async (operation) => {
         try {
           reread.set(operation.id, await client.get(operation.id, signal));
-        } catch {
-          // The row keeps what it showed; the next tick reads it again.
+        } catch (error: unknown) {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          // A run that no longer exists will not answer on the next tick either.
+          if (error instanceof BootstrapApiError && (error.code === 'OPERATION_NOT_FOUND' || error.code === 'HTTP_404')) return;
+          unreadRows = true;
         }
       }));
       // Another read of the list (open, release, cancel) overtook this one, a page was loaded meanwhile, or a newer read of
@@ -216,9 +228,16 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         .map((operation) => reread.get(operation.id) ?? operation)
         // A run that was on the first page and no longer holds its server has left the list of holds.
         .filter((operation) => operation.active || !before.has(operation.id));
-      setOperations([...page.operations, ...kept]);
+      const rows = [...page.operations, ...kept];
+      setOperations(rows);
       if (pages === 0) setNextCursor(page.nextCursor);
       setListFailed(false);
+      // Not fully read: a row's read failed, or a readiness change arrived while this read was out and rows are enrolled.
+      // What was read is on screen, and the same read is tried again until one comes back whole.
+      if (unreadRows || (readinessSignals.current !== signals && rows.some((entry) => entry.state === 'enrolled'))) {
+        setListReadPending(true);
+        return false;
+      }
       return true;
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return false;
@@ -268,6 +287,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         return;
       }
       const seq = ++detailReadSeq.current;
+      const signals = readinessSignals.current;
       void client.get(operationId, controller.signal)
         .then((detail) => {
           if (epoch !== viewEpoch.current || seq < detailAppliedSeq.current) return;
@@ -275,6 +295,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
           if (shownRef.current === detail.id) apply(detail);
           setPollFailures(0);
           setReadinessReadFailed(false);
+          // A readiness change arrived while this poll was out, when the run was not yet enrolled for the announcement's read to follow it.
+          if (readinessSignals.current !== signals && detail.state === 'enrolled') void readNowRef.current?.();
         })
         .catch((error: unknown) => {
           if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -400,13 +422,21 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     if (!operationId) return;
     setBusy(kind);
     viewEpoch.current += 1;
+    const signals = readinessSignals.current;
     try {
       const verify = client.verify ?? verifyBootstrapOperation;
       const detail = kind === 'cancel'
         ? await client.cancel(operationId)
         : kind === 'release' ? await client.release(operationId) : await verify(operationId);
       viewEpoch.current += 1;
-      if (shownRef.current === detail.id) apply(detail);
+      if (kind === 'verify' && readinessSignals.current !== signals) {
+        // The hub announced a readiness change while the check ran, and a read may already have shown it: this answer is
+        // older than that, so it is not put on screen (a Ready from before a disconnect must not come back). The shown
+        // run is read once more instead, which is the newest the hub has.
+        void readNowRef.current?.();
+      } else if (shownRef.current === detail.id) {
+        apply(detail);
+      }
       if (kind === 'release') toast.success('Server released. Nothing on it was changed.');
       void refreshList();
     } catch (error: unknown) {

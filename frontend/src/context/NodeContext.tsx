@@ -7,6 +7,9 @@ import type { BootstrapOperationState, NodeReadinessState } from '@/components/n
 
 /** How long a burst of readiness announcements is gathered before the node list is refetched once. */
 const READINESS_REFRESH_DELAY_MS = 500;
+/** How long after a catch-up read that did not apply the next one starts; it doubles up to the cap while reads keep failing. */
+const READINESS_RETRY_BASE_MS = 5_000;
+const READINESS_RETRY_MAX_MS = 30_000;
 
 export type NodeMode = 'proxy' | 'pilot_agent';
 
@@ -155,15 +158,22 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
   const nodesRequestSeqRef = useRef(0);
   const nodesAppliedSeqRef = useRef(0);
   const appliedNodesRef = useRef<Node[]>([]);
+  // Readiness announcements and notification-socket returns seen so far, and the highest count a read that applied had
+  // already seen when it started. A read answers for every signal that came before it began, so while the second is
+  // behind the first, the list on screen may still hold a verdict the hub has withdrawn, and a catch-up read is owed.
+  const readinessSignalsSeenRef = useRef(0);
+  const readinessSignalsCoveredRef = useRef(0);
 
   const refreshNodes = useCallback(async () => {
     const seq = ++nodesRequestSeqRef.current;
+    const signals = readinessSignalsSeenRef.current;
     try {
       const res = await apiFetch('/nodes');
       if (res.ok) {
         const data = await res.json();
         if (seq < nodesAppliedSeqRef.current) return;
         nodesAppliedSeqRef.current = seq;
+        readinessSignalsCoveredRef.current = Math.max(readinessSignalsCoveredRef.current, signals);
         const before = appliedNodesRef.current;
         appliedNodesRef.current = data;
         setNodes(data);
@@ -229,20 +239,47 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       refreshNodes();
     };
 
+    // A read of the list made because the readiness changed. One that does not apply (the request failed, the answer was
+    // not OK or not JSON, or a newer read overtook it) leaves the signal unanswered, so it is tried again at a bounded
+    // pace until a read that began after the signal applies. The change is never consumed by a read that failed.
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelay = READINESS_RETRY_BASE_MS;
+    let disposed = false;
+    const catchUp = () => {
+      void refreshNodes().then(() => {
+        if (disposed) return;
+        if (readinessSignalsCoveredRef.current >= readinessSignalsSeenRef.current) {
+          retryDelay = READINESS_RETRY_BASE_MS;
+          return;
+        }
+        if (retryTimer !== null) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          catchUp();
+        }, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, READINESS_RETRY_MAX_MS);
+      });
+    };
+
     // The hub announces a changed readiness verdict, so badges in Fleet, the switcher and Settings do not go stale.
     // Announcements that arrive within one window share a refetch; a check that outlasts it refetches again for its verdict.
     let readinessTimer: ReturnType<typeof setTimeout> | null = null;
     const handleStateInvalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
-      if (detail?.scope !== 'node-readiness' || readinessTimer !== null) return;
+      if (detail?.scope !== 'node-readiness') return;
+      readinessSignalsSeenRef.current += 1;
+      if (readinessTimer !== null) return;
       readinessTimer = setTimeout(() => {
         readinessTimer = null;
-        refreshNodes();
+        catchUp();
       }, READINESS_REFRESH_DELAY_MS);
     };
 
     // Announcements sent while the notification socket was down are lost, so its return reads the list once.
-    const stopWatchingSocket = onNotificationsReturn(() => { refreshNodes(); });
+    const stopWatchingSocket = onNotificationsReturn(() => {
+      readinessSignalsSeenRef.current += 1;
+      catchUp();
+    });
 
     window.addEventListener('node-not-found', handleNodeNotFound);
     window.addEventListener('sencho:state-invalidate', handleStateInvalidate);
@@ -250,7 +287,9 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       window.removeEventListener('node-not-found', handleNodeNotFound);
       window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
       stopWatchingSocket();
+      disposed = true;
       if (readinessTimer !== null) clearTimeout(readinessTimer);
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
   }, [refreshNodes]);
 

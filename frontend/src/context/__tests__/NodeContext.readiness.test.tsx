@@ -117,6 +117,134 @@ describe('NodeContext readiness refresh', () => {
     }
   });
 
+  describe('a catch-up read that does not apply', () => {
+    type Failure = 'rejected fetch' | 'non-OK HTTP' | 'undecodable JSON';
+    const FAILURES: Failure[] = ['rejected fetch', 'non-OK HTTP', 'undecodable JSON'];
+    const TRIGGERS = [
+      { name: 'a readiness announcement', fire: () => window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } })) },
+      { name: 'the notification socket returning', fire: () => { announceNotificationsConnection(false); announceNotificationsConnection(true); } },
+    ];
+    const lists = () => apiFetch.mock.calls.filter(([path]) => path === '/nodes').length;
+    const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+    const failing = (failure: Failure) => {
+      if (failure === 'rejected fetch') return Promise.reject(new Error('network down'));
+      if (failure === 'non-OK HTTP') return Promise.resolve({ ok: false, status: 502, json: async () => ({}) });
+      return Promise.resolve({ ok: true, json: async () => { throw new SyntaxError('Unexpected token <'); } });
+    };
+
+    /** A hub whose node 2 is ready, then provisional; its next `failures` list reads fail the given way. */
+    function demotedHub(failure: Failure, failures: number) {
+      let state: 'provisional' | 'ready' = 'ready';
+      let remaining = 0;
+      apiFetch.mockImplementation((path: string) => {
+        if (path === '/nodes') {
+          if (remaining > 0) { remaining -= 1; return failing(failure); }
+          return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+        }
+        if (path === '/nodes/2/meta') return Promise.resolve({ ok: true, json: async () => ({ version: '1.0.0', capabilities: ['stacks'], online: true }) });
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      });
+      return { demote: () => { state = 'provisional'; remaining = failures; }, promote: () => { state = 'ready'; } };
+    }
+
+    for (const trigger of TRIGGERS) {
+      for (const failure of FAILURES) {
+        it(`reads the list again, without another event, after ${trigger.name} met a ${failure}`, async () => {
+          vi.useFakeTimers();
+          const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+          try {
+            const hubState = demotedHub(failure, 1);
+            const { result } = renderHook(() => useNodes(), { wrapper });
+            await advance(0);
+            expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready');
+            const before = lists();
+            hubState.demote();
+            act(() => { trigger.fire(); });
+            await advance(1000);
+            // The catch-up failed: the old verdict is still on screen, and a read is owed.
+            expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready');
+            await advance(60_000);
+            expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional');
+            const used = lists() - before;
+            expect(used).toBe(2);
+            // Once one read applied the signal is answered, and nothing keeps reading.
+            await advance(120_000);
+            expect(lists() - before).toBe(used);
+          } finally {
+            error.mockRestore();
+            vi.useRealTimers();
+          }
+        });
+      }
+    }
+
+    it('backs off while reads keep failing, and recovers the capabilities of a node that became ready', async () => {
+      vi.useFakeTimers();
+      localStorage.setItem('sencho-active-node', '2');
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        let state: 'provisional' | 'ready' = 'provisional';
+        let failuresLeft = 0;
+        let metaCalls = 0;
+        apiFetch.mockImplementation((path: string) => {
+          if (path === '/nodes') {
+            if (failuresLeft > 0) { failuresLeft -= 1; return failing('rejected fetch'); }
+            return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+          }
+          if (path === '/nodes/2/meta') {
+            metaCalls += 1;
+            return Promise.resolve(metaCalls === 1 ? { ok: false, json: async () => ({}) } : { ok: true, json: async () => ({ version: '1.0.0', capabilities: ['stacks'], online: true }) });
+          }
+          return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+        const { result } = renderHook(() => useNodes(), { wrapper });
+        await advance(0);
+        expect(result.current.hasCapability('stacks')).toBe(false);
+        const before = lists();
+        state = 'ready';
+        failuresLeft = 3;
+        act(() => { window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } })); });
+        await advance(500);
+        expect(lists() - before).toBe(1);
+        // Retries wait 5s, then 10s, then 20s: bounded, not a tight loop.
+        await advance(4_900);
+        expect(lists() - before).toBe(1);
+        await advance(200);
+        expect(lists() - before).toBe(2);
+        await advance(10_100);
+        expect(lists() - before).toBe(3);
+        await advance(20_100);
+        expect(lists() - before).toBe(4);
+        expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready');
+        expect(result.current.hasCapability('stacks')).toBe(true);
+        expect(metaCalls).toBe(2);
+      } finally {
+        error.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops retrying when the provider unmounts', async () => {
+      vi.useFakeTimers();
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const hubState = demotedHub('rejected fetch', 5);
+        const { unmount } = renderHook(() => useNodes(), { wrapper });
+        await advance(0);
+        hubState.demote();
+        act(() => { TRIGGERS[0].fire(); });
+        await advance(1000);
+        const used = lists();
+        unmount();
+        await advance(120_000);
+        expect(lists()).toBe(used);
+      } finally {
+        error.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('capabilities after readiness', () => {
     const ANNOUNCE = () => window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
 

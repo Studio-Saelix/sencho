@@ -22,6 +22,7 @@ import { OPERATION_POLL_MS, READINESS_REFRESH_DELAY_MS, SETTLE_POLL_MS, useBoots
 import type {
   NodeReadiness,
   BootstrapHostKeyResult,
+  BootstrapOperation,
   BootstrapOperationDetail,
   BootstrapPlan,
   BootstrapPreflightResult,
@@ -1074,6 +1075,139 @@ describe('readiness announcements reach the open dialog', () => {
       expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
       await act(async () => { answers[0]({ operations: [row('a', 'verifying')], nextCursor: null }); });
       expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+    });
+  });
+
+  describe('a readiness change that overtakes a read', () => {
+    const TRIGGERS: Array<{ name: string; fire: () => void | Promise<void>; waitMs: number }> = [
+      { name: 'an announcement', fire: () => announce(), waitMs: READINESS_REFRESH_DELAY_MS },
+      { name: 'the socket returning', fire: () => { act(() => { announceNotificationsConnection(false); }); act(() => { announceNotificationsConnection(true); }); }, waitMs: 0 },
+    ];
+    const row = (id: string, state: NodeReadiness['state'], extra: Partial<BootstrapOperationDetail> = {}) => enrolled(state, { id, targetName: id, ...extra });
+    const stoppedRow = (id: string) => ({ ...STOPPED, id, nodeId: 4, agentStarted: false, targetName: id });
+    const words = (entries: BootstrapOperation[]) => entries.map((entry) => `${entry.id}:${operationStateWord(entry).word}`);
+
+    for (const trigger of TRIGGERS) {
+      describe(trigger.name, () => {
+        it('reads a loaded later page\'s row again, without another event, when its first re-read failed', async () => {
+          vi.useFakeTimers();
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const page1 = { operations: [row('first', 'ready'), stoppedRow('held-1')], nextCursor: 'c1' };
+          vi.mocked(listBootstrapOperations)
+            .mockResolvedValueOnce(page1)
+            .mockResolvedValueOnce({ operations: [row('later', 'ready', { nodeId: 8 })], nextCursor: null })
+            .mockResolvedValue(page1);
+          let laterReads = 0;
+          vi.mocked(fetchBootstrapOperation).mockImplementation(async (id: string) => {
+            if (id !== 'later') return row(id, 'ready');
+            laterReads += 1;
+            if (laterReads === 1) throw new Error('network down');
+            return row('later', 'not_ready', { nodeId: 8, readiness: readiness('not_ready', NOT_READY_GATES) });
+          });
+          const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+          await settle(0);
+          await act(async () => { await result.current.loadMore(); });
+          expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Ready']);
+
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          // The page-one read answered, the later row's read failed: it still says Ready, and the list is owed a read.
+          expect(laterReads).toBe(1);
+          expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Ready']);
+          await settle(SETTLE_POLL_MS);
+          expect(laterReads).toBe(2);
+          expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Unverified']);
+          // Once the row was read the list stops reading, and the pages are as they were.
+          const lists = vi.mocked(listBootstrapOperations).mock.calls.length;
+          await settle(SETTLE_POLL_MS * 6);
+          expect(vi.mocked(listBootstrapOperations).mock.calls.length).toBeLessThanOrEqual(lists + 3);
+          expect(laterReads).toBe(2);
+          expect(result.current.hasMoreOperations).toBe(false);
+          warn.mockRestore();
+        });
+
+        it('reads a row on a later page that was still on its way when the change arrived', async () => {
+          vi.useFakeTimers();
+          const page1 = { operations: [row('first', 'ready'), stoppedRow('held-1')], nextCursor: 'c1' };
+          let answerPage: (page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void = () => {};
+          vi.mocked(listBootstrapOperations).mockImplementation((_signal, cursor) => (cursor
+            ? new Promise((resolve) => { answerPage = resolve; })
+            : Promise.resolve(page1)));
+          vi.mocked(fetchBootstrapOperation).mockImplementation(async (id: string) => (id === 'later'
+            ? row('later', 'provisional', { nodeId: 8 })
+            : row(id, 'ready')));
+          const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+          await settle(0);
+          let loading: Promise<void> = Promise.resolve();
+          act(() => { loading = result.current.loadMore(); });
+          // The hub demotes the node; the read of the loaded rows follows and finishes before the page answers with the older verdict.
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          await act(async () => { answerPage({ operations: [row('later', 'ready', { nodeId: 8 })], nextCursor: null }); await loading; });
+          expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Ready']);
+          await settle(SETTLE_POLL_MS);
+          expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Unverified']);
+          expect(result.current.hasMoreOperations).toBe(false);
+        });
+
+        it('does not put a Verify answer from before the change back on screen', async () => {
+          vi.useFakeTimers();
+          let answerVerify: (detail: BootstrapOperationDetail) => void = () => {};
+          const verify = vi.fn(() => new Promise<BootstrapOperationDetail>((resolve) => { answerVerify = resolve; }));
+          vi.mocked(fetchBootstrapOperation).mockResolvedValue(enrolled('provisional'));
+          const { result } = renderHook(() => useBootstrapOperation({
+            open: true,
+            api: { get: fetchBootstrapOperation, list: listBootstrapOperations, cancel: cancelBootstrapOperation, release: releaseBootstrapOperation, verify },
+          }));
+          act(() => result.current.show(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) })));
+          act(() => { void result.current.verify(); });
+          // The check passed, then the Pilot disconnected and the hub put the node back to unverified before the answer got here.
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          expect(result.current.operation?.readiness?.state).toBe('provisional');
+          await act(async () => { answerVerify(enrolled('ready')); });
+          await settle(0);
+          expect(result.current.operation?.readiness?.state).toBe('provisional');
+          expect(result.current.busy).toBeNull();
+          // The shown run is still followed to its next verdict.
+          vi.mocked(fetchBootstrapOperation).mockResolvedValue(enrolled('ready'));
+          // The poll that straddled the answer is dropped once by design; the next one lands.
+          for (let tick = 0; tick < 6; tick += 1) await settle(SETTLE_POLL_MS);
+          expect(result.current.operation?.readiness?.state).toBe('ready');
+        });
+
+        it('reads a run again when its poll was answered after the change, before the run was enrolled', async () => {
+          vi.useFakeTimers();
+          let answerPoll: (detail: BootstrapOperationDetail) => void = () => {};
+          vi.mocked(fetchBootstrapOperation)
+            .mockImplementationOnce(() => new Promise((resolve) => { answerPoll = resolve; }))
+            .mockResolvedValue(enrolled('provisional'));
+          const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+          act(() => result.current.show(operation({ state: 'running' })));
+          await settle(OPERATION_POLL_MS);
+          expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+          // The run is not enrolled, so the change finds nothing to read; the poll then answers with a verdict from before it.
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+          await act(async () => { answerPoll(enrolled('ready')); });
+          await settle(0);
+          expect(result.current.operation?.readiness?.state).toBe('provisional');
+        });
+      });
+    }
+
+    it('puts a Verify answer on screen when no readiness change arrived while the check ran', async () => {
+      vi.useFakeTimers();
+      const verify = vi.fn().mockResolvedValue(enrolled('ready'));
+      const { result } = renderHook(() => useBootstrapOperation({
+        open: true,
+        api: { get: fetchBootstrapOperation, list: listBootstrapOperations, cancel: cancelBootstrapOperation, release: releaseBootstrapOperation, verify },
+      }));
+      act(() => result.current.show(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) })));
+      await act(async () => { await result.current.verify(); });
+      expect(result.current.operation?.readiness?.state).toBe('ready');
+      expect(fetchBootstrapOperation).not.toHaveBeenCalled();
     });
   });
 });
