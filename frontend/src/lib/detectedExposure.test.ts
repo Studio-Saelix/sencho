@@ -4,7 +4,7 @@
  * safety; the last test asserts that over every string this module builds.
  */
 import { describe, it, expect } from 'vitest';
-import { conflictChip, conflictChipText, proofLine, strongestConflict } from './detectedExposure';
+import { conflictChip, conflictChipText, exposureAnswer, proofLine, strongestConflict } from './detectedExposure';
 import type { DetectedPath, DetectedServiceExposure, ExposureIntent, IntentConflict } from '@/types/networking';
 
 const EMPTY_CONFLICTS: Record<ExposureIntent, IntentConflict[]> = {
@@ -178,5 +178,57 @@ describe('never claims more than Sencho can see', () => {
       expect(text.toLowerCase()).not.toMatch(/\b(?:internet reachable|internet-reachable|safe|isolated)\b/);
       expect(text.toLowerCase().replace(/unverified/g, '')).not.toMatch(/verified/);
     }
+  });
+});
+
+describe('exposureAnswer', () => {
+  const withConflict = (level: 'conflict' | 'possible' | 'note') => detected({
+    paths: [broadPort],
+    conflicts: { ...EMPTY_CONFLICTS, internal: [{ level, reason: 'host-port', paths: [0] }] },
+  });
+
+  it('is null when the node reports no detection', () => {
+    expect(exposureAnswer([{ name: 'api', effectiveIntent: 'internal' }])).toBeNull();
+  });
+
+  it('counts conflicting services and leaves each reason to its chip', () => {
+    const answer = exposureAnswer([
+      { name: 'a', detected: withConflict('conflict'), effectiveIntent: 'internal' },
+      { name: 'b', detected: withConflict('possible'), effectiveIntent: 'internal' },
+      { name: 'c', detected: detected(), effectiveIntent: 'internal' },
+    ]);
+    expect(answer).toMatchObject({ tone: 'warning', title: 'conflict', line: '2 services conflict with the declared exposure intent.' });
+  });
+
+  it('reads a lone possible conflict as may conflict', () => {
+    expect(exposureAnswer([{ name: 'a', detected: withConflict('possible'), effectiveIntent: 'internal' }]))
+      .toMatchObject({ title: 'may conflict', line: '1 service may conflict with the declared exposure intent.' });
+  });
+
+  it('does not raise an informational note to an Answer', () => {
+    expect(exposureAnswer([{ name: 'a', detected: withConflict('note'), effectiveIntent: 'internal' }])?.tone).toBe('success');
+  });
+
+  it('says no intent is set when a detected service has none', () => {
+    expect(exposureAnswer([{ name: 'a', detected: detected(), effectiveIntent: null }]))
+      .toMatchObject({ tone: 'neutral', title: 'no intent set', line: '1 service has no exposure intent, so only the detected exposure is shown.' });
+  });
+
+  it('reads matches intent when every detected service has an agreeing intent', () => {
+    expect(exposureAnswer([{ name: 'a', detected: detected(), effectiveIntent: 'public' }])?.title).toBe('matches intent');
+  });
+
+  it('marks an answer drawn without the runtime, once', () => {
+    const answer = exposureAnswer([
+      { name: 'a', detected: detected({ runtimeChecked: false }), effectiveIntent: 'public' },
+      { name: 'b', detected: detected({ runtimeChecked: false }), effectiveIntent: 'public' },
+    ]);
+    expect(answer?.marker).toBe('runtime not checked');
+  });
+
+  it('omits the runtime note from the proof line only when asked', () => {
+    const d = detected({ runtimeChecked: false });
+    expect(proofLine(d)).toContain('runtime not checked');
+    expect(proofLine(d, { runtimeNote: false })).toBeNull();
   });
 });

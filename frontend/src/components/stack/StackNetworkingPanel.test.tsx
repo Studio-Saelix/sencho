@@ -5,7 +5,7 @@
  * banner.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -229,7 +229,7 @@ describe('StackNetworkingPanel', () => {
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
     expect(await screen.findByText(/Could not load the networking view/i)).toBeInTheDocument();
     const before = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).endsWith('/networking')).length;
-    fireEvent.click(screen.getByRole('button', { name: 'retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => {
       const after = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).endsWith('/networking')).length;
       expect(after).toBeGreaterThan(before);
@@ -392,7 +392,9 @@ describe('StackNetworkingPanel: detected exposure', () => {
     expect(proof.textContent).toContain('the Compose file declares a port the running container does not publish');
     expect(proof.textContent).toContain('the host path comes from "app"');
     expect(proof.textContent).toContain('a connector in another stack on "shared" could reach it');
-    expect(proof.textContent).toContain('runtime not checked');
+    // The runtime caveat is the Answer's marker, not repeated on each service.
+    expect(proof.textContent).not.toContain('runtime not checked');
+    expect(screen.getByTestId('networking-answer')).toHaveTextContent('runtime not checked');
   });
 });
 
@@ -494,5 +496,62 @@ describe('StackNetworkingPanel: view freshness', () => {
       const after = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).endsWith('/networking')).length;
       expect(after).toBeGreaterThan(before);
     });
+  });
+});
+
+describe('StackNetworkingPanel: one answer', () => {
+  const conflicting = () => detected({
+    conflicts: { internal: [{ level: 'conflict', reason: 'host-port', paths: [0] }], 'same-node': [], lan: [], 'reverse-proxy': [], public: [], temporary: [], unknown: [] },
+  });
+
+  it('counts conflicting services in the Answer and leaves the reason to the chip', async () => {
+    mockApi(facts({ services: [service('api', { detected: conflicting() }), service('web', { detected: conflicting() })] }), [{ service: '', intent: 'internal' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('2 services conflict with the declared exposure intent.');
+    expect(answer).not.toHaveTextContent('published port');
+    expect(screen.getAllByText('conflicts with internal: published port')).toHaveLength(2);
+  });
+
+  it('shows no Answer for a node that reports no detection', async () => {
+    mockApi(facts(), []);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    expect(screen.queryByTestId('networking-answer')).not.toBeInTheDocument();
+  });
+
+  it('states the runtime caveat once, not per service', async () => {
+    const unchecked = () => detected({ runtimeChecked: false });
+    mockApi(facts({ services: [service('api', { detected: unchecked() }), service('web', { detected: unchecked() })] }), [{ service: '', intent: 'public' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByTestId('networking-answer');
+    expect(screen.getAllByText(/runtime not checked/)).toHaveLength(1);
+  });
+
+  it('says the intent is unreadable on the Answer with a Retry that refetches', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url === '/stacks/web/networking') return Promise.resolve(jsonRes(facts({ services: [service('api', { detected: detected() })] })));
+      return Promise.resolve(jsonRes({ error: 'boom' }, false));
+    });
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('intent unavailable');
+    const before = vi.mocked(apiFetch).mock.calls.length;
+    fireEvent.click(within(answer).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('renders cannot render as the Answer', async () => {
+    mockApi(facts({ renderable: false, renderError: 'bad yaml' }), []);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    expect(await screen.findByText('bad yaml')).toBeInTheDocument();
+    expect(screen.getByText('cannot render')).toBeInTheDocument();
+  });
+
+  it('shows a layout-matched skeleton only once the first load is slow', async () => {
+    vi.mocked(apiFetch).mockReturnValue(new Promise<Response>(() => {}));
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    expect(screen.queryByTestId('networking-skeleton')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('networking-skeleton')).toBeInTheDocument();
   });
 });

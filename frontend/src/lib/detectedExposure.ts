@@ -111,7 +111,7 @@ function quotedList(names: string[]): string {
  * established, which namespace a host path comes from, the external-network
  * caveat, and whether the runtime was read at all. Null when none applies.
  */
-export function proofLine(detected: DetectedServiceExposure): string | null {
+export function proofLine(detected: DetectedServiceExposure, options: { runtimeNote?: boolean } = {}): string | null {
   const parts: string[] = [];
   const reasons: UndeterminedReason[] = detected.status === 'undetermined'
     ? detected.reasons
@@ -134,6 +134,66 @@ export function proofLine(detected: DetectedServiceExposure): string | null {
   if (detected.externalNetworks.length > 0) {
     parts.push(`a connector in another stack on ${quotedList(detected.externalNetworks)} could reach it`);
   }
-  if (!detected.runtimeChecked) parts.push('runtime not checked, so a running container may reach more than the file says');
+  if (!detected.runtimeChecked && options.runtimeNote !== false) parts.push('runtime not checked, so a running container may reach more than the file says');
   return parts.length > 0 ? `${parts.join('; ')}.` : null;
+}
+
+export const RUNTIME_NOT_CHECKED_NOTE = 'runtime not checked, so a running container may reach more than the file says';
+
+export interface ExposureAnswerInput {
+  name: string;
+  detected?: DetectedServiceExposure;
+  /** The service's own intent, else the stack's; null when neither is set. */
+  effectiveIntent: ExposureIntent | null;
+}
+
+export interface ExposureAnswer {
+  tone: 'warning' | 'neutral' | 'success';
+  title: string;
+  line: string;
+  /** Set when some service's runtime was not read, so the answer is from the file alone. */
+  marker?: string;
+}
+
+/**
+ * The one answer for a stack's exposure: how many services conflict with
+ * their declared intent (each service's chip says why), else whether intent is
+ * set at all. Null when the node reports no
+ * detection, since there is nothing to answer from.
+ */
+export function exposureAnswer(services: readonly ExposureAnswerInput[]): ExposureAnswer | null {
+  const detectedServices = services.filter(service => service.detected);
+  if (detectedServices.length === 0) return null;
+  const marker = detectedServices.some(service => service.detected && !service.detected.runtimeChecked)
+    ? 'runtime not checked'
+    : undefined;
+  const flagged: Array<{ chip: ExposureChip }> = [];
+  for (const service of detectedServices) {
+    if (!service.detected || !service.effectiveIntent) continue;
+    const chip = conflictChip(service.detected, service.effectiveIntent);
+    if (chip && chip.level !== 'note') flagged.push({ chip });
+  }
+  if (flagged.length > 0) {
+    // The specific reason is on each service's own chip; the Answer only counts.
+    const hardest = flagged.some(item => item.chip.level === 'conflict');
+    const verb = flagged.length === 1
+      ? (hardest ? 'conflicts' : 'may conflict')
+      : (hardest ? 'conflict' : 'may conflict');
+    return {
+      tone: 'warning',
+      title: hardest ? 'conflict' : 'may conflict',
+      line: `${flagged.length} ${flagged.length === 1 ? 'service' : 'services'} ${verb} with the declared exposure intent.`,
+      marker,
+    };
+  }
+  const unset = detectedServices.filter(service => !service.effectiveIntent).length;
+  if (unset > 0) {
+    return {
+      tone: 'neutral',
+      title: 'no intent set',
+      line: `${unset} ${unset === 1 ? 'service has' : 'services have'} no exposure intent, so only the detected exposure is shown.`,
+      marker,
+    };
+  }
+  return { tone: 'success', title: 'matches intent', line: 'The declared exposure intent matches what Sencho detected.', marker };
 }
