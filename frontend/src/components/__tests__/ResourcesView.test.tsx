@@ -660,6 +660,22 @@ describe('ResourcesView', () => {
     expect(body.planFingerprint).toBe('fp-test');
   });
 
+  it('holds the prune list from the first frame and shows the placeholder only once the plan is slow', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') return new Promise<Response>(() => {});
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    const placeholder = await screen.findByTestId('prune-plan-skeleton');
+    expect(placeholder.className).toContain('invisible');
+    await waitFor(() => expect(screen.getByTestId('prune-plan-skeleton').className).not.toContain('invisible'));
+    expect(screen.queryByText('Building prune plan...')).not.toBeInTheDocument();
+  });
+
   it('discloses extra repository tags in the prune confirm list', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {

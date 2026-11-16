@@ -133,3 +133,8 @@ export function isPrunePlan(value: unknown): value is PrunePlan {
   }
   return total === plan.reclaimableBytes;
 }
+
+/** The key a plan item and its outcome share. */
+export function pruneItemKey(target: string, id: string): string {
+  return `${target}\0${id}`;
+}
