@@ -1251,6 +1251,8 @@ describe('readiness announcements reach the open dialog', () => {
             expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
             await act(async () => { answers[0](enrolled('ready')); });
             await settle(0);
+            // The late answer is the newest the hub gave, so it is shown, but it does not end the recovery.
+            expect(result.current.operation?.readiness?.state).toBe('ready');
             // Nothing newer has answered, and no further event comes: the run is read again on its own until one read lands.
             for (let tick = 0; tick < 3; tick += 1) await settle(SETTLE_POLL_MS);
             expect(vi.mocked(fetchBootstrapOperation).mock.calls.length).toBeGreaterThanOrEqual(3);
@@ -1305,6 +1307,31 @@ describe('readiness announcements reach the open dialog', () => {
         });
       });
     }
+
+    it('keeps reading the run when a progress poll that started after an announcement answers after the read it started failed', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const answers: Array<(detail: BootstrapOperationDetail) => void> = [];
+      // The announcement lands just before the poll starts, so the poll's own check finds no change since it began and starts no
+      // read; the announcement's read (half a second later) fails. The poll then answers Ready, which needs no further reads.
+      vi.mocked(fetchBootstrapOperation)
+        .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValue(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) }));
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      act(() => result.current.show(enrolled('provisional')));
+      await settle(SETTLE_POLL_MS - 100);
+      announce();
+      await settle(100);
+      expect(answers).toHaveLength(1);
+      await settle(READINESS_REFRESH_DELAY_MS);
+      expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+      await act(async () => { answers[0](enrolled('ready')); });
+      await settle(0);
+      for (let tick = 0; tick < 3; tick += 1) await settle(SETTLE_POLL_MS);
+      expect(result.current.operation?.readiness?.state).toBe('not_ready');
+      warn.mockRestore();
+    });
 
     it('does not keep reading a later page\'s row whose run is gone or whose session ended', async () => {
       vi.useFakeTimers();

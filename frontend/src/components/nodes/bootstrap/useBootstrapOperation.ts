@@ -30,7 +30,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * notification socket coming back after a drop (announcements sent while it was
  * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
  * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
- * a loaded later page's row that fails is retried like a failed read of the list. A read of the shown run that fails is retried until a read that began after it answers; an older answer that arrives late does not end the retries. Nothing polls while the dialog is closed.
+ * a loaded later page's row that fails is retried like a failed read of the list. A readiness read of the shown run that fails is retried until a read that began after it answers; an older answer that arrives late does not end the retries. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -89,14 +89,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // answer older than one already applied is dropped, so a slow earlier read cannot bring back a verdict a later one replaced.
   const detailReadSeq = useRef(0);
   const detailAppliedSeq = useRef(0);
-  // The newest read of the shown run that failed. What is on screen may be older than the change that read was started for, and
+  // The newest readiness read that failed (the numbers only grow, so one from an earlier run never blocks a later read). What is on screen may be older than the change that read was started for, and
   // only a read that started after it can say otherwise: an older answer that arrives late does not end the recovery.
   const detailFailedSeq = useRef(0);
   // The same rule for reads of the list (a settle read and a readiness read).
   const listReadSeq = useRef(0);
   const listAppliedSeq = useRef(0);
   const operationRef = useRef<BootstrapOperationDetail | null>(null);
-  // A readiness read of the shown run failed: what is on screen may be stale, so it is read again until one answers.
+  // A readiness read of the shown run failed: what is on screen may be stale, so it is read again until a read that began after the failed one answers.
   const [readinessReadFailed, setReadinessReadFailed] = useState(false);
   // The same for the list: a readiness read of it failed or was overtaken, so its rows are read again until one applies.
   const [listReadPending, setListReadPending] = useState(false);
@@ -446,7 +446,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         // The hub announced a readiness change while the check ran. That may be the check's own announcement (it announces
         // when it starts and when it records) or a later change such as a dropped tunnel, and this answer cannot say which, so
         // it is not put on screen (a Ready from before a disconnect must not come back). The shown run is read instead, which
-        // is the newest the hub has; if that read fails, the shown run is read again every few seconds until one answers.
+        // is the newest the hub has; if that read fails, the shown run is read again every few seconds until a read that began after it answers.
         void readNowRef.current?.();
       } else if (shownRef.current === detail.id) {
         apply(detail);
