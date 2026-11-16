@@ -583,7 +583,7 @@ describe('StackNetworkingPanel: one answer', () => {
     expect(answer).toHaveTextContent('partly determined');
     expect(answer).toHaveTextContent('runtime not checked');
     expect(answer).not.toHaveTextContent('matches intent');
-    expect(answer).not.toHaveAttribute('data-tone', 'success');
+    expect(answer.querySelector('[data-tone]')).toHaveAttribute('data-tone', 'neutral');
   });
 
   it('renders cannot render as the Answer', async () => {
