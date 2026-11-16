@@ -41,7 +41,7 @@ export interface VulnScanAnswerOptions {
 
 /** True when the scan's scanner set includes the vulnerability scanner (`vuln`, `vuln,secret`). */
 export function ranVulnerabilityScanner(scan: Pick<VulnerabilityScan, 'scanners_used'>): boolean {
-  return (scan.scanners_used ?? 'vuln').split(',').map((s) => s.trim()).includes('vuln');
+  return (scan.scanners_used || 'vuln').split(',').map((s) => s.trim()).includes('vuln');
 }
 
 export function vulnScanAnswer(scan: VulnerabilityScan, options: VulnScanAnswerOptions = {}): VulnScanAnswer {
