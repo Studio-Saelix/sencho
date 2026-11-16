@@ -49,7 +49,7 @@ function getBackupBaseDir(): string {
 }
 
 import { isDebugEnabled } from '../utils/debug';
-import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { isDataRestoreFenceError, type DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 /**
  * Identity of a file as it was published: the inode and mtime a staged file
@@ -114,6 +114,14 @@ const declarationSets = new Map<string, DeclarationSetState>();
 // Advances whenever any bracket opens or closes. Process-wide on purpose: a
 // false "changed" only makes a reader keep claims it could have released.
 let declarationSetClock = 0;
+
+/**
+ * The stacks the last listing of each compose root found, so a stack whose
+ * compose file a data restore has moved aside mid-swap stays listed. One entry
+ * per compose root; in memory, so after a restart only the restore's own record
+ * of the stacks depending on the directory keeps one listed.
+ */
+const listedStacks = new Map<string, Set<string>>();
 
 export interface DeclarationSetPublication {
   /** The layers are whole again: the operation finished or its writes were undone. */
@@ -443,6 +451,13 @@ export class FileSystemService {
     return path.join(getBackupBaseDir(), String(this.nodeId), stackName);
   }
 
+  /**
+   * True when the stack directory has a compose file, false when it has none.
+   * Throws the fence's `DataRestoreFenceError` instead of answering false when
+   * a missing compose file sits in a directory a data restore is overwriting
+   * (the stack's own, or one a link to it points into): it may only be
+   * mid-swap, so the stack is not known to be gone.
+   */
   async hasComposeFile(dir: string): Promise<boolean> {
     // Canonical inline js/path-injection barrier at the fs sink below: CodeQL
     // credits neither the wrapped isPathWithinBase helper nor a check in a
@@ -462,7 +477,45 @@ export class FileSystemService {
         // continue
       }
     }
+    const refusal = await this.composeFenceRefusal(resolvedDir);
+    if (refusal) throw refusal;
     return false;
+  }
+
+  /**
+   * The fence's refusal when any root compose file of `stackDir`, or a path a
+   * link on the way to it names, sits in a directory a data restore is
+   * overwriting; null otherwise, also when the check itself fails (the
+   * caller's own answer stands). Asked after the compose file was found
+   * missing or unusable; one lookup when nothing is fenced.
+   */
+  private async composeFenceRefusal(stackDir: string): Promise<DataRestoreFenceError | null> {
+    const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
+    try {
+      for (const file of COMPOSE_ROOT_FILENAMES) {
+        await refuseIfFencedSource(path.join(stackDir, file), this.baseDir);
+      }
+    } catch (err) {
+      if (isDataRestoreFenceError(err)) return err;
+    }
+    return null;
+  }
+
+  /**
+   * Run `step`, which resolves or checks a stack's compose file before its
+   * read or write is admitted. When it fails (a link that dangles, no compose
+   * file at all) while the file may only be mid-swap under a data restore,
+   * the fence's refusal is thrown instead: a link into the fenced directory
+   * that dangles is not a link out of the stack, and a missing file is not
+   * gone. Otherwise the step's own error is kept.
+   */
+  private async composeStepUnderFences<T>(stackName: string, step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (err) {
+      if (isDataRestoreFenceError(err)) throw err;
+      throw (await this.composeFenceRefusal(this.resolveStackDir(stackName))) ?? err;
+    }
   }
 
   /**
@@ -650,12 +703,28 @@ export class FileSystemService {
       if (!item.name || typeof item.name !== 'string') continue;
 
       const stackDir = path.join(this.baseDir, item.name);
-      if (await this.hasComposeFile(stackDir)) {
-        stackNames.push(item.name);
+      try {
+        if (await this.hasComposeFile(stackDir)) stackNames.push(item.name);
+      } catch (err) {
+        if (!isDataRestoreFenceError(err)) throw err;
+        // A stack whose compose file is mid-swap under a data restore is still
+        // a stack: dropping it would read as deleted to every consumer (the
+        // sidebar, the scan reconcile that purges a missing stack's rows). A
+        // fenced directory that never was one (a bind at the top of the
+        // compose root) is not listed: the restore recorded the stack as
+        // depending on it, or this process listed it before the fence.
+        if (await this.wasStack(item.name)) stackNames.push(item.name);
       }
     }
 
+    listedStacks.set(path.resolve(this.baseDir), new Set(stackNames));
     return stackNames;
+  }
+
+  private async wasStack(name: string): Promise<boolean> {
+    if (listedStacks.get(path.resolve(this.baseDir))?.has(name)) return true;
+    const { RestoreFenceStore } = await import('./recovery/restoreFence');
+    return RestoreFenceStore.getInstance().isStackFenced(name);
   }
 
   async getStacks(): Promise<string[]> {
@@ -730,7 +799,7 @@ export class FileSystemService {
    * state, even if the file is replaced (rename) between the two calls.
    */
   async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number; filename: string }> {
-    const untrustedFilePath = await this.getComposeFilePath(stackName);
+    const untrustedFilePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
     // Canonical js/path-injection barrier: resolve against a known-safe root
     // then check the result is contained in that root. The form mirrors
     // CodeQL's documented sanitizer exactly so taint flow recognizes it.
@@ -796,9 +865,11 @@ export class FileSystemService {
   async saveStackContent(stackName: string, content: string | Buffer): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
-    await this.assertRealWithinBase(filePath);
-    await this.assertRealWithinStack(stackName, stackDir);
-    await this.assertRealWithinStack(stackName, filePath);
+    await this.composeStepUnderFences(stackName, async () => {
+      await this.assertRealWithinBase(filePath);
+      await this.assertRealWithinStack(stackName, stackDir);
+      await this.assertRealWithinStack(stackName, filePath);
+    });
     try {
       // Buffer input is published byte-exact (the encoding option is ignored
       // for Buffers); string input keeps the utf-8 write. Byte-exactness
@@ -834,9 +905,14 @@ export class FileSystemService {
     // A write resolution refuses a compose file that links out of the stack
     // directory: the save would otherwise land in the shared target, which the
     // read path deliberately follows.
-    const resolved = await this.resolveComposeFile(stackName, 'write');
+    // A link that dangles into a directory a data restore is overwriting, or
+    // the opened file missing from one, is the fence: not a link out of the
+    // stack, and not a different file.
+    const resolved = await this.composeStepUnderFences(stackName, () => this.resolveComposeFile(stackName, 'write'));
     if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
       if (!resolved) {
+        const refusal = await this.composeFenceRefusal(this.resolveStackDir(stackName));
+        if (refusal) throw refusal;
         return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
       }
       const current = await this.readContainedCompose(resolved.absolute);
@@ -859,11 +935,13 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    await this.assertRealWithinBase(safePath);
     // The resolved file is where the write lands, so ownership is checked again
     // at the sink: a link that appeared after the resolution above is refused
     // rather than followed into another stack's file.
-    await this.assertRealWithinStack(stackName, safePath);
+    await this.composeStepUnderFences(stackName, async () => {
+      await this.assertRealWithinBase(safePath);
+      await this.assertRealWithinStack(stackName, safePath);
+    });
 
     // The comparison and the write are one piece of file work: a fence on the
     // directory the file sits in (through a link into a bind, too) refuses it

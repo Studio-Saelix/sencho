@@ -1810,6 +1810,241 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
   });
 
+  /** Remove the stack directory and every recorded overwrite, so a loop can build the next shape. */
+  function resetStack(stack = 'web'): void {
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, stack), { recursive: true, force: true });
+    recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_fence_members').run();
+    recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
+  }
+  /** `linkedComposeStack` with `compose.yaml` reached through a chain: compose.yaml -> mid.yaml -> data/compose.yaml. */
+  function chainedComposeStack(): { dir: string; data: string; compose: string } {
+    const stack = linkedComposeStack();
+    fs.rmSync(path.join(stack.dir, 'compose.yaml'));
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(stack.dir, 'mid.yaml'));
+    fs.symlinkSync('mid.yaml', path.join(stack.dir, 'compose.yaml'));
+    return stack;
+  }
+
+  it('refuses a Compose save through a link that dangles into the fenced directory mid-swap, and creates no file', async () => {
+    for (const shape of ['single', 'chained'] as const) {
+      resetStack();
+      const { dir, data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const opened = await request(app).get('/api/stacks/web').set('Cookie', adminCookie);
+      expect(opened.status, shape).toBe(200);
+      fencedOverwriteOf(data, ['web']);
+      fs.renameSync(compose, `${compose}.aside`);
+      const save = () => request(app).put('/api/stacks/web').set('Cookie', adminCookie);
+      const variants = {
+        plain: await save().send({ content: 'services: {}\n' }),
+        conditional: await save().set('If-Match', opened.headers.etag as string).send({ content: 'services: {}\n' }),
+        pinned: await save().set('X-Compose-File', 'compose.yaml').send({ content: 'services: {}\n' }),
+        read: await request(app).get('/api/stacks/web').set('Cookie', adminCookie),
+      };
+      for (const [name, res] of Object.entries(variants)) {
+        expect(res.status, `${shape} ${name}`).toBe(409);
+        expect(res.body.code, `${shape} ${name}`).toBe('data_restore');
+      }
+      expect(fs.existsSync(compose), shape).toBe(false);
+      expect(fs.lstatSync(path.join(dir, 'compose.yaml')).isSymbolicLink(), shape).toBe(true);
+      expect(fs.readFileSync(`${compose}.aside`, 'utf-8'), shape).toBe('services:\n  app:\n    image: nginx\n    env_file: data/app.env\n');
+    }
+  });
+
+  it('keeps the link answers for a Compose link that dangles outside any fence', async () => {
+    const { compose } = chainedComposeStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const read = await request(app).get('/api/stacks/web').set('Cookie', adminCookie);
+    expect(read.status).toBe(409);
+    expect(read.body.code).toBeUndefined();
+    expect(read.body.error).toMatch(/links outside the stack directory/);
+    const save = await request(app).put('/api/stacks/web').set('Cookie', adminCookie).send({ content: 'services: {}\n' });
+    expect(save.status).toBe(409);
+    expect(save.body.code).toBeUndefined();
+    expect(save.body.error).toMatch(/Sencho cannot save it here/);
+    expect(fs.existsSync(compose)).toBe(false);
+  });
+
+  it('answers the Compose editor with the fence when the opened file is missing from the fenced stack directory', async () => {
+    const dir = stackDir('web');
+    fencedOverwriteOf(dir, ['web']);
+    fs.renameSync(path.join(dir, 'compose.yaml'), path.join(dir, 'compose.yaml.aside'));
+    const read = await request(app).get('/api/stacks/web').set('Cookie', adminCookie);
+    const pinned = await request(app).put('/api/stacks/web').set('Cookie', adminCookie)
+      .set('X-Compose-File', 'compose.yaml').send({ content: 'services: {}\n' });
+    for (const [name, res] of Object.entries({ read, pinned })) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+    }
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(false);
+  });
+
+  it('refuses an automated Compose write and a Fleet snapshot restore through a link that dangles into the fenced directory', async () => {
+    const { compose } = linkedComposeStack();
+    fencedOverwriteOf(path.dirname(compose), ['other']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    await expect(FileSystemService.getInstance(nodeId).saveStackContent('web', 'services: {}\n'))
+      .rejects.toMatchObject({ code: 'data_restore' });
+    const applied = await request(app).post('/api/stacks/web/fleet-snapshot-apply').set('Cookie', adminCookie)
+      .send({ files: [{ filename: 'compose.yaml', content: 'services: {}\n' }] });
+    expect(applied.status).toBe(409);
+    expect(applied.body.code).toBe('data_restore');
+    expect(fs.existsSync(compose)).toBe(false);
+  });
+
+  it('keeps a stack whose compose file is mid-swap in the stack list and its scan history, and answers a bulk action with the fence', async () => {
+    stackDir('other');
+    const { data, compose } = linkedComposeStack();
+    const listedBefore = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listedBefore.body).toEqual(expect.arrayContaining(['web', 'other']));
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const listed = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listed.status).toBe(200);
+    expect(listed.body).toEqual(expect.arrayContaining(['web', 'other']));
+    const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'stop', stackNames: ['web'] });
+    expect(bulk.status).toBe(200);
+    expect(bulk.body.results[0]).toMatchObject({ stackName: 'web', ok: false, code: 'data_restore' });
+    // The scan reconcile purges the rows of a stack missing from the list.
+    const DockerController = (await import('../services/DockerController')).default;
+    vi.spyOn(DockerController.prototype, 'getImages').mockResolvedValue([]);
+    const { MonitorService } = await import('../services/MonitorService');
+    const scans = { getDistinctScanImageRefs: vi.fn().mockReturnValue(['stack:web', 'stack:other', 'stack:gone']), deleteScansByImageRef: vi.fn().mockReturnValue(1) };
+    await (MonitorService.getInstance() as unknown as { reconcileOrphanedScans: (db: unknown, s: Record<string, string>) => Promise<void> })
+      .reconcileOrphanedScans(scans, { prune_orphaned_scans: '1' });
+    expect(scans.deleteScansByImageRef.mock.calls.map((c) => c[1])).toEqual(['stack:gone']);
+  });
+
+  it('answers a stack scan and a template deploy onto a stack whose compose file is mid-swap with the fence, and writes nothing', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fencedOverwriteOf(data, ['other']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const TrivyService = (await import('../services/TrivyService')).default;
+    const trivy = TrivyService.getInstance();
+    vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
+    (trivy as unknown as { binaryPath: string | null }).binaryPath = '/usr/bin/trivy-test';
+    try {
+      const scan = await request(app).post('/api/security/scan/stack').set('Cookie', adminCookie).send({ stackName: 'web' });
+      expect(scan.status).toBe(409);
+      expect(scan.body.code).toBe('data_restore');
+    } finally {
+      (trivy as unknown as { binaryPath: string | null }).binaryPath = null;
+    }
+    const deploy = await request(app).post('/api/templates/deploy').set('Cookie', adminCookie)
+      .send({ stackName: 'web', template: { title: 'nginx', image: 'nginx' } });
+    expect(deploy.status).toBe(409);
+    expect(deploy.body.code).toBe('data_restore');
+    expect(fs.lstatSync(path.join(dir, 'compose.yaml')).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(compose)).toBe(false);
+  });
+
+  it('drops a stack with no compose file from the list and the bulk action as before while only another directory is fenced', async () => {
+    stackDir('other');
+    const { compose } = linkedComposeStack();
+    fencedOverwriteOf(dataDir('third'), ['third']);
+    fs.renameSync(compose, `${compose}.aside`);
+    const listed = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listed.body).not.toContain('web');
+    expect(listed.body).toContain('other');
+    const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'stop', stackNames: ['web'] });
+    expect(bulk.body.results[0]).toMatchObject({ stackName: 'web', ok: false, code: 'not_found' });
+  });
+
+  it('lists a fenced directory without a compose file only when it was a stack: one the restore recorded, not a bind at the top of the compose root', async () => {
+    const root = process.env.COMPOSE_DIR as string;
+    const recorded = `recorded-${randomUUID().slice(0, 8)}`;
+    const bind = `bind-${randomUUID().slice(0, 8)}`;
+    fs.mkdirSync(path.join(root, recorded));
+    fs.mkdirSync(path.join(root, bind));
+    fencedOverwriteOf(fs.realpathSync(path.join(root, recorded)), [recorded]);
+    fencedOverwriteOf(fs.realpathSync(path.join(root, bind)), []);
+    const listed = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listed.body).toContain(recorded);
+    expect(listed.body).not.toContain(bind);
+  });
+
+  it('refuses the editor\'s confirmed overwrite of an env file whose link dangles into a directory fenced since the env files were resolved', async () => {
+    const { dir, data, envFile } = chainedEnvStack();
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const original = proto.writeFileIfUnchanged;
+    vi.spyOn(proto, 'writeFileIfUnchanged').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      fencedOverwriteOf(data, ['web']);
+      fs.renameSync(envFile, `${envFile}.aside`);
+      return original.apply(this, args);
+    });
+    const res = await request(app).put(`/api/stacks/web/env?create=1&force=1&file=${encodeURIComponent(path.join(dir, 'app.env'))}`)
+      .set('Cookie', adminCookie).send({ content: 'A=9\n' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(fs.existsSync(envFile)).toBe(false);
+    expect(fs.readFileSync(`${envFile}.aside`, 'utf-8')).toBe('A=1\n');
+  });
+
+  it('keeps refusing an env create through a link that dangles outside any fence as a link, not the fence', async () => {
+    const dir = stackDir('web');
+    dataDir('web');
+    fs.symlinkSync(path.join('data', 'real.env'), path.join(dir, '.env'));
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const res = await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=1\n' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBeUndefined();
+  });
+
+  it('refuses the env routes when the compose file reaches the fenced directory through a sibling directory under the compose root', async () => {
+    const { data, compose } = linkedComposeStack();
+    const sibling = path.join(process.env.COMPOSE_DIR as string, 'shared');
+    fs.mkdirSync(sibling);
+    fs.symlinkSync(path.join('..', 'web', 'data', 'compose.yaml'), path.join(sibling, 'compose.yaml'));
+    const link = path.join(path.dirname(data), 'compose.yaml');
+    fs.rmSync(link);
+    fs.symlinkSync(path.join('..', 'shared', 'compose.yaml'), link);
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(path.dirname(data), '.env'))).toBe(false);
+  });
+
+  it('refuses the env routes when the linked directory the compose file is reached through is moved aside whole', async () => {
+    const { dir, data } = linkedComposeStack();
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync('data', path.join(dir, 'source'));
+    fs.symlinkSync(path.join('source', 'compose.yaml'), path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(data, `${data}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('follows a chain of more than a few links to the fenced directory', async () => {
+    const { dir, compose } = linkedComposeStack();
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(dir, 'l6.yaml'));
+    for (let i = 5; i >= 1; i -= 1) fs.symlinkSync(`l${i + 1}.yaml`, path.join(dir, `l${i}.yaml`));
+    fs.symlinkSync('l1.yaml', path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(path.dirname(compose), ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+  });
+
+  it('pushes a Secrets bundle into a missing env file as new while only another directory is fenced', async () => {
+    const dir = stackDir('web');
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const { SecretsService } = await import('../services/SecretsService');
+    const secrets = SecretsService.getInstance();
+    const { id } = secrets.create({ name: `push-absent-${randomUUID().slice(0, 8)}`, kv: { A: '2' }, user: 'admin' });
+    const selector = { type: 'nodes' as const, ids: [nodeId] };
+    const plan = await secrets.previewPushDiff(id, selector, 'web', '.env');
+    const result = await secrets.executePush(id, {
+      selector, stackName: 'web', envFileBasename: '.env', expectedVersion: plan.version,
+      expectedTargets: plan.targets.map(({ nodeId: target, fingerprint }) => ({ nodeId: target, fingerprint })),
+      user: 'admin',
+    });
+    expect(result.results[0].status).not.toBe('failed');
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf-8')).toMatch(/A=2/);
+  });
+
   it('leaves the editors of a stack clear of the fenced directory alone', async () => {
     const { data } = envStack();
     fencedOverwriteOf(data, ['web']);

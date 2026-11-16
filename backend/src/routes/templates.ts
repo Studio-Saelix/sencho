@@ -23,6 +23,7 @@ import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../h
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 function tryAcquireRegistryDeliveryLock(
   req: Request,
@@ -148,7 +149,12 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
       console.log(`[Templates] Cleaned up orphaned stack directory: ${stackName}`);
       await fsService.deleteStack(stackName);
-    } catch {
+    } catch (err) {
+      // A stack whose compose file is mid-swap under a data restore is not an
+      // orphaned directory to replace.
+      if (isDataRestoreFenceError(err)) {
+        return res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE, rolledBack: false });
+      }
       // Directory does not exist; proceed with deploy
     }
 

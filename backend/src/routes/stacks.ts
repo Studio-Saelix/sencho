@@ -121,7 +121,6 @@ import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../help
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
-import { COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import type { FsWorkLease } from '../services/recovery/restoreFence';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
@@ -330,21 +329,6 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
 }
 
 /**
- * Throw the fence's refusal when a root compose file of the stack, or a path a
- * link on the way to it names, sits in a directory a data restore is
- * overwriting. Asked once the compose file was found missing or unusable,
- * which mid-swap says nothing about the stack.
- */
-async function refuseIfComposeFenced(nodeId: number, stackName: string): Promise<void> {
-  if (!isValidStackName(stackName)) return;
-  const fsSvc = FileSystemService.getInstance(nodeId);
-  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
-  for (const file of COMPOSE_ROOT_FILENAMES) {
-    await refuseIfFencedSource(path.join(stackDir, file), fsSvc.getBaseDir());
-  }
-}
-
-/**
  * True when the stack exists on the node. Exported for the observation router,
  * which answers its own 404 code (`STACK_NOT_FOUND`) instead of duplicating the
  * same containment-shaped check.
@@ -365,11 +349,10 @@ export async function requireStackExists(
   const fsSvc = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsSvc.getBaseDir(), stackName);
   try {
+    // A compose file missing because a data restore is overwriting its
+    // directory (or the one a link to it points into) may only be mid-swap:
+    // hasComposeFile throws the fence's refusal then, not false.
     if (!(await fsSvc.hasComposeFile(stackDir))) {
-      // A compose file missing because a data restore is overwriting its
-      // directory (or the one a link to it points into) may only be mid-swap:
-      // the stack is not known to be gone.
-      await refuseIfComposeFenced(nodeId, stackName);
       notFound();
       return false;
     }
@@ -689,7 +672,11 @@ async function runStackBulkOp(
     if (!(await fsSvc.hasComposeFile(stackDir))) {
       return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
     }
-  } catch {
+  } catch (err) {
+    // Mid-swap under a data restore the stack is not known to be gone.
+    if (isDataRestoreFenceError(err)) {
+      return { stackName, ok: false, error: err.message, code: DATA_RESTORE_FENCE_CODE };
+    }
     return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
   }
 
@@ -925,18 +912,10 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
     if (isDataRestoreFenceError(error)) {
       return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
     }
+    // A link into a directory a data restore is overwriting that dangles
+    // mid-swap is answered as the fence above, not as a link out of the stack.
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      // A link into a directory a data restore is overwriting dangles mid-swap:
-      // that is the fence, not a link out of the stack directory.
-      try {
-        await refuseIfComposeFenced(req.nodeId, req.params.stackName as string);
-      } catch (fenced) {
-        if (isDataRestoreFenceError(fenced)) {
-          return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
-        }
-        // The check itself failing keeps the read's own answer below.
-      }
       return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     res.status(500).json({ error: 'Failed to read stack' });
