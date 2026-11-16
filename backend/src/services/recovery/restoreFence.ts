@@ -5,6 +5,7 @@ import { recoveryDb } from './recoveryDb';
 import { parseFsTargetPaths, type FsTargetPaths } from './fsTargets';
 import { RecoveryError } from './redaction';
 import type { RestoreFenceState } from './restoreIntents';
+import type { OwnMounts } from './fsRoots';
 
 /**
  * The durable restore fence.
@@ -611,20 +612,50 @@ export interface FsWorkMatch {
   checked: ReadonlySet<string>;
 }
 
+/** The paths one piece of file work is known by: one, or every spelling a link on the way gives it. */
+function spellingsOf(senchoPaths: string | readonly string[]): readonly string[] {
+  return typeof senchoPaths === 'string' ? [senchoPaths] : senchoPaths;
+}
+
 /**
- * Compare a directory a stack file operation reads or writes, in Sencho's
- * namespace, with every directory a live overwrite holds, by each spelling
- * either has (see `relateToFencedDirectory`). An overlap is refused, and so is a
- * relationship that cannot be proven. One query when nothing is fenced.
+ * How one piece of file work, known by each of `spellings`, sits relative to a
+ * fenced directory: an overlap by any spelling is an overlap, and one no
+ * spelling overlaps but one cannot be placed is unknown.
  */
-export async function matchFsWorkToFences(senchoPath: string): Promise<FsWorkMatch> {
+async function relateSpellingsToFencedDirectory(
+  spellings: readonly string[],
+  target: FsTargetPaths,
+  ownMounts: OwnMounts | 'unreadable',
+): Promise<'overlap' | 'unrelated' | 'unknown'> {
+  const { relateToFencedDirectory } = await import('./fsRoots');
+  let unknown = false;
+  for (const spelling of spellings) {
+    const relation = await relateToFencedDirectory(spelling, target, ownMounts);
+    if (relation === 'overlap') return 'overlap';
+    if (relation === 'unknown') unknown = true;
+  }
+  return unknown ? 'unknown' : 'unrelated';
+}
+
+/**
+ * Compare a file or directory a stack file operation reads or writes, in
+ * Sencho's namespace, with every directory a live overwrite holds, by each
+ * spelling either has (see `relateToFencedDirectory`). A file reached through
+ * links is passed with every spelling the links give it (`linkSpellings`): a
+ * link whose target a restore has just moved aside resolves to nothing, so its
+ * own path alone would look unrelated to the directory it points into. An
+ * overlap by any spelling is refused, and so is a relationship that cannot be
+ * proven. One query when nothing is fenced.
+ */
+export async function matchFsWorkToFences(senchoPaths: string | readonly string[]): Promise<FsWorkMatch> {
   const targets = RestoreFenceStore.getInstance().liveFencedFsTargets();
   const checked = new Set<string>();
   if (targets.length === 0) return { refusal: null, checked };
-  const { readOwnMounts, relateToFencedDirectory } = await import('./fsRoots');
+  const { readOwnMounts } = await import('./fsRoots');
   const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+  const spellings = spellingsOf(senchoPaths);
   for (const target of targets) {
-    const relation = await relateToFencedDirectory(senchoPath, target, ownMounts);
+    const relation = await relateSpellingsToFencedDirectory(spellings, target, ownMounts);
     if (relation === 'overlap') return { refusal: new DataRestoreFenceError(target.hostPath, 'browse', 'directory'), checked };
     if (relation === 'unknown') return { refusal: new DataRestoreFenceError(target.hostPath, 'unproven', 'directory'), checked };
     checked.add(fsTargetMatchKey(target));
@@ -653,7 +684,8 @@ export interface FsWorkLease {
 }
 
 interface FsWorkEntry {
-  senchoPath: string;
+  /** Every spelling the work was matched by, so a fence's drain compares the same ones. */
+  senchoPaths: readonly string[];
   startedAt: number;
   /** Fenced directories this work is proven clear of; a fence's drain adds to it. */
   checked: Set<string>;
@@ -679,7 +711,7 @@ function uncheckedFsFence(checked: ReadonlySet<string>): DataRestoreFenceError |
  * registered before the fence exists and is waited for by `waitForFsWorkOn`.
  */
 export function admitFsWork(
-  senchoPath: string,
+  senchoPaths: string | readonly string[],
   checked: ReadonlySet<string>,
   abort: (() => void) | null = null,
 ): FsWorkLease | DataRestoreFenceError {
@@ -687,7 +719,7 @@ export function admitFsWork(
   if (late) return late;
   let settle: () => void = () => undefined;
   const entry: FsWorkEntry = {
-    senchoPath,
+    senchoPaths: spellingsOf(senchoPaths),
     startedAt: performance.now(),
     checked: new Set(checked),
     abort,
@@ -723,13 +755,13 @@ export function fsWorkInFlightCountForTests(): number {
 export async function waitForFsWorkOn(target: FsTargetPaths, timeoutMs = startDrainTimeoutMs): Promise<boolean> {
   const entries = [...fsWorkInFlight];
   if (entries.length === 0) return true;
-  const { readOwnMounts, relateToFencedDirectory } = await import('./fsRoots');
+  const { readOwnMounts } = await import('./fsRoots');
   const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
   const key = fsTargetMatchKey(target);
   const pending: FsWorkEntry[] = [];
   for (const entry of entries) {
     if (!fsWorkInFlight.has(entry)) continue;
-    if (await relateToFencedDirectory(entry.senchoPath, target, ownMounts) === 'unrelated') entry.checked.add(key);
+    if (await relateSpellingsToFencedDirectory(entry.senchoPaths, target, ownMounts) === 'unrelated') entry.checked.add(key);
     else pending.push(entry);
   }
   // Work that writes nothing yet is cut off, not waited for: a client that reads

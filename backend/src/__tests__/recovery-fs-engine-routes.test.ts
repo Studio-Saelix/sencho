@@ -2153,6 +2153,177 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect((await request(app).put('/api/stacks/other').set('Cookie', adminCookie).send({ content: 'services: {}\n' })).status).toBe(200);
   });
 
+  /**
+   * Run `step` once, the next time a file operation is matched against the
+   * directory fences: after its own checks have passed and just before its
+   * admission, the moment a restore can move a linked target aside.
+   */
+  async function beforeNextAdmission(step: () => void): Promise<void> {
+    const fence = await import('../services/recovery/restoreFence');
+    const original = fence.matchFsWorkToFences;
+    let pending: (() => void) | null = step;
+    vi.spyOn(fence, 'matchFsWorkToFences').mockImplementation(async (paths) => {
+      const run = pending;
+      pending = null;
+      run?.();
+      return original(paths);
+    });
+  }
+  /** A stack whose `.env` and `app.env` reach `data/` by a link, directly or through `mid*.env`. */
+  function linkedEnvStack(shape: 'single' | 'chained'): { dir: string; data: string; files: Record<string, string> } {
+    const { dir, data } = envStack();
+    const files: Record<string, string> = {};
+    for (const name of ['.env', 'app.env']) {
+      const target = path.join(data, name);
+      fs.writeFileSync(target, 'A=1\n');
+      if (shape === 'single') {
+        fs.symlinkSync(path.join('data', name), path.join(dir, name));
+      } else {
+        fs.symlinkSync(path.join('data', name), path.join(dir, `mid${name}`));
+        fs.symlinkSync(`mid${name}`, path.join(dir, name));
+      }
+      files[name] = target;
+    }
+    return { dir, data, files };
+  }
+
+  it('refuses every env and Compose write whose link target is moved aside just before admission, and changes nothing', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    for (const shape of ['single', 'chained'] as const) {
+      // Env writes: direct (the forced editor save and the Secrets write),
+      // plain, conditional, the project .env save, and the exclusive create.
+      resetStack();
+      const env = linkedEnvStack(shape);
+      fencedOverwriteOf(env.data, ['web']);
+      const app = path.join(env.dir, 'app.env');
+      const mtime = fs.statSync(env.files['app.env']).mtimeMs;
+      const envWrites: Record<string, [string, () => Promise<unknown>]> = {
+        direct: [env.files['app.env'], () => fsService.writeFile(app, 'A=2\n')],
+        plain: [env.files['app.env'], () => fsService.writeFileIfUnchanged('web', app, 'A=2\n', null)],
+        conditional: [env.files['app.env'], () => fsService.writeFileIfUnchanged('web', app, 'A=2\n', mtime)],
+        project: [env.files['.env'], () => fsService.saveEnvContent('web', 'A=2\n')],
+        exclusive: [env.files['app.env'], () => fsService.createFileExclusive(app, 'A=2\n')],
+        read: [env.files['app.env'], () => fsService.readFile(app)],
+      };
+      for (const [name, [target, write]] of Object.entries(envWrites)) {
+        const label = `${shape} env ${name}`;
+        await beforeNextAdmission(() => fs.renameSync(target, `${target}.aside`));
+        await expect(write(), label).rejects.toMatchObject({ code: 'data_restore' });
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        expect(fs.existsSync(target), label).toBe(false);
+        expect(fs.readFileSync(`${target}.aside`, 'utf-8'), label).toBe('A=1\n');
+        expect(fs.lstatSync(path.join(env.dir, path.basename(target))).isSymbolicLink(), label).toBe(true);
+        expect(fence.fsWorkInFlightCountForTests(), label).toBe(0);
+        fs.renameSync(`${target}.aside`, target);
+      }
+
+      // Compose writes: the automated save, and the editor's plain, If-Match,
+      // filename-pinned and pinned-with-If-Match saves.
+      resetStack();
+      const { dir, data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const before = fs.readFileSync(compose, 'utf-8');
+      fencedOverwriteOf(data, ['web']);
+      const composeMtime = fs.statSync(compose).mtimeMs;
+      const composeWrites: Record<string, () => Promise<unknown>> = {
+        automated: () => fsService.saveStackContent('web', 'services: {}\n'),
+        plain: () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null),
+        ifMatch: () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', composeMtime),
+        pinned: () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, 'compose.yaml'),
+        pinnedIfMatch: () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', composeMtime, 'compose.yaml'),
+        read: () => fsService.getStackContent('web'),
+        readWithMtime: () => fsService.getStackContentWithMtime('web'),
+      };
+      for (const [name, write] of Object.entries(composeWrites)) {
+        const label = `${shape} compose ${name}`;
+        await beforeNextAdmission(() => fs.renameSync(compose, `${compose}.aside`));
+        await expect(write(), label).rejects.toMatchObject({ code: 'data_restore' });
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        expect(fs.existsSync(compose), label).toBe(false);
+        expect(fs.readFileSync(`${compose}.aside`, 'utf-8'), label).toBe(before);
+        expect(fs.lstatSync(path.join(dir, 'compose.yaml')).isSymbolicLink(), label).toBe(true);
+        expect(fence.fsWorkInFlightCountForTests(), label).toBe(0);
+        fs.renameSync(`${compose}.aside`, compose);
+      }
+    }
+  });
+
+  it('still writes through links into a directory no fence holds while another directory is fenced', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    for (const shape of ['single', 'chained'] as const) {
+      resetStack();
+      const env = linkedEnvStack(shape);
+      fencedOverwriteOf(dataDir('other'), ['other']);
+      const app = path.join(env.dir, 'app.env');
+      await fsService.writeFile(app, 'A=2\n');
+      expect(await fsService.writeFileIfUnchanged('web', app, 'A=3\n', null), shape).toMatchObject({ ok: true });
+      await fsService.saveEnvContent('web', 'B=1\n');
+      expect(fs.readFileSync(env.files['app.env'], 'utf-8'), shape).toBe('A=3\n');
+      expect(fs.readFileSync(env.files['.env'], 'utf-8'), shape).toBe('B=1\n');
+      resetStack();
+      const { dir, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      fencedOverwriteOf(dataDir('other'), ['other']);
+      expect(await fsService.getStackContent('web'), shape).toContain('image: nginx');
+      expect(await fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, 'compose.yaml'), shape).toMatchObject({ ok: true });
+      await fsService.saveStackContent('web', 'services:\n  b: {}\n');
+      expect(fs.readFileSync(compose, 'utf-8'), shape).toBe('services:\n  b: {}\n');
+      expect(fs.lstatSync(path.join(dir, 'compose.yaml')).isSymbolicLink(), shape).toBe(true);
+    }
+  });
+
+  it('admits the services list and update preview read of a compose file in the fenced directory under the fence, by any timing', async () => {
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    vi.spyOn(ImageUpdateService, 'isChecksEnabled').mockReturnValue(true);
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    const routes = () => ({
+      services: request(app).get('/api/stacks/web/services').set('Cookie', adminCookie),
+      preview: request(app).get('/api/stacks/web/update-preview').set('Cookie', adminCookie),
+      reconcile: request(app).post('/api/stacks/web/update-preview').set('Cookie', adminCookie),
+    });
+    for (const shape of ['single', 'chained'] as const) {
+      // The file is there and the directory is already fenced.
+      resetStack();
+      const { data } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      fencedOverwriteOf(data, ['web']);
+      await expect(fsService.getStackContent('web'), shape).rejects.toMatchObject({ code: 'data_restore' });
+      for (const [name, pending] of Object.entries(routes())) {
+        const res = await pending;
+        expect(res.status, `${shape} ${name}`).toBe(409);
+        expect(res.body.code, `${shape} ${name}`).toBe('data_restore');
+      }
+      // The fence lands after the compose file was resolved.
+      resetStack();
+      const late = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      await beforeNextAdmission(() => { fencedOverwriteOf(late.data, ['web']); });
+      await expect(fsService.getStackContent('web'), `${shape} late fence`).rejects.toMatchObject({ code: 'data_restore' });
+      vi.mocked(fence.matchFsWorkToFences).mockRestore();
+      expect(fence.fsWorkInFlightCountForTests(), shape).toBe(0);
+      // The file is moved aside between its resolution and its read.
+      for (const [name, pending] of Object.entries(routes())) {
+        await beforeNextAdmission(() => {
+          if (fs.existsSync(late.compose)) fs.renameSync(late.compose, `${late.compose}.aside`);
+        });
+        const res = await pending;
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        expect(res.status, `${shape} ${name} moved`).toBe(409);
+        expect(res.body.code, `${shape} ${name} moved`).toBe('data_restore');
+        if (fs.existsSync(`${late.compose}.aside`)) fs.renameSync(`${late.compose}.aside`, late.compose);
+      }
+    }
+    // No fence on the link's way: the read answers as before.
+    resetStack();
+    linkedComposeStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    expect(await fsService.getStackContent('web')).toContain('image: nginx');
+    const services = await request(app).get('/api/stacks/web/services').set('Cookie', adminCookie);
+    expect(services.status).toBe(200);
+    expect(services.body).toEqual(['app']);
+  });
+
   it('makes a fence recorded while an env save is writing wait for it', async () => {
     const { data, envFile } = envStack();
     const fence = await import('../services/recovery/restoreFence');

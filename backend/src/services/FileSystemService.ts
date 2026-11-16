@@ -50,6 +50,7 @@ function getBackupBaseDir(): string {
 
 import { isDebugEnabled } from '../utils/debug';
 import { isDataRestoreFenceError, DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { linkSpellings } from '../helpers/linkSpellings';
 
 /**
  * Identity of a file as it was published: the inode and mtime a staged file
@@ -790,16 +791,23 @@ export class FileSystemService {
    * until `work` settles, so a fence recorded meanwhile waits for it before it
    * captures or swaps anything. Used by the single-file sinks the Compose and
    * env editors and the local Secrets read and write go through
-   * (getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged
+   * (getStackContent, getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged
    * and the conflict read it answers with, writeFileIfUnchanged,
    * createFileExclusive, readFile, writeFile, saveEnvContent) and by
    * deleteStack; the Files routes have their own admission. One query when
    * nothing is fenced.
+   *
+   * `target` is matched and registered by every spelling a link on the way to
+   * it gives it, not by its own path alone: a link whose target a restore moved
+   * aside after the caller's checks resolves to nothing, and by its own path
+   * would look unrelated to the directory it points into, so a write would
+   * recreate the file inside that directory or replace the link itself.
    */
   private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
     const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');
-    const match = await matchFsWorkToFences(target);
-    const admitted = match.refusal ?? admitFsWork(target, match.checked);
+    const spellings = await linkSpellings(target, this.baseDir);
+    const match = await matchFsWorkToFences(spellings);
+    const admitted = match.refusal ?? admitFsWork(spellings, match.checked);
     if (isDataRestoreFenceError(admitted)) throw admitted;
     try {
       return await work();
@@ -808,10 +816,20 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * The stack's compose file as text. The read itself is file work under the
+   * directory fences, as in getStackContentWithMtime: refused while the file
+   * sits in, or links into, a directory a data restore is overwriting, and
+   * otherwise registered so a fence waits for it. A read that fails is asked
+   * about the fence again, so a file gone mid-swap answers with the fence.
+   */
   async getStackContent(stackName: string): Promise<string> {
     try {
       const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
-      return await fsPromises.readFile(filePath, 'utf-8');
+      return await this.composeStepUnderFences(
+        stackName,
+        () => this.underDirectoryFences(filePath, () => fsPromises.readFile(filePath, 'utf-8')),
+      );
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
       const code = error && typeof error === 'object' && 'code' in error
@@ -844,7 +862,9 @@ export class FileSystemService {
     // the check/open gap gives this call a descriptor to inspect instead of
     // sleeping until a writer appears. The descriptor's own type is authoritative,
     // so the read still only ever returns a regular compose file.
-    return this.underDirectoryFences(safePath, async () => {
+    // A read that fails is asked about the fence again: a file gone mid-swap
+    // answers with the fence, not as missing.
+    return this.composeStepUnderFences(stackName, () => this.underDirectoryFences(safePath, async () => {
       const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
       try {
         const stat = await fh.stat();
@@ -854,7 +874,7 @@ export class FileSystemService {
       } finally {
         await fh.close();
       }
-    });
+    }));
   }
 
   /**
