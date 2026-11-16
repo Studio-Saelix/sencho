@@ -255,8 +255,9 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         if (retryTimer !== null) return;
         retryTimer = setTimeout(() => {
           retryTimer = null;
-          // Another read answered for the signal while this one waited.
+          // Another read answered for the signal while this one waited: nothing is owed, and the next failure starts at the base pace.
           if (readinessSignalsCoveredRef.current < readinessSignalsSeenRef.current) catchUp();
+          else retryDelay = READINESS_RETRY_BASE_MS;
         }, retryDelay);
         retryDelay = Math.min(retryDelay * 2, READINESS_RETRY_MAX_MS);
       });

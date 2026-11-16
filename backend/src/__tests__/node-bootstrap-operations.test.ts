@@ -969,6 +969,28 @@ describe('bootstrap operations: enrollment and retry', () => {
       cleanUp(nodeId);
     });
 
+    it('keeps no cause when the Pilot connected and dropped again before the log answered', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      h.host.override = (command) => (command.includes('docker logs')
+        ? gate.then(() => ({ exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo EAI_AGAIN ${hubName}`, stderr: '', truncated: false, timedOut: false, error: null }))
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(true), { timeout: 10_000 });
+      const nodeId = h.service.get(op.id).nodeId as number;
+      h.tunnels.connect(nodeId);
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+      // The tunnel is gone again by the time the log answers, so the check at that moment alone would call it disconnected.
+      h.tunnels.active.delete(nodeId);
+      release();
+      await h.service.settled();
+      expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', error: null });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
     it('says the log could not be read when the enrollment also ran out', async () => {
       const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs: 1 });
       withLog(h, { exit: 1 });

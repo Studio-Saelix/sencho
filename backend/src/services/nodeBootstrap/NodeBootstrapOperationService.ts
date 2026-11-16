@@ -893,13 +893,24 @@ export class NodeBootstrapOperationService {
     });
     if (outcome === 'cancelled') throw new RunCancelled();
     if (outcome === 'timeout') {
-      const { failure, cause } = await this.enrollmentTimeout(nodeId, op.enrollment_expires_at, context.hubUrl, readLog);
+      // A Pilot that connects while the log is read, even one that drops again before it returns, has an enrollment that
+      // was used: what the log said is history, so it is neither kept nor reported.
+      let connectedDuringRead = false;
+      const onUp = (upId: number) => {
+        if (upId === nodeId) connectedDuringRead = true;
+      };
+      this.deps.tunnels.on('tunnel-up', onUp);
+      let result: Awaited<ReturnType<typeof this.enrollmentTimeout>>;
+      try {
+        result = await this.enrollmentTimeout(nodeId, op.enrollment_expires_at, context.hubUrl, readLog);
+      } finally {
+        this.deps.tunnels.off('tunnel-up', onUp);
+      }
       // A cancel that arrived while the log was read stops the run as cancelled, as one during the wait does.
       if (signal.aborted) throw new RunCancelled();
-      // The Pilot connected while the log was read: it is enrolled, and what the log said is history, so it is not kept.
-      if (!this.deps.tunnels.hasActiveTunnel(nodeId)) {
-        if (cause) this.deps.attempts.recordRefusal(nodeId, cause, this.deps.now());
-        throw failure;
+      if (!connectedDuringRead && !this.deps.tunnels.hasActiveTunnel(nodeId)) {
+        if (result.cause) this.deps.attempts.recordRefusal(nodeId, result.cause, this.deps.now());
+        throw result.failure;
       }
     }
     this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; the hub now checks that it is ready for deployments.');

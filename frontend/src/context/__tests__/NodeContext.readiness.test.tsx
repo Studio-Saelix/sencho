@@ -280,6 +280,38 @@ describe('NodeContext readiness refresh', () => {
       }
     });
 
+    it('starts the next failure at the base pace after another read answered for the signal while the retry waited', async () => {
+      vi.useFakeTimers();
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const hubState = demotedHub('rejected fetch', 1);
+        renderHook(() => useNodes(), { wrapper });
+        await advance(0);
+        const before = lists();
+        hubState.demote();
+        act(() => { TRIGGERS[0].fire(); });
+        await advance(500);
+        // The catch-up failed and a retry waits 5s, then 10s next time. A read of another kind answers for the signal first.
+        expect(lists() - before).toBe(1);
+        act(() => { window.dispatchEvent(new Event('node-not-found')); });
+        await advance(100);
+        expect(lists() - before).toBe(2);
+        await advance(5_000);
+        // The retry found nothing owed and read nothing.
+        expect(lists() - before).toBe(2);
+        // A new change whose catch-up fails is retried after the base wait, not the doubled one.
+        hubState.demote();
+        act(() => { TRIGGERS[0].fire(); });
+        await advance(500);
+        expect(lists() - before).toBe(3);
+        await advance(5_100);
+        expect(lists() - before).toBe(4);
+      } finally {
+        error.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it('stops retrying when the provider unmounts', async () => {
       vi.useFakeTimers();
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});
