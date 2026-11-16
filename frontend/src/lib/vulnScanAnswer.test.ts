@@ -23,16 +23,43 @@ describe('vulnScanAnswer', () => {
 
   it('tones by the worst severity and states the counts once', () => {
     expect(vulnScanAnswer(scan({ total_vulnerabilities: 3, critical_count: 1, high_count: 2 })))
-      .toEqual({ tone: 'destructive', title: 'critical', line: '1 critical, 2 high' });
+      .toMatchObject({ tone: 'destructive', title: 'critical', line: '1 critical, 2 high' });
     expect(vulnScanAnswer(scan({ total_vulnerabilities: 2, high_count: 2 }))).toMatchObject({ tone: 'warning', title: 'high' });
     expect(vulnScanAnswer(scan({ total_vulnerabilities: 4, medium_count: 4 }))).toMatchObject({ tone: 'warning', title: 'medium' });
     expect(vulnScanAnswer(scan({ total_vulnerabilities: 1, low_count: 1 }))).toMatchObject({ tone: 'neutral', title: 'low' });
   });
 
+  it('titles an unknown-only scan unknown, not low, and falls back to the counts line', () => {
+    expect(vulnScanAnswer(scan({ total_vulnerabilities: 2, unknown_count: 2 }))).toMatchObject({ tone: 'neutral', title: 'unknown', line: '2 unknown' });
+    expect(vulnScanAnswer(scan({ total_vulnerabilities: 3, low_count: 1, unknown_count: 2 }))).toMatchObject({ title: 'low', line: '1 low, 2 unknown' });
+  });
+
+  it('ranks high above medium and gives each answer its own icon', () => {
+    const mixed = vulnScanAnswer(scan({ total_vulnerabilities: 2, high_count: 1, medium_count: 1 }));
+    expect(mixed.title).toBe('high');
+    expect(vulnScanAnswer(scan({ status: 'in_progress' })).icon).not.toBe(vulnScanAnswer(scan()).icon);
+    expect(vulnScanAnswer(scan({ total_vulnerabilities: 1, critical_count: 1 })).icon).not.toBe(vulnScanAnswer(scan()).icon);
+  });
+
+  it('words a policy violation without reasons or counts without a stray fragment', () => {
+    const bare = vulnScanAnswer(scan({ policy_evaluation: { policyId: 1, violated: true, policyName: 'prod-gate', reasons: [], maxSeverity: 'HIGH' } }));
+    expect(bare.line).toBe('This scan violates prod-gate.');
+  });
+
+  it('does not claim a clean scan when secrets or misconfigs exist or could not be loaded', () => {
+    expect(vulnScanAnswer(scan({ secret_count: 2 }))).toMatchObject({ tone: 'neutral', title: 'no vulnerabilities' });
+    expect(vulnScanAnswer(scan({ misconfig_count: 1 })).line).toContain('1 secret or misconfig finding');
+    expect(vulnScanAnswer(scan(), { evidencePartial: true })).toMatchObject({ tone: 'neutral' });
+  });
+
+  it('keeps the partial counts visible on a scan still running', () => {
+    expect(vulnScanAnswer(scan({ status: 'in_progress', high_count: 2 })).line).toContain('2 high so far.');
+  });
+
   it('puts a policy violation first, with the matched reasons and the counts', () => {
     const answer = vulnScanAnswer(scan({
       total_vulnerabilities: 1, high_count: 1,
-      policy_evaluation: { violated: true, policyName: 'prod-gate', reasons: ['kev'], maxSeverity: 'HIGH' } as VulnerabilityScan['policy_evaluation'],
+      policy_evaluation: { policyId: 1, violated: true, policyName: 'prod-gate', reasons: ['kev'], maxSeverity: 'HIGH' },
     }));
     expect(answer).toMatchObject({ tone: 'destructive', title: 'policy violation' });
     expect(answer.line).toBe('This scan violates prod-gate: matched a known-exploited CVE (KEV). 1 high.');
@@ -40,7 +67,7 @@ describe('vulnScanAnswer', () => {
 
   it('never reads an unfinished scan as clean or as a verdict', () => {
     expect(vulnScanAnswer(scan({ status: 'in_progress' }))).toMatchObject({ tone: 'neutral', title: 'scanning' });
-    expect(vulnScanAnswer(scan({ status: 'failed', error: 'trivy timed out' }))).toEqual({ tone: 'destructive', title: 'scan failed', line: 'trivy timed out' });
+    expect(vulnScanAnswer(scan({ status: 'failed', error: 'trivy timed out' }))).toMatchObject({ tone: 'destructive', title: 'scan failed', line: 'trivy timed out' });
     expect(vulnScanAnswer(scan({ status: 'failed' })).line).toContain('not a verdict');
   });
 });

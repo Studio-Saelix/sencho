@@ -1,61 +1,86 @@
 /**
  * The one Answer for a vulnerability scan sheet: whether the scan finished,
- * whether it violates a policy, and how bad the findings are. Counts per
- * severity are the Answer's line; the total, fixable count and trigger live in
- * the sheet header, and the scan time in its footer, so none is stated twice.
- * Pure and side-effect free.
+ * whether it violates a policy, and how bad the findings are. A completed scan
+ * carries its per-severity counts in the line (after the policy sentence on a
+ * violation); a scan that has not completed says so instead of a verdict. The
+ * total, fixable count and trigger live in the sheet header, and the scan time
+ * in its footer, so none is stated twice. Pure and side-effect free.
  */
+import { AlertTriangle, ShieldAlert, ShieldCheck, ShieldQuestion, type LucideIcon } from 'lucide-react';
 import { formatPolicyReasons } from '@/lib/policyReasons';
+import type { StatusPathAnswer } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
 import type { VulnerabilityScan } from '@/types/security';
 
-export interface VulnScanAnswer {
-  tone: StatusTone;
-  title: string;
-  line: string;
-}
+export type VulnScanAnswer = Pick<StatusPathAnswer, 'tone' | 'title' | 'line'> & { icon: LucideIcon };
 
 type CountedScan = Pick<VulnerabilityScan,
-  'critical_count' | 'high_count' | 'medium_count' | 'low_count' | 'unknown_count' | 'total_vulnerabilities'>;
+  'critical_count' | 'high_count' | 'medium_count' | 'low_count' | 'unknown_count'>;
+
+/** Worst first. The first severity with findings sets the Answer's title and tone. */
+const SEVERITY_LADDER: ReadonlyArray<{ key: keyof CountedScan; word: string; tone: StatusTone; icon: LucideIcon }> = [
+  { key: 'critical_count', word: 'critical', tone: 'destructive', icon: ShieldAlert },
+  { key: 'high_count', word: 'high', tone: 'warning', icon: ShieldAlert },
+  { key: 'medium_count', word: 'medium', tone: 'warning', icon: AlertTriangle },
+  { key: 'low_count', word: 'low', tone: 'neutral', icon: ShieldCheck },
+  { key: 'unknown_count', word: 'unknown', tone: 'neutral', icon: ShieldQuestion },
+];
 
 /** "2 critical, 5 high", leaving out any severity with none. UNKNOWN is counted, not dropped. */
 export function severityCountsLine(scan: CountedScan): string {
-  return ([
-    [scan.critical_count, 'critical'],
-    [scan.high_count, 'high'],
-    [scan.medium_count, 'medium'],
-    [scan.low_count, 'low'],
-    [scan.unknown_count, 'unknown'],
-  ] as const)
-    .filter(([count]) => count > 0)
-    .map(([count, word]) => `${count} ${word}`)
+  return SEVERITY_LADDER
+    .filter(({ key }) => scan[key] > 0)
+    .map(({ key, word }) => `${scan[key]} ${word}`)
     .join(', ');
 }
 
-export function vulnScanAnswer(scan: VulnerabilityScan): VulnScanAnswer {
-  // A scan that has not completed says so before any count: its numbers are partial or absent.
+export interface VulnScanAnswerOptions {
+  /** The secrets or misconfigs list did not load, so a clean result cannot be claimed. */
+  evidencePartial?: boolean;
+}
+
+export function vulnScanAnswer(scan: VulnerabilityScan, options: VulnScanAnswerOptions = {}): VulnScanAnswer {
+  const counts = severityCountsLine(scan);
+  // A scan that has not completed says so before any verdict: its numbers are partial or absent.
   if (scan.status === 'failed') {
-    return { tone: 'destructive', title: 'scan failed', line: scan.error || 'The scan did not complete, so these results are not a verdict.' };
+    return {
+      tone: 'destructive', icon: ShieldAlert, title: 'scan failed',
+      line: scan.error || 'The scan did not complete, so these results are not a verdict.',
+    };
   }
   if (scan.status === 'in_progress') {
-    return { tone: 'neutral', title: 'scanning', line: 'The scan is still running, so the counts so far are partial.' };
+    return {
+      tone: 'neutral', icon: ShieldQuestion, title: 'scanning',
+      line: `The scan is still running, so the counts so far are partial.${counts ? ` ${counts} so far.` : ''}`,
+    };
   }
-  const counts = severityCountsLine(scan);
   const evaluation = scan.policy_evaluation;
   if (evaluation?.violated) {
     const reasons = evaluation.reasons.length > 0
       ? `: matched ${formatPolicyReasons(evaluation.reasons, evaluation.maxSeverity)}`
       : '';
     return {
-      tone: 'destructive',
-      title: 'policy violation',
+      tone: 'destructive', icon: ShieldAlert, title: 'policy violation',
       line: `This scan violates ${evaluation.policyName}${reasons}.${counts ? ` ${counts}.` : ''}`,
     };
   }
-  if (scan.total_vulnerabilities === 0) {
-    return { tone: 'success', title: 'no vulnerabilities', line: 'No vulnerabilities were found in this scan.' };
+  const worst = SEVERITY_LADDER.find(({ key }) => scan[key] > 0);
+  if (!worst) {
+    // No vulnerabilities is only a clean result when nothing else was found or left unread.
+    const otherFindings = (scan.secret_count ?? 0) + (scan.misconfig_count ?? 0);
+    if (otherFindings > 0) {
+      return {
+        tone: 'neutral', icon: ShieldQuestion, title: 'no vulnerabilities',
+        line: `No vulnerabilities were found, but the scan reports ${otherFindings} secret or misconfig ${otherFindings === 1 ? 'finding' : 'findings'}.`,
+      };
+    }
+    if (options.evidencePartial) {
+      return {
+        tone: 'neutral', icon: ShieldQuestion, title: 'no vulnerabilities',
+        line: 'No vulnerabilities were found, but the secrets or misconfigs could not be loaded, so this is not a clean result.',
+      };
+    }
+    return { tone: 'success', icon: ShieldCheck, title: 'no vulnerabilities', line: 'No vulnerabilities were found in this scan.' };
   }
-  const tone: StatusTone = scan.critical_count > 0 ? 'destructive' : scan.high_count > 0 || scan.medium_count > 0 ? 'warning' : 'neutral';
-  const title = scan.critical_count > 0 ? 'critical' : scan.high_count > 0 ? 'high' : scan.medium_count > 0 ? 'medium' : 'low';
-  return { tone, title, line: counts || `${scan.total_vulnerabilities} findings.` };
+  return { tone: worst.tone, icon: worst.icon, title: worst.word, line: counts };
 }
