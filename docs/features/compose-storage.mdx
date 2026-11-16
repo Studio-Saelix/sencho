@@ -12,6 +12,10 @@ The view is read-only. It never changes a mount, and it never reads, moves, or c
 
 Click any stack in the left sidebar, then switch to the **Storage** tab in the Anatomy panel header.
 
+<Frame>
+  <img src="/images/compose-storage/storage-tab.png" alt="The Storage tab for a stack that mounts the Docker socket and two host paths. A node-bound verdict block states the first reason, that the service mounts the Docker socket, and says 2 more reasons, with a collapsed Other reasons disclosure below it. The mount rows list the socket and two bind mounts, followed by a Snapshot coverage warning with a Take a fleet snapshot link." />
+</Frame>
+
 The tab only appears when the active node reports that it supports storage portability. A node running an older version does not advertise this capability, so the tab stays hidden until that node is updated.
 
 ## Storage inventory
@@ -44,6 +48,10 @@ A few things worth knowing:
 - A read-only bind to an outside path is still **node-bound**. The `ro` flag lowers the risk of an accidental write, not the requirement that the path exist on the target node.
 - A symlink inside the stack directory that resolves outside it is treated as **node-bound** for the same reason: moving the stack files does not bring the symlink target with them.
 - For **partially portable** stacks, anonymous volumes are the most common oversight. Because they have no name, they are easy to miss when taking a manual backup and are orphaned when the container is recreated.
+
+<Frame>
+  <img src="/images/compose-storage/storage-node-bound.png" alt="The Storage tab with the Other reasons disclosure open under the node-bound verdict block. It lists the two remaining reasons, that the service binds /srv/media and /srv/backups, host paths outside the stack directory that must exist on every node the stack moves to. The socket reason appears only in the verdict block." />
+</Frame>
 
 ## Snapshot coverage
 
