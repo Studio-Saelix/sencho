@@ -330,11 +330,6 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
 }
 
 /**
- * True when the stack exists on the node. Exported for the observation router,
- * which answers its own 404 code (`STACK_NOT_FOUND`) instead of duplicating the
- * same containment-shaped check.
- */
-/**
  * Throw the fence's refusal when a root compose file of the stack, or a path a
  * link on the way to it names, sits in a directory a data restore is
  * overwriting. Asked once the compose file was found missing or unusable,
@@ -349,6 +344,11 @@ async function refuseIfComposeFenced(nodeId: number, stackName: string): Promise
   }
 }
 
+/**
+ * True when the stack exists on the node. Exported for the observation router,
+ * which answers its own 404 code (`STACK_NOT_FOUND`) instead of duplicating the
+ * same containment-shaped check.
+ */
 export async function requireStackExists(
   nodeId: number,
   stackName: string,
