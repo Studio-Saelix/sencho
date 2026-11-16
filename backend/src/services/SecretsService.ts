@@ -583,7 +583,7 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
             await refuseIfFencedSource(resolved, fsService.getBaseDir());
         } catch (fenced) {
             if (isDataRestoreFenceError(fenced)) throw new SecretSourceRefusedError(fenced.message);
-            throw fenced;
+            // The check itself failing keeps the read's own answer below.
         }
         const code = (err as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT') {
@@ -610,7 +610,14 @@ async function writeEnvLocal(nodeId: number, absolutePath: string, content: stri
         // A link into a directory a restore fenced since the push resolved it
         // dangles mid-swap: the write fails with the fence's reason, as the
         // admitted write would, not as a link out of the compose root.
-        if (!isDataRestoreFenceError(err)) await refuseIfFencedSource(absolutePath, fsService.getBaseDir());
+        if (!isDataRestoreFenceError(err)) {
+            try {
+                await refuseIfFencedSource(absolutePath, fsService.getBaseDir());
+            } catch (fenced) {
+                if (isDataRestoreFenceError(fenced)) throw fenced;
+                // The check itself failing keeps the write's own error.
+            }
+        }
         throw err;
     }
 }

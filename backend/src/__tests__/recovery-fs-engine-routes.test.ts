@@ -1521,10 +1521,11 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       inventory: await request(app).get(`/api/stacks/${stack}/env-inventory`).set('Cookie', adminCookie),
     };
   }
-  /** `envRoutes`, plus the routes that first ask whether the stack has a compose file at all. */
+  /** `envRoutes`, plus the Compose editor's read and a Compose Doctor run, which read or look for the compose file first. */
   async function composeRoutes(stack = 'web') {
     return {
       ...await envRoutes(stack),
+      compose: await request(app).get(`/api/stacks/${stack}`).set('Cookie', adminCookie),
       preflight: await request(app).post(`/api/stacks/${stack}/preflight/run`).set('Cookie', adminCookie),
     };
   }
@@ -1660,16 +1661,71 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
     const original = proto.writeFileIfUnchanged;
     vi.spyOn(proto, 'writeFileIfUnchanged').mockImplementation(async function (this: unknown, ...args: unknown[]) {
-      fencedOverwriteOf(data, ['web']);
-      fs.renameSync(envFile, `${envFile}.aside`);
+      if (!fs.existsSync(`${envFile}.aside`)) {
+        fencedOverwriteOf(data, ['web']);
+        fs.renameSync(envFile, `${envFile}.aside`);
+      }
       return original.apply(this, args);
     });
-    const res = await request(app).put(`/api/stacks/web/env?file=${encodeURIComponent(path.join(dir, 'app.env'))}`)
-      .set('Cookie', adminCookie).send({ content: 'A=9\n' });
+    // Pinned to the file, and the default file the editor saves without one.
+    for (const query of [`?file=${encodeURIComponent(path.join(dir, 'app.env'))}`, '']) {
+      const res = await request(app).put(`/api/stacks/web/env${query}`).set('Cookie', adminCookie).send({ content: 'A=9\n' });
+      expect(res.status, query).toBe(409);
+      expect(res.body.code, query).toBe('data_restore');
+      expect(fs.existsSync(envFile), query).toBe(false);
+      expect(fs.readFileSync(`${envFile}.aside`, 'utf-8'), query).toBe('A=1\n');
+      fs.renameSync(`${envFile}.aside`, envFile);
+      recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
+    }
+  });
+
+  it('refuses the env editor\'s read when a fence lands between its existence check and its read', async () => {
+    for (const query of ['', '?file=']) {
+      vi.restoreAllMocks();
+      const { data, envFile } = chainedEnvStack();
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      const original = proto.readFile;
+      const link = path.join(path.dirname(data), 'app.env');
+      let hooked = false;
+      vi.spyOn(proto, 'readFile').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        if (String(args[0]) === link && !hooked) {
+          hooked = true;
+          fencedOverwriteOf(data, ['web']);
+          fs.renameSync(envFile, `${envFile}.aside`);
+        }
+        return original.apply(this, args);
+      });
+      const res = await request(app).get(`/api/stacks/web/env${query}${query ? encodeURIComponent(link) : ''}`).set('Cookie', adminCookie);
+      expect(hooked, query).toBe(true);
+      expect(res.status, query).toBe(409);
+      expect(res.body.code, query).toBe('data_restore');
+      expect(res.headers['x-env-exists'], query).toBeUndefined();
+      fs.rmSync(path.dirname(data), { recursive: true, force: true });
+      recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
+    }
+  });
+
+  it('ends a link loop instead of following it, and refuses it as unprovable while a fence is held', async () => {
+    const { dir } = chainedEnvStack();
+    fs.rmSync(path.join(dir, 'app.env'));
+    fs.rmSync(path.join(dir, 'mid.env'));
+    fs.symlinkSync('mid.env', path.join(dir, 'app.env'));
+    fs.symlinkSync('app.env', path.join(dir, 'mid.env'));
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const res = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('data_restore');
-    expect(fs.existsSync(envFile)).toBe(false);
-    expect(fs.readFileSync(`${envFile}.aside`, 'utf-8')).toBe('A=1\n');
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('still answers a stack with no compose file as not found while another directory is fenced', async () => {
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    fs.mkdirSync(path.join(process.env.COMPOSE_DIR as string, 'empty'), { recursive: true });
+    const res = await request(app).get('/api/stacks/empty/env-inventory').set('Cookie', adminCookie);
+    expect(res.status).toBe(404);
+    const created = await request(app).put('/api/stacks/empty/env?create=1').set('Cookie', adminCookie).send({ content: 'A=1\n' });
+    expect(created.status).toBe(404);
   });
 
   it('refuses a Secrets read and write whose link dangles into a directory fenced since the env files were resolved', async () => {

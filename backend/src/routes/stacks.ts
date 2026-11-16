@@ -334,6 +334,21 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
  * which answers its own 404 code (`STACK_NOT_FOUND`) instead of duplicating the
  * same containment-shaped check.
  */
+/**
+ * Throw the fence's refusal when a root compose file of the stack, or a path a
+ * link on the way to it names, sits in a directory a data restore is
+ * overwriting. Asked once the compose file was found missing or unusable,
+ * which mid-swap says nothing about the stack.
+ */
+async function refuseIfComposeFenced(nodeId: number, stackName: string): Promise<void> {
+  if (!isValidStackName(stackName)) return;
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
+  for (const file of COMPOSE_ROOT_FILENAMES) {
+    await refuseIfFencedSource(path.join(stackDir, file), fsSvc.getBaseDir());
+  }
+}
+
 export async function requireStackExists(
   nodeId: number,
   stackName: string,
@@ -354,9 +369,7 @@ export async function requireStackExists(
       // A compose file missing because a data restore is overwriting its
       // directory (or the one a link to it points into) may only be mid-swap:
       // the stack is not known to be gone.
-      for (const file of COMPOSE_ROOT_FILENAMES) {
-        await refuseIfFencedSource(path.join(stackDir, file), fsSvc.getBaseDir());
-      }
+      await refuseIfComposeFenced(nodeId, stackName);
       notFound();
       return false;
     }
@@ -914,6 +927,16 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
     }
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      // A link into a directory a data restore is overwriting dangles mid-swap:
+      // that is the fence, not a link out of the stack directory.
+      try {
+        await refuseIfComposeFenced(req.nodeId, req.params.stackName as string);
+      } catch (fenced) {
+        if (isDataRestoreFenceError(fenced)) {
+          return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
+        }
+        // The check itself failing keeps the read's own answer below.
+      }
       return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     res.status(500).json({ error: 'Failed to read stack' });
@@ -1040,12 +1063,16 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       res.setHeader('X-Env-Exists', 'true');
       return res.send(content);
     } catch (e: unknown) {
-      // TOCTOU: the file existed at access() but vanished before readFile().
-      // Return the same friendly empty-body shape rather than a generic 500
+      // TOCTOU: the file existed at access() but vanished before readFile(),
+      // or a link to it started dangling. When a data restore fenced its
+      // directory meanwhile, answer the fence. Otherwise a vanished default
+      // file gets the same friendly empty-body shape rather than a generic 500
       // that the frontend would otherwise echo as an opaque error.
       const code = (e as NodeJS.ErrnoException)?.code;
-      if (code === 'ENOENT' && !requestedFile) {
+      if (code === 'ENOENT' || code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
         await refuseIfFencedSource(envPath, fsService.getBaseDir());
+      }
+      if (code === 'ENOENT' && !requestedFile) {
         res.setHeader('X-Env-Exists', 'false');
         return res.send('');
       }

@@ -113,8 +113,9 @@ const MAX_LINK_HOPS = 40;
  * file itself, a link to a link, or a linked directory on the way), the path
  * with that link replaced by where it points. Followed component by component,
  * so a chain whose last target was moved aside still yields that target's
- * spelling. Stops at a component that is not there, and after MAX_LINK_HOPS
- * links.
+ * spelling. Stops at a component that cannot be read as a link or a plain
+ * entry (not there, not a directory, not readable), and after MAX_LINK_HOPS
+ * links, so a loop ends.
  */
 async function linkSpellings(abs: string, baseDir: string): Promise<string[]> {
   const baseResolved = path.resolve(baseDir);
@@ -136,8 +137,8 @@ async function linkSpellings(abs: string, baseDir: string): Promise<string[]> {
     try {
       target = await fsPromises.readlink(contained);
     } catch (err) {
-      // Not a link: carry on with the next component. Not there at all:
-      // nothing below it can be asked.
+      // Not a link: carry on with the next component. Any other failure (not
+      // there, not a directory, not readable): nothing below it can be asked.
       if ((err as NodeJS.ErrnoException).code === 'EINVAL') {
         resolved = next;
         continue;
@@ -158,12 +159,15 @@ async function linkSpellings(abs: string, baseDir: string): Promise<string[]> {
  * Throw the fence's refusal when `abs`, or any path a link on the way to it
  * names, sits in a directory a data restore is overwriting. A file that is not
  * there, or cannot be read, in such a directory may only be mid-swap, so its
- * absence is not an answer. One query when nothing is fenced; called only once
- * a file was found missing or unreadable. Exported for the env editor's own
- * absence answers, which must not report a fenced file as missing either.
+ * absence is not an answer. Asked only after a file was found missing or
+ * unusable: when nothing is fenced it returns after one lookup, without
+ * reading any link. Exported for the routes and Secrets sinks that would
+ * otherwise answer such a file as missing, as a link out of the compose root,
+ * or the stack as gone.
  */
 export async function refuseIfFencedSource(abs: string, baseDir: string): Promise<void> {
-  const { matchFsWorkToFences } = await import('../services/recovery/restoreFence');
+  const { matchFsWorkToFences, RestoreFenceStore } = await import('../services/recovery/restoreFence');
+  if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return;
   for (const spelling of await linkSpellings(abs, baseDir)) {
     const match = await matchFsWorkToFences(spelling);
     if (match.refusal) throw match.refusal;
