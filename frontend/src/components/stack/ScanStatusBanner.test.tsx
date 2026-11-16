@@ -224,3 +224,26 @@ describe('ScanStatusBanner', () => {
     expect((screen.getByTestId('scan-rescan') as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe('ScanStatusBanner quiet mode and visibility report', () => {
+  it('drops the tint but keeps the words, Rescan and Dismiss when quiet', async () => {
+    serve([failed]);
+    render(<ScanStatusBanner stackName="web" nodeId={1} quiet />);
+    const strip = (await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]');
+    expect(strip).toHaveAttribute('data-tone', 'neutral');
+    expect(strip?.className).not.toContain('bg-warning');
+    expect(screen.getByTestId('scan-rescan')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+  });
+
+  it('reports when the strip shows and when it is dismissed', async () => {
+    serve([failed]);
+    const onShownChange = vi.fn();
+    render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    await screen.findByText(/Last post-deploy scan failed/);
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(false));
+  });
+});
+

@@ -189,6 +189,7 @@ export default function StackAnatomyPanel({
   // changes. Adjusting during render means the next stack never paints revealed.
   const revealIdentity = `${activeNode?.id ?? 'local'}:${stackName}`;
   const [showHiddenServices, setShowHiddenServices] = useState(false);
+  const [scanBannerShown, setScanBannerShown] = useState(false);
   const [revealIdentitySeen, setRevealIdentitySeen] = useState(revealIdentity);
   if (revealIdentitySeen !== revealIdentity) {
     setRevealIdentitySeen(revealIdentity);
@@ -455,16 +456,26 @@ export default function StackAnatomyPanel({
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
     : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
-  const bannerTone = bannerSeverity === 'danger'
-    ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
-    : bannerSeverity === 'warn'
-      ? 'border-warning/40 bg-warning/[0.06] text-warning'
-      : 'border-success/40 bg-success/[0.06] text-success';
-  const applyBtnTone = bannerSeverity === 'danger'
-    ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
-    : bannerSeverity === 'warn'
-      ? 'border-warning/40 text-warning hover:bg-warning/10'
-      : 'border-success/40 text-success hover:bg-success/10';
+  // One toned block per view. The update banner and the incomplete-check notice are
+  // the tab's Answer; the post-deploy scan strip is toned only when it is the
+  // louder of the two (a green "safe to apply" banner does not outrank a scan
+  // warning), and is quiet otherwise.
+  const updateBannerQuiet = showUpdateBanner && scanBannerShown && bannerSeverity === 'ok';
+  const scanBannerQuiet = scanBannerShown && !updateBannerQuiet && (showUpdateBanner || showCheckStatusBanner);
+  const bannerTone = updateBannerQuiet
+    ? 'border-muted bg-card/40 text-stat-subtitle'
+    : bannerSeverity === 'danger'
+      ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
+      : bannerSeverity === 'warn'
+        ? 'border-warning/40 bg-warning/[0.06] text-warning'
+        : 'border-success/40 bg-success/[0.06] text-success';
+  const applyBtnTone = updateBannerQuiet
+    ? 'border-muted text-foreground hover:bg-muted/40'
+    : bannerSeverity === 'danger'
+      ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
+      : bannerSeverity === 'warn'
+        ? 'border-warning/40 text-warning hover:bg-warning/10'
+        : 'border-success/40 text-success hover:bg-success/10';
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
   const tagOnlyAdvisory = isTagOnlyAdvisory(updatePreview);
   const canApplyPreview = isActionableUpdatePreview(updatePreview);
@@ -798,7 +809,7 @@ export default function StackAnatomyPanel({
             </div>
           </div>
         )}
-        <ScanStatusBanner key={`${activeNode?.id ?? 'local'}:${stackName}`} stackName={stackName} nodeId={activeNode?.id} />
+        <ScanStatusBanner key={`${activeNode?.id ?? 'local'}:${stackName}`} stackName={stackName} nodeId={activeNode?.id} quiet={scanBannerQuiet} onShownChange={setScanBannerShown} />
       </div>
       {anatomy && anatomy.services.length > 0 && (
         <div className="border-t border-muted px-3 py-2 flex items-center justify-between">

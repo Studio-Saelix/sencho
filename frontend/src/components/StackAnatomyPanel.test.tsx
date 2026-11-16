@@ -268,6 +268,63 @@ describe('StackAnatomyPanel update banner', () => {
     expect(screen.queryByText(/checks the image already installed, not the new one/i)).toBeNull();
   });
 
+  describe('one toned block on the Anatomy tab', () => {
+    const FAILED_SCAN = { status: 'failed', attemptedAt: 100, errorMessage: 'registry unreachable', scanning: false };
+
+    function serve(bump: 'patch' | 'minor' | null, scan: unknown) {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) {
+          const body = previewBody(bump !== null);
+          if (bump === 'minor') {
+            body.summary.semver_bump = 'minor';
+            body.summary.update_kind = 'tag';
+            body.images[0].semver_bump = 'minor';
+          }
+          return jsonRes(body);
+        }
+        if (url.includes('/scan-status')) return jsonRes(scan);
+        return jsonRes(null, false);
+      });
+    }
+
+    it('keeps the scan strip toned when it is the only banner', async () => {
+      serve(null, FAILED_SCAN);
+      render(panel(false));
+      const strip = await screen.findByText(/Last post-deploy scan failed/);
+      expect(strip.closest('[data-tone]')).toHaveAttribute('data-tone', 'warning');
+      expect(screen.queryByTestId('update-available-banner')).not.toBeInTheDocument();
+    });
+
+    it('quiets the scan strip under an update banner that is a warning', async () => {
+      serve('minor', FAILED_SCAN);
+      render(panel(false));
+      const banner = await screen.findByTestId('update-available-banner');
+      expect(banner.className).toContain('bg-warning');
+      const strip = (await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]');
+      expect(strip).toHaveAttribute('data-tone', 'neutral');
+      // Words and verb are unchanged; only the tint is gone.
+      expect(screen.getByTestId('scan-rescan')).toBeInTheDocument();
+    });
+
+    it('lets a scan warning outrank a green safe-to-apply banner', async () => {
+      serve('patch', FAILED_SCAN);
+      render(panel(false));
+      const banner = await screen.findByTestId('update-available-banner');
+      await screen.findByText(/Last post-deploy scan failed/);
+      await waitFor(() => expect(banner.className).not.toContain('bg-success'));
+      expect(banner.className).toContain('bg-card/40');
+      expect(screen.getByRole('button', { name: 'apply' })).toBeInTheDocument();
+      expect(screen.getByText(/Last post-deploy scan failed/).closest('[data-tone]')).toHaveAttribute('data-tone', 'warning');
+    });
+
+    it('keeps the update banner green when the scan strip is not showing', async () => {
+      serve('patch', { status: 'ok' });
+      render(panel(false));
+      expect((await screen.findByTestId('update-available-banner')).className).toContain('bg-success');
+    });
+  });
+
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {
     const onApply = vi.fn();
     render(panel(false, onApply));
