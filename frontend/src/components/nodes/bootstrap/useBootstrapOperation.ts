@@ -133,7 +133,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       operationsRef.current = page.operations;
       setNextCursor(page.nextCursor);
       setListFailed(false);
-      // A readiness change arrived while this read was out: its enrolled rows may predate it.
+      // A readiness change arrived while this read was out: what it answered may predate it.
       if (readinessSignals.current !== signals && page.operations.some((entry) => entry.state === 'enrolled')) void readNowRef.current?.();
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
