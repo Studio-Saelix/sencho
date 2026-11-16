@@ -39,13 +39,20 @@ export interface VulnScanAnswerOptions {
   evidencePartial?: boolean;
 }
 
+/** True when the scan's scanner set includes the vulnerability scanner (`vuln`, `vuln,secret`). */
+export function ranVulnerabilityScanner(scan: Pick<VulnerabilityScan, 'scanners_used'>): boolean {
+  return (scan.scanners_used ?? 'vuln').split(',').map((s) => s.trim()).includes('vuln');
+}
+
 export function vulnScanAnswer(scan: VulnerabilityScan, options: VulnScanAnswerOptions = {}): VulnScanAnswer {
   const counts = severityCountsLine(scan);
   // A scan that has not completed says so before any verdict: its numbers are partial or absent.
   if (scan.status === 'failed') {
     return {
       tone: 'destructive', icon: ShieldAlert, title: 'scan failed',
-      line: scan.error || 'The scan did not complete, so these results are not a verdict.',
+      // The raw error (Trivy stderr, often a thousand characters) belongs in the sheet's
+      // collapsed detail, never in the Answer's one sentence.
+      line: 'The scan did not complete, so these results are not a verdict.',
     };
   }
   if (scan.status === 'in_progress') {
@@ -65,6 +72,15 @@ export function vulnScanAnswer(scan: VulnerabilityScan, options: VulnScanAnswerO
     };
   }
   const worst = SEVERITY_LADDER.find(({ key }) => scan[key] > 0);
+  if (!worst && !ranVulnerabilityScanner(scan)) {
+    // A config-only or secret-only scan never read package vulnerabilities, so zero
+    // counts say nothing about them.
+    const otherFindings = (scan.secret_count ?? 0) + (scan.misconfig_count ?? 0);
+    return {
+      tone: 'neutral', icon: ShieldQuestion, title: 'not scanned for vulnerabilities',
+      line: `No vulnerability scanner ran for this scan, so it says nothing about vulnerabilities.${otherFindings > 0 ? ` It reports ${otherFindings} secret or misconfig ${otherFindings === 1 ? 'finding' : 'findings'}.` : ''}`,
+    };
+  }
   if (!worst) {
     // No vulnerabilities is only a clean result when nothing else was found or left unread.
     const otherFindings = (scan.secret_count ?? 0) + (scan.misconfig_count ?? 0);

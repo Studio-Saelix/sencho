@@ -67,7 +67,24 @@ describe('vulnScanAnswer', () => {
 
   it('never reads an unfinished scan as clean or as a verdict', () => {
     expect(vulnScanAnswer(scan({ status: 'in_progress' }))).toMatchObject({ tone: 'neutral', title: 'scanning' });
-    expect(vulnScanAnswer(scan({ status: 'failed', error: 'trivy timed out' }))).toMatchObject({ tone: 'destructive', title: 'scan failed', line: 'trivy timed out' });
+    expect(vulnScanAnswer(scan({ status: 'failed', error: 'trivy timed out' }))).toMatchObject({ tone: 'destructive', title: 'scan failed', line: expect.stringContaining('did not complete') });
     expect(vulnScanAnswer(scan({ status: 'failed' })).line).toContain('not a verdict');
+  });
+
+  it('does not read a config-only or secret-only scan as a clean vulnerability result', () => {
+    for (const scanners_used of ['config', 'secret']) {
+      const answer = vulnScanAnswer(scan({ scanners_used }));
+      expect(answer).toMatchObject({ tone: 'neutral', title: 'not scanned for vulnerabilities' });
+      expect(answer.line).toContain('No vulnerability scanner ran');
+    }
+    expect(vulnScanAnswer(scan({ scanners_used: 'config', misconfig_count: 2 })).line).toContain('2 secret or misconfig findings');
+    // Both vulnerability-bearing sets still read clean.
+    expect(vulnScanAnswer(scan({ scanners_used: 'vuln,secret' }))).toMatchObject({ tone: 'success' });
+  });
+
+  it('keeps a failed scan\'s Answer to one short sentence, whatever the error says', () => {
+    const answer = vulnScanAnswer(scan({ status: 'failed', error: 'x'.repeat(1000) }));
+    expect(answer.line.length).toBeLessThan(100);
+    expect(answer.line).not.toContain('xxx');
   });
 });
