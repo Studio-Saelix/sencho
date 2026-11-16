@@ -1471,6 +1471,9 @@ export class SchedulerService {
                     recordUpdatePolicyDecision(nodeId, policy, 'system:scheduler');
                     return { kind: 'update_policy_skipped', policy };
                 }
+                // A compose file a data restore is overwriting refuses the run
+                // before the gate, so the refusal writes no gate evidence.
+                await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
                 const schedulerGate = await this.enforceSchedulerPolicyGate(
                     stackName,
                     nodeId,

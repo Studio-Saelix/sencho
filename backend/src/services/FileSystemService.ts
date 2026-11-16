@@ -265,8 +265,9 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
  * non-blocking before asking it what it is. O_NONBLOCK has no effect on a
  * regular file, but a FIFO that replaced the resolved file in the check/open
  * gap gives this call a descriptor to inspect instead of sleeping until a
- * writer appears, which under a directory fence would also hold the fence's
- * drain until it gave up. The descriptor's own type is authoritative, so only
+ * writer appears. The read is registered under the directory fences, so a
+ * sleeping one would also hold a fence's drain until its wait ran out and the
+ * restore aborted. The descriptor's own type is authoritative, so only
  * a regular compose file is ever returned.
  */
 async function readRegularComposeFile(filePath: string): Promise<{ content: string; mtimeMs: number }> {
@@ -522,7 +523,7 @@ export class FileSystemService {
     try {
       const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
       for (const file of COMPOSE_ROOT_FILENAMES) {
-        await refuseIfFencedSource(path.join(stackDir, file), this.baseDir);
+        await refuseIfFencedSource(path.join(stackDir, file));
       }
     } catch (err) {
       if (isDataRestoreFenceError(err)) return err;
@@ -828,7 +829,7 @@ export class FileSystemService {
    */
   private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
     const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');
-    const spellings = await linkSpellings(target, this.baseDir);
+    const spellings = await linkSpellings(target);
     const match = await matchFsWorkToFences(spellings);
     const admitted = match.refusal ?? admitFsWork(spellings, match.checked);
     if (isDataRestoreFenceError(admitted)) throw admitted;
@@ -848,11 +849,7 @@ export class FileSystemService {
    */
   async getStackContent(stackName: string): Promise<string> {
     try {
-      const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
-      return await this.composeStepUnderFences(
-        stackName,
-        () => this.underDirectoryFences(filePath, async () => (await readRegularComposeFile(filePath)).content),
-      );
+      return await this.readStackContentUnderFences(stackName);
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
       const code = error && typeof error === 'object' && 'code' in error
@@ -864,17 +861,27 @@ export class FileSystemService {
     }
   }
 
+  /** getStackContent's read, with its failures as they are: no log, no rewording. */
+  private async readStackContentUnderFences(stackName: string): Promise<string> {
+    const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
+    return this.composeStepUnderFences(
+      stackName,
+      () => this.underDirectoryFences(filePath, async () => (await readRegularComposeFile(filePath)).content),
+    );
+  }
+
   /**
    * Throw the fence's refusal when the stack's compose file sits in, or links
    * into, a directory a data restore is overwriting: the read getStackContent
-   * makes, asked up front by work that would otherwise record evidence, run a
-   * gate or spend a checked observation before its own read is refused. Any
-   * other read failure is not this check's to answer; the work goes on and
-   * reports it from its own read.
+   * makes, asked up front by an update that would otherwise write gate evidence
+   * or spend a checked observation before its own read is refused. Any other
+   * read failure is not this check's to answer: it is neither logged nor
+   * thrown here, and the update reports it from its own read. A fence recorded
+   * after this check is still answered by that later read.
    */
   async refuseIfComposeFenced(stackName: string): Promise<void> {
     try {
-      await this.getStackContent(stackName);
+      await this.readStackContentUnderFences(stackName);
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
     }

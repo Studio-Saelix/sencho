@@ -580,7 +580,7 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
         // directory after the env files were resolved is refused the same way,
         // never read as missing or as a link out of the compose root.
         try {
-            await refuseIfFencedSource(resolved, fsService.getBaseDir());
+            await refuseIfFencedSource(resolved);
         } catch (fenced) {
             if (isDataRestoreFenceError(fenced)) throw new SecretSourceRefusedError(fenced.message);
             // The check itself failing keeps the read's own answer below.
@@ -612,7 +612,7 @@ async function writeEnvLocal(nodeId: number, absolutePath: string, content: stri
         // admitted write would, not as a link out of the compose root.
         if (!isDataRestoreFenceError(err)) {
             try {
-                await refuseIfFencedSource(absolutePath, fsService.getBaseDir());
+                await refuseIfFencedSource(absolutePath);
             } catch (fenced) {
                 if (isDataRestoreFenceError(fenced)) throw fenced;
                 // The check itself failing keeps the write's own error.

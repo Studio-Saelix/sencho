@@ -121,6 +121,7 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getStacks: vi.fn().mockResolvedValue([]),
       getBaseDir: () => '/tmp/compose',
+      refuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
       readComposeFile: vi.fn().mockResolvedValue(''),
       hasComposeFile: vi.fn().mockResolvedValue(true),
       getBackupInfo: mockGetBackupInfo,

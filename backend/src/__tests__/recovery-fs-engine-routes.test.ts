@@ -151,11 +151,22 @@ function stackDir(name: string): string {
 
 /**
  * The link shapes the late-admission matrices cover: a single link, a chain,
- * and a chain whose middle hop is spelled through another path to the compose
- * root, which a check by the configured root's spelling alone would not follow.
+ * a chain whose middle hop is spelled through another path to the compose
+ * root (`alias`), and a chain whose middle hop is a link outside the compose
+ * root that points back into it (`outside`). A check bounded by the configured
+ * root's spelling would follow neither of the last two.
  */
-const LINK_SHAPES = ['single', 'chained', 'alias'] as const;
+const LINK_SHAPES = ['single', 'chained', 'alias', 'outside'] as const;
 type LinkShape = typeof LINK_SHAPES[number];
+
+/** A new link outside the compose root that points at `target`, inside it. */
+function outsideLinkTo(target: string): string {
+  const dir = path.join(shared, `outside-${randomUUID().slice(0, 8)}`);
+  fs.mkdirSync(dir);
+  const link = path.join(dir, path.basename(target));
+  fs.symlinkSync(target, link);
+  return link;
+}
 
 /** A new link outside the compose root that names it: another path to the same directory. */
 function composeRootAlias(): string {
@@ -1881,8 +1892,16 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     fs.symlinkSync(alias ? path.join(composeRootAlias(), 'web', 'mid.yaml') : 'mid.yaml', path.join(stack.dir, 'compose.yaml'));
     return stack;
   }
+  /** `linkedComposeStack` with `compose.yaml` reached through a link outside the compose root: compose.yaml -> <outside>/compose.yaml -> data/compose.yaml. */
+  function outsideComposeStack(): { dir: string; data: string; compose: string } {
+    const stack = linkedComposeStack();
+    fs.rmSync(path.join(stack.dir, 'compose.yaml'));
+    fs.symlinkSync(outsideLinkTo(stack.compose), path.join(stack.dir, 'compose.yaml'));
+    return stack;
+  }
   /** The compose stack for one link shape of the late-admission matrices. */
   function composeStackOf(shape: LinkShape): { dir: string; data: string; compose: string } {
+    if (shape === 'outside') return outsideComposeStack();
     return shape === 'single' ? linkedComposeStack() : chainedComposeStack(shape === 'alias');
   }
 
@@ -2239,6 +2258,8 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       fs.writeFileSync(target, 'A=1\n');
       if (shape === 'single') {
         fs.symlinkSync(path.join('data', name), path.join(dir, name));
+      } else if (shape === 'outside') {
+        fs.symlinkSync(outsideLinkTo(target), path.join(dir, name));
       } else {
         fs.symlinkSync(path.join('data', name), path.join(dir, `mid${name}`));
         fs.symlinkSync(shape === 'alias' ? path.join(composeRootAlias(), 'web', `mid${name}`) : `mid${name}`, path.join(dir, name));
@@ -2497,7 +2518,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it('refuses a manual and an automatic update of a compose file in the fenced directory before the gate runs or a checked observation is spent', async () => {
+  it('refuses a manual update, a bulk update row and an automatic update of a compose file in the fenced directory before the gate runs or a checked observation is spent', async () => {
     const updatePolicy = await import('../services/updatePolicy');
     const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
     vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
@@ -2519,6 +2540,9 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       const res = await request(app).post('/api/stacks/web/update').set('Cookie', adminCookie);
       expect(res.status, shape).toBe(409);
       expect(res.body.code, shape).toBe('data_restore');
+      const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'update', stackNames: ['web'] });
+      expect(bulk.status, `${shape} bulk`).toBe(200);
+      expect(bulk.body.results[0], `${shape} bulk`).toMatchObject({ stackName: 'web', ok: false, code: 'data_restore' });
       const verify = vi.fn();
       const consume = vi.fn();
       await expect(applyAutomaticStackUpdate({
@@ -2530,6 +2554,25 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     }
     expect(gate).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves a compose read failure that is not the fence to the update and the drift view, unlogged by the pre-check', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    const drift = await import('../services/DriftDetectionService');
+    vi.spyOn(drift, 'buildStackDriftReport').mockResolvedValue({ stackName: 'web', findings: [] } as never);
+    resetStack();
+    const compose = path.join(stackDir('web'), 'compose.yaml');
+    fs.rmSync(compose);
+    execFileSync('mkfifo', [compose]);
+    // Another directory is fenced, so the fence is asked and finds nothing.
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(fsService.refuseIfComposeFenced('web')).resolves.toBeUndefined();
+    expect(errors).not.toHaveBeenCalled();
+    const view = await request(app).get('/api/stacks/web/drift').set('Cookie', adminCookie);
+    expect(view.status).toBe(200);
+    expect(view.body.temporal).toMatchObject({ hasBaseline: false });
   });
 
   it('admits the services list and update preview read of a compose file in the fenced directory under the fence, by any timing', async () => {

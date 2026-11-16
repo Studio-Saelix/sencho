@@ -17,7 +17,7 @@ const {
   mockGetContainersByStack, mockRestartContainer, mockAssertNoEndpointContainers, mockFindContainerByName,
   mockStartContainer, mockStopContainer, mockPruneSystem,
   mockUpdateStack,
-  mockGetStacks, mockGetStackContent, mockGetEnvContent,
+  mockGetStacks, mockGetStackContent, mockGetEnvContent, mockRefuseIfComposeFenced,
   mockCheckImage, mockRecheckStack,
   mockDispatchAlert, mockBroadcastEvent,
   mockGetProxyTarget,
@@ -61,6 +61,7 @@ const {
   mockUpdateStack: vi.fn().mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null }),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
+  mockRefuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
   mockCheckImage: vi.fn().mockResolvedValue({ hasUpdate: false }),
   mockRecheckStack: vi.fn().mockResolvedValue({ outcome: 'cleared', warning: null }),
@@ -173,6 +174,7 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getStacks: mockGetStacks,
       getStackContent: mockGetStackContent,
+      refuseIfComposeFenced: mockRefuseIfComposeFenced,
       getEnvContent: mockGetEnvContent,
       backupStackFiles: mockBackupStackFiles,
     }),
@@ -978,6 +980,34 @@ describe('SchedulerService - executeUpdate', () => {
       nodeId: 1,
       stackName: 'web-app',
     }));
+  });
+
+  it('refuses a scheduled update whose compose file a data restore is overwriting before the gate runs', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 81,
+      name: 'update-fenced',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockRefuseIfComposeFenced.mockRejectedValueOnce(new DataRestoreFenceError('/srv/web-app/data', 'browse', 'directory'));
+
+    await SchedulerService.getInstance().triggerTask(81, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('web-app');
+    expect(mockEnforcePolicyPreDeploy).not.toHaveBeenCalled();
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({ output: expect.stringMatching(/Stack "web-app" failed: .*data restore is overwriting/) }),
+    );
   });
 
   it('blocks scheduled Compose apply when a sibling image check failed', async () => {

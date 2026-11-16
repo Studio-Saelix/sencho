@@ -729,6 +729,9 @@ async function runStackBulkOp(
           code: 'update_policy_skipped',
         };
       }
+      // A compose file a data restore is overwriting refuses the row before the
+      // gate, so it writes no gate evidence; the catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req, {
         imageSource: 'registry',
         unattended: false,
@@ -1024,7 +1027,7 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       }
       // A file a data restore fenced after the env files were resolved may only
       // be mid-swap: refuse instead of answering that it is not there.
-      await refuseIfFencedSource(envPath, fsService.getBaseDir());
+      await refuseIfFencedSource(envPath);
       // No env file at the resolved path. For an explicit ?file= query we
       // surface a 404 (the caller asked for something specific). Otherwise
       // treat it as the empty-stack case above.
@@ -1049,7 +1052,7 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       // that the frontend would otherwise echo as an opaque error.
       const code = (e as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT' || code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-        await refuseIfFencedSource(envPath, fsService.getBaseDir());
+        await refuseIfFencedSource(envPath);
       }
       if (code === 'ENOENT' && !requestedFile) {
         res.setHeader('X-Env-Exists', 'false');
@@ -1175,7 +1178,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       // resolved dangles mid-swap: answer the fence, not an unusable path or a
       // missing stack.
       try {
-        await refuseIfFencedSource(written, FileSystemService.getInstance(req.nodeId).getBaseDir());
+        await refuseIfFencedSource(written);
       } catch (fenced) {
         if (isDataRestoreFenceError(fenced)) {
           return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });

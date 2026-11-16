@@ -288,6 +288,24 @@ interface DriftPanelProps {
   onOpenGitSource?: () => void;
 }
 
+
+/**
+ * The reason the server gave for refusing a drift read while a data restore
+ * overwrites the stack's compose file, so the toast says a restore is under
+ * way instead of reporting a failure. Null for any other failed answer.
+ */
+async function refusalReason(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object' && (body as { code?: unknown }).code === 'data_restore') {
+      const error = (body as { error?: unknown }).error;
+      return typeof error === 'string' && error ? error : null;
+    }
+  } catch {
+    // Not a JSON answer: the generic message stands.
+  }
+  return null;
+}
 export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpenGitSource }: DriftPanelProps) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -348,7 +366,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
         if (cancelled) return;
         if (!res.ok) {
           setLoadError(true);
-          toast.error('Failed to load the drift report.');
+          toast.error(await refusalReason(res) ?? 'Failed to load the drift report.');
           return;
         }
         setReport((await res.json()) as StackDriftReport);
@@ -374,7 +392,7 @@ export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpe
     try {
       const res = await apiFetch(`/stacks/${stackName}/drift/recheck`, { method: 'POST' });
       if (!res.ok) {
-        toast.error('Failed to re-check drift.');
+        toast.error(await refusalReason(res) ?? 'Failed to re-check drift.');
         return;
       }
       const fresh = (await res.json()) as StackDriftReport;

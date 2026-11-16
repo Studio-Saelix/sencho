@@ -97,7 +97,8 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
     }
     if (isDataRestoreFenceError(error)) {
       // A restore is overwriting what the update reads: a refusal with its
-      // reason, which the hub relays, not a failed update.
+      // reason, not an update that ran and failed. The hub reports the stack
+      // as failed with that reason.
       res.status(409).json({ ...envelope, result: 'rejected', code: DATA_RESTORE_FENCE_CODE, error: error.message });
       return;
     }

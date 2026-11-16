@@ -114,10 +114,10 @@ function inlineEnvKeysOf(environment: unknown): string[] {
  * otherwise answer such a file as missing, as a link out of the compose root,
  * or the stack as gone.
  */
-export async function refuseIfFencedSource(abs: string, baseDir: string): Promise<void> {
+export async function refuseIfFencedSource(abs: string): Promise<void> {
   const { matchFsWorkToFences, RestoreFenceStore } = await import('../services/recovery/restoreFence');
   if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return;
-  const match = await matchFsWorkToFences(await linkSpellings(abs, baseDir));
+  const match = await matchFsWorkToFences(await linkSpellings(abs));
   if (match.refusal) throw match.refusal;
 }
 
@@ -127,7 +127,7 @@ async function existenceOf(fsService: FileSystemService, abs: string, baseDir: s
     await fsService.access(abs);
     return 'present';
   } catch (err) {
-    await refuseIfFencedSource(abs, baseDir);
+    await refuseIfFencedSource(abs);
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unverifiable';
   }
 }
@@ -137,7 +137,6 @@ async function discoverAuthoredComposeFiles(
   fsService: FileSystemService,
   stackName: string,
   stackDir: string,
-  baseDir: string,
 ): Promise<string[]> {
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (spec && Array.isArray(spec.files) && spec.files.length > 0) {
@@ -157,13 +156,13 @@ async function discoverAuthoredComposeFiles(
     } catch {
       // A compose file missing because its directory is being restored is not
       // "no compose file"; otherwise try the next candidate.
-      await refuseIfFencedSource(abs, baseDir);
+      await refuseIfFencedSource(abs);
     }
   }
   return [];
 }
 
-async function parseComposeServices(fsService: FileSystemService, absPath: string, baseDir: string): Promise<{
+async function parseComposeServices(fsService: FileSystemService, absPath: string): Promise<{
   services: Record<string, unknown>;
   text: string;
 } | null> {
@@ -178,7 +177,7 @@ async function parseComposeServices(fsService: FileSystemService, absPath: strin
     // that dangles mid-swap, an applied Git deploy spec naming such a link) or
     // a file gone since it was found.
     if (isDataRestoreFenceError(err)) throw err;
-    await refuseIfFencedSource(absPath, baseDir);
+    await refuseIfFencedSource(absPath);
     return null;
   }
   if (content.length > MAX_COMPOSE_PARSE_BYTES) return null;
@@ -202,7 +201,7 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
   const baseDir = fsService.getBaseDir();
   const stackDir = path.join(baseDir, stackName);
 
-  const composeFiles = await discoverAuthoredComposeFiles(fsService, stackName, stackDir, baseDir);
+  const composeFiles = await discoverAuthoredComposeFiles(fsService, stackName, stackDir);
 
   // Physical env files, deduped by resolved absolute path.
   // Seed the project `.env` as the fallback interpolation source. When the stack
@@ -256,7 +255,7 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
   let authoredText = '';
 
   for (const file of composeFiles) {
-    const parsed = await parseComposeServices(fsService, file, baseDir);
+    const parsed = await parseComposeServices(fsService, file);
     if (!parsed) continue;
     authoredText += parsed.text + '\n';
 
