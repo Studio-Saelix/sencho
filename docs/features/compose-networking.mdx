@@ -13,7 +13,7 @@ Compose Networking reads structure: network names, service-to-network membership
 
 <img
   src="/images/compose-networking/networking-tab-overview.png"
-  alt="The Networking tab showing the full panel: EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing arr-net with an external badge, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the green 'runtime matches compose' card"
+  alt="The Networking tab showing the full panel: the MATCHES INTENT answer at the top, the EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing swag_arr-net as created by the stack, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the 'runtime matches compose' card"
 />
 
 ## Accessing the Networking tab
@@ -90,7 +90,7 @@ Every service row in the exposure-intent section also shows one quiet line: **de
 | **no known exposure path** | Sencho found no path at all. This is absence of evidence, not a safety claim: it never means internal, isolated or safe. A service on an external network carries the caveat that a connector in another stack on that network could reach it. |
 | **could not be determined** | The reach is hidden: the service shares a network namespace with a container from outside this stack, a connector runs in another container's namespace, a running container is attached to a network the stack does not declare, or a running container publishes a port the Compose file does not. |
 
-When the reach is only partly known, the known paths stay listed and the answer ends in **partly undetermined**; the proof line in the services card names the reason. A running container whose published ports differ from the Compose file makes the answer partly undetermined when a known path remains, in either direction: the file declares a port the container does not publish (the common edited-not-redeployed case), or the container publishes a port the file does not. The same line names the namespace a shared host path comes from, the external networks a connector of another stack could reach over, and **runtime not checked** when Docker was unavailable or the service has no running container. A missing runtime is never shown as a clean result.
+When the reach is only partly known, the known paths stay listed and the answer ends in **partly undetermined**; the proof line in the services card names the reason. A running container whose published ports differ from the Compose file makes the answer partly undetermined when a known path remains, in either direction: the file declares a port the container does not publish (the common edited-not-redeployed case), or the container publishes a port the file does not. The same line names the namespace a shared host path comes from and the external networks a connector of another stack could reach over. When Docker was unavailable, or no service has a running container, the status block at the top of the tab carries a **runtime not checked** marker once, instead of each service repeating it. When only some services were read, each unread service's own row says it: **runtime not checked, so a running container may reach more than the file says**. A service the node reported no detection for at all shows **exposure not reported for this service.** on its row. A missing runtime is never shown as a clean result.
 
 **What Sencho never claims:** internet reachability, verified Cloudflare or tailnet routing, peer authorization, or that a service is safe. An unrenderable Compose model shows the render error instead of a detection.
 
@@ -111,7 +111,9 @@ A chip names the class of fact, never the port numbers; the services card below 
 
 **Use same-node.** When nothing is declared and every path is an own loopback-only publication, the runtime was read, the service has a running container, there is no external network and no other doubt, the row offers **Use same-node**. One click writes that service's intent through the same control as the picker, and **inherit** on the picker clears it again. No other adoption is offered: a Cloudflare Tunnel could mean `public` or `reverse-proxy`, and an overlay could be `lan` or `internal`.
 
-**Older nodes** do not report detection, and the line says so instead of guessing. If the intent list itself cannot be read, the section says so instead of showing **auto (detected)** or offering an adoption.
+**The status block.** The tab opens with one status block. When a declared intent contradicts what was detected it counts the services involved ("2 services conflict with the declared exposure intent", or "may conflict" when the evidence is only partial), and each service's own chip says why. Otherwise it reads **partly determined** when some service's exposure could not be fully established (including one a connector in another stack could reach), **no intent set** (the `unknown` intent counts as not set), or **matches intent**, which is only said when every service was fully determined and its runtime was read, so a stack with no running container reads **partly determined**. When the runtime was not read, it carries the **runtime not checked** marker.
+
+**Older nodes** do not report detection, so there is nothing to summarize and the service line says so instead of guessing. If the intent list itself cannot be read, the status block says so, with a **Retry** button, on any node, instead of showing **auto (detected)** or offering an adoption.
 
 **Three meanings of "unknown".** The `unknown` *intent* is a declaration that you have not classified the service. The Fleet filter *unknown exposure* counts stacks that publish something without any intent. A detected **could not be determined** is about the evidence, not about you: Sencho saw the service but cannot establish its reach.
 
@@ -205,7 +207,7 @@ When a service declares `extra_hosts:`, the resolved hostname-to-IP mappings are
 <Frame>
   <img
     src="/images/compose-networking/networking-runtime-matches.png"
-    alt="The runtime drift section showing a green card with a globe icon and the text 'runtime matches compose' in uppercase"
+    alt="The runtime drift section showing a card with a globe icon and the text 'runtime matches compose' in uppercase"
   />
 </Frame>
 
@@ -220,7 +222,7 @@ When the node is reachable, the tab compares the declared effective model agains
 
 System-managed networks (`bridge`, `host`, `none`) and Docker's implicit default bridge are excluded from all drift findings. Attachments to `sencho_mesh` are also excluded when Sencho verifies that the container is its own instance or that the stack is opted into Sencho Mesh. A manual attachment from an opted-out stack remains visible as drift.
 
-When the runtime matches the Compose file, the section shows a green **runtime matches compose** card.
+When the runtime matches the Compose file, the section shows a quiet **runtime matches compose** card.
 
 When Docker is not reachable, the section shows **runtime unavailable, showing the declared model only**. The networks, ports, and exposure facts are still accurate; drift comparison resumes once the node is reachable.
 

@@ -1,8 +1,9 @@
 /**
  * Display copy for detected exposure: the strongest conflict chip for a declared
  * intent, and the proof line that names why a detection is incomplete. The
- * answer itself comes from the backend, so the panel and the findings name the
- * same thing. Nothing here claims reachability, verified routing or safety; the
+ * detection (paths, conflicts, reasons) comes from the backend, so the panel and
+ * the findings name the same thing; exposureAnswer only summarizes it for the
+ * Networking tab. Nothing here claims reachability, verified routing or safety; the
  * tests assert that.
  */
 import { tunnelProviderLabel } from '@/lib/tunnelExposure';
@@ -111,7 +112,7 @@ function quotedList(names: string[]): string {
  * established, which namespace a host path comes from, the external-network
  * caveat, and whether the runtime was read at all. Null when none applies.
  */
-export function proofLine(detected: DetectedServiceExposure): string | null {
+export function proofLine(detected: DetectedServiceExposure, options: { includeRuntimeNote?: boolean } = {}): string | null {
   const parts: string[] = [];
   const reasons: UndeterminedReason[] = detected.status === 'undetermined'
     ? detected.reasons
@@ -134,6 +135,93 @@ export function proofLine(detected: DetectedServiceExposure): string | null {
   if (detected.externalNetworks.length > 0) {
     parts.push(`a connector in another stack on ${quotedList(detected.externalNetworks)} could reach it`);
   }
-  if (!detected.runtimeChecked) parts.push('runtime not checked, so a running container may reach more than the file says');
+  if (!detected.runtimeChecked && (options.includeRuntimeNote ?? true)) parts.push('runtime not checked, so a running container may reach more than the file says');
   return parts.length > 0 ? `${parts.join('; ')}.` : null;
+}
+
+export interface ExposureAnswerInput {
+  detected?: DetectedServiceExposure;
+  /** The service's own intent, else the stack's; null when neither is set. */
+  effectiveIntent: ExposureIntent | null;
+}
+
+export interface ExposureAnswer {
+  tone: 'warning' | 'neutral' | 'success';
+  title: string;
+  line: string;
+}
+
+/** True when some service's runtime was not read, so its exposure is drawn from the file alone. */
+export function runtimeUnchecked(services: readonly Pick<ExposureAnswerInput, 'detected'>[]): boolean {
+  return services.some(service => service.detected && !service.detected.runtimeChecked);
+}
+
+/** True when some service's runtime was not read and some other service was not that case (its
+ *  runtime was read, or it has no detection at all). Then the Answer's marker cannot say which,
+ *  so each unread service's own proof line must. When every service is unread the marker
+ *  already says it for the whole stack. */
+export function runtimeUncheckedMixed(services: readonly Pick<ExposureAnswerInput, 'detected'>[]): boolean {
+  return runtimeUnchecked(services) && services.some(service => !service.detected || service.detected.runtimeChecked);
+}
+
+/** Detection that could not be fully established: undetermined, partly undetermined, a connector
+ *  in another stack that could reach it (the service's proof line says so), a runtime that was
+ *  never read (the file alone cannot show a running container's reach), or not reported at all. */
+function isPartlyDetermined(detected: DetectedServiceExposure | undefined): boolean {
+  return !detected
+    || !detected.runtimeChecked
+    || detected.status === 'undetermined'
+    || (detected.status === 'paths' && detected.incomplete.length > 0)
+    || detected.externalNetworks.length > 0;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * The one answer for a stack's exposure, built only from the detection the node
+ * sends: how many services conflict with their declared intent (each service's
+ * chip says why), else how many could not be fully determined, else whether
+ * intent is set at all. Null when no service has detection (an older node),
+ * since there is nothing to answer from. A green answer is given only when
+ * every service was fully determined.
+ */
+export function exposureAnswer(services: readonly ExposureAnswerInput[]): ExposureAnswer | null {
+  const detectedServices = services.filter(service => service.detected);
+  if (detectedServices.length === 0) return null;
+  const flagged: ExposureChip['level'][] = [];
+  for (const service of detectedServices) {
+    if (!service.detected || !service.effectiveIntent) continue;
+    const chip = conflictChip(service.detected, service.effectiveIntent);
+    if (chip && chip.level !== 'note') flagged.push(chip.level);
+  }
+  if (flagged.length > 0) {
+    // The specific reason is on each service's own chip; the Answer only counts.
+    const hard = flagged.filter(level => level === 'conflict').length;
+    const title = hard > 0 ? 'conflict' : 'may conflict';
+    let line: string;
+    if (hard === flagged.length) line = `${plural(hard, 'service conflicts', 'services conflict')} with the declared exposure intent.`;
+    else if (hard === 0) line = `${plural(flagged.length, 'service may conflict', 'services may conflict')} with the declared exposure intent.`;
+    else line = `${plural(hard, 'service conflicts', 'services conflict')} and ${flagged.length - hard} may conflict with the declared exposure intent.`;
+    return { tone: 'warning', title, line };
+  }
+  const partial = services.filter(service => isPartlyDetermined(service.detected)).length;
+  if (partial > 0) {
+    return {
+      tone: 'neutral',
+      title: 'partly determined',
+      line: `${plural(partial, 'service has', 'services have')} exposure that could not be fully determined, so no match is claimed.`,
+    };
+  }
+  // The `unknown` intent says the service is not classified, so it counts as unset.
+  const unset = detectedServices.filter(service => !service.effectiveIntent || service.effectiveIntent === 'unknown').length;
+  if (unset > 0) {
+    return {
+      tone: 'neutral',
+      title: 'no intent set',
+      line: `${plural(unset, 'service has', 'services have')} no exposure intent, so only the detected exposure is shown.`,
+    };
+  }
+  return { tone: 'success', title: 'matches intent', line: 'The declared exposure intent matches what Sencho detected.' };
 }

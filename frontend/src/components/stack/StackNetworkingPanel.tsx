@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight, Plus } from 'lucide-react';
+import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight, Plus, Check, Info } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { IconBusyButton } from '@/components/ui/icon-busy-button';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { StatusPath } from '@/components/ui/status-path';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import { conflictChip, proofLine } from '@/lib/detectedExposure';
+import { conflictChip, exposureAnswer, proofLine, runtimeUnchecked, runtimeUncheckedMixed, type ExposureAnswer } from '@/lib/detectedExposure';
 import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
 import type {
   DetectedPath, DetectedServiceExposure, ExposureIntent, ServiceTunnelExposure, TunnelConnector,
@@ -129,6 +133,67 @@ function TunnelBadges({ connector, tunnels }: { connector?: TunnelConnector; tun
   );
 }
 
+const ANSWER_ICON = { warning: Globe, success: Check, neutral: Info } as const;
+
+const RUNTIME_DETAIL = 'A running container may reach more than the file says.';
+
+/** One Answer for the tab. An unreadable intent list is said before any
+ *  conflict, since no intent can be judged without it. The runtime marker is
+ *  carried in both cases, so a missing runtime is never shown as a clean result. */
+function ExposureAnswerBlock({ state, runtimeUnread, refreshing, onRetry }: {
+  state: ExposureAnswer | 'intent-unavailable' | null;
+  runtimeUnread: boolean;
+  refreshing: boolean;
+  onRetry: () => void;
+}) {
+  if (state === null) return null;
+  const runtime = runtimeUnread ? { marker: 'runtime not checked', detail: RUNTIME_DETAIL } : { marker: undefined, detail: null };
+  if (state === 'intent-unavailable') {
+    return (
+      <StatusPath
+        stages={[]}
+        data-testid="networking-answer"
+        answer={{
+          tone: 'warning',
+          icon: ShieldQuestion,
+          title: 'intent unavailable',
+          line: 'The exposure intent could not be read, so no conflict can be judged.',
+          ...runtime,
+          action: (
+            <Button type="button" size="sm" variant="outline" disabled={refreshing} className="h-7 rounded-lg max-md:h-11" onClick={onRetry}>
+              Retry
+            </Button>
+          ),
+        }}
+      />
+    );
+  }
+  return (
+    <StatusPath
+      stages={[]}
+      data-testid="networking-answer"
+      answer={{ tone: state.tone, icon: ANSWER_ICON[state.tone], title: state.title, line: state.line, ...runtime }}
+    />
+  );
+}
+
+function NetworkingSkeleton() {
+  return (
+    <div data-testid="networking-skeleton" role="status" className="flex flex-1 min-h-0 flex-col gap-4 px-3 py-3">
+      <span className="sr-only">Loading networking</span>
+      <Skeleton className="h-14 w-full" />
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-28 w-full" />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+    </div>
+  );
+}
+
 export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled }: {
   stackName: string;
   canEdit: boolean;
@@ -203,6 +268,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     return () => { cancelled = true; };
   }, [stackName, nodeId, reloadKey, viewKey]);
 
+  const { showBusy: showSkeleton } = useVisualBusy(!facts && !loadError);
   const stackIntent = intents.find(i => i.service === '')?.intent ?? null;
   const intentFor = (service: string): ExposureIntent | null => intents.find(i => i.service === service)?.intent ?? null;
 
@@ -218,27 +284,56 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
   if (loadError) {
     return (
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3">
-          <span className="font-mono text-[11px] text-destructive">Could not load the networking view.</span>
-          <button type="button" onClick={() => setReloadKey(k => k + 1)} className="font-mono text-[10px] uppercase tracking-wide text-destructive hover:underline">retry</button>
-        </div>
+        <StatusPath
+          stages={[]}
+          answer={{
+            tone: 'destructive',
+            icon: Network,
+            title: 'could not load',
+            line: 'Could not load the networking view.',
+            action: (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-testid="networking-retry-btn"
+                disabled={refreshing}
+                className="h-7 rounded-lg max-md:h-11"
+                onClick={() => setReloadKey(k => k + 1)}
+              >
+                Retry
+              </Button>
+            ),
+          }}
+        />
       </div>
     );
   }
   if (!facts) {
-    return <div className="flex-1 min-h-0 px-3 py-3 font-mono text-[11px] text-stat-subtitle">Loading networking…</div>;
+    return showSkeleton ? <NetworkingSkeleton /> : <div className="flex-1 min-h-0" />;
   }
   if (!facts.renderable) {
     return (
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
-        <div className={cn(CARD_CLASS, 'border-destructive/40 bg-destructive/[0.06]')}>
-          <div className="flex items-center gap-2 text-destructive"><Network className="h-4 w-4" strokeWidth={1.5} /><span className="font-mono text-[11px] uppercase tracking-wide">cannot render</span></div>
-          <p className="mt-1 text-[12px] leading-relaxed text-foreground/80">{facts.renderError ?? 'Sencho could not render the effective Compose model.'}</p>
-        </div>
+        <StatusPath
+          stages={[]}
+          answer={{
+            tone: 'destructive',
+            icon: Network,
+            title: 'cannot render',
+            line: facts.renderError ?? 'Sencho could not render the effective Compose model.',
+          }}
+        />
       </div>
     );
   }
 
+  const answerInputs = facts.services.map(svc => ({
+    detected: svc.detected,
+    effectiveIntent: intentFor(svc.name) ?? stackIntent,
+  }));
+  // Unread-runtime services are counted by the Answer, so when not every service is unread each row must say so.
+  const nameUnreadRuntime = runtimeUncheckedMixed(answerInputs);
   const drift = facts.drift;
   const hasDrift = drift.runtimeOnlyAttachments.length > 0 || drift.foreignNetworkAttachments.length > 0
     || drift.declaredButUnused.length > 0 || drift.missingFromRuntime.length > 0;
@@ -264,6 +359,13 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         </div>
       </div>
 
+      <ExposureAnswerBlock
+        state={intentsUnavailable ? 'intent-unavailable' : exposureAnswer(answerInputs)}
+        runtimeUnread={runtimeUnchecked(answerInputs)}
+        refreshing={refreshing}
+        onRetry={() => setReloadKey(k => k + 1)}
+      />
+
       <CreateNetworkDialog
         open={showCreateNetwork}
         onOpenChange={setShowCreateNetwork}
@@ -273,9 +375,6 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
       {/* Exposure intent */}
       <section className="flex flex-col gap-2">
         <div className={LABEL_CLASS}>exposure intent</div>
-        {intentsUnavailable && (
-          <div className="font-mono text-[10px] text-warning/90">exposure intent could not be read; refresh to retry</div>
-        )}
         <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-2')}>
           <div className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-foreground/80">stack</span>
@@ -340,9 +439,11 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         <div className={LABEL_CLASS}>services</div>
         <div className="flex flex-col gap-2">
           {facts.services.map(svc => {
-            const proof = svc.detected ? proofLine(svc.detected) : null;
+            const proof = svc.detected
+              ? proofLine(svc.detected, { includeRuntimeNote: nameUnreadRuntime })
+              : answerInputs.some(input => input.detected) ? 'exposure not reported for this service.' : null;
             return (
-              <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
+              <div key={svc.name} data-testid={`networking-service-${svc.name}`} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-[12px] text-foreground/90">{svc.name}</span>
                 {svc.networkMode && <span className="rounded border border-warning/40 bg-warning/[0.08] px-1 py-0.5 font-mono text-[10px] text-warning">network_mode: {svc.networkMode}</span>}
@@ -396,7 +497,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
             <span className="font-mono text-[11px]">runtime unavailable, showing the declared model only</span>
           </div>
         ) : !hasDrift ? (
-          <div className={cn(CARD_CLASS, 'border-success/30 bg-success/[0.06] flex items-center gap-2 text-success')}>
+          <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex items-center gap-2 text-stat-subtitle')}>
             <Globe className="h-4 w-4" strokeWidth={1.5} />
             <span className="font-mono text-[11px] uppercase tracking-wide">runtime matches compose</span>
           </div>

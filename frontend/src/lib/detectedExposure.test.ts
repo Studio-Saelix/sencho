@@ -4,7 +4,7 @@
  * safety; the last test asserts that over every string this module builds.
  */
 import { describe, it, expect } from 'vitest';
-import { conflictChip, conflictChipText, proofLine, strongestConflict } from './detectedExposure';
+import { conflictChip, conflictChipText, exposureAnswer, proofLine, runtimeUnchecked, runtimeUncheckedMixed, strongestConflict } from './detectedExposure';
 import type { DetectedPath, DetectedServiceExposure, ExposureIntent, IntentConflict } from '@/types/networking';
 
 const EMPTY_CONFLICTS: Record<ExposureIntent, IntentConflict[]> = {
@@ -178,5 +178,136 @@ describe('never claims more than Sencho can see', () => {
       expect(text.toLowerCase()).not.toMatch(/\b(?:internet reachable|internet-reachable|safe|isolated)\b/);
       expect(text.toLowerCase().replace(/unverified/g, '')).not.toMatch(/verified/);
     }
+  });
+});
+
+describe('exposureAnswer', () => {
+  const withConflict = (level: 'conflict' | 'possible' | 'note') => detected({
+    paths: [broadPort],
+    conflicts: { ...EMPTY_CONFLICTS, internal: [{ level, reason: 'host-port', paths: [0] }] },
+  });
+
+  it('is null when the node reports no detection', () => {
+    expect(exposureAnswer([{ effectiveIntent: 'internal' }])).toBeNull();
+  });
+
+  it('counts conflicting services and leaves each reason to its chip', () => {
+    const answer = exposureAnswer([
+      { detected: withConflict('conflict'), effectiveIntent: 'internal' },
+      { detected: withConflict('possible'), effectiveIntent: 'internal' },
+      { detected: detected(), effectiveIntent: 'internal' },
+    ]);
+    expect(answer).toMatchObject({ tone: 'warning', title: 'conflict', line: '1 service conflicts and 1 may conflict with the declared exposure intent.' });
+  });
+
+  it('reads a lone possible conflict as may conflict', () => {
+    expect(exposureAnswer([{ detected: withConflict('possible'), effectiveIntent: 'internal' }]))
+      .toMatchObject({ title: 'may conflict', line: '1 service may conflict with the declared exposure intent.' });
+  });
+
+  it('does not raise an informational note to an Answer', () => {
+    expect(exposureAnswer([{ detected: withConflict('note'), effectiveIntent: 'internal' }])?.tone).toBe('success');
+  });
+
+  it('says no intent is set when a detected service has none', () => {
+    expect(exposureAnswer([{ detected: detected(), effectiveIntent: null }]))
+      .toMatchObject({ tone: 'neutral', title: 'no intent set', line: '1 service has no exposure intent, so only the detected exposure is shown.' });
+  });
+
+  it('reads matches intent when every detected service has an agreeing intent', () => {
+    expect(exposureAnswer([{ detected: detected(), effectiveIntent: 'public' }])?.title).toBe('matches intent');
+  });
+
+  it('reports an unread runtime separately from the answer', () => {
+    expect(runtimeUnchecked([{ detected: detected({ runtimeChecked: false }) }, { detected: detected() }])).toBe(true);
+    expect(runtimeUnchecked([{ detected: detected() }, {}])).toBe(false);
+  });
+
+  it('never claims a match for an undetermined or partly determined service', () => {
+    const undetermined = detected({ status: 'undetermined', reasons: ['foreign-namespace'], paths: [] } as Partial<DetectedServiceExposure>);
+    expect(exposureAnswer([{ detected: undetermined, effectiveIntent: 'public' }]))
+      .toMatchObject({ tone: 'neutral', title: 'partly determined' });
+    expect(exposureAnswer([{ detected: detected({ incomplete: ['runtime-ports-missing'] }), effectiveIntent: 'public' }]))
+      .toMatchObject({ title: 'partly determined' });
+  });
+
+  it('does not claim a match while a connector in another stack could reach the service', () => {
+    expect(exposureAnswer([{ detected: detected({ externalNetworks: ['shared'] }), effectiveIntent: 'public' }]))
+      .toMatchObject({ title: 'partly determined' });
+  });
+
+  it('never claims a match for a service whose runtime was not read', () => {
+    expect(exposureAnswer([{ detected: detected({ runtimeChecked: false }), effectiveIntent: 'public' }]))
+      .toMatchObject({ tone: 'neutral', title: 'partly determined' });
+    expect(exposureAnswer([
+      { detected: detected(), effectiveIntent: 'public' },
+      { detected: detected({ status: 'none-known', paths: [], runtimeChecked: false } as Partial<DetectedServiceExposure>), effectiveIntent: 'internal' },
+    ])).toMatchObject({ tone: 'neutral', title: 'partly determined', line: '1 service has exposure that could not be fully determined, so no match is claimed.' });
+  });
+
+  it('still puts a conflict before an unread runtime', () => {
+    const d = detected({
+      runtimeChecked: false,
+      paths: [broadPort],
+      conflicts: { ...EMPTY_CONFLICTS, internal: [{ level: 'conflict', reason: 'host-port', paths: [0] }] },
+    });
+    expect(exposureAnswer([{ detected: d, effectiveIntent: 'internal' }])).toMatchObject({ tone: 'warning', title: 'conflict' });
+  });
+
+  it('reads a fully determined service with no known path and an intent as a match', () => {
+    expect(exposureAnswer([{ detected: detected({ status: 'none-known', paths: [] } as Partial<DetectedServiceExposure>), effectiveIntent: 'internal' }]))
+      .toMatchObject({ tone: 'success', title: 'matches intent' });
+  });
+
+  it('answers nothing for a stack with no services', () => {
+    expect(exposureAnswer([])).toBeNull();
+    expect(runtimeUnchecked([])).toBe(false);
+  });
+
+  it('does not claim a match when only some services report detection', () => {
+    expect(exposureAnswer([{ detected: detected(), effectiveIntent: 'public' }, { effectiveIntent: 'public' }]))
+      .toMatchObject({ title: 'partly determined' });
+  });
+
+  it('counts the unknown intent as unset', () => {
+    expect(exposureAnswer([{ detected: detected(), effectiveIntent: 'unknown' }])).toMatchObject({ title: 'no intent set' });
+  });
+
+  it('puts a conflict before partial detection and unset intent', () => {
+    expect(exposureAnswer([
+      { detected: withConflict('conflict'), effectiveIntent: 'internal' },
+      { detected: detected({ incomplete: ['runtime-ports-missing'] }), effectiveIntent: null },
+    ])).toMatchObject({ title: 'conflict', line: '1 service conflicts with the declared exposure intent.' });
+  });
+
+  it('words a mix of conflicts and possible conflicts without overstating', () => {
+    expect(exposureAnswer([
+      { detected: withConflict('conflict'), effectiveIntent: 'internal' },
+      { detected: withConflict('possible'), effectiveIntent: 'internal' },
+      { detected: withConflict('possible'), effectiveIntent: 'internal' },
+    ])?.line).toBe('1 service conflicts and 2 may conflict with the declared exposure intent.');
+    expect(exposureAnswer([
+      { detected: withConflict('possible'), effectiveIntent: 'internal' },
+      { detected: withConflict('possible'), effectiveIntent: 'internal' },
+    ])?.line).toBe('2 services may conflict with the declared exposure intent.');
+  });
+
+  it('reports a mixed runtime only when some services were read and others not', () => {
+    const read = { detected: detected() };
+    const unread = { detected: detected({ runtimeChecked: false }) };
+    expect(runtimeUncheckedMixed([read, unread])).toBe(true);
+    expect(runtimeUncheckedMixed([unread, unread])).toBe(false);
+    expect(runtimeUncheckedMixed([read, read])).toBe(false);
+    // A service with no detection is not itself unread, so the unread one must be named.
+    expect(runtimeUncheckedMixed([unread, {}])).toBe(true);
+  });
+
+  it('omits the runtime note from the proof line only when asked', () => {
+    const d = detected({ runtimeChecked: false });
+    expect(proofLine(d)).toContain('runtime not checked');
+    expect(proofLine(d, { includeRuntimeNote: false })).toBeNull();
+    const withOthers = detected({ runtimeChecked: false, externalNetworks: ['shared'] });
+    expect(proofLine(withOthers, { includeRuntimeNote: false })).toContain('"shared"');
+    expect(proofLine(withOthers, { includeRuntimeNote: false })).not.toContain('runtime not checked');
   });
 });
