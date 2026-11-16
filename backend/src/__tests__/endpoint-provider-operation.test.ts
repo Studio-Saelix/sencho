@@ -287,10 +287,10 @@ describe('execute (the process that spawns the helper)', () => {
     expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_restored');
   });
 
-  it.each([
+  it.each<[string, Record<string, unknown>, 'failed' | 'succeeded']>([
     ['a failure', { ok: false, phase: 'provider', error: 'container is unhealthy', rollback: { restored: true, error: null } }, 'failed'],
     ['a success', { ok: true }, 'succeeded'],
-  ])('releases the claim before %s is readable as the operation state', async (_label, outcome, state) => {
+  ])('never publishes %s before its slow write step finishes, then frees the claim', async (_label, outcome, state) => {
     const selfUpdate = mockAvailableProvider();
     const service = fastTimings();
     mockDocker();
@@ -299,25 +299,27 @@ describe('execute (the process that spawns the helper)', () => {
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockImplementation(async () => {
       await writeOutcome(operationId, outcome);
     });
-    // Hold the slow disk step long enough that the first poll which sees the
-    // terminal state is still inside the window a rename-then-chmod ordering
-    // leaves open.
+    // The rename publishes the state file, so nothing slow may follow it.
+    // Record what a reader can see every time a write carrying the terminal
+    // state reaches its slow step: with the rename kept last, the readable
+    // state is still non-terminal. A rename-then-chmod ordering publishes
+    // first, so the terminal state is already readable here.
     const realChmod = fs.chmod.bind(fs);
+    const readableDuringSlowStep: (string | undefined)[] = [];
     vi.spyOn(fs, 'chmod').mockImplementation(async (...args: Parameters<typeof fs.chmod>) => {
-      await new Promise(resolve => setTimeout(resolve, 300));
+      const pendingWrite = await fs.readFile(String(args[0]), 'utf8').catch(() => '');
+      if (pendingWrite.includes(`"state":"${state}"`)) {
+        readableDuringSlowStep.push((await service.getCurrentOperation())?.state);
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
       return realChmod(...args);
     });
     await service.executeClaimedComposeReapply();
-    // Assert on the first poll that sees the terminal state. A retrying waitFor
-    // would step over the window and pass on a rename-then-chmod ordering.
-    let pendingWhenFirstReadable: boolean | undefined;
-    await vi.waitFor(async () => {
-      if ((await service.getCurrentOperation())?.state !== state) {
-        throw new Error('the operation has not reached its terminal state yet');
-      }
-      pendingWhenFirstReadable ??= service.isEndpointProviderPending();
-      expect(pendingWhenFirstReadable).toBe(false);
-    }, { interval: 5, timeout: 5_000 });
+    // Settles only once the terminal state is durable, the claim is released
+    // and the Fleet status is updated, so nothing below reads mid-write.
+    await waitForSettled(service, state, 5_000);
+    expect(readableDuringSlowStep.length).toBeGreaterThan(0);
+    expect(readableDuringSlowStep).not.toContain(state);
     await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
   });
 
