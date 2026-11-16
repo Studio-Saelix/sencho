@@ -1868,6 +1868,63 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(compose)).toBe(false);
   });
 
+  it('answers the services list and the update preview with the fence when the compose file links into the fenced directory mid-swap', async () => {
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    vi.spyOn(ImageUpdateService, 'isChecksEnabled').mockReturnValue(true);
+    const reads = () => ({
+      services: request(app).get('/api/stacks/web/services').set('Cookie', adminCookie),
+      preview: request(app).get('/api/stacks/web/update-preview').set('Cookie', adminCookie),
+      reconcile: request(app).post('/api/stacks/web/update-preview').set('Cookie', adminCookie),
+    });
+    for (const shape of ['single', 'chained'] as const) {
+      resetStack();
+      const { data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const opened = await request(app).get('/api/stacks/web/services').set('Cookie', adminCookie);
+      expect(opened.status, shape).toBe(200);
+      expect(opened.body, shape).toEqual(['app']);
+      fencedOverwriteOf(data, ['web']);
+      fs.renameSync(compose, `${compose}.aside`);
+      for (const [name, pending] of Object.entries(reads())) {
+        const res = await pending;
+        expect(res.status, `${shape} ${name}`).toBe(409);
+        expect(res.body.code, `${shape} ${name}`).toBe('data_restore');
+      }
+    }
+    // No fence on the link's way: the answer is the read failure it was before.
+    resetStack();
+    const { compose } = chainedComposeStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    fs.renameSync(compose, `${compose}.aside`);
+    for (const [name, pending] of Object.entries(reads())) {
+      const res = await pending;
+      expect(res.status, name).toBe(500);
+      expect(res.body.code, name).toBeUndefined();
+    }
+  });
+
+  it('logs a fence check on a missing compose file that fails, and answers it as unproven instead of as a stack that is gone', async () => {
+    const dir = stackDir('web');
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    expect((await request(app).get('/api/stacks').set('Cookie', adminCookie)).body).toContain('web');
+    fs.renameSync(path.join(dir, 'compose.yaml'), path.join(dir, 'compose.yaml.aside'));
+    const envFileResolution = await import('../helpers/envFileResolution');
+    vi.spyOn(envFileResolution, 'refuseIfFencedSource').mockRejectedValue(new Error('fence store unreadable'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const listed = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listed.body).toContain('web');
+    const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'stop', stackNames: ['web'] });
+    expect(bulk.body.results[0]).toMatchObject({ stackName: 'web', ok: false, code: 'data_restore' });
+    for (const [name, res] of Object.entries({
+      read: await request(app).get('/api/stacks/web').set('Cookie', adminCookie),
+      services: await request(app).get('/api/stacks/web/services').set('Cookie', adminCookie),
+    })) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+      expect(res.body.error, name).toMatch(/cannot prove/);
+    }
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('answering as unproven') && String(call[2]).includes('fence store unreadable'))).toBe(true);
+  });
+
   it('answers the Compose editor with the fence when the opened file is missing from the fenced stack directory', async () => {
     const dir = stackDir('web');
     fencedOverwriteOf(dir, ['web']);

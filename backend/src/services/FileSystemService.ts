@@ -49,7 +49,7 @@ function getBackupBaseDir(): string {
 }
 
 import { isDebugEnabled } from '../utils/debug';
-import { isDataRestoreFenceError, type DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { isDataRestoreFenceError, DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 /**
  * Identity of a file as it was published: the inode and mtime a staged file
@@ -455,8 +455,9 @@ export class FileSystemService {
    * True when the stack directory has a compose file, false when it has none.
    * Throws the fence's `DataRestoreFenceError` instead of answering false when
    * a missing compose file sits in a directory a data restore is overwriting
-   * (the stack's own, or one a link to it points into): it may only be
-   * mid-swap, so the stack is not known to be gone.
+   * (the stack's own, or one a link to it points into), or cannot be checked
+   * against a held fence: it may only be mid-swap, so the stack is not known
+   * to be gone.
    */
   async hasComposeFile(dir: string): Promise<boolean> {
     // Canonical inline js/path-injection barrier at the fs sink below: CodeQL
@@ -485,20 +486,29 @@ export class FileSystemService {
   /**
    * The fence's refusal when any root compose file of `stackDir`, or a path a
    * link on the way to it names, sits in a directory a data restore is
-   * overwriting; null otherwise, also when the check itself fails (the
-   * caller's own answer stands). Asked after a step on the compose file
-   * failed; no filesystem work, and one store lookup, when nothing is fenced.
+   * overwriting; null otherwise. A check that fails while a fence is held
+   * proves nothing either way, so it is logged and answered as the fence's
+   * `unproven` refusal: a compose file Sencho could not check is not gone.
+   * Asked after a step on the compose file failed; no filesystem work, and
+   * one store lookup, when nothing is fenced.
    */
   private async composeFenceRefusal(stackDir: string): Promise<DataRestoreFenceError | null> {
     const { RestoreFenceStore } = await import('./recovery/restoreFence');
-    if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return null;
-    const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
+    const fenced = RestoreFenceStore.getInstance().liveFencedFsTargets();
+    if (fenced.length === 0) return null;
     try {
+      const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
       for (const file of COMPOSE_ROOT_FILENAMES) {
         await refuseIfFencedSource(path.join(stackDir, file), this.baseDir);
       }
     } catch (err) {
       if (isDataRestoreFenceError(err)) return err;
+      console.warn(
+        '[FileSystemService] Could not check the compose files of %s against a data restore; answering as unproven: %s',
+        sanitizeForLog(stackDir),
+        sanitizeForLog((err as Error)?.message ?? String(err)),
+      );
+      return new DataRestoreFenceError(fenced[0].hostPath, 'unproven', 'directory');
     }
     return null;
   }

@@ -1801,6 +1801,10 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to fetch services' });
   }
@@ -3246,6 +3250,10 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
     res.json(preview);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
@@ -3290,6 +3298,10 @@ stacksRouter.post('/:stackName/update-preview', async (req: Request, res: Respon
     }
     res.json({ ...preview, reconciled });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Update preview reconcile failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
