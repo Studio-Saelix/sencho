@@ -53,7 +53,7 @@ describe('StoragePanel', () => {
     expect(screen.getByText(/\/var\/lib/)).toBeInTheDocument();
   });
 
-  it('names the first reason in the Answer and keeps every reason behind one disclosure', async () => {
+  it('names the first reason in the Answer and lists only the other reasons behind one disclosure', async () => {
     route({ storage: jsonRes(inventory({
       portability: { status: 'node-bound', reasons: ['bind /mnt/media', 'mounts the Docker socket', 'bind /srv/x'] },
     })) });
@@ -80,7 +80,7 @@ describe('StoragePanel', () => {
     const verdict = await screen.findByTestId('storage-portability');
     expect(verdict).toHaveAttribute('data-tone', tone);
     expect(verdict).toHaveTextContent(line);
-    expect(screen.queryByRole('button', { name: /all reasons/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /other reasons/i })).toBeNull();
   });
 
   it('a single reason has no count and no disclosure; two reasons say "1 more reason"', async () => {
@@ -88,7 +88,7 @@ describe('StoragePanel', () => {
     const { unmount } = render(<StoragePanel stackName="app" />);
     const one = await screen.findByTestId('storage-portability');
     expect(one).not.toHaveTextContent(/more reason/);
-    expect(screen.queryByRole('button', { name: /all reasons/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /other reasons/i })).toBeNull();
     unmount();
     route({ storage: jsonRes(inventory({ portability: { status: 'node-bound', reasons: ['a', 'b'] } })) });
     render(<StoragePanel stackName="app" />);
