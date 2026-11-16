@@ -236,6 +236,24 @@ describe('exposureAnswer', () => {
       .toMatchObject({ title: 'partly determined' });
   });
 
+  it('never claims a match for a service whose runtime was not read', () => {
+    expect(exposureAnswer([{ detected: detected({ runtimeChecked: false }), effectiveIntent: 'public' }]))
+      .toMatchObject({ tone: 'neutral', title: 'partly determined' });
+    expect(exposureAnswer([
+      { detected: detected(), effectiveIntent: 'public' },
+      { detected: detected({ status: 'none-known', paths: [], runtimeChecked: false } as Partial<DetectedServiceExposure>), effectiveIntent: 'internal' },
+    ])).toMatchObject({ tone: 'neutral', title: 'partly determined', line: '1 service has exposure that could not be fully determined, so no match is claimed.' });
+  });
+
+  it('still puts a conflict before an unread runtime', () => {
+    const d = detected({
+      runtimeChecked: false,
+      paths: [broadPort],
+      conflicts: { ...EMPTY_CONFLICTS, internal: [{ level: 'conflict', reason: 'host-port', paths: [0] }] },
+    });
+    expect(exposureAnswer([{ detected: d, effectiveIntent: 'internal' }])).toMatchObject({ tone: 'warning', title: 'conflict' });
+  });
+
   it('reads a fully determined service with no known path and an intent as a match', () => {
     expect(exposureAnswer([{ detected: detected({ status: 'none-known', paths: [] } as Partial<DetectedServiceExposure>), effectiveIntent: 'internal' }]))
       .toMatchObject({ tone: 'success', title: 'matches intent' });

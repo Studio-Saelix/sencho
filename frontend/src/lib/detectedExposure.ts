@@ -157,9 +157,11 @@ export function runtimeUnchecked(services: readonly Pick<ExposureAnswerInput, 'd
 }
 
 /** Detection that could not be fully established: undetermined, partly undetermined, a connector
- *  in another stack that could reach it (the service's proof line says so), or not reported at all. */
+ *  in another stack that could reach it (the service's proof line says so), a runtime that was
+ *  never read (the file alone cannot show a running container's reach), or not reported at all. */
 function isPartlyDetermined(detected: DetectedServiceExposure | undefined): boolean {
   return !detected
+    || !detected.runtimeChecked
     || detected.status === 'undetermined'
     || (detected.status === 'paths' && detected.incomplete.length > 0)
     || detected.externalNetworks.length > 0;

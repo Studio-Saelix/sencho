@@ -576,6 +576,16 @@ describe('StackNetworkingPanel: one answer', () => {
     expect(screen.getByText('runtime matches compose').closest('div')?.className).not.toContain('bg-success');
   });
 
+  it('never shows a green match for a stack whose runtime was never read', async () => {
+    mockApi(facts({ services: [service('web', { detected: detected({ runtimeChecked: false }) })] }), [{ service: '', intent: 'lan' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('partly determined');
+    expect(answer).toHaveTextContent('runtime not checked');
+    expect(answer).not.toHaveTextContent('matches intent');
+    expect(answer).not.toHaveAttribute('data-tone', 'success');
+  });
+
   it('renders cannot render as the Answer', async () => {
     mockApi(facts({ renderable: false, renderError: 'bad yaml' }), []);
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
