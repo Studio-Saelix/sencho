@@ -40,10 +40,6 @@ This tutorial covers one guardrail: **Block deploy on missing required env vars*
   </Step>
   <Step title="Confirm the variable in the Environment tab">
     Open the stack and switch to the **Environment** tab in the Anatomy panel header. The summary block reads `resolved`, and `DB_PASSWORD` appears in the **Present** group with **secret** and **required** badges, sourced from `.env` and scoped to interpolation. The lock badge means its value is never read into the inventory, only its presence and status.
-
-    <Frame>
-      <img src="/images/tutorials/configure-environment-guardrails/env-tab-db-password-required.png" alt="Environment tab for inventory-db showing the Project environment file section reading Using .env (default), the summary 3 vars and 2 likely secret, and a Present group listing DB_PASSWORD (secret, required, present, source .env, scope interpolation), POSTGRES_DB (present, source inline, scope injected), and POSTGRES_PASSWORD (secret, present, source inline, scope injected)." />
-    </Frame>
   </Step>
   <Step title="Check the guardrail is on">
     Open **Settings** → **Infrastructure** → **Stacks** and find the **Deploy Guardrails** section. Confirm **Block deploy on missing required env vars** is on. It's on by default; if it was turned off, turn it on and select **Save settings** at the bottom of the section. Without it, Compose only reports a missing required variable when the deploy or update actually runs.

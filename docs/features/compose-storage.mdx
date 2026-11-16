@@ -12,13 +12,6 @@ The view is read-only. It never changes a mount, and it never reads, moves, or c
 
 Click any stack in the left sidebar, then switch to the **Storage** tab in the Anatomy panel header.
 
-<Frame>
-  <img
-    src="/images/compose-storage/storage-tab.png"
-    alt="The Anatomy panel tab strip with Storage selected, showing the STORAGE PORTABILITY label, a node-bound verdict card with the reason that a bind path outside the stack directory must exist on every target node, the mount row for that bind, and a SNAPSHOT COVERAGE section with a warning and Take a fleet snapshot link"
-  />
-</Frame>
-
 The tab only appears when the active node reports that it supports storage portability. A node running an older version does not advertise this capability, so the tab stays hidden until that node is updated.
 
 ## Storage inventory
@@ -37,7 +30,7 @@ If the stack declares no mounts at all, the inventory shows a single card: "This
 
 ## Portability verdict
 
-The top of the tab gives the stack a single verdict. The verdict block states the first reason that contributed to it and counts the rest; **All reasons** opens the full list, so you know exactly what is tying the stack to the node or limiting its portability.
+The top of the tab gives the stack a single verdict. The verdict block states the first reason that contributed to it and counts the rest; **Other reasons** opens the remaining ones, so you know exactly what is tying the stack to the node or limiting its portability.
 
 | Verdict | Meaning |
 |---------|---------|
@@ -51,13 +44,6 @@ A few things worth knowing:
 - A read-only bind to an outside path is still **node-bound**. The `ro` flag lowers the risk of an accidental write, not the requirement that the path exist on the target node.
 - A symlink inside the stack directory that resolves outside it is treated as **node-bound** for the same reason: moving the stack files does not bring the symlink target with them.
 - For **partially portable** stacks, anonymous volumes are the most common oversight. Because they have no name, they are easy to miss when taking a manual backup and are orphaned when the container is recreated.
-
-<Frame>
-  <img
-    src="/images/compose-storage/storage-node-bound.png"
-    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict card with the reason the service mounts the Docker socket tying the stack to this host's Docker engine, followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
-  />
-</Frame>
 
 ## Snapshot coverage
 

@@ -273,7 +273,7 @@ function PortabilityAnswer({ portability }: { portability: StorageInventory['por
         'data-testid': 'storage-portability',
       }}
       proof={rest.length > 0 ? {
-        label: 'All reasons',
+        label: 'Other reasons',
         children: (
           <ul className="flex flex-col gap-1">
             {rest.map((r, i) => (

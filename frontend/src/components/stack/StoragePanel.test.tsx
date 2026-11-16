@@ -62,9 +62,9 @@ describe('StoragePanel', () => {
     expect(verdict).toHaveTextContent('bind /mnt/media');
     expect(verdict).toHaveTextContent('2 more reasons');
     expect(screen.queryByText(/mounts the Docker socket/)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /all reasons/i }));
+    fireEvent.click(screen.getByRole('button', { name: /other reasons/i }));
     expect(await screen.findByText(/mounts the Docker socket/)).toBeInTheDocument();
-    // The first reason is stated once, in the Answer: the disclosure lists only the rest.
+    // The first reason is stated once, in the Answer: the disclosure, labelled Other reasons, lists only the rest.
     expect(screen.getAllByText(/bind \/mnt\/media/)).toHaveLength(1);
     expect(screen.getAllByText(/bind \/srv\/x/)).toHaveLength(1);
   });

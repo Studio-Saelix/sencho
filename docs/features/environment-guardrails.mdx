@@ -8,10 +8,6 @@ The **Environment** tab in the right-hand **Anatomy** panel answers a question C
 
 The inventory is advisory and read only. It never changes a stack, and it works entirely from variable **names**: a value is never read into the report, the checklist, or the logs, so nothing sensitive is exposed.
 
-<Frame>
-  <img src="/images/environment-guardrails/env-overview.png" alt="Environment tab open on a stack. The panel shows a PROJECT ENVIRONMENT FILE section reading 'Using .env (default)', a summary line reading '18 vars · 2 likely secret', an ENV FILES section with .env marked missing and a second file marked unverifiable, and a PRESENT group listing injected variables." />
-</Frame>
-
 ## Interpolation versus container injection
 
 Compose treats environment in two distinct ways, and mixing them up is a common source of "it works on one host but not another":
@@ -48,10 +44,6 @@ For every variable, Sencho records its source, its scope, and a status:
 A variable marked with `${VAR:?message}` in the Compose file is **required**: if it is unset or empty, Compose refuses to start. Required variables carry a separate **required** badge.
 
 Variables whose name suggests a secret, such as `DB_PASSWORD`, `API_KEY`, or `CLIENT_SECRET`, are marked with a lock and show presence only. Their value is never read, so it cannot appear in the inventory, the checklist, or anywhere else.
-
-<Frame>
-  <img src="/images/environment-guardrails/env-secrets.png" alt="Variable list showing TUNNEL_TOKEN and VPN_PASS, each with a lock badge labelled 'secret' next to their present status badge." />
-</Frame>
 
 The classification is a heuristic based on the variable name. It errs toward marking things as secret. Marking a non-secret as a likely secret only hides a value that the inventory never reads anyway, so there is no downside.
 
