@@ -231,6 +231,21 @@ describe('exposureAnswer', () => {
       .toMatchObject({ title: 'partly determined' });
   });
 
+  it('does not claim a match while a connector in another stack could reach the service', () => {
+    expect(exposureAnswer([{ detected: detected({ externalNetworks: ['shared'] }), effectiveIntent: 'public' }]))
+      .toMatchObject({ title: 'partly determined' });
+  });
+
+  it('reads a fully determined service with no known path and an intent as a match', () => {
+    expect(exposureAnswer([{ detected: detected({ status: 'none-known', paths: [] } as Partial<DetectedServiceExposure>), effectiveIntent: 'internal' }]))
+      .toMatchObject({ tone: 'success', title: 'matches intent' });
+  });
+
+  it('answers nothing for a stack with no services', () => {
+    expect(exposureAnswer([])).toBeNull();
+    expect(runtimeUnchecked([])).toBe(false);
+  });
+
   it('does not claim a match when only some services report detection', () => {
     expect(exposureAnswer([{ detected: detected(), effectiveIntent: 'public' }, { effectiveIntent: 'public' }]))
       .toMatchObject({ title: 'partly determined' });

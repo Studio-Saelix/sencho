@@ -156,9 +156,13 @@ export function runtimeUnchecked(services: readonly Pick<ExposureAnswerInput, 'd
   return services.some(service => service.detected && !service.detected.runtimeChecked);
 }
 
-/** Detection that could not be fully established: undetermined, partly undetermined, or not reported at all. */
+/** Detection that could not be fully established: undetermined, partly undetermined, a connector
+ *  in another stack that could reach it (the service's proof line says so), or not reported at all. */
 function isPartlyDetermined(detected: DetectedServiceExposure | undefined): boolean {
-  return !detected || detected.status === 'undetermined' || (detected.status === 'paths' && detected.incomplete.length > 0);
+  return !detected
+    || detected.status === 'undetermined'
+    || (detected.status === 'paths' && detected.incomplete.length > 0)
+    || detected.externalNetworks.length > 0;
 }
 
 function plural(n: number, one: string, many: string): string {

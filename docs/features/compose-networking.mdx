@@ -13,7 +13,7 @@ Compose Networking reads structure: network names, service-to-network membership
 
 <img
   src="/images/compose-networking/networking-tab-overview.png"
-  alt="The Networking tab showing the full panel: the EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing arr-net with an external badge, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the green 'runtime matches compose' card"
+  alt="The Networking tab showing the full panel: the EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing arr-net with an external badge, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the 'runtime matches compose' card"
 />
 
 ## Accessing the Networking tab
@@ -111,7 +111,7 @@ A chip names the class of fact, never the port numbers; the services card below 
 
 **Use same-node.** When nothing is declared and every path is an own loopback-only publication, the runtime was read, the service has a running container, there is no external network and no other doubt, the row offers **Use same-node**. One click writes that service's intent through the same control as the picker, and **inherit** on the picker clears it again. No other adoption is offered: a Cloudflare Tunnel could mean `public` or `reverse-proxy`, and an overlay could be `lan` or `internal`.
 
-**The status block.** The tab opens with one status block. When a declared intent contradicts what was detected it counts the services involved ("2 services conflict with the declared exposure intent", or "may conflict" when the evidence is only partial), and each service's own chip says why. Otherwise it reads **partly determined** when some service's exposure could not be fully established, **no intent set** (the `unknown` intent counts as not set), or **matches intent**, which is only said when every service was fully determined. When the runtime was not read, it carries the **runtime not checked** marker.
+**The status block.** The tab opens with one status block. When a declared intent contradicts what was detected it counts the services involved ("2 services conflict with the declared exposure intent", or "may conflict" when the evidence is only partial), and each service's own chip says why. Otherwise it reads **partly determined** when some service's exposure could not be fully established (including one a connector in another stack could reach), **no intent set** (the `unknown` intent counts as not set), or **matches intent**, which is only said when every service was fully determined. When the runtime was not read, it carries the **runtime not checked** marker.
 
 **Older nodes** do not report detection, so there is nothing to summarize and the service line says so instead of guessing. If the intent list itself cannot be read, the status block says so, with a **Retry** button, on any node, instead of showing **auto (detected)** or offering an adoption.
 
