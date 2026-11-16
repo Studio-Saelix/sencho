@@ -7,7 +7,8 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' }, hasCapability: () => false }) }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
+const auth = vi.hoisted(() => ({ canEdit: true }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => auth.canEdit }) }));
 
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
@@ -31,6 +32,7 @@ const INVENTORY: EnvInventory = {
 beforeEach(() => {
   mockedFetch.mockReset();
   mockedCopy.mockReset().mockResolvedValue(undefined);
+  auth.canEdit = true;
 });
 
 describe('EnvironmentPanel', () => {
@@ -60,7 +62,8 @@ describe('EnvironmentPanel', () => {
     const answer = await screen.findByTestId('env-answer');
     expect(screen.getAllByTestId('status-answer')).toHaveLength(1);
     expect(answer.querySelector('[data-tone="destructive"]')).toBeTruthy();
-    expect(answer).toHaveTextContent('1 missing');
+    expect(answer).toHaveTextContent('missing variables');
+    expect(answer).not.toHaveTextContent('1 missing');
     fireEvent.click(screen.getByRole('button', { name: 'Edit env files' }));
     expect(onOpenFiles).toHaveBeenCalledTimes(1);
   });
@@ -70,6 +73,51 @@ describe('EnvironmentPanel', () => {
     render(<EnvironmentPanel stackName="demo" />);
     await screen.findByTestId('env-answer');
     expect(screen.queryByRole('button', { name: 'Edit env files' })).toBeNull();
+  });
+
+  it('offers no file verb to a user who cannot edit, though the Answer is the same', async () => {
+    auth.canEdit = false;
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    render(<EnvironmentPanel stackName="demo" onOpenFiles={vi.fn()} />);
+    expect(await screen.findByTestId('env-answer')).toHaveTextContent('missing variables');
+    expect(screen.queryByRole('button', { name: 'Edit env files' })).toBeNull();
+  });
+
+  it('drops the previous stack\'s Answer and rows while the next stack loads', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    const { rerender } = render(<EnvironmentPanel stackName="demo" onOpenFiles={vi.fn()} />);
+    await screen.findByText('MISSING_VAR');
+    mockedFetch.mockReturnValue(new Promise(() => {}));
+    rerender(<EnvironmentPanel stackName="other" onOpenFiles={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByText('MISSING_VAR')).toBeNull());
+    expect(screen.queryByTestId('env-answer')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit env files' })).toBeNull();
+    expect((screen.getByTestId('env-copy-checklist-btn') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('ignores a late response for the stack it switched away from', async () => {
+    let resolveOld: (v: unknown) => void = () => {};
+    mockedFetch.mockReturnValueOnce(new Promise(res => { resolveOld = res; }));
+    const { rerender } = render(<EnvironmentPanel stackName="demo" />);
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => ({ ...INVENTORY, items: [INVENTORY.items[0]], summary: { ...INVENTORY.summary, total: 1, missing: 0 } }) });
+    rerender(<EnvironmentPanel stackName="other" />);
+    expect(await screen.findByTestId('env-answer')).toHaveTextContent('resolved');
+    await act(async () => { resolveOld({ ok: true, json: async () => INVENTORY }); });
+    expect(screen.getByTestId('env-answer')).toHaveTextContent('resolved');
+    expect(screen.queryByText('MISSING_VAR')).toBeNull();
+  });
+
+  it('keeps an absent optional env file quiet under a resolved Answer, and a required one loud', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => inv({ envFiles: [FILE('missing', false)] }) });
+    const { unmount } = render(<EnvironmentPanel stackName="demo" />);
+    const section = await screen.findByTestId('env-files-section');
+    expect(section).toHaveTextContent('optional, not found');
+    expect(section.querySelector('.text-destructive')).toBeNull();
+    unmount();
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => inv({ envFiles: [FILE('missing')] }) });
+    render(<EnvironmentPanel stackName="demo" />);
+    const loud = await screen.findByTestId('env-files-section');
+    expect(loud.querySelector('.text-destructive')).toBeTruthy();
   });
 
   it('reads resolved, with no verb, when nothing is wrong', async () => {
@@ -104,13 +152,13 @@ describe('EnvironmentPanel', () => {
   });
 
   it.each([
-    ['missing vars outrank a missing env file', inv({ envFiles: [FILE('missing')] }, { missing: 1 }), '1 missing', 'destructive'],
-    ['duplicate outranks shell-only', inv({}, { duplicate: 1, unpersisted: 1 }), '1 duplicate', 'warning'],
-    ['shell-only on its own', inv({}, { unpersisted: 1 }), '1 shell-only', 'warning'],
-    ['shell-only outranks an unverifiable file', inv({ envFiles: [FILE('unverifiable')] }, { unpersisted: 1 }), '1 shell-only', 'warning'],
+    ['missing vars outrank a missing env file', inv({ envFiles: [FILE('missing')] }, { missing: 1 }), 'missing variables', 'destructive'],
+    ['duplicate outranks shell-only', inv({}, { duplicate: 1, unpersisted: 1 }), 'duplicate variables', 'warning'],
+    ['shell-only on its own', inv({}, { unpersisted: 1 }), 'shell-only variables', 'warning'],
+    ['shell-only outranks an unverifiable file', inv({ envFiles: [FILE('unverifiable')] }, { unpersisted: 1 }), 'shell-only variables', 'warning'],
     ['unverifiable file on its own', inv({ envFiles: [FILE('unverifiable')] }), 'env file unverifiable', 'warning'],
-    ['an optional missing file does not raise the Answer', inv({ envFiles: [FILE('missing', false)] }, { duplicate: 1 }), '1 duplicate', 'warning'],
-    ['two missing files', inv({ envFiles: [FILE('missing'), { ...FILE('missing'), rawPaths: ['./b.env'] }] }), '2 env files missing', 'destructive'],
+    ['an optional missing file does not raise the Answer', inv({ envFiles: [FILE('missing', false)] }, { duplicate: 1 }), 'duplicate variables', 'warning'],
+    ['two missing files', inv({ envFiles: [FILE('missing'), { ...FILE('missing'), rawPaths: ['./b.env'] }] }), 'env files missing', 'destructive'],
     ['unused variables stay resolved', inv({}, { unused: 2 }), 'resolved', 'success'],
     ['an unrendered model is a partial view', inv({ renderable: false }), 'partial view', 'warning'],
   ])('Answer: %s', async (_name, inventory, title, tone) => {
@@ -205,8 +253,16 @@ describe('EnvironmentPanel', () => {
     expect(screen.getByText('shell-only · 1')).toBeTruthy();
     expect(screen.getByTestId('env-files-section')).toBeTruthy();
     expect(screen.getByText('./gone.env')).toBeTruthy();
+    expect(screen.getByTestId('status-answer')).toHaveTextContent('env file missing');
     expect(screen.getByTestId('status-marker')).toHaveTextContent(/effective model unavailable/i);
     expect(screen.getAllByTestId('status-answer')).toHaveLength(1);
+  });
+
+  it('a partial view states itself once: no marker repeating its own line', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => ({ ...INVENTORY, renderable: false, summary: { ...INVENTORY.summary, missing: 0, total: 1 }, items: [INVENTORY.items[0]] }) });
+    render(<EnvironmentPanel stackName="demo" />);
+    expect(await screen.findByTestId('status-answer')).toHaveTextContent('partial view');
+    expect(screen.queryByTestId('status-marker')).toBeNull();
   });
 
   it('renders an empty state when no variables are present', async () => {

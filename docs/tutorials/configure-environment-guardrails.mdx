@@ -42,7 +42,7 @@ This tutorial covers one guardrail: **Block deploy on missing required env vars*
     Open the stack and switch to the **Environment** tab in the Anatomy panel header. The summary block reads `resolved`, and `DB_PASSWORD` appears in the **Present** group with **secret** and **required** badges, sourced from `.env` and scoped to interpolation. The lock badge means its value is never read into the inventory, only its presence and status.
 
     <Frame>
-      <img src="/images/tutorials/configure-environment-guardrails/env-tab-db-password-required.png" alt="Environment tab for inventory-db showing the Project environment file section reading Using .env (default), a resolved summary block, and a Present group listing DB_PASSWORD (secret, required, source .env, scope interpolation), POSTGRES_DB (source inline, scope injected), and POSTGRES_PASSWORD (secret, source inline, scope injected)." />
+      <img src="/images/tutorials/configure-environment-guardrails/env-tab-db-password-required.png" alt="Environment tab for inventory-db showing the Project environment file section reading Using .env (default), the summary 3 vars and 2 likely secret, and a Present group listing DB_PASSWORD (secret, required, present, source .env, scope interpolation), POSTGRES_DB (present, source inline, scope injected), and POSTGRES_PASSWORD (secret, present, source inline, scope injected)." />
     </Frame>
   </Step>
   <Step title="Check the guardrail is on">

@@ -64,6 +64,9 @@ describe('StoragePanel', () => {
     expect(screen.queryByText(/mounts the Docker socket/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /all reasons/i }));
     expect(await screen.findByText(/mounts the Docker socket/)).toBeInTheDocument();
+    // The first reason is stated once, in the Answer: the disclosure lists only the rest.
+    expect(screen.getAllByText(/bind \/mnt\/media/)).toHaveLength(1);
+    expect(screen.getAllByText(/bind \/srv\/x/)).toHaveLength(1);
   });
 
   it.each([

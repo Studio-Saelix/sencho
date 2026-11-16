@@ -276,7 +276,7 @@ function PortabilityAnswer({ portability }: { portability: StorageInventory['por
         label: 'All reasons',
         children: (
           <ul className="flex flex-col gap-1">
-            {portability.reasons.map((r, i) => (
+            {rest.map((r, i) => (
               <li key={i} className="text-[12px] leading-relaxed text-foreground/80">· {r}</li>
             ))}
           </ul>

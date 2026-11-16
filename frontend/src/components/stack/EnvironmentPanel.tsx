@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Lock, Copy, Info, TriangleAlert, ShieldAlert, X, ChevronUp, ChevronDown, CircleCheck, type LucideIcon } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -32,6 +32,11 @@ const EXISTENCE_TONE: Record<EnvFileExistence, string> = {
   missing: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
   unverifiable: 'border-warning/40 bg-warning/[0.06] text-warning',
 };
+// An optional file that is absent is not a problem (the Answer ignores it), so
+// its chip stays quiet instead of contradicting a green Answer.
+const OPTIONAL_ABSENT_TONE = EXISTENCE_TONE.present;
+
+const PARTIAL_VIEW_TITLE = 'partial view';
 
 interface EnvAnswerModel {
   tone: StatusTone;
@@ -45,34 +50,35 @@ interface EnvAnswerModel {
 /**
  * The one Answer for the tab: the loudest problem across variables and env
  * files. Counts per status live in the group headers below, so the Answer
- * names the problem and what it does, never the tally again.
+ * names the problem and what it does, never the tally again. The partial-view
+ * state carries its reason in its own line, so it has no extra marker.
  */
 function envAnswer(inventory: EnvInventory): EnvAnswerModel | null {
   const { missing, duplicate, unpersisted } = inventory.summary;
   const missingFiles = inventory.envFiles.filter(f => f.existence === 'missing' && f.required).length;
   const unverifiableFiles = inventory.envFiles.filter(f => f.existence === 'unverifiable').length;
   if (missing > 0) {
-    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: `${missing} missing`,
+    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: 'missing variables',
       line: 'Referenced by the Compose file but set nowhere. Compose substitutes an empty string, or refuses to start when the variable is required.' };
   }
   if (missingFiles > 0) {
-    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: missingFiles === 1 ? 'env file missing' : `${missingFiles} env files missing`,
+    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: missingFiles === 1 ? 'env file missing' : 'env files missing',
       line: 'A declared env file cannot be found, so the variables it carries never reach the service.' };
   }
   if (duplicate > 0) {
-    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: `${duplicate} duplicate`,
+    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: 'duplicate variables',
       line: 'Defined in two places, which can resolve to different values.' };
   }
   if (unpersisted > 0) {
-    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: `${unpersisted} shell-only`,
+    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: 'shell-only variables',
       line: 'Resolved only from the host shell, so they do not follow the stack to another node.' };
   }
   if (unverifiableFiles > 0) {
-    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: unverifiableFiles === 1 ? 'env file unverifiable' : `${unverifiableFiles} env files unverifiable`,
+    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: unverifiableFiles === 1 ? 'env file unverifiable' : 'env files unverifiable',
       line: 'Sencho cannot read a declared env file to check it.' };
   }
   if (!inventory.renderable) {
-    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: 'partial view',
+    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: PARTIAL_VIEW_TITLE,
       line: 'Sencho could not render the effective Compose model, so this inventory covers the authored env files only.' };
   }
   if (inventory.items.length === 0) return null;
@@ -140,7 +146,16 @@ const STATUS_GROUPS: { status: EnvItemStatus; label: string }[] = [
   { status: 'present', label: 'present' },
 ];
 
-export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName: string; onOpenFiles?: () => void }) {
+/**
+ * Keyed on stack and node so a switch remounts with empty state: the previous
+ * stack's Answer, rows and file list never show under the next stack's name.
+ */
+export default function EnvironmentPanel(props: { stackName: string; onOpenFiles?: () => void }) {
+  const { activeNode } = useNodes();
+  return <EnvironmentPanelBody key={`${activeNode?.id ?? ''}:${props.stackName}`} {...props} />;
+}
+
+function EnvironmentPanelBody({ stackName, onOpenFiles }: { stackName: string; onOpenFiles?: () => void }) {
   const { activeNode, hasCapability } = useNodes();
   const { can } = useAuth();
   const nodeId = activeNode?.id;
@@ -178,22 +193,29 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
     [fetchJsonEnvFiles],
   );
 
+  // A response only lands if no newer request has started (stack switch, retry).
+  const inventoryRequest = useRef(0);
   const fetchInventory = useCallback(async () => {
+    const request = ++inventoryRequest.current;
+    const current = () => request === inventoryRequest.current;
     setLoading(true);
     setLoadError(false);
     try {
       const res = await apiFetch(`/stacks/${stackName}/env-inventory`);
+      if (!current()) return;
       if (!res.ok) {
         setLoadError(true);
         toast.error('Failed to load the environment inventory.');
         return;
       }
-      setInventory((await res.json()) as EnvInventory);
+      const data = (await res.json()) as EnvInventory;
+      if (current()) setInventory(data);
     } catch {
+      if (!current()) return;
       setLoadError(true);
       toast.error('Failed to load the environment inventory.');
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [stackName]);
 
@@ -408,8 +430,8 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
                   icon: answer.icon,
                   title: answer.title,
                   line: answer.line,
-                  marker: inventory.renderable ? undefined : 'effective model unavailable',
-                  action: answer.fixable && onOpenFiles ? (
+                  marker: inventory.renderable || answer.title === PARTIAL_VIEW_TITLE ? undefined : 'effective model unavailable',
+                  action: answer.fixable && canEdit && onOpenFiles ? (
                     <Button type="button" size="sm" variant="outline" className="h-7 rounded-lg max-md:h-11" onClick={onOpenFiles}>
                       Edit env files
                     </Button>
@@ -431,8 +453,8 @@ export default function EnvironmentPanel({ stackName, onOpenFiles }: { stackName
                   {files.map((f, i) => (
                     <div key={`${f.rawPaths.join(',')}-${i}`} className="flex flex-wrap items-center gap-2 border-t border-muted py-2 first:border-t-0">
                       <span className="font-mono text-[12px] text-foreground/90">{f.rawPaths.join(', ')}</span>
-                      <span className={cn('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px]', EXISTENCE_TONE[f.existence])}>
-                        {f.existence}
+                      <span className={cn('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px]', f.existence === 'missing' && !f.required ? OPTIONAL_ABSENT_TONE : EXISTENCE_TONE[f.existence])}>
+                        {f.existence === 'missing' && !f.required ? 'optional, not found' : f.existence}
                       </span>
                       {f.declaringServices.length > 0 && (
                         <span className="font-mono text-[10px] text-stat-subtitle">{f.declaringServices.join(', ')}</span>
