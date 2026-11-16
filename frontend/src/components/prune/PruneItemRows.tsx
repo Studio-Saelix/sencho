@@ -33,6 +33,57 @@ function outcomeDetail(item: PrunePlanItem, outcome: PruneItemOutcome | undefine
   return item.reason;
 }
 
+function SummaryRow({ item }: { item: PrunePlanItem }) {
+  return (
+    <li className="border-t border-hairline py-1 font-mono text-[12px] text-stat-subtitle/90 first:border-t-0">
+      <span className="block truncate">
+        <span className="text-stat-subtitle/60">{item.target}</span>
+        {' · '}
+        {item.name}
+        {item.sizeBytes != null && item.sizeBytes > 0 ? ` · ${formatBytes(item.sizeBytes)}` : ''}
+      </span>
+      {(item.image?.references ?? []).filter((reference) => reference !== item.name).map((reference) => (
+        <span key={reference} className="block break-all">{reference}</span>
+      ))}
+    </li>
+  );
+}
+
+function FullRow({ item, outcome }: { item: PrunePlanItem; outcome?: PruneItemOutcome }) {
+  return (
+    <li className="border-t border-hairline py-2 first:border-t-0">
+      <div className="flex items-start gap-2 max-md:flex-col">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="break-all font-mono text-xs text-stat-value">{item.name}</span>
+            <span className={cn(
+              'font-mono text-[10px] uppercase tracking-[0.14em]',
+              item.managed ? 'text-stat-subtitle' : 'text-warning',
+            )}>
+              {item.managed ? 'managed' : 'unmanaged'}
+            </span>
+            {outcome && (
+              <span className={cn('font-mono text-[10px] uppercase tracking-[0.14em]', OUTCOME_WORD_CLASS[outcome.status])}>
+                {outcome.status}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 break-all font-mono text-[10px] text-stat-subtitle">
+            {shortId(item.id)}{item.stackName ? ` · stack ${item.stackName}` : ''}
+          </p>
+          {itemMetadata(item).map((value) => (
+            <p key={value} className="mt-0.5 break-all font-mono text-[10px] text-stat-icon">{value}</p>
+          ))}
+          <p className="mt-1 text-[11px] text-stat-subtitle">{outcomeDetail(item, outcome)}</p>
+        </div>
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-stat-value">
+          {item.sizeBytes == null ? 'size unavailable' : formatBytes(item.sizeBytes)}
+        </span>
+      </div>
+    </li>
+  );
+}
+
 export interface PruneItemRowsProps {
   items: readonly PrunePlanItem[];
   /** Outcomes of a finished run, keyed by `pruneItemKey`. */
@@ -57,55 +108,9 @@ export function PruneItemRows({ items, outcomes, detail = 'full', className }: P
   return (
     <ul data-testid="prune-item-rows" className={cn('flex flex-col', className)}>
       {items.map((item) => {
-        const outcome = outcomes?.get(pruneItemKey(item.target, item.id));
-        const sized = item.sizeBytes != null && item.sizeBytes > 0;
-        if (detail === 'summary') {
-          return (
-            <li key={`${item.target}:${item.id}`} className="border-t border-hairline py-1 font-mono text-[12px] text-stat-subtitle/90 first:border-t-0">
-              <span className="block truncate">
-                <span className="text-stat-subtitle/60">{item.target}</span>
-                {' · '}
-                {item.name}
-                {sized ? ` · ${formatBytes(item.sizeBytes ?? 0)}` : ''}
-              </span>
-              {(item.image?.references ?? []).filter((reference) => reference !== item.name).map((reference) => (
-                <span key={reference} className="block break-all">{reference}</span>
-              ))}
-            </li>
-          );
-        }
-        return (
-          <li key={`${item.target}:${item.id}`} className="border-t border-hairline py-2 first:border-t-0">
-            <div className="flex items-start gap-2 max-md:flex-col">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  <span className="break-all font-mono text-xs text-stat-value">{item.name}</span>
-                  <span className={cn(
-                    'font-mono text-[10px] uppercase tracking-[0.14em]',
-                    item.managed ? 'text-stat-subtitle' : 'text-warning',
-                  )}>
-                    {item.managed ? 'managed' : 'unmanaged'}
-                  </span>
-                  {outcome && (
-                    <span className={cn('font-mono text-[10px] uppercase tracking-[0.14em]', OUTCOME_WORD_CLASS[outcome.status])}>
-                      {outcome.status}
-                    </span>
-                  )}
-                </div>
-                <p className="mt-0.5 break-all font-mono text-[10px] text-stat-subtitle">
-                  {shortId(item.id)}{item.stackName ? ` · stack ${item.stackName}` : ''}
-                </p>
-                {itemMetadata(item).map((value) => (
-                  <p key={value} className="mt-0.5 break-all font-mono text-[10px] text-stat-icon">{value}</p>
-                ))}
-                <p className="mt-1 text-[11px] text-stat-subtitle">{outcomeDetail(item, outcome)}</p>
-              </div>
-              <span className="shrink-0 font-mono text-[11px] tabular-nums text-stat-value">
-                {item.sizeBytes == null ? 'size unavailable' : formatBytes(item.sizeBytes)}
-              </span>
-            </div>
-          </li>
-        );
+        const key = `${item.target}:${item.id}`;
+        if (detail === 'summary') return <SummaryRow key={key} item={item} />;
+        return <FullRow key={key} item={item} outcome={outcomes?.get(pruneItemKey(item.target, item.id))} />;
       })}
     </ul>
   );

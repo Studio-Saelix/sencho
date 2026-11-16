@@ -34,11 +34,18 @@ function executionSize(execution: FleetPruneNodeResult): string {
 }
 
 /** Counts the items a finished node failed or skipped, so a collapsed node still shows its exceptions. */
-function unremovedSummary(outcomes: PruneItemOutcome[]): string {
+function unremovedSummary(outcomes: PruneItemOutcome[]): string | undefined {
   const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;
   const failed = outcomes.filter((outcome) => outcome.status === 'failed').length;
-  return [failed > 0 && `${failed} failed`, skipped > 0 && `${skipped} skipped`]
-    .filter(Boolean).map((part) => ` · ${part}`).join('');
+  const parts = [failed > 0 && `${failed} failed`, skipped > 0 && `${skipped} skipped`].filter(Boolean);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+/** The quiet qualifier on a node row: its error, or the exceptions of a finished run. */
+function executionMeta(execution: FleetPruneNodeResult | undefined): string | undefined {
+  if (execution?.error) return 'error';
+  if (execution?.outcomes) return unremovedSummary(execution.outcomes);
+  return undefined;
 }
 
 function NodePlan({ plan, execution, solo }: { plan: FleetPruneNodeResult; execution?: FleetPruneNodeResult; solo: boolean }) {
@@ -61,7 +68,7 @@ function NodePlan({ plan, execution, solo }: { plan: FleetPruneNodeResult; execu
       className="border-t border-hairline first:border-t-0"
       // The only reachable node opens to its items, and its total is already the status block's answer, so it is not stated again here.
       label={solo ? plan.nodeName : `${plan.nodeName} · ${execution ? executionSize(execution) : planSize(plan)}`}
-      meta={execution?.error ? 'error' : execution?.outcomes ? unremovedSummary(execution.outcomes).replace(/^ · /, '') || undefined : undefined}
+      meta={executionMeta(execution)}
     >
       {execution?.error && (
         <p className="font-mono text-[11px] text-destructive">{execution.error}</p>

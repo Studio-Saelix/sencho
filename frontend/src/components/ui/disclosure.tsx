@@ -28,9 +28,10 @@ const TRIGGER_CLASS: Record<NonNullable<DisclosureProps['variant']>, string> = {
 };
 
 /**
- * A disclosure that starts collapsed (open with `defaultOpen`, which is read once, so a caller that needs it to follow later state should remount it with a key): a button with a chevron, `aria-expanded`
+ * A disclosure that starts collapsed: a button with a chevron, `aria-expanded`
  * and `aria-controls` wired, the height sprung through AutoHeight on the shared
- * reduced-motion transition. Use it for evidence behind a status block (the
+ * reduced-motion transition. `defaultOpen` is read once, so a caller that needs
+ * it to follow later state should remount it with a key. Use it for evidence behind a status block (the
  * Proof layer, DESIGN.md section 1.1) and for any other one-level reveal; never
  * a raw `<details>`.
  */
