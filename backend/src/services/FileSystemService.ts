@@ -486,10 +486,12 @@ export class FileSystemService {
    * The fence's refusal when any root compose file of `stackDir`, or a path a
    * link on the way to it names, sits in a directory a data restore is
    * overwriting; null otherwise, also when the check itself fails (the
-   * caller's own answer stands). Asked after the compose file was found
-   * missing or unusable; one lookup when nothing is fenced.
+   * caller's own answer stands). Asked after a step on the compose file
+   * failed; no filesystem work, and one store lookup, when nothing is fenced.
    */
   private async composeFenceRefusal(stackDir: string): Promise<DataRestoreFenceError | null> {
+    const { RestoreFenceStore } = await import('./recovery/restoreFence');
+    if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return null;
     const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
     try {
       for (const file of COMPOSE_ROOT_FILENAMES) {
@@ -503,11 +505,11 @@ export class FileSystemService {
 
   /**
    * Run `step`, which resolves or checks a stack's compose file before its
-   * read or write is admitted. When it fails (a link that dangles, no compose
-   * file at all) while the file may only be mid-swap under a data restore,
-   * the fence's refusal is thrown instead: a link into the fenced directory
-   * that dangles is not a link out of the stack, and a missing file is not
-   * gone. Otherwise the step's own error is kept.
+   * read or write is admitted. When it fails for any reason while a root
+   * compose file of the stack sits in, or links into, a directory a data
+   * restore is overwriting, the fence's refusal is thrown instead: a link
+   * that dangles there mid-swap is not a link out of the stack, and a file
+   * missing there is not gone. Otherwise the step's own error is kept.
    */
   private async composeStepUnderFences<T>(stackName: string, step: () => Promise<T>): Promise<T> {
     try {
@@ -711,9 +713,8 @@ export class FileSystemService {
         // a stack: dropping it would read as deleted to every consumer (the
         // sidebar, the scan reconcile that purges a missing stack's rows). A
         // fenced directory that never was one (a bind at the top of the
-        // compose root) is not listed: the restore recorded the stack as
-        // depending on it, or this process listed it before the fence.
-        if (await this.wasStack(item.name)) stackNames.push(item.name);
+        // compose root) is not listed; see wasStack.
+        if (await this.wasStack(item.name, stackDir)) stackNames.push(item.name);
       }
     }
 
@@ -721,7 +722,22 @@ export class FileSystemService {
     return stackNames;
   }
 
-  private async wasStack(name: string): Promise<boolean> {
+  /**
+   * Whether a fenced directory whose compose file cannot be found was a stack:
+   * a compose filename is still there as a link (one that dangles into the
+   * fenced directory mid-swap), the restore's fence names the stack (by stack
+   * or Compose project name, as a stopped container's or a recorded
+   * dependent), or this process listed it before. The last is in memory, so
+   * after a restart only the first two keep a stack listed.
+   */
+  private async wasStack(name: string, stackDir: string): Promise<boolean> {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
+      try {
+        if ((await fsPromises.lstat(path.join(stackDir, file))).isSymbolicLink()) return true;
+      } catch {
+        // Not there: try the next name.
+      }
+    }
     if (listedStacks.get(path.resolve(this.baseDir))?.has(name)) return true;
     const { RestoreFenceStore } = await import('./recovery/restoreFence');
     return RestoreFenceStore.getInstance().isStackFenced(name);
@@ -780,9 +796,10 @@ export class FileSystemService {
 
   async getStackContent(stackName: string): Promise<string> {
     try {
-      const filePath = await this.getComposeFilePath(stackName);
+      const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
       return await fsPromises.readFile(filePath, 'utf-8');
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       const code = error && typeof error === 'object' && 'code' in error
         ? (error as { code?: unknown }).code
         : undefined;
@@ -904,13 +921,13 @@ export class FileSystemService {
   > {
     // A write resolution refuses a compose file that links out of the stack
     // directory: the save would otherwise land in the shared target, which the
-    // read path deliberately follows.
-    // A link that dangles into a directory a data restore is overwriting, or
-    // the opened file missing from one, is the fence: not a link out of the
-    // stack, and not a different file.
+    // read path deliberately follows. A link that dangles into a directory a
+    // data restore is overwriting is the fence, not a link out of the stack.
     const resolved = await this.composeStepUnderFences(stackName, () => this.resolveComposeFile(stackName, 'write'));
     if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
       if (!resolved) {
+        // The opened file missing from a fenced directory may only be
+        // mid-swap: that is the fence, not a different file.
         const refusal = await this.composeFenceRefusal(this.resolveStackDir(stackName));
         if (refusal) throw refusal;
         return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };

@@ -150,8 +150,8 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       console.log(`[Templates] Cleaned up orphaned stack directory: ${stackName}`);
       await fsService.deleteStack(stackName);
     } catch (err) {
-      // A stack whose compose file is mid-swap under a data restore is not an
-      // orphaned directory to replace.
+      // A fence refusal from the compose check or the orphan deletion means a
+      // data restore holds the directory: it is not an orphan to replace.
       if (isDataRestoreFenceError(err)) {
         return res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE, rolledBack: false });
       }

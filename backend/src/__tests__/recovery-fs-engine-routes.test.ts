@@ -1862,6 +1862,9 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(save.status).toBe(409);
     expect(save.body.code).toBeUndefined();
     expect(save.body.error).toMatch(/Sencho cannot save it here/);
+    const conditional = await request(app).put('/api/stacks/web').set('Cookie', adminCookie).set('If-Match', '"1"').send({ content: 'services: {}\n' });
+    expect(conditional.status).toBe(409);
+    expect(conditional.body.code).toBeUndefined();
     expect(fs.existsSync(compose)).toBe(false);
   });
 
@@ -1886,10 +1889,12 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const { FileSystemService } = await import('../services/FileSystemService');
     await expect(FileSystemService.getInstance(nodeId).saveStackContent('web', 'services: {}\n'))
       .rejects.toMatchObject({ code: 'data_restore' });
-    const applied = await request(app).post('/api/stacks/web/fleet-snapshot-apply').set('Cookie', adminCookie)
-      .send({ files: [{ filename: 'compose.yaml', content: 'services: {}\n' }] });
-    expect(applied.status).toBe(409);
-    expect(applied.body.code).toBe('data_restore');
+    // With and without a compose.yaml to write: the stack is not taken for a new one either way.
+    for (const files of [[{ filename: 'compose.yaml', content: 'services: {}\n' }], [{ filename: '.env', content: 'A=1\n' }]]) {
+      const applied = await request(app).post('/api/stacks/web/fleet-snapshot-apply').set('Cookie', adminCookie).send({ files });
+      expect(applied.status, files[0].filename).toBe(409);
+      expect(applied.body.code, files[0].filename).toBe('data_restore');
+    }
     expect(fs.existsSync(compose)).toBe(false);
   });
 
@@ -1949,6 +1954,39 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(listed.body).toContain('other');
     const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'stop', stackNames: ['web'] });
     expect(bulk.body.results[0]).toMatchObject({ stackName: 'web', ok: false, code: 'not_found' });
+    const TrivyService = (await import('../services/TrivyService')).default;
+    const trivy = TrivyService.getInstance();
+    vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
+    (trivy as unknown as { binaryPath: string | null }).binaryPath = '/usr/bin/trivy-test';
+    try {
+      const scan = await request(app).post('/api/security/scan/stack').set('Cookie', adminCookie).send({ stackName: 'web' });
+      expect(scan.status).toBe(404);
+    } finally {
+      (trivy as unknown as { binaryPath: string | null }).binaryPath = null;
+    }
+  });
+
+  it('keeps listing a mid-swap stack the fence does not name: by its compose link, or because it was listed before the fence', async () => {
+    const root = process.env.COMPOSE_DIR as string;
+    stackDir('other');
+    // Never listed, not named by the fence: its docker-compose.yml link dangles into the fenced directory.
+    const linked = `linked-${randomUUID().slice(0, 8)}`;
+    const data = path.join(root, linked, 'data');
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'docker-compose.yml'), 'services: {}\n');
+    fs.symlinkSync(path.join('data', 'docker-compose.yml'), path.join(root, linked, 'docker-compose.yml'));
+    fencedOverwriteOf(fs.realpathSync(data), ['other']);
+    fs.renameSync(path.join(data, 'docker-compose.yml'), path.join(data, 'docker-compose.yml.aside'));
+    // Listed before the fence; then the fence, which names no stack, holds its whole directory and its plain compose file is gone.
+    const before = `before-${randomUUID().slice(0, 8)}`;
+    const beforeDir = stackDir(before);
+    expect((await request(app).get('/api/stacks').set('Cookie', adminCookie)).body).toContain(before);
+    fencedOverwriteOf(beforeDir, []);
+    fs.rmSync(path.join(beforeDir, 'compose.yaml'));
+    const listed = await request(app).get('/api/stacks').set('Cookie', adminCookie);
+    expect(listed.body).toEqual(expect.arrayContaining([linked, before, 'other']));
+    const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'stop', stackNames: [linked, before] });
+    for (const row of bulk.body.results) expect(row, row.stackName).toMatchObject({ ok: false, code: 'data_restore' });
   });
 
   it('lists a fenced directory without a compose file only when it was a stack: one the restore recorded, not a bind at the top of the compose root', async () => {
