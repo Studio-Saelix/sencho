@@ -30,7 +30,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * notification socket coming back after a drop (announcements sent while it was
  * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
  * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
- * a loaded later page's row that fails is retried like a failed read of the list. Nothing polls while the dialog is closed.
+ * a loaded later page's row that fails is retried like a failed read of the list. A read of the shown run that fails is retried until a read that began after it answers; an older answer that arrives late does not end the retries. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -89,6 +89,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // answer older than one already applied is dropped, so a slow earlier read cannot bring back a verdict a later one replaced.
   const detailReadSeq = useRef(0);
   const detailAppliedSeq = useRef(0);
+  // The newest read of the shown run that failed. What is on screen may be older than the change that read was started for, and
+  // only a read that started after it can say otherwise: an older answer that arrives late does not end the recovery.
+  const detailFailedSeq = useRef(0);
   // The same rule for reads of the list (a settle read and a readiness read).
   const listReadSeq = useRef(0);
   const listAppliedSeq = useRef(0);
@@ -117,6 +120,18 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     operationRef.current = detail;
     setOperation(detail);
   }, []);
+
+  /**
+   * Take a read of the shown run's detail that answered. The caller has already checked that no newer answer was applied. The
+   * read ends a recovery from a failed read only when it started after that read; an older answer is shown (it is the newest
+   * the hub gave) but the shown run is still read again until one that began later answers.
+   */
+  const takeDetail = useCallback((seq: number, detail: BootstrapOperationDetail) => {
+    detailAppliedSeq.current = seq;
+    if (shownRef.current === detail.id) apply(detail);
+    setPollFailures(0);
+    if (seq > detailFailedSeq.current) setReadinessReadFailed(false);
+  }, [apply]);
 
   const refreshList = useCallback(async (signal?: AbortSignal) => {
     listGeneration.current += 1;
@@ -291,10 +306,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       void client.get(operationId, controller.signal)
         .then((detail) => {
           if (epoch !== viewEpoch.current || seq < detailAppliedSeq.current) return;
-          detailAppliedSeq.current = seq;
-          if (shownRef.current === detail.id) apply(detail);
-          setPollFailures(0);
-          setReadinessReadFailed(false);
+          takeDetail(seq, detail);
           // A readiness change arrived while this poll was out, when the run was not yet enrolled for the announcement's read to follow it.
           if (readinessSignals.current !== signals && detail.state === 'enrolled') void readNowRef.current?.();
         })
@@ -363,15 +375,16 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         try {
           const detail = await client.get(shown.id, controller.signal);
           if (epoch !== viewEpoch.current || seq < detailAppliedSeq.current || shownRef.current !== detail.id) return;
-          detailAppliedSeq.current = seq;
-          apply(detail);
-          setPollFailures(0);
-          setReadinessReadFailed(false);
+          takeDetail(seq, detail);
         } catch (error: unknown) {
           if (error instanceof DOMException && error.name === 'AbortError') return;
-          // What is on screen may be stale. The shown run is read again on the slower pace until one read answers.
+          // What is on screen may be stale. The shown run is read again on the slower pace until one read that began after this
+          // one answers. A newer read that already answered makes this failure moot.
           console.warn('Bootstrap readiness could not be refreshed:', error);
-          if (epoch === viewEpoch.current) setReadinessReadFailed(true);
+          if (epoch === viewEpoch.current && seq > detailAppliedSeq.current) {
+            detailFailedSeq.current = Math.max(detailFailedSeq.current, seq);
+            setReadinessReadFailed(true);
+          }
         }
         return;
       }

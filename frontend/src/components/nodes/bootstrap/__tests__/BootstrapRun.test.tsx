@@ -1039,6 +1039,29 @@ describe('readiness announcements reach the open dialog', () => {
       warn.mockRestore();
     });
 
+    it('reads the list again when an older read answers after a newer one failed', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      announce();
+      await settle();
+      announce();
+      await settle();
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(3);
+      // The older read answers with the verdict from before the change, after the newer one failed.
+      await act(async () => { answers[0]({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(SETTLE_POLL_MS * 2);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      warn.mockRestore();
+    });
+
     it('drops a full list read that answers after a newer settle read', async () => {
       vi.useFakeTimers();
       const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
@@ -1200,6 +1223,65 @@ describe('readiness announcements reach the open dialog', () => {
           expect(result.current.operation?.readiness?.state).not.toBe('ready');
           for (let tick = 0; tick < 6; tick += 1) await settle(SETTLE_POLL_MS);
           expect(result.current.operation?.readiness?.state).toBe('not_ready');
+          warn.mockRestore();
+        });
+
+        const FAILURES: Array<{ name: string; error: () => Error }> = [
+          { name: 'a network error', error: () => new TypeError('Failed to fetch') },
+          { name: 'an HTTP 502', error: () => new BootstrapApiError('Bad gateway', 'HTTP_502', null) },
+          { name: 'an undecodable body', error: () => new SyntaxError('Unexpected token < in JSON') },
+        ];
+        for (const failure of FAILURES) {
+          it(`keeps reading the shown run when an older read answers after a newer one failed with ${failure.name}`, async () => {
+            vi.useFakeTimers();
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            const answers: Array<(detail: BootstrapOperationDetail) => void> = [];
+            // Read 1 is slow and holds the verdict from before the change; read 2 (started by the next change) fails; later reads say not ready.
+            vi.mocked(fetchBootstrapOperation)
+              .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+              .mockRejectedValueOnce(failure.error())
+              .mockResolvedValue(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) }));
+            const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+            act(() => result.current.show(enrolled('ready')));
+            await trigger.fire();
+            await settle(trigger.waitMs);
+            expect(answers).toHaveLength(1);
+            await trigger.fire();
+            await settle(trigger.waitMs);
+            expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+            await act(async () => { answers[0](enrolled('ready')); });
+            await settle(0);
+            // Nothing newer has answered, and no further event comes: the run is read again on its own until one read lands.
+            for (let tick = 0; tick < 3; tick += 1) await settle(SETTLE_POLL_MS);
+            expect(vi.mocked(fetchBootstrapOperation).mock.calls.length).toBeGreaterThanOrEqual(3);
+            expect(result.current.operation?.readiness?.state).toBe('not_ready');
+            // Once a read that began after the failed one answered, it stops.
+            const reads = vi.mocked(fetchBootstrapOperation).mock.calls.length;
+            await settle(SETTLE_POLL_MS * 4);
+            expect(vi.mocked(fetchBootstrapOperation).mock.calls.length).toBe(reads);
+            warn.mockRestore();
+          });
+        }
+
+        it('does not keep reading the run when an older read fails after a newer one answered', async () => {
+          vi.useFakeTimers();
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const fails: Array<(error: Error) => void> = [];
+          vi.mocked(fetchBootstrapOperation)
+            .mockImplementationOnce(() => new Promise((_resolve, reject) => { fails.push(reject); }))
+            .mockResolvedValue(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) }));
+          const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+          act(() => result.current.show(enrolled('ready')));
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+          expect(result.current.operation?.readiness?.state).toBe('not_ready');
+          await act(async () => { fails[0](new TypeError('Failed to fetch')); });
+          await settle(SETTLE_POLL_MS * 4);
+          // The newer read already answered, so the older failure leaves nothing to recover.
+          expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
           warn.mockRestore();
         });
 
