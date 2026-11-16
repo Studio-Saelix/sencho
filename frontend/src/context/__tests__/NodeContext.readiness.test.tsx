@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { renderHook, waitFor, act } from '@testing-library/react';
+import { announceNotificationsConnection } from '@/lib/notificationsConnection';
 import { NodeProvider, useNodes } from '../NodeContext';
 
 const apiFetch = vi.fn();
@@ -21,6 +22,8 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe('NodeContext readiness refresh', () => {
   beforeEach(() => {
+    // The socket's last announced state outlives a test; start each one with it up.
+    announceNotificationsConnection(true);
     localStorage.clear();
     apiFetch.mockReset();
   });
@@ -192,7 +195,7 @@ describe('NodeContext readiness refresh', () => {
       await waitFor(() => expect(result.current.activeNodeMeta?.capabilities).toEqual(['stacks', 'containers']));
       expect(metaCalls).toBe(1);
 
-      const connection = (connected: boolean) => act(() => { window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected } })); });
+      const connection = (connected: boolean) => act(() => { announceNotificationsConnection(connected); });
       const lists = () => apiFetch.mock.calls.filter(([path]) => path === '/nodes').length;
       const before = lists();
       connection(true);
@@ -201,6 +204,25 @@ describe('NodeContext readiness refresh', () => {
       state = 'provisional';
       connection(false);
       connection(true);
+      await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'));
+      expect(lists()).toBe(before + 1);
+    });
+
+    it('reads the list when the socket returns from a drop that began before the provider mounted', async () => {
+      localStorage.setItem('sencho-active-node', '2');
+      let state: 'provisional' | 'ready' = 'ready';
+      apiFetch.mockImplementation((path: string) => {
+        if (path === '/nodes') return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+        if (path === '/nodes/2/meta') return online();
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      });
+      act(() => { announceNotificationsConnection(false); });
+      const { result } = renderHook(() => useNodes(), { wrapper });
+      await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('ready'));
+      const lists = () => apiFetch.mock.calls.filter(([path]) => path === '/nodes').length;
+      const before = lists();
+      state = 'provisional';
+      act(() => { announceNotificationsConnection(true); });
       await waitFor(() => expect(result.current.nodes.find((node) => node.id === 2)?.readiness?.state).toBe('provisional'));
       expect(lists()).toBe(before + 1);
     });

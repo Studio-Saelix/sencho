@@ -15,6 +15,7 @@ import {
   runBootstrapPreflight,
   startBootstrapOperation,
 } from '../bootstrapApi';
+import { announceNotificationsConnection } from '@/lib/notificationsConnection';
 import { operationAnswer, operationStages, operationStateWord } from '../operationStatus';
 import { BootstrapRunStep } from '../BootstrapRunStep';
 import { OPERATION_POLL_MS, READINESS_REFRESH_DELAY_MS, SETTLE_POLL_MS, useBootstrapOperation } from '../useBootstrapOperation';
@@ -184,6 +185,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The notification socket's last announced state outlives a test; leave it up.
+  announceNotificationsConnection(true);
   vi.useRealTimers();
   vi.clearAllMocks();
 });
@@ -739,7 +742,7 @@ describe('readiness announcements reach the open dialog', () => {
     vi.useFakeTimers();
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     act(() => result.current.show(enrolled('ready')));
-    const connection = (connected: boolean) => act(() => { window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected } })); });
+    const connection = (connected: boolean) => act(() => { announceNotificationsConnection(connected); });
     // A first connection, or one that never dropped, is not a reconnect.
     connection(true);
     await settle();
@@ -751,6 +754,48 @@ describe('readiness announcements reach the open dialog', () => {
     await settle(0);
     expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
     expect(result.current.operation?.readiness?.state).toBe('provisional');
+  });
+
+  it('reads the shown run when the socket returns from a drop that began before the dialog opened', async () => {
+    vi.useFakeTimers();
+    // The socket is already down (backing off) when the dialog mounts, so this listener never sees the close.
+    act(() => { announceNotificationsConnection(false); });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(enrolled('ready')));
+    vi.mocked(fetchBootstrapOperation).mockResolvedValueOnce(enrolled('provisional'));
+    act(() => { announceNotificationsConnection(true); });
+    await settle(0);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.operation?.readiness?.state).toBe('provisional');
+
+    // One return is one read: a later connection that never dropped adds none.
+    act(() => { announceNotificationsConnection(true); });
+    await settle();
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads a dialog that was closed and reopened during the outage once the socket returns', async () => {
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(({ open }) => useBootstrapOperation({ open }), { initialProps: { open: true } });
+    act(() => result.current.show(enrolled('ready')));
+    rerender({ open: false });
+    act(() => { announceNotificationsConnection(false); });
+    rerender({ open: true });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValueOnce(enrolled('provisional'));
+    act(() => { announceNotificationsConnection(true); });
+    await settle(0);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
+    expect(result.current.operation?.readiness?.state).toBe('provisional');
+  });
+
+  it('does not read a run when the socket has not dropped, or when the dialog is closed', async () => {
+    vi.useFakeTimers();
+    act(() => { announceNotificationsConnection(false); });
+    const { result } = renderHook(() => useBootstrapOperation({ open: false }));
+    act(() => result.current.show(enrolled('ready')));
+    act(() => { announceNotificationsConnection(true); });
+    await settle();
+    expect(fetchBootstrapOperation).not.toHaveBeenCalled();
   });
 
   it('drops an older read that answers after a newer one, so it cannot bring an earlier verdict back', async () => {
@@ -844,6 +889,34 @@ describe('readiness announcements reach the open dialog', () => {
       announce();
       await settle();
       expect(listBootstrapOperations).not.toHaveBeenCalled();
+    });
+
+    it('reads the listed runs when the socket returns from a drop that began before the dialog opened', async () => {
+      vi.useFakeTimers();
+      act(() => { announceNotificationsConnection(false); });
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready'), row('b', 'ready', { nodeId: 7 })], nextCursor: null })
+        .mockResolvedValueOnce({ operations: [row('a', 'provisional'), row('b', 'ready', { nodeId: 7 })], nextCursor: null })
+        .mockResolvedValue({ operations: [row('a', 'ready'), row('b', 'ready', { nodeId: 7 })], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      expect(result.current.operations.map((entry) => operationStateWord(entry).word)).toEqual(['Ready', 'Ready']);
+      // The hub demoted the first node and announced it into the dead socket; nothing polls a Ready row.
+      await settle(SETTLE_POLL_MS * 3);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(1);
+      act(() => { announceNotificationsConnection(true); });
+      await settle(0);
+      expect(result.current.operations.map((entry) => operationStateWord(entry).word)).toEqual(['Unverified', 'Ready']);
+    });
+
+    it('does not read the list when the socket connects without having dropped', async () => {
+      vi.useFakeTimers();
+      vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [row('a', 'ready')], nextCursor: null });
+      renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      act(() => { announceNotificationsConnection(true); });
+      await settle(SETTLE_POLL_MS * 3);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(1);
     });
 
     it('reads an enrolled row on a page "Show more" added, and keeps the pages', async () => {

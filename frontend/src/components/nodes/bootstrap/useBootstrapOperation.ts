@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from '@/components/ui/toast-store';
+import { onNotificationsReturn } from '@/lib/notificationsConnection';
 import {
   BootstrapApiError,
   cancelBootstrapOperation,
@@ -355,22 +356,13 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       }, READINESS_REFRESH_DELAY_MS);
     };
     // Announcements sent while the notification socket was down are lost (a hub restart puts every ready node back to
-    // unverified without any socket to say so), so the socket coming back reads the same views once.
-    let socketWasDown = false;
-    const onConnection = (event: Event) => {
-      const connected = (event as CustomEvent<{ connected?: unknown }>).detail?.connected;
-      if (connected === false) {
-        socketWasDown = true;
-      } else if (connected === true && socketWasDown) {
-        socketWasDown = false;
-        void readNow();
-      }
-    };
+    // unverified without any socket to say so), so the socket coming back reads the same views once. That includes a
+    // drop already under way when the dialog opened, which this listener never saw begin.
     window.addEventListener('sencho:state-invalidate', onInvalidate);
-    window.addEventListener('sencho:notifications-connection', onConnection);
+    const stopWatchingSocket = onNotificationsReturn(() => { void readNow(); });
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
-      window.removeEventListener('sencho:notifications-connection', onConnection);
+      stopWatchingSocket();
       if (timer !== null) clearTimeout(timer);
       controller.abort();
     };

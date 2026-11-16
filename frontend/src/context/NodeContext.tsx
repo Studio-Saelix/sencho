@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { apiFetch } from '@/lib/api';
 import { beginNodeSession, markMilestone } from '@/lib/hydrationTiming';
+import { onNotificationsReturn } from '@/lib/notificationsConnection';
 import type { Capability } from '@/lib/capabilities';
 import type { BootstrapOperationState, NodeReadinessState } from '@/components/nodes/bootstrap/types';
 
@@ -241,23 +242,14 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     };
 
     // Announcements sent while the notification socket was down are lost, so its return reads the list once.
-    let socketWasDown = false;
-    const handleConnection = (event: Event) => {
-      const connected = (event as CustomEvent<{ connected?: unknown }>).detail?.connected;
-      if (connected === false) socketWasDown = true;
-      else if (connected === true && socketWasDown) {
-        socketWasDown = false;
-        refreshNodes();
-      }
-    };
+    const stopWatchingSocket = onNotificationsReturn(() => { refreshNodes(); });
 
     window.addEventListener('node-not-found', handleNodeNotFound);
     window.addEventListener('sencho:state-invalidate', handleStateInvalidate);
-    window.addEventListener('sencho:notifications-connection', handleConnection);
     return () => {
       window.removeEventListener('node-not-found', handleNodeNotFound);
       window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
-      window.removeEventListener('sencho:notifications-connection', handleConnection);
+      stopWatchingSocket();
       if (readinessTimer !== null) clearTimeout(readinessTimer);
     };
   }, [refreshNodes]);
