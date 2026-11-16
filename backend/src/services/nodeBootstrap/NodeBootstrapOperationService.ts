@@ -12,7 +12,7 @@ import {
   type NodeBootstrapOperationTransition,
 } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
-import { PilotEnrollmentAttempts } from '../PilotEnrollmentAttempts';
+import { PilotEnrollmentAttempts, type PilotConnectFailure } from '../PilotEnrollmentAttempts';
 import { PilotTunnelManager } from '../PilotTunnelManager';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
 import {
@@ -241,12 +241,17 @@ interface AgentLogRead {
 }
 type AgentLogReader = () => Promise<AgentLogRead>;
 
+/** A failure that names no cause from the agent's log, so nothing is recorded for the readiness check. */
+function refused(failure: StepFailure): { failure: StepFailure; cause: null } {
+  return { failure, cause: null };
+}
+
 /** The failure a line of the agent's log named, as the operator reads it. The line itself is the step's detail. */
 function connectFailure(finding: AgentLogFinding, hubUrl: string): StepFailure {
   switch (finding.cause) {
     case 'dns_unresolved':
       return new StepFailure('failed', 'ENROLLMENT_DNS_FAILED',
-        `The Pilot started, but the server cannot resolve the hub's name: the Pilot's log shows a lookup error for ${hubUrl}. Fix the server's DNS (or the hub URL the enrollment carries, the Public URL setting), then retry; a retry mints a new enrollment.`,
+        `The Pilot started, but the server cannot resolve the hub's name: the Pilot's log shows a name lookup error while it dialled ${hubUrl}. Fix the server's DNS (or the hub URL the enrollment carries, the Public URL setting), then retry; a retry mints a new enrollment.`,
         finding.evidence);
     case 'tls_untrusted':
       return new StepFailure('failed', 'ENROLLMENT_TLS_FAILED',
@@ -888,10 +893,14 @@ export class NodeBootstrapOperationService {
     });
     if (outcome === 'cancelled') throw new RunCancelled();
     if (outcome === 'timeout') {
-      const failure = await this.enrollmentTimeout(nodeId, op.enrollment_expires_at, context.hubUrl, readLog);
+      const { failure, cause } = await this.enrollmentTimeout(nodeId, op.enrollment_expires_at, context.hubUrl, readLog);
       // A cancel that arrived while the log was read stops the run as cancelled, as one during the wait does.
       if (signal.aborted) throw new RunCancelled();
-      throw failure;
+      // The Pilot connected while the log was read: it is enrolled, and what the log said is history, so it is not kept.
+      if (!this.deps.tunnels.hasActiveTunnel(nodeId)) {
+        if (cause) this.deps.attempts.recordRefusal(nodeId, cause, this.deps.now());
+        throw failure;
+      }
     }
     this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; the hub now checks that it is ready for deployments.');
   }
@@ -903,39 +912,37 @@ export class NodeBootstrapOperationService {
    * certificate the agent does not trust, a connection answered with an HTTP status instead of a WebSocket upgrade). When
    * the log cannot be read, or names nothing the hub recognizes, the cause stays unknown and the message says which.
    */
-  private async enrollmentTimeout(nodeId: number, expiresAt: number | null, hubUrl: string, readLog: AgentLogReader): Promise<StepFailure> {
+  private async enrollmentTimeout(nodeId: number, expiresAt: number | null, hubUrl: string, readLog: AgentLogReader): Promise<{ failure: StepFailure; cause: PilotConnectFailure | null }> {
     const refusal = this.deps.attempts.lastRefusal(nodeId);
     if (refusal?.reason === 'enrollment_used') {
-      return new StepFailure('failed', 'ENROLLMENT_USED',
-        'The Pilot reached the hub, but the enrollment it presented was no longer valid: it was already used, or a newer enrollment replaced it (a compose file started earlier keeps its old token). Retry, which mints a new enrollment and rewrites the file.');
+      return refused(new StepFailure('failed', 'ENROLLMENT_USED',
+        'The Pilot reached the hub, but the enrollment it presented was no longer valid: it was already used, or a newer enrollment replaced it (a compose file started earlier keeps its old token). Retry, which mints a new enrollment and rewrites the file.'));
     }
     if (refusal?.reason === 'credential_expired') {
-      return new StepFailure('failed', 'PILOT_CREDENTIAL_EXPIRED',
-        'The Pilot reached the hub with a saved credential that had expired (kept in the sencho-agent-data volume by an earlier enrollment). Retry, which mints a new enrollment for the Pilot to fall back to; if it still does not connect, `docker logs sencho-agent` on the server says why.');
+      return refused(new StepFailure('failed', 'PILOT_CREDENTIAL_EXPIRED',
+        'The Pilot reached the hub with a saved credential that had expired (kept in the sencho-agent-data volume by an earlier enrollment). Retry, which mints a new enrollment for the Pilot to fall back to; if it still does not connect, `docker logs sencho-agent` on the server says why.'));
     }
     if (refusal?.reason === 'enrollment_expired') {
-      return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
-        'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.');
+      return refused(new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.'));
     }
     // Nothing the hub signed was refused, so what the Pilot says about itself is the only evidence there is.
     const log = await readLog();
-    if (log.finding) {
-      this.deps.attempts.recordRefusal(nodeId, log.finding.cause, this.deps.now());
-      return connectFailure(log.finding, hubUrl);
-    }
+    if (log.finding) return { failure: connectFailure(log.finding, hubUrl), cause: log.finding.cause };
     // The wait ends on a timer set to the expiry, which can fire a moment before it.
     const ranOut = expiresAt !== null && this.deps.now() >= expiresAt - ENROLLMENT_EXPIRY_TOLERANCE_MS;
-    if (ranOut) {
-      return new StepFailure('failed', 'ENROLLMENT_EXPIRED',
-        'The enrollment expired (it is valid for 15 minutes) before any Pilot used it, and no connection attempt reached the hub. If the host was slow to start the Pilot, retry, which mints a new enrollment; if it keeps happening, `docker logs sencho-agent` on the server names why the Pilot cannot reach the hub.');
-    }
     const seen = log.read
       ? 'its log shows no failure the hub recognizes, so the hub cannot tell why. '
       : 'the hub could not read the Pilot\'s log, so it cannot tell why. ';
-    return new StepFailure('failed', 'ENROLLMENT_NOT_CONNECTED',
+    if (ranOut) {
+      return refused(new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        `The enrollment expired (it is valid for 15 minutes) before any Pilot used it, and no connection attempt reached the hub, and ${seen}`
+        + 'If the host was slow to start the Pilot, retry, which mints a new enrollment; if it keeps happening, `docker logs sencho-agent` on the server names why the Pilot cannot reach the hub.'));
+    }
+    return refused(new StepFailure('failed', 'ENROLLMENT_NOT_CONNECTED',
       `The Pilot started, but no connection attempt from it reached the hub before the wait ended, and ${seen}`
       + 'The cause is on the server: `docker logs sencho-agent` names it (a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade). '
-      + 'Fix it, then retry; a retry mints a new enrollment.');
+      + 'Fix it, then retry; a retry mints a new enrollment.'));
   }
 
   /**

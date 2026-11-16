@@ -224,6 +224,62 @@ describe('NodeContext readiness refresh', () => {
       }
     });
 
+    it('caps the wait between retries at 30 seconds', async () => {
+      vi.useFakeTimers();
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const hubState = demotedHub('rejected fetch', 99);
+        renderHook(() => useNodes(), { wrapper });
+        await advance(0);
+        const before = lists();
+        hubState.demote();
+        act(() => { TRIGGERS[0].fire(); });
+        // Attempts at 0.5s, then waits of 5, 10, 20 and 30 seconds, and 30 seconds again: the cap holds.
+        await advance(500 + 5_000 + 10_000 + 20_000 + 30_000 + 100);
+        expect(lists() - before).toBe(5);
+        await advance(30_000);
+        expect(lists() - before).toBe(6);
+        await advance(30_000);
+        expect(lists() - before).toBe(7);
+      } finally {
+        error.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not read again for a signal that another read already answered while the retry waited', async () => {
+      vi.useFakeTimers();
+      try {
+        const answers: Array<() => void> = [];
+        let state: 'provisional' | 'ready' = 'ready';
+        let held = false;
+        apiFetch.mockImplementation((path: string) => {
+          if (path !== '/nodes') return Promise.resolve({ ok: true, json: async () => ({}) });
+          if (!held) return Promise.resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] });
+          return new Promise((resolve) => { answers.push(() => resolve({ ok: true, json: async () => [{ ...LOCAL_NODE }, bootstrapped(state)] })); });
+        });
+        renderHook(() => useNodes(), { wrapper });
+        await advance(0);
+        const before = lists();
+        held = true;
+        state = 'provisional';
+        const announce = () => window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'node-readiness', nodeId: 2 } }));
+        // The first announcement's read is out when a second one arrives, so a second read starts behind it.
+        act(() => { announce(); });
+        await advance(500);
+        act(() => { announce(); });
+        await advance(500);
+        expect(answers).toHaveLength(2);
+        // The first answers (it began before the second signal, so one is still owed), then the second answers for both.
+        await act(async () => { answers[0](); });
+        await act(async () => { answers[1](); });
+        await advance(60_000);
+        expect(lists() - before).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('stops retrying when the provider unmounts', async () => {
       vi.useFakeTimers();
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});

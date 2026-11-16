@@ -214,8 +214,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
           reread.set(operation.id, await client.get(operation.id, signal));
         } catch (error: unknown) {
           if (error instanceof DOMException && error.name === 'AbortError') return;
-          // A run that no longer exists will not answer on the next tick either.
-          if (error instanceof BootstrapApiError && (error.code === 'OPERATION_NOT_FOUND' || error.code === 'HTTP_404')) return;
+          // A run that no longer exists, or a session that ended, will not answer on the next tick either.
+          if (error instanceof BootstrapApiError && (error.code === 'OPERATION_NOT_FOUND' || error.code === 'HTTP_404' || error.code === 'HTTP_401')) return;
           unreadRows = true;
         }
       }));
@@ -430,9 +430,10 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         : kind === 'release' ? await client.release(operationId) : await verify(operationId);
       viewEpoch.current += 1;
       if (kind === 'verify' && readinessSignals.current !== signals) {
-        // The hub announced a readiness change while the check ran, and a read may already have shown it: this answer is
-        // older than that, so it is not put on screen (a Ready from before a disconnect must not come back). The shown
-        // run is read once more instead, which is the newest the hub has.
+        // The hub announced a readiness change while the check ran. That may be the check's own announcement (it announces
+        // when it starts and when it records) or a later change such as a dropped tunnel, and this answer cannot say which, so
+        // it is not put on screen (a Ready from before a disconnect must not come back). The shown run is read instead, which
+        // is the newest the hub has; if that read fails, the shown run is read again every few seconds until one answers.
         void readNowRef.current?.();
       } else if (shownRef.current === detail.id) {
         apply(detail);

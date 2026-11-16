@@ -840,15 +840,18 @@ describe('bootstrap operations: enrollment and retry', () => {
 
   describe('a Pilot that never reached the hub: what its own log says', () => {
     const hubName = 'hub.example.com';
-    const withLog = (h: Harness, log: string | (() => never) | { exit: number }) => {
+    type LogScript = string | (() => never) | { exit: number } | { timedOut: true } | { transport: 'CONNECTION_LOST' };
+    const withLog = (h: Harness, log: LogScript) => {
       h.host.override = (command) => {
         if (!command.includes('docker logs')) return undefined;
         if (typeof log === 'function') return log();
+        if (typeof log === 'object' && 'timedOut' in log) return { exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: true, error: null };
+        if (typeof log === 'object' && 'transport' in log) return { exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: false, error: 'CONNECTION_LOST' };
         if (typeof log === 'object') return { exitCode: log.exit, stdout: '', stderr: 'Error: No such container', truncated: false, timedOut: false, error: null };
         return { exitCode: 0, stdout: log, stderr: '', truncated: false, timedOut: false, error: null };
       };
     };
-    const run = async (log: string | (() => never) | { exit: number }) => {
+    const run = async (log: LogScript) => {
       const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
       withLog(h, log);
       const { request } = approve(h);
@@ -901,8 +904,10 @@ describe('bootstrap operations: enrollment and retry', () => {
     it.each([
       ['the container has no log to read', { exit: 1 }],
       ['the log command cannot run', () => { throw new Error('connection reset'); }],
+      ['the log command times out', { timedOut: true }],
+      ['the transport fails the command', { transport: 'CONNECTION_LOST' }],
     ])('keeps the cause unknown, and says the log could not be read, when %s', async (_label, log) => {
-      const { stopped, nodeId } = await run(log as { exit: number });
+      const { stopped, nodeId } = await run(log as LogScript);
       expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_NOT_CONNECTED', message: expect.stringMatching(/the hub could not read the Pilot's log, so it cannot tell why/) });
       expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
       cleanUp(nodeId);
@@ -943,6 +948,38 @@ describe('bootstrap operations: enrollment and retry', () => {
       cleanUp(stopped.nodeId as number);
     });
 
+    it('settles as enrolled, and keeps no cause, when the Pilot connects while the log is being read', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      h.host.override = (command) => (command.includes('docker logs')
+        ? gate.then(() => ({ exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo EAI_AGAIN ${hubName}`, stderr: '', truncated: false, timedOut: false, error: null }))
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(true), { timeout: 10_000 });
+      const nodeId = h.service.get(op.id).nodeId as number;
+      // The tunnel registers and the hub forgets earlier history, as it does for an accepted connection, before the log answers.
+      h.tunnels.connect(nodeId);
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+      release();
+      await h.service.settled();
+      expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', active: false, error: null });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
+    it('says the log could not be read when the enrollment also ran out', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs: 1 });
+      withLog(h, { exit: 1 });
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await h.service.settled();
+      const stopped = h.service.get(op.id);
+      expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_EXPIRED', message: expect.stringMatching(/hub could not read the Pilot's log[\s\S]*docker logs sencho-agent/) });
+      cleanUp(stopped.nodeId as number);
+    });
+
     it('ends as cancelled when the operator cancels while the log is being read', async () => {
       const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
       let release: () => void = () => undefined;
@@ -958,6 +995,8 @@ describe('bootstrap operations: enrollment and retry', () => {
       await h.service.settled();
       const cancelled = h.service.get(op.id);
       expect(cancelled.state).toBe('cancelled');
+      // A run that ended as cancelled leaves no cause behind for the node.
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(cancelled.nodeId as number)).toBeNull();
       cleanUp(cancelled.nodeId as number);
     });
   });

@@ -16,6 +16,7 @@ import {
   startBootstrapOperation,
 } from '../bootstrapApi';
 import { announceNotificationsConnection } from '@/lib/notificationsConnection';
+import { BootstrapApiError } from '../bootstrapApi';
 import { operationAnswer, operationStages, operationStateWord } from '../operationStatus';
 import { BootstrapRunStep } from '../BootstrapRunStep';
 import { OPERATION_POLL_MS, READINESS_REFRESH_DELAY_MS, SETTLE_POLL_MS, useBootstrapOperation } from '../useBootstrapOperation';
@@ -1176,6 +1177,32 @@ describe('readiness announcements reach the open dialog', () => {
           expect(result.current.operation?.readiness?.state).toBe('ready');
         });
 
+        it('keeps reading the run when the read that replaced a discarded Verify answer fails, until the newest verdict lands', async () => {
+          vi.useFakeTimers();
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          let answerVerify: (detail: BootstrapOperationDetail) => void = () => {};
+          const verify = vi.fn(() => new Promise<BootstrapOperationDetail>((resolve) => { answerVerify = resolve; }));
+          vi.mocked(fetchBootstrapOperation)
+            .mockResolvedValueOnce(enrolled('provisional'))
+            .mockRejectedValueOnce(new Error('network down'))
+            .mockResolvedValue(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) }));
+          const { result } = renderHook(() => useBootstrapOperation({
+            open: true,
+            api: { get: fetchBootstrapOperation, list: listBootstrapOperations, cancel: cancelBootstrapOperation, release: releaseBootstrapOperation, verify },
+          }));
+          act(() => result.current.show(enrolled('not_ready', { readiness: readiness('not_ready', NOT_READY_GATES) })));
+          act(() => { void result.current.verify(); });
+          await trigger.fire();
+          await settle(trigger.waitMs);
+          await act(async () => { answerVerify(enrolled('ready')); });
+          await settle(0);
+          // The answer was not shown and its replacement read failed: the run says what the last read said, not Ready.
+          expect(result.current.operation?.readiness?.state).not.toBe('ready');
+          for (let tick = 0; tick < 6; tick += 1) await settle(SETTLE_POLL_MS);
+          expect(result.current.operation?.readiness?.state).toBe('not_ready');
+          warn.mockRestore();
+        });
+
         it('reads a run again when its poll was answered after the change, before the run was enrolled', async () => {
           vi.useFakeTimers();
           let answerPoll: (detail: BootstrapOperationDetail) => void = () => {};
@@ -1196,6 +1223,32 @@ describe('readiness announcements reach the open dialog', () => {
         });
       });
     }
+
+    it('does not keep reading a later page\'s row whose run is gone or whose session ended', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const page1 = { operations: [row('first', 'ready'), stoppedRow('held-1')], nextCursor: 'c1' };
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce(page1)
+        .mockResolvedValueOnce({ operations: [row('later', 'ready', { nodeId: 8 })], nextCursor: null })
+        .mockResolvedValue(page1);
+      vi.mocked(fetchBootstrapOperation).mockImplementation(async (id: string) => {
+        if (id === 'later') throw new BootstrapApiError('The run does not exist.', 'OPERATION_NOT_FOUND', null);
+        return row(id, 'ready');
+      });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      await act(async () => { await result.current.loadMore(); });
+      announce();
+      await settle();
+      const reads = vi.mocked(fetchBootstrapOperation).mock.calls.length;
+      expect(reads).toBe(1);
+      // Nothing is owed: a run that is gone will not answer on the next tick either.
+      await settle(SETTLE_POLL_MS * 4);
+      expect(vi.mocked(fetchBootstrapOperation).mock.calls.length).toBe(reads);
+      expect(words(result.current.operations)).toEqual(['first:Ready', 'held-1:Stopped partway', 'later:Ready']);
+      warn.mockRestore();
+    });
 
     it('puts a Verify answer on screen when no readiness change arrived while the check ran', async () => {
       vi.useFakeTimers();

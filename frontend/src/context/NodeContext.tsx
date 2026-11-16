@@ -255,7 +255,8 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         if (retryTimer !== null) return;
         retryTimer = setTimeout(() => {
           retryTimer = null;
-          catchUp();
+          // Another read answered for the signal while this one waited.
+          if (readinessSignalsCoveredRef.current < readinessSignalsSeenRef.current) catchUp();
         }, retryDelay);
         retryDelay = Math.min(retryDelay * 2, READINESS_RETRY_MAX_MS);
       });
