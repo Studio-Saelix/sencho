@@ -13,7 +13,7 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import { conflictChip, exposureAnswer, proofLine, type ExposureAnswer } from '@/lib/detectedExposure';
+import { conflictChip, exposureAnswer, proofLine, runtimeUnchecked, type ExposureAnswer } from '@/lib/detectedExposure';
 import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
 import type {
   DetectedPath, DetectedServiceExposure, ExposureIntent, ServiceTunnelExposure, TunnelConnector,
@@ -135,15 +135,20 @@ function TunnelBadges({ connector, tunnels }: { connector?: TunnelConnector; tun
 
 const ANSWER_ICON = { warning: Globe, success: Check, neutral: Info } as const;
 
+const RUNTIME_DETAIL = 'A running container may reach more than the file says.';
+
 /** One Answer for the tab. An unreadable intent list is said before any
- *  conflict, since no intent can be judged without it. */
-function ExposureAnswerBlock({ answer, intentsUnavailable, refreshing, onRetry }: {
-  answer: ExposureAnswer | null;
-  intentsUnavailable: boolean;
+ *  conflict, since no intent can be judged without it. The runtime marker is
+ *  carried in both cases, so a missing runtime is never shown as a clean result. */
+function ExposureAnswerBlock({ state, runtimeUnread, refreshing, onRetry }: {
+  state: ExposureAnswer | 'intent-unavailable' | null;
+  runtimeUnread: boolean;
   refreshing: boolean;
   onRetry: () => void;
 }) {
-  if (intentsUnavailable) {
+  if (state === null) return null;
+  const runtime = runtimeUnread ? { marker: 'runtime not checked', detail: RUNTIME_DETAIL } : { marker: undefined, detail: null };
+  if (state === 'intent-unavailable') {
     return (
       <StatusPath
         stages={[]}
@@ -153,6 +158,7 @@ function ExposureAnswerBlock({ answer, intentsUnavailable, refreshing, onRetry }
           icon: ShieldQuestion,
           title: 'intent unavailable',
           line: 'The exposure intent could not be read, so no conflict can be judged.',
+          ...runtime,
           action: (
             <Button type="button" size="sm" variant="outline" disabled={refreshing} className="h-7 rounded-lg max-md:h-11" onClick={onRetry}>
               Retry
@@ -162,19 +168,11 @@ function ExposureAnswerBlock({ answer, intentsUnavailable, refreshing, onRetry }
       />
     );
   }
-  if (!answer) return null;
   return (
     <StatusPath
       stages={[]}
       data-testid="networking-answer"
-      answer={{
-        tone: answer.tone,
-        icon: ANSWER_ICON[answer.tone],
-        title: answer.title,
-        line: answer.line,
-        detail: answer.marker ? 'A running container may reach more than the file says.' : null,
-        marker: answer.marker,
-      }}
+      answer={{ tone: state.tone, icon: ANSWER_ICON[state.tone], title: state.title, line: state.line, ...runtime }}
     />
   );
 }
@@ -330,6 +328,10 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     );
   }
 
+  const answerInputs = facts.services.map(svc => ({
+    detected: svc.detected,
+    effectiveIntent: intentFor(svc.name) ?? stackIntent,
+  }));
   const drift = facts.drift;
   const hasDrift = drift.runtimeOnlyAttachments.length > 0 || drift.foreignNetworkAttachments.length > 0
     || drift.declaredButUnused.length > 0 || drift.missingFromRuntime.length > 0;
@@ -356,12 +358,8 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
       </div>
 
       <ExposureAnswerBlock
-        answer={intentsUnavailable ? null : exposureAnswer(facts.services.map(svc => ({
-          name: svc.name,
-          detected: svc.detected,
-          effectiveIntent: intentFor(svc.name) ?? stackIntent,
-        })))}
-        intentsUnavailable={intentsUnavailable}
+        state={intentsUnavailable ? 'intent-unavailable' : exposureAnswer(answerInputs)}
+        runtimeUnread={runtimeUnchecked(answerInputs)}
         refreshing={refreshing}
         onRetry={() => setReloadKey(k => k + 1)}
       />
@@ -439,7 +437,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
         <div className={LABEL_CLASS}>services</div>
         <div className="flex flex-col gap-2">
           {facts.services.map(svc => {
-            const proof = svc.detected ? proofLine(svc.detected, { runtimeNote: false }) : null;
+            const proof = svc.detected ? proofLine(svc.detected, { includeRuntimeNote: false }) : null;
             return (
               <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
               <div className="flex items-center gap-2">
@@ -495,7 +493,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
             <span className="font-mono text-[11px]">runtime unavailable, showing the declared model only</span>
           </div>
         ) : !hasDrift ? (
-          <div className={cn(CARD_CLASS, 'border-success/30 bg-success/[0.06] flex items-center gap-2 text-success')}>
+          <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex items-center gap-2 text-stat-subtitle')}>
             <Globe className="h-4 w-4" strokeWidth={1.5} />
             <span className="font-mono text-[11px] uppercase tracking-wide">runtime matches compose</span>
           </div>

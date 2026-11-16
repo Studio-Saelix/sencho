@@ -541,6 +541,41 @@ describe('StackNetworkingPanel: one answer', () => {
     await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.length).toBeGreaterThan(before));
   });
 
+  it('keeps the runtime marker on the intent-unavailable Answer and ranks it above a conflict', async () => {
+    const d = detected({
+      runtimeChecked: false,
+      conflicts: { internal: [{ level: 'conflict', reason: 'host-port', paths: [0] }], 'same-node': [], lan: [], 'reverse-proxy': [], public: [], temporary: [], unknown: [] },
+    });
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url === '/stacks/web/networking') return Promise.resolve(jsonRes(facts({ services: [service('api', { detected: d })] })));
+      return Promise.resolve(jsonRes({ error: 'boom' }, false));
+    });
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('intent unavailable');
+    expect(answer).not.toHaveTextContent('conflict with');
+    expect(answer).toHaveTextContent('runtime not checked');
+  });
+
+  it('judges each service against its own intent before the stack intent', async () => {
+    const hostPublished = () => detected({
+      conflicts: { internal: [{ level: 'conflict', reason: 'host-port', paths: [0] }], 'same-node': [], lan: [], 'reverse-proxy': [], public: [], temporary: [], unknown: [] },
+    });
+    mockApi(facts({ services: [service('api', { detected: hostPublished() })] }), [{ service: '', intent: 'internal' }, { service: 'api', intent: 'public' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    expect(await screen.findByTestId('networking-answer')).toHaveTextContent('matches intent');
+  });
+
+  it('never claims a match for a partly determined service, and keeps one toned block', async () => {
+    mockApi(facts({ services: [service('api', { detected: detected({ incomplete: ['runtime-ports-missing'] }) })] }), [{ service: '', intent: 'public' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    const answer = await screen.findByTestId('networking-answer');
+    expect(answer).toHaveTextContent('partly determined');
+    expect(answer).not.toHaveTextContent('matches intent');
+    // The clean drift card is muted, so the Answer is the only toned block.
+    expect(screen.getByText('runtime matches compose').closest('div')?.className).not.toContain('bg-success');
+  });
+
   it('renders cannot render as the Answer', async () => {
     mockApi(facts({ renderable: false, renderError: 'bad yaml' }), []);
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
