@@ -862,7 +862,7 @@ export default function StackAnatomyPanel({
       )}
       {envInventoryEnabled && (
         <TabsContent value="environment" className="flex flex-col flex-1 min-h-0 mt-0">
-          <EnvironmentPanel stackName={stackName} />
+          <EnvironmentPanel stackName={stackName} onOpenFiles={onOpenFiles} />
         </TabsContent>
       )}
       {composeLabelsEnabled && (

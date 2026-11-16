@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { Lock, Copy, Info, TriangleAlert, ShieldAlert, X, ChevronUp, ChevronDown } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Lock, Copy, Info, TriangleAlert, ShieldAlert, X, ChevronUp, ChevronDown, CircleCheck, type LucideIcon } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
@@ -10,43 +10,91 @@ import { useAuth } from '@/context/AuthContext';
 import {
   buildEnvChecklistMarkdown,
   SOURCE_LABELS,
-  STATUS_LABELS,
   type EnvInventory,
   type EnvInventoryItem,
   type EnvItemStatus,
   type EnvFileExistence,
 } from '@/lib/envChecklist';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { StatusPath } from '@/components/ui/status-path';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import type { StatusTone } from '@/lib/statusTone';
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
-const STATUS_META: Record<EnvItemStatus, { tone: string }> = {
-  present: { tone: 'border-muted bg-card/40 text-stat-subtitle' },
-  missing: { tone: 'border-destructive/40 bg-destructive/[0.06] text-destructive' },
-  duplicate: { tone: 'border-warning/40 bg-warning/[0.06] text-warning' },
-  unpersisted: { tone: 'border-warning/40 bg-warning/[0.06] text-warning' },
-  unused: { tone: 'border-info/40 bg-info/[0.06] text-info' },
-};
-
 const EXISTENCE_TONE: Record<EnvFileExistence, string> = {
   present: 'border-muted bg-card/40 text-stat-subtitle',
   missing: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
   unverifiable: 'border-warning/40 bg-warning/[0.06] text-warning',
 };
+// An optional file that is absent is not a problem (the Answer ignores it), so
+// its chip stays quiet instead of contradicting a green Answer.
+const OPTIONAL_ABSENT_TONE = EXISTENCE_TONE.present;
 
-/** Local status pill. Env statuses are not vuln-scan severities, so this is its own badge. */
-function EnvironmentStatusBadge({ status }: { status: EnvItemStatus }) {
+const PARTIAL_VIEW_TITLE = 'partial view';
+
+interface EnvAnswerModel {
+  tone: StatusTone;
+  title: string;
+  line: string;
+  icon: LucideIcon;
+  /** True when the fix lives in a file the operator edits. */
+  fixable: boolean;
+}
+
+/**
+ * The one Answer for the tab: the loudest problem across variables and env
+ * files. Counts per status live in the group headers below, so the Answer
+ * names the problem and what it does, never the tally again. The partial-view
+ * state carries its reason in its own line, so it has no extra marker.
+ */
+function envAnswer(inventory: EnvInventory): EnvAnswerModel | null {
+  const { missing, duplicate, unpersisted } = inventory.summary;
+  const missingFiles = inventory.envFiles.filter(f => f.existence === 'missing' && f.required).length;
+  const unverifiableFiles = inventory.envFiles.filter(f => f.existence === 'unverifiable').length;
+  if (missing > 0) {
+    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: 'missing variables',
+      line: 'Referenced by the Compose file but set nowhere. Compose substitutes an empty string, or refuses to start when the variable is required.' };
+  }
+  if (missingFiles > 0) {
+    return { tone: 'destructive', icon: ShieldAlert, fixable: true, title: missingFiles === 1 ? 'env file missing' : 'env files missing',
+      line: 'A declared env file cannot be found, so the variables it carries never reach the service.' };
+  }
+  if (duplicate > 0) {
+    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: 'duplicate variables',
+      line: 'Defined in two places, which can resolve to different values.' };
+  }
+  if (unpersisted > 0) {
+    return { tone: 'warning', icon: TriangleAlert, fixable: true, title: 'shell-only variables',
+      line: 'Resolved only from the host shell, so they do not follow the stack to another node.' };
+  }
+  if (unverifiableFiles > 0) {
+    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: unverifiableFiles === 1 ? 'env file unverifiable' : 'env files unverifiable',
+      line: 'Sencho cannot read a declared env file to check it.' };
+  }
+  if (!inventory.renderable) {
+    return { tone: 'warning', icon: TriangleAlert, fixable: false, title: PARTIAL_VIEW_TITLE,
+      line: 'Sencho could not render the effective Compose model, so this inventory covers the authored env files only.' };
+  }
+  if (inventory.items.length === 0) return null;
+  return { tone: 'success', icon: CircleCheck, fixable: false, title: 'resolved', line: 'Every referenced variable is set, and no variable is defined twice.' };
+}
+
+function EnvironmentSkeleton() {
   return (
-    <span
-      data-testid="env-status-badge"
-      data-status={status}
-      className={cn('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px]', STATUS_META[status].tone)}
-    >
-      {STATUS_LABELS[status]}
-    </span>
+    <div data-testid="environment-skeleton" role="status" className="flex flex-col gap-4">
+      <span className="sr-only">Loading environment</span>
+      <Skeleton className="h-14 w-full" />
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+    </div>
   );
 }
 
@@ -81,7 +129,6 @@ function ItemRow({ item }: { item: EnvInventoryItem }) {
         {item.required && (
           <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">required</span>
         )}
-        <EnvironmentStatusBadge status={item.status} />
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[10px] text-stat-subtitle">
         <span>source: {sources}</span>
@@ -99,7 +146,16 @@ const STATUS_GROUPS: { status: EnvItemStatus; label: string }[] = [
   { status: 'present', label: 'present' },
 ];
 
-export default function EnvironmentPanel({ stackName }: { stackName: string }) {
+/**
+ * Keyed on stack and node so a switch remounts with empty state: the previous
+ * stack's Answer, rows and file list never show under the next stack's name.
+ */
+export default function EnvironmentPanel(props: { stackName: string; onOpenFiles?: () => void }) {
+  const { activeNode } = useNodes();
+  return <EnvironmentPanelBody key={`${activeNode?.id ?? ''}:${props.stackName}`} {...props} />;
+}
+
+function EnvironmentPanelBody({ stackName, onOpenFiles }: { stackName: string; onOpenFiles?: () => void }) {
   const { activeNode, hasCapability } = useNodes();
   const { can } = useAuth();
   const nodeId = activeNode?.id;
@@ -107,6 +163,7 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [copying, setCopying] = useState(false);
+  const { showBusy } = useVisualBusy(loading && !inventory);
 
   // Project env file selection
   const projectEnvCapable = hasCapability('project-env-files');
@@ -136,22 +193,33 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
     [fetchJsonEnvFiles],
   );
 
+  // A response only lands if no newer request has started in this instance
+  // (a project-env save refetching while an earlier fetch is in flight).
+  const inventoryRequest = useRef(0);
+  // An unmounted instance (stack or node switch) invalidates its in-flight request,
+  // so it cannot raise an error toast over the next stack.
+  useEffect(() => () => { inventoryRequest.current++; }, []);
   const fetchInventory = useCallback(async () => {
+    const request = ++inventoryRequest.current;
+    const current = () => request === inventoryRequest.current;
     setLoading(true);
     setLoadError(false);
     try {
       const res = await apiFetch(`/stacks/${stackName}/env-inventory`);
+      if (!current()) return;
       if (!res.ok) {
         setLoadError(true);
         toast.error('Failed to load the environment inventory.');
         return;
       }
-      setInventory((await res.json()) as EnvInventory);
+      const data = (await res.json()) as EnvInventory;
+      if (current()) setInventory(data);
     } catch {
+      if (!current()) return;
       setLoadError(true);
       toast.error('Failed to load the environment inventory.');
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [stackName]);
 
@@ -336,29 +404,46 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
       )}
 
       {loadError ? (
-        <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3">
-          <ShieldAlert className="h-4 w-4 text-destructive" strokeWidth={1.5} />
-          <span className="font-mono text-[11px] text-destructive">Could not load the environment inventory.</span>
-        </div>
-      ) : loading || !inventory ? (
-        <div className="py-3 font-mono text-[11px] text-stat-subtitle">Loading environment…</div>
+        <StatusPath
+          stages={[]}
+          answer={{
+            tone: 'destructive',
+            icon: ShieldAlert,
+            title: 'could not load',
+            line: 'Could not load the environment inventory.',
+            action: (
+              <Button type="button" size="sm" variant="outline" data-testid="env-retry-btn" disabled={loading} className="h-7 rounded-lg max-md:h-11" onClick={() => void fetchInventory()}>
+                Retry
+              </Button>
+            ),
+          }}
+        />
+      ) : !inventory ? (
+        showBusy ? <EnvironmentSkeleton /> : null
       ) : (
         <>
-          {!inventory.renderable && (
-            <div className={cn(CARD_CLASS, 'border-warning/40 bg-warning/[0.06] text-warning flex items-center gap-2')}>
-              <TriangleAlert className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-              <span className="font-mono text-[11px]">Effective model unavailable. Showing the authored env surface only.</span>
-            </div>
-          )}
-
-          <div className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-stat-subtitle')}>
-            <span>{inventory.summary.total} vars</span>
-            {inventory.summary.missing > 0 && <span className="text-destructive">{inventory.summary.missing} missing</span>}
-            {inventory.summary.duplicate > 0 && <span className="text-warning">{inventory.summary.duplicate} duplicate</span>}
-            {inventory.summary.unpersisted > 0 && <span className="text-warning">{inventory.summary.unpersisted} shell-only</span>}
-            {inventory.summary.unused > 0 && <span className="text-info">{inventory.summary.unused} unused</span>}
-            {inventory.summary.likelySecret > 0 && <span>{inventory.summary.likelySecret} likely secret</span>}
-          </div>
+          {(() => {
+            const answer = envAnswer(inventory);
+            if (!answer) return null;
+            return (
+              <StatusPath
+                stages={[]}
+                data-testid="env-answer"
+                answer={{
+                  tone: answer.tone,
+                  icon: answer.icon,
+                  title: answer.title,
+                  line: answer.line,
+                  marker: inventory.renderable || answer.title === PARTIAL_VIEW_TITLE ? undefined : 'effective model unavailable',
+                  action: answer.fixable && canEdit && onOpenFiles ? (
+                    <Button type="button" size="sm" variant="outline" className="h-7 rounded-lg max-md:h-11" onClick={onOpenFiles}>
+                      Edit env files
+                    </Button>
+                  ) : undefined,
+                }}
+              />
+            );
+          })()}
 
           {(() => {
             // Declared env files plus anything not cleanly present, so a missing or
@@ -372,8 +457,8 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
                   {files.map((f, i) => (
                     <div key={`${f.rawPaths.join(',')}-${i}`} className="flex flex-wrap items-center gap-2 border-t border-muted py-2 first:border-t-0">
                       <span className="font-mono text-[12px] text-foreground/90">{f.rawPaths.join(', ')}</span>
-                      <span className={cn('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px]', EXISTENCE_TONE[f.existence])}>
-                        {f.existence}
+                      <span className={cn('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px]', f.existence === 'missing' && !f.required ? OPTIONAL_ABSENT_TONE : EXISTENCE_TONE[f.existence])}>
+                        {f.existence === 'missing' && !f.required ? 'optional, not found' : f.existence}
                       </span>
                       {f.declaringServices.length > 0 && (
                         <span className="font-mono text-[10px] text-stat-subtitle">{f.declaringServices.join(', ')}</span>
@@ -395,8 +480,8 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
               const items = inventory.items.filter(i => i.status === status);
               if (items.length === 0) return null;
               return (
-                <section key={status}>
-                  <div className={cn(LABEL_CLASS, 'mb-1.5')}>{label} · {items.length}</div>
+                <section key={status} aria-labelledby={`env-group-${status}`}>
+                  <div id={`env-group-${status}`} className={cn(LABEL_CLASS, 'mb-1.5')}>{label} · {items.length}</div>
                   <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                     {items.map(item => <ItemRow key={item.key} item={item} />)}
                   </div>
