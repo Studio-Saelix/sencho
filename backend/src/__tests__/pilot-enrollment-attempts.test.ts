@@ -119,6 +119,13 @@ describe('hub record of refused Pilot attempts', () => {
     expect(attempts().lastRefusal(nodeId)).toBeNull();
   });
 
+  it.each(['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const)('forgets a failure the agent\'s log named (%s) when a new enrollment is minted, like a refusal', (reason) => {
+    attempts().recordRefusal(nodeId, reason);
+    expect(attempts().lastRefusal(nodeId)).toMatchObject({ reason });
+    mintPilotEnrollmentToken(nodeId);
+    expect(attempts().lastRefusal(nodeId)).toBeNull();
+  });
+
   describe('accepting a connection', () => {
     const accepting = { handleUpgrade: (_req: unknown, _socket: unknown, _head: unknown, done: (ws: unknown) => void) => done({ send: () => undefined, close: () => undefined }) };
     const upgrade = () => {
@@ -133,6 +140,17 @@ describe('hub record of refused Pilot attempts', () => {
         attempts().recordRefusal(nodeId, 'enrollment_used');
         await upgrade();
         expect(register).toHaveBeenCalledTimes(1);
+        expect(attempts().lastRefusal(nodeId)).toBeNull();
+      } finally {
+        register.mockRestore();
+      }
+    });
+
+    it.each(['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const)('forgets a failure the agent\'s log named (%s) once the hub has registered the node\'s tunnel', async (reason) => {
+      const register = vi.spyOn(PilotTunnelManager.getInstance(), 'registerTunnel').mockResolvedValue(undefined);
+      try {
+        attempts().recordRefusal(nodeId, reason);
+        await upgrade();
         expect(attempts().lastRefusal(nodeId)).toBeNull();
       } finally {
         register.mockRestore();

@@ -190,10 +190,13 @@ describe('readiness gates', () => {
 
   it('names its own cause when the Pilot could not be asked', () => {
     const cases = [
-      [readinessWithoutReport({ kind: 'not_connected' }), 'tunnel', 'fail', /no refused attempt from it reached the hub/],
+      [readinessWithoutReport({ kind: 'not_connected' }), 'tunnel', 'fail', /the hub does not know why: no refused attempt from it reached the hub/],
       [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_expired' }), 'tunnel', 'fail', /refused, because its enrollment had expired/],
       [readinessWithoutReport({ kind: 'not_connected', refusal: 'enrollment_used' }), 'tunnel', 'fail', /already used or replaced/],
       [readinessWithoutReport({ kind: 'not_connected', refusal: 'credential_expired' }), 'tunnel', 'fail', /refused, because its saved credential had expired/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'dns_unresolved' }), 'tunnel', 'fail', /cannot resolve the hub's name/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'tls_untrusted' }), 'tunnel', 'fail', /does not trust the hub's TLS certificate/],
+      [readinessWithoutReport({ kind: 'not_connected', refusal: 'upgrade_blocked' }), 'tunnel', 'fail', /answered its WebSocket upgrade with a plain HTTP response/],
       [readinessWithoutReport({ kind: 'unsupported', status: 404 }), 'contract', 'fail', /does not provide the readiness report/],
       [readinessWithoutReport({ kind: 'refused', status: 403 }), 'contract', 'fail', /refused/],
       [readinessWithoutReport({ kind: 'malformed' }), 'contract', 'unknown', /not a readiness report/],
@@ -204,6 +207,18 @@ describe('readiness gates', () => {
       const blocking = result.gates.at(-1);
       expect(blocking).toMatchObject({ id, status });
       expect(blocking?.summary).toMatch(summary);
+    }
+  });
+
+  it('gives each cause the agent\'s log named its own summary and remediation, none of them the generic one', () => {
+    const causes = ['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const;
+    const gates = causes.map((refusal) => readinessWithoutReport({ kind: 'not_connected', refusal }).gates.at(-1));
+    const generic = readinessWithoutReport({ kind: 'not_connected' }).gates.at(-1);
+    expect(new Set(gates.map((gate) => gate?.summary)).size).toBe(3);
+    expect(new Set(gates.map((gate) => gate && gate.status !== 'pass' ? gate.remediation : '')).size).toBe(3);
+    for (const gate of gates) {
+      expect(gate?.summary).not.toBe(generic?.summary);
+      expect(gate?.summary).toMatch(/its own log, read when the bootstrap waited for it/);
     }
   });
 });

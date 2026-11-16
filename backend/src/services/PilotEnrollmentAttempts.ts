@@ -13,12 +13,24 @@
  *
  * Only a token whose signature the hub verified is recorded, so nobody can
  * plant a refusal on a node by presenting a forged token.
+ *
+ * A second kind of record comes from the host. When the bootstrap's wait for
+ * the Pilot ends with nothing having reached the hub, the run reads the tail of
+ * the agent's own log over its SSH session and names a cause only when a line
+ * in it matches a known failure (a name that does not resolve, a certificate the
+ * agent does not trust, a connection answered with an HTTP status instead of a
+ * WebSocket upgrade). That is what the agent said about itself, recorded so the
+ * readiness check can repeat it for the disconnected node, and a log that names
+ * nothing records nothing.
  */
 
 export type PilotRefusal = 'enrollment_expired' | 'enrollment_used' | 'credential_expired';
 
+/** What the agent's log said stopped it from reaching the hub. */
+export type PilotConnectFailure = 'dns_unresolved' | 'tls_untrusted' | 'upgrade_blocked';
+
 export interface PilotRefusalRecord {
-  reason: PilotRefusal;
+  reason: PilotRefusal | PilotConnectFailure;
   at: number;
 }
 
@@ -34,8 +46,8 @@ export class PilotEnrollmentAttempts {
     return PilotEnrollmentAttempts.instance;
   }
 
-  /** Keep the newest refusal for the node. */
-  public recordRefusal(nodeId: number, reason: PilotRefusal, at: number = Date.now()): void {
+  /** Keep the newest refusal, or failure the agent's log named, for the node. */
+  public recordRefusal(nodeId: number, reason: PilotRefusal | PilotConnectFailure, at: number = Date.now()): void {
     this.refusals.delete(nodeId);
     this.refusals.set(nodeId, { reason, at });
     if (this.refusals.size > MAX_NODES) {

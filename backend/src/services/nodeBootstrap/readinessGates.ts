@@ -1,4 +1,4 @@
-import type { PilotRefusal } from '../PilotEnrollmentAttempts';
+import type { PilotConnectFailure, PilotRefusal } from '../PilotEnrollmentAttempts';
 import { REQUIRED_PILOT_CAPABILITIES, type PilotReadinessReport, type ReadinessCheckId, type ReportedCheck } from '../../pilot/readinessContract';
 
 /**
@@ -71,7 +71,7 @@ export interface ReadinessExpectation {
 
 /** Why no report could be judged. Each one maps to its own gate so the operator sees the cause, not a generic failure. */
 export type ReadinessFailure =
-  | { kind: 'not_connected'; refusal?: PilotRefusal }
+  | { kind: 'not_connected'; refusal?: PilotRefusal | PilotConnectFailure }
   | { kind: 'unsupported'; status: number }
   | { kind: 'refused'; status: number }
   | { kind: 'malformed' }
@@ -123,10 +123,11 @@ export function sameHubUrl(a: string, b: string): boolean {
 const REGENERATE_ENROLLMENT = 'Regenerate the enrollment (Settings → Nodes → Edit node → Regenerate enrollment token), put the new token in the sencho-agent compose file on the host, run `docker compose up -d`, then verify again.';
 
 /**
- * A tunnel that is down. The hub knows why only when the Pilot reached it and was refused with a credential the hub
- * signed; otherwise the cause (name resolution, TLS or CA trust, a proxy that drops the WebSocket upgrade) is on the host.
+ * A tunnel that is down. The hub knows why when the Pilot reached it and was refused with a credential the hub signed, or
+ * when the bootstrap read the agent's own log and a line in it named the failure. Otherwise the cause (name resolution,
+ * TLS or CA trust, a proxy that drops the WebSocket upgrade) is on the host and stays unknown.
  */
-function notConnected(refusal: PilotRefusal | undefined): ReadinessGate {
+function notConnected(refusal: PilotRefusal | PilotConnectFailure | undefined): ReadinessGate {
   switch (refusal) {
     case 'enrollment_expired':
       return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its enrollment had expired.', REGENERATE_ENROLLMENT);
@@ -134,8 +135,17 @@ function notConnected(refusal: PilotRefusal | undefined): ReadinessGate {
       return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its enrollment was already used or replaced by a newer one.', REGENERATE_ENROLLMENT);
     case 'credential_expired':
       return notPass('tunnel', 'fail', 'The Pilot is not connected: the last attempt the hub saw from it was refused, because its saved credential had expired.', REGENERATE_ENROLLMENT);
+    case 'dns_unresolved':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its own log, read when the bootstrap waited for it, showed that the server cannot resolve the hub\'s name.',
+        'On the server, check that the hub\'s host name resolves (`getent hosts <name>`), fix its DNS or the hub URL in SENCHO_PRIMARY_URL, run `docker compose up -d` in the sencho-agent project, then verify again.');
+    case 'tls_untrusted':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its own log, read when the bootstrap waited for it, showed that it does not trust the hub\'s TLS certificate.',
+        'For a hub with its own CA, mount the CA file in the sencho-agent project and point SENCHO_PILOT_CA_FILE at it; otherwise fix the certificate (expired, a missing intermediate, or a host name it does not cover). Then run `docker compose up -d` there and verify again.');
+    case 'upgrade_blocked':
+      return notPass('tunnel', 'fail', 'The Pilot is not connected: its own log, read when the bootstrap waited for it, showed that the server at the hub URL answered its WebSocket upgrade with a plain HTTP response.',
+        'Make the reverse proxy in front of the hub pass WebSocket upgrades for /api/pilot/tunnel (or correct SENCHO_PRIMARY_URL if it names another server), then verify again.');
     default:
-      return notPass('tunnel', 'fail', 'The Pilot is not connected to the hub, and no refused attempt from it reached the hub, so the hub cannot tell why.',
+      return notPass('tunnel', 'fail', 'The Pilot is not connected to the hub, and the hub does not know why: no refused attempt from it reached the hub, and no failure from the agent\'s own log has been recorded.',
         'On the host, run `docker logs sencho-agent`: it names a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade. Fix that, then verify again.');
   }
 }

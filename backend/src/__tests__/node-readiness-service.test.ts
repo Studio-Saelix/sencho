@@ -711,6 +711,26 @@ describe('node readiness: why a tunnel is down', () => {
     expect(gate && gate.status !== 'pass' ? gate.remediation : '').not.toMatch(/Retry/);
   });
 
+  it.each([
+    ['dns_unresolved', /cannot resolve the hub's name/, /getent hosts/],
+    ['tls_untrusted', /does not trust the hub's TLS certificate/, /SENCHO_PILOT_CA_FILE/],
+    ['upgrade_blocked', /answered its WebSocket upgrade with a plain HTTP response/, /pass WebSocket upgrades/],
+  ] as const)('names a failure the agent\'s log showed (%s) on a disconnected Verify, with its own remediation', async (reason, summary, remediation) => {
+    const attempts = new PilotEnrollmentAttempts();
+    const { nodeId } = setup();
+    const named = new NodeReadinessService({ db, tunnels: new FakeTunnels(), fetch: vi.fn(), changed: vi.fn(), attempts });
+    attempts.recordRefusal(nodeId, reason);
+    const view = await named.verify(nodeId, AUDIT);
+    const gate = view?.gates.at(-1);
+    expect(view?.state).toBe('not_ready');
+    expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(summary) });
+    expect(gate && gate.status !== 'pass' ? gate.remediation : '').toMatch(remediation);
+    // A failure that was cleared (a new enrollment, or a connection the hub accepted) is history: back to unknown.
+    attempts.clear(nodeId);
+    const cleared = await named.verify(nodeId, AUDIT);
+    expect(cleared?.gates.at(-1)).toMatchObject({ id: 'tunnel', summary: expect.stringMatching(/does not know why/) });
+  });
+
   it('reads the refusals the tunnel handler records, through the services\' default wiring', async () => {
     const { nodeId } = setup();
     // No `attempts` injected: the readiness service and the handler must share the hub's one record.
@@ -728,7 +748,7 @@ describe('node readiness: why a tunnel is down', () => {
     const { nodeId, service } = setup();
     const view = await service.verify(nodeId, AUDIT);
     const gate = view?.gates.at(-1);
-    expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(/cannot tell why/) });
+    expect(gate).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(/does not know why/) });
     expect(gate && gate.status !== 'pass' ? gate.remediation : '').toMatch(/docker logs sencho-agent/);
   });
 });
