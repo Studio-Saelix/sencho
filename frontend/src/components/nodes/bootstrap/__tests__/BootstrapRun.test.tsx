@@ -1062,6 +1062,86 @@ describe('readiness announcements reach the open dialog', () => {
       warn.mockRestore();
     });
 
+    it('keeps reading the list when a settle read that started after an announcement answers after the read it started failed', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        // The first announcement's read fails, which leaves the list owed a read.
+        .mockRejectedValueOnce(new Error('network down'))
+        // The settle read starts after the second announcement and before that announcement's own read, so it finds no change
+        // since it began; it is slow.
+        .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+        // The second announcement's read fails.
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      announce();
+      await settle();
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
+      await settle(SETTLE_POLL_MS - 100);
+      announce();
+      await settle(100);
+      expect(answers).toHaveLength(1);
+      await settle(READINESS_REFRESH_DELAY_MS);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(4);
+      // The settle read answers with the verdict from before the change, after the newer read failed: it is shown, and it does not end the retries.
+      await act(async () => { answers[0]({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(0);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Ready');
+      await settle(SETTLE_POLL_MS * 2);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(5);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      warn.mockRestore();
+    });
+
+    it('keeps reading the list when a full read that started before a failed readiness read answers after it', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        // A full read (after an action elsewhere) is slow.
+        .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+        // The announcement's read fails while it is out.
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      // The announcement comes first, so the full read starts after it and finds no change since it began.
+      announce();
+      act(() => { void result.current.refreshList(); });
+      await settle();
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(3);
+      await act(async () => { answers[0]({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(0);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Ready');
+      await settle(SETTLE_POLL_MS * 2);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(4);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      warn.mockRestore();
+    });
+
+    it('ends the retries when the read that answers began after the failed one', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue({ operations: [row('a', 'ready')], nextCursor: null });
+      renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      announce();
+      await settle();
+      await settle(SETTLE_POLL_MS);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(3);
+      await settle(SETTLE_POLL_MS * 3);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(3);
+      warn.mockRestore();
+    });
+
     it('drops a full list read that answers after a newer settle read', async () => {
       vi.useFakeTimers();
       const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
@@ -1313,7 +1393,8 @@ describe('readiness announcements reach the open dialog', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const answers: Array<(detail: BootstrapOperationDetail) => void> = [];
       // The announcement lands just before the poll starts, so the poll's own check finds no change since it began and starts no
-      // read; the announcement's read (half a second later) fails. The poll then answers Ready, which needs no further reads.
+      // read; the announcement's read (half a second later) fails. The poll then answers Ready: that answer is shown, but the poll
+      // began before the failed read, so it does not end the recovery, and the run is read again until a read that began after the failure answers.
       vi.mocked(fetchBootstrapOperation)
         .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
         .mockRejectedValueOnce(new TypeError('Failed to fetch'))

@@ -16,6 +16,7 @@ import { handlePilotTunnel } from '../websocket/pilotTunnel';
 import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
 import { PilotTunnelCapacityError, PilotTunnelManager } from '../services/PilotTunnelManager';
 import { mintPilotEnrollmentToken } from '../helpers/pilotEnrollment';
+import { NodeReadinessService } from '../services/nodeBootstrap/NodeReadinessService';
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -155,6 +156,46 @@ describe('hub record of refused Pilot attempts', () => {
       } finally {
         register.mockRestore();
       }
+    });
+
+    // The hub holds no SSH key once a run ends and sees nothing of an attempt that never reaches it, so what the agent's log
+    // named while the run waited is history once the Pilot has connected. A disconnected Verify afterwards says it does not
+    // know why (and points to `docker logs sencho-agent`) instead of repeating a cause the hub cannot re-observe.
+    describe('a Pilot that connected and later is not connected', () => {
+      const GENERIC = /does not know why/;
+      const verifyDisconnected = async (readinessAttempts: PilotEnrollmentAttempts) => {
+        const db = DatabaseService.getInstance();
+        db.markNodeReadinessProvisional(nodeId, crypto.randomUUID(), 'https://hub.example.com', Date.now());
+        const tunnels = Object.assign(new EventEmitter(), { hasActiveTunnel: () => false, getLoopbackUrl: () => null, isTunnelConfidential: () => true });
+        const service = new NodeReadinessService({ tunnels: tunnels as never, fetch: vi.fn(), changed: vi.fn(), attempts: readinessAttempts });
+        try {
+          const view = await service.verify(nodeId, { username: 'admin', ip: '127.0.0.1', method: 'POST', path: '/verify' });
+          return view?.gates.at(-1);
+        } finally {
+          service.stop();
+        }
+      };
+
+      it.each(['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const)('does not repeat a cause the log named while the run waited (%s) once the tunnel was accepted', async (reason) => {
+        const register = vi.spyOn(PilotTunnelManager.getInstance(), 'registerTunnel').mockResolvedValue(undefined);
+        try {
+          attempts().recordRefusal(nodeId, reason);
+          // Named while the run waited, so a Verify before any connection still says it.
+          expect(await verifyDisconnected(attempts())).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(/its own log, read when the bootstrap waited for it/) });
+          await upgrade();
+          expect(await verifyDisconnected(attempts())).toMatchObject({ id: 'tunnel', status: 'fail', summary: expect.stringMatching(GENERIC) });
+        } finally {
+          register.mockRestore();
+        }
+      });
+
+      it.each(['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const)('does not repeat a cause (%s) after a hub restart or a new enrollment', async (reason) => {
+        attempts().recordRefusal(nodeId, reason);
+        // A restarted hub starts with an empty record.
+        expect(await verifyDisconnected(new PilotEnrollmentAttempts())).toMatchObject({ summary: expect.stringMatching(GENERIC) });
+        mintPilotEnrollmentToken(nodeId);
+        expect(await verifyDisconnected(attempts())).toMatchObject({ summary: expect.stringMatching(GENERIC) });
+      });
     });
 
     it('keeps a refusal when the tunnel was not registered (the gateway is at its limit)', async () => {
