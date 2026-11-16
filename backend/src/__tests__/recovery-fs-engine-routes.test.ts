@@ -1903,6 +1903,8 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
   });
 
   it('logs a fence check on a missing compose file that fails, and answers it as unproven instead of as a stack that is gone', async () => {
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    vi.spyOn(ImageUpdateService, 'isChecksEnabled').mockReturnValue(true);
     const dir = stackDir('web');
     fencedOverwriteOf(dataDir('other'), ['other']);
     expect((await request(app).get('/api/stacks').set('Cookie', adminCookie)).body).toContain('web');
@@ -1917,6 +1919,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     for (const [name, res] of Object.entries({
       read: await request(app).get('/api/stacks/web').set('Cookie', adminCookie),
       services: await request(app).get('/api/stacks/web/services').set('Cookie', adminCookie),
+      preview: await request(app).get('/api/stacks/web/update-preview').set('Cookie', adminCookie),
     })) {
       expect(res.status, name).toBe(409);
       expect(res.body.code, name).toBe('data_restore');

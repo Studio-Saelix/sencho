@@ -489,6 +489,8 @@ export class FileSystemService {
    * overwriting; null otherwise. A check that fails while a fence is held
    * proves nothing either way, so it is logged and answered as the fence's
    * `unproven` refusal: a compose file Sencho could not check is not gone.
+   * That refusal names the first held fence, which need not be the one the
+   * stack touches, since the failed check could not say which.
    * Asked after a step on the compose file failed; no filesystem work, and
    * one store lookup, when nothing is fenced.
    */
@@ -519,7 +521,9 @@ export class FileSystemService {
    * compose file of the stack sits in, or links into, a directory a data
    * restore is overwriting, the fence's refusal is thrown instead: a link
    * that dangles there mid-swap is not a link out of the stack, and a file
-   * missing there is not gone. Otherwise the step's own error is kept.
+   * missing there is not gone. A check that could not run while a fence is
+   * held is answered as the fence's `unproven` refusal. Otherwise the step's
+   * own error is kept.
    */
   private async composeStepUnderFences<T>(stackName: string, step: () => Promise<T>): Promise<T> {
     try {
