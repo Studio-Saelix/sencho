@@ -3,10 +3,12 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Masthead, SectionHead, StateDot } from '@/components/mobile/mobile-ui';
 import { attentionLabel, countCurrentTargets, hasKnownPosture, PORTFOLIO_EMPTY_COPY, portfolioMastheadState, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
 import { cn } from '@/lib/utils';
+import { BusyButton } from '@/components/ui/busy-button';
 import { IconBusyButton } from '@/components/ui/icon-busy-button';
 import { formatRelativeTime } from '@/lib/utils';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 import { openPortfolioApplication } from '../gitops/portfolio/portfolioNavigation';
+import { useAttentionSteps, byUrgency } from '../gitops/portfolio/useAttentionSteps';
 import { useGitOpsPortfolio } from '../gitops/portfolio/useGitOpsPortfolio';
 import { WorkplaceActions } from '../gitops/portfolio/WorkplaceActions';
 import { GitOpsApplicationView } from '../gitops/application/GitOpsApplicationView';
@@ -21,9 +23,10 @@ import { useGitOpsApplicationSelection } from '../gitops/application/useGitOpsAp
  * re-skin of hub-aggregated evidence, never a second fetch path. Summary and
  * attention stay in the masthead, search and mode filters stay reachable, and
  * attention reasons stay inline under each application name, because a narrow
- * viewport is exactly where triage cannot afford to hide them. Consequential
- * operations stay where they always were: on the owning detail surfaces the
- * application view hands off to. The application view itself is the same
+ * viewport is exactly where triage cannot afford to hide them. A row that needs
+ * an operator carries the same one-tap step as the desktop attention queue
+ * (Retry, Resume, Review update), from the same hook; anything else opens the
+ * owning surface in place. The application view itself is the same
  * read-only component the desktop workplace uses, reflowed to one column.
  * The Git source sheet opens in place over both the list and an application view.
  */
@@ -40,6 +43,7 @@ function MobileGitOpsBody({ headerActions }: { headerActions?: ReactNode }) {
   const portfolio = useGitOpsPortfolio();
   const { data, loading, error, staleSince } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();
+  const steps = useAttentionSteps();
   // Rows the merge cap dropped and nodes that failed to answer are the same
   // fact to an operator: this list does not show everything.
   const coveragePartial = data?.truncated === true || data?.coverage.some(entry => entry.state !== 'ok') === true;
@@ -206,7 +210,7 @@ function MobileGitOpsBody({ headerActions }: { headerActions?: ReactNode }) {
             <SectionHead right={String(data.applications.length)}>Applications</SectionHead>
             <ul className="divide-y divide-card-border/60 rounded-lg border border-card-border bg-card">
               {data.applications.map(row => (
-                <MobileGitOpsRow key={row.id} row={row} />
+                <MobileGitOpsRow key={row.id} row={row} steps={steps} />
               ))}
             </ul>
             {(data.nextCursor !== null || portfolio.pageLoaded > 1) && (
@@ -243,7 +247,9 @@ function MobileGitOpsBody({ headerActions }: { headerActions?: ReactNode }) {
   );
 }
 
-function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
+function MobileGitOpsRow({ row, steps }: { row: GitOpsPortfolioRow; steps: ReturnType<typeof useAttentionSteps> }) {
+  const urgent = row.attention.length > 0 ? [...row.attention].sort(byUrgency)[0] : null;
+  const next = urgent !== null ? steps.stepFor(row, urgent) : null;
   const currentTargetCount = countCurrentTargets(row.targets);
   const postureTone: Readonly<Record<string, 'destructive' | 'warning' | 'brand' | 'success'>> = {
     failed: 'destructive',
@@ -294,6 +300,21 @@ function MobileGitOpsRow({ row }: { row: GitOpsPortfolioRow }) {
           {row.evidence.unknown ? ' · evidence unknown' : ''}
         </span>
       </button>
+      {next && (
+        // The step that clears the most urgent reason runs here, as on the desktop queue;
+        // the row itself still opens the application.
+        <div className="px-3 pb-2.5 pl-8">
+          <BusyButton
+            variant="outline"
+            size="sm"
+            className="min-h-11 px-4 font-mono text-[11px] uppercase tracking-[0.12em]"
+            pending={steps.isPending(row.id)}
+            onClick={() => { void steps.run(row.id, next.run); }}
+          >
+            {next.label}
+          </BusyButton>
+        </div>
+      )}
     </li>
   );
 }
