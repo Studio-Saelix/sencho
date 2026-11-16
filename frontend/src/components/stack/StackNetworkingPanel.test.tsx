@@ -518,6 +518,7 @@ describe('StackNetworkingPanel: one answer', () => {
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
     await screen.findByText('web_backend');
     expect(screen.queryByTestId('networking-answer')).not.toBeInTheDocument();
+    expect(screen.queryByText(/not reported for this service/)).not.toBeInTheDocument();
   });
 
   it('states the runtime caveat once, not per service', async () => {
@@ -538,7 +539,8 @@ describe('StackNetworkingPanel: one answer', () => {
     expect(answer).toHaveTextContent('1 service has exposure that could not be fully determined');
     const notes = screen.getAllByText(/^runtime not checked, so a running container may reach more than the file says\.$/);
     expect(notes).toHaveLength(1);
-    expect(notes[0].closest('div[class*="flex-col"]')?.textContent).toContain('job');
+    expect(within(screen.getByTestId('networking-service-job')).getByText(/^runtime not checked/)).toBeInTheDocument();
+    expect(within(screen.getByTestId('networking-service-api')).queryByText(/runtime not checked/)).not.toBeInTheDocument();
   });
 
   it('names a service the node reported no exposure for when others have detection', async () => {
@@ -549,7 +551,18 @@ describe('StackNetworkingPanel: one answer', () => {
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
     await screen.findByTestId('networking-answer');
     const note = screen.getByText('exposure not reported for this service.');
-    expect(note.closest('div[class*="flex-col"]')?.textContent).toContain('legacy');
+    expect(within(screen.getByTestId('networking-service-legacy')).getByText('exposure not reported for this service.')).toBeInTheDocument();
+    expect(note).toBeInTheDocument();
+  });
+
+  it('names an unread service beside one the node reported nothing for', async () => {
+    mockApi(facts({ services: [
+      service('job', { detected: detected({ runtimeChecked: false }) }),
+      service('legacy'),
+    ] }), [{ service: '', intent: 'internal' }]);
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByTestId('networking-answer');
+    expect(within(screen.getByTestId('networking-service-job')).getByText(/^runtime not checked/)).toBeInTheDocument();
   });
 
   it('says the intent is unreadable on the Answer with a Retry that refetches', async () => {

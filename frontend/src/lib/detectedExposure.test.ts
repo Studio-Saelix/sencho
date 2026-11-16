@@ -298,7 +298,8 @@ describe('exposureAnswer', () => {
     expect(runtimeUncheckedMixed([read, unread])).toBe(true);
     expect(runtimeUncheckedMixed([unread, unread])).toBe(false);
     expect(runtimeUncheckedMixed([read, read])).toBe(false);
-    expect(runtimeUncheckedMixed([unread, {}])).toBe(false);
+    // A service with no detection is not itself unread, so the unread one must be named.
+    expect(runtimeUncheckedMixed([unread, {}])).toBe(true);
   });
 
   it('omits the runtime note from the proof line only when asked', () => {

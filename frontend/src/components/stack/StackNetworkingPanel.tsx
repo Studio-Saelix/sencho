@@ -332,7 +332,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     detected: svc.detected,
     effectiveIntent: intentFor(svc.name) ?? stackIntent,
   }));
-  // Each partly determined service is counted by the Answer, so its row must name it.
+  // Unread-runtime services are counted by the Answer, so when not every service is unread each row must say so.
   const nameUnreadRuntime = runtimeUncheckedMixed(answerInputs);
   const drift = facts.drift;
   const hasDrift = drift.runtimeOnlyAttachments.length > 0 || drift.foreignNetworkAttachments.length > 0
@@ -443,7 +443,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
               ? proofLine(svc.detected, { includeRuntimeNote: nameUnreadRuntime })
               : answerInputs.some(input => input.detected) ? 'exposure not reported for this service.' : null;
             return (
-              <div key={svc.name} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
+              <div key={svc.name} data-testid={`networking-service-${svc.name}`} className={cn(CARD_CLASS, 'border-muted bg-card/40 flex flex-col gap-1.5')}>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-[12px] text-foreground/90">{svc.name}</span>
                 {svc.networkMode && <span className="rounded border border-warning/40 bg-warning/[0.08] px-1 py-0.5 font-mono text-[10px] text-warning">network_mode: {svc.networkMode}</span>}
