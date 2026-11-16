@@ -159,9 +159,10 @@ describe('hub record of refused Pilot attempts', () => {
     });
 
     // The hub holds no SSH key once a run ends and sees nothing of an attempt that never reaches it, so what the agent's log
-    // named while the run waited is history once the Pilot has connected. A disconnected Verify afterwards says it does not
-    // know why (and points to `docker logs sencho-agent`) instead of repeating a cause the hub cannot re-observe.
-    describe('a Pilot that connected and later is not connected', () => {
+    // named while the run waited is history once the Pilot has connected, the hub restarted (the record is in memory) or a new
+    // enrollment was minted. A disconnected Verify afterwards says it does not know why (and points to `docker logs
+    // sencho-agent`) instead of repeating a cause the hub cannot re-observe.
+    describe('a Pilot that connected and later is not connected, or whose record was lost or reset', () => {
       const GENERIC = /does not know why/;
       const verifyDisconnected = async (readinessAttempts: PilotEnrollmentAttempts) => {
         const db = DatabaseService.getInstance();
@@ -191,6 +192,8 @@ describe('hub record of refused Pilot attempts', () => {
 
       it.each(['dns_unresolved', 'tls_untrusted', 'upgrade_blocked'] as const)('does not repeat a cause (%s) after a hub restart or a new enrollment', async (reason) => {
         attempts().recordRefusal(nodeId, reason);
+        // Named while the record holds it.
+        expect(await verifyDisconnected(attempts())).toMatchObject({ summary: expect.stringMatching(/its own log, read when the bootstrap waited for it/) });
         // A restarted hub starts with an empty record.
         expect(await verifyDisconnected(new PilotEnrollmentAttempts())).toMatchObject({ summary: expect.stringMatching(GENERIC) });
         mintPilotEnrollmentToken(nodeId);

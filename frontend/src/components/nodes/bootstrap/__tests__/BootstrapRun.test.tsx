@@ -1097,6 +1097,36 @@ describe('readiness announcements reach the open dialog', () => {
       warn.mockRestore();
     });
 
+    it('keeps reading the list when a settle read that started before the socket returned answers after the read it started failed', async () => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const answers: Array<(page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void> = [];
+      vi.mocked(listBootstrapOperations)
+        .mockResolvedValueOnce({ operations: [row('a', 'ready')], nextCursor: null })
+        .mockRejectedValueOnce(new Error('network down'))
+        // The settle read is slow.
+        .mockImplementationOnce(() => new Promise((resolve) => { answers.push(resolve); }))
+        // The read the socket's return starts fails.
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      await settle(0);
+      announce();
+      await settle();
+      await settle(SETTLE_POLL_MS);
+      expect(answers).toHaveLength(1);
+      act(() => { announceNotificationsConnection(false); });
+      act(() => { announceNotificationsConnection(true); });
+      await settle(0);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(4);
+      await act(async () => { answers[0]({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(0);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Ready');
+      await settle(SETTLE_POLL_MS * 2);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+      warn.mockRestore();
+    });
+
     it('keeps reading the list when a full read that started before a failed readiness read answers after it', async () => {
       vi.useFakeTimers();
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

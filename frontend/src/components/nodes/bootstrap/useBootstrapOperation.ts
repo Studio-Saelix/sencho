@@ -30,7 +30,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * notification socket coming back after a drop (announcements sent while it was
  * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
  * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
- * a loaded later page's row that fails is retried like a failed read of the list. A readiness read of the shown run that fails is retried until a read that began after it answers; an older answer that arrives late does not end the retries. Nothing polls while the dialog is closed.
+ * a loaded later page's row that fails is retried like a failed read of the list. A readiness read of the shown run, or of the list, that fails is retried until a read that began after it answers; an older answer that arrives late is shown but does not end the retries. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -92,15 +92,16 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // The newest readiness read that failed (the numbers only grow, so one from an earlier run never blocks a later read). What is on screen may be older than the change that read was started for, and
   // only a read that started after it can say otherwise: an older answer that arrives late does not end the recovery.
   const detailFailedSeq = useRef(0);
-  // The same rule for reads of the list (a settle read, a full read and a readiness read): a read of it that failed, or
-  // was not fully read, records its number, and only a read that started after it ends the recovery.
+  // The same rule for reads of the list (a settle read, a full read and a readiness read): a settle read that failed records its
+  // number, and only a read that started after it ends the recovery. A read that was overtaken, or applied only in part, needs no
+  // record: every read older than it is then dropped (older than an applied answer, or overtaken the same way).
   const listReadSeq = useRef(0);
   const listAppliedSeq = useRef(0);
   const listFailedSeq = useRef(0);
   const operationRef = useRef<BootstrapOperationDetail | null>(null);
   // A readiness read of the shown run failed: what is on screen may be stale, so it is read again until a read that began after the failed one answers.
   const [readinessReadFailed, setReadinessReadFailed] = useState(false);
-  // The same for the list: a readiness read of it failed or was overtaken, so its rows are read again until a read that began after it applies.
+  // The same for the list: a readiness read of it failed or was overtaken, so its rows are read again until a read that began after it comes back whole.
   const [listReadPending, setListReadPending] = useState(false);
   // Counts the readiness announcements and socket returns seen so far. A read that was already out when one arrived may
   // have been answered from before the change, and the effect below finds nothing loaded to refresh yet, so a read that
@@ -159,7 +160,6 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       if (error instanceof DOMException && error.name === 'AbortError') return;
       // The wizard stays usable without the list; the dialog says it is missing.
       console.warn('Bootstrap operations could not be listed:', error);
-      listFailedSeq.current = Math.max(listFailedSeq.current, seq);
       setListFailed(true);
     }
     // client.* is stable module API unless a test injects it.
@@ -192,7 +192,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       extraPages.current += 1;
       setNextCursor(page.nextCursor);
       // A readiness change arrived while this page was out: its enrolled rows may carry a verdict that predates it, and the
-      // read of the loaded rows that followed the change finished without them. They are read with the rest, until one applies.
+      // read of the loaded rows that followed the change finished without them. They are read with the rest, until a whole read that began after the page came back applies.
       if (readinessSignals.current !== signals && page.operations.some((entry) => entry.state === 'enrolled')) setListReadPending(true);
     } catch (error: unknown) {
       if (generation !== listGeneration.current) return;
@@ -209,8 +209,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
    * added, so those pages are kept. A run that fell off the first page (a newer hold pushed it down, or it was
    * released) and a run on a later page that may still settle are read one by one. An answer that a page load or another
    * read of the list overtook is dropped (the next tick tries again); the read itself never invalidates a page load in flight.
-   * Resolves true only for a read that was whole and began after the newest read that failed or was not whole: an older answer
-   * is shown (it is the newest the hub gave) but resolves false, so the list is read again until a later read answers.
+   * Resolves true only for a whole read that began after the newest settle read that failed. An answer older than one already
+   * applied is dropped; an answer older than a failed read but newer than every applied one is shown (it is the newest the hub
+   * gave) and resolves false, so the list is read again until a later read answers.
    */
   const refreshSettling = useCallback(async (signal: AbortSignal, readinessChanged = false): Promise<boolean> => {
     const pages = extraPages.current;
@@ -241,13 +242,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         }
       }));
       // Another read of the list (open, release, cancel) overtook this one, a page was loaded meanwhile, or a newer read of
-      // these rows already answered.
-      if (signal.aborted) return false;
-      if (generation !== listGeneration.current || pages !== extraPages.current) {
-        listFailedSeq.current = Math.max(listFailedSeq.current, seq);
-        return false;
-      }
-      if (seq < listAppliedSeq.current) return false;
+      // these rows already answered. Each leaves the list owed a read, which the caller's pending flag or the next tick supplies.
+      if (signal.aborted || generation !== listGeneration.current || pages !== extraPages.current || seq < listAppliedSeq.current) return false;
       listAppliedSeq.current = seq;
       firstPageIds.current = firstIds;
       const kept = tail
@@ -261,7 +257,6 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       // Not fully read: a row's read failed, or a readiness change arrived while this read was out and rows are enrolled.
       // What was read is on screen, and the same read is tried again until one comes back whole.
       if (unreadRows || (readinessSignals.current !== signals && rows.some((entry) => entry.state === 'enrolled'))) {
-        listFailedSeq.current = Math.max(listFailedSeq.current, seq);
         setListReadPending(true);
         return false;
       }
@@ -402,7 +397,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
         return;
       }
       if (operationsRef.current.some((entry) => entry.state === 'enrolled')) {
-        // A read that failed or was overtaken is read again on the slower pace until one applies.
+        // A read that failed or was overtaken is read again on the slower pace until a read that began after it comes back whole.
         const applied = await refreshSettling(controller.signal, true);
         if (!applied && !controller.signal.aborted) setListReadPending(true);
       }
