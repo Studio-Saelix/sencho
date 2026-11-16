@@ -6,11 +6,13 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }));
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' }, hasCapability: () => false }) }));
+const node = vi.hoisted(() => ({ id: 'local' }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: node.id }, hasCapability: () => false }) }));
 const auth = vi.hoisted(() => ({ canEdit: true }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => auth.canEdit }) }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { copyToClipboard } from '@/lib/clipboard';
 import EnvironmentPanel from '../EnvironmentPanel';
 import type { EnvInventory } from '@/lib/envChecklist';
@@ -33,6 +35,7 @@ beforeEach(() => {
   mockedFetch.mockReset();
   mockedCopy.mockReset().mockResolvedValue(undefined);
   auth.canEdit = true;
+  node.id = 'local';
 });
 
 describe('EnvironmentPanel', () => {
@@ -95,6 +98,29 @@ describe('EnvironmentPanel', () => {
     expect((screen.getByTestId('env-copy-checklist-btn') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('drops the previous node\'s Answer when only the active node changes', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    const { rerender } = render(<EnvironmentPanel stackName="demo" />);
+    await screen.findByText('MISSING_VAR');
+    mockedFetch.mockReturnValue(new Promise(() => {}));
+    node.id = 'remote-1';
+    rerender(<EnvironmentPanel stackName="demo" />);
+    await waitFor(() => expect(screen.queryByText('MISSING_VAR')).toBeNull());
+    expect(screen.queryByTestId('env-answer')).toBeNull();
+  });
+
+  it('does not raise an error toast for a request of the stack it switched away from', async () => {
+    let rejectOld: (e: unknown) => void = () => {};
+    mockedFetch.mockReturnValueOnce(new Promise((_, rej) => { rejectOld = rej; }));
+    const { rerender } = render(<EnvironmentPanel stackName="demo" />);
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => INVENTORY });
+    rerender(<EnvironmentPanel stackName="other" />);
+    await screen.findByTestId('env-answer');
+    await act(async () => { rejectOld(new Error('boom')); });
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('env-retry-btn')).toBeNull();
+  });
+
   it('ignores a late response for the stack it switched away from', async () => {
     let resolveOld: (v: unknown) => void = () => {};
     mockedFetch.mockReturnValueOnce(new Promise(res => { resolveOld = res; }));
@@ -107,10 +133,11 @@ describe('EnvironmentPanel', () => {
     expect(screen.queryByText('MISSING_VAR')).toBeNull();
   });
 
-  it('keeps an absent optional env file quiet under a resolved Answer, and a required one loud', async () => {
+  it('keeps an absent optional env file quiet under a resolved Answer and a required one loud', async () => {
     mockedFetch.mockResolvedValue({ ok: true, json: async () => inv({ envFiles: [FILE('missing', false)] }) });
     const { unmount } = render(<EnvironmentPanel stackName="demo" />);
     const section = await screen.findByTestId('env-files-section');
+    expect(screen.getByTestId('status-answer')).toHaveTextContent('resolved');
     expect(section).toHaveTextContent('optional, not found');
     expect(section.querySelector('.text-destructive')).toBeNull();
     unmount();
@@ -166,6 +193,7 @@ describe('EnvironmentPanel', () => {
     render(<EnvironmentPanel stackName="demo" onOpenFiles={vi.fn()} />);
     const answer = await screen.findByTestId('status-answer');
     expect(answer).toHaveTextContent(title as string);
+    expect(answer.textContent).not.toMatch(/\d (missing|duplicate|shell-only|env files?)/);
     expect(answer).toHaveAttribute('data-tone', tone as string);
   });
 

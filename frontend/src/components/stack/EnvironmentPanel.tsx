@@ -193,8 +193,12 @@ function EnvironmentPanelBody({ stackName, onOpenFiles }: { stackName: string; o
     [fetchJsonEnvFiles],
   );
 
-  // A response only lands if no newer request has started (stack switch, retry).
+  // A response only lands if no newer request has started in this instance
+  // (a project-env save refetching while an earlier fetch is in flight).
   const inventoryRequest = useRef(0);
+  // An unmounted instance (stack or node switch) invalidates its in-flight request,
+  // so it cannot raise an error toast over the next stack.
+  useEffect(() => () => { inventoryRequest.current++; }, []);
   const fetchInventory = useCallback(async () => {
     const request = ++inventoryRequest.current;
     const current = () => request === inventoryRequest.current;
