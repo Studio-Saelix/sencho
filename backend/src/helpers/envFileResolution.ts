@@ -104,28 +104,67 @@ function inlineEnvKeysOf(environment: unknown): string[] {
   return [];
 }
 
+/** Links followed before a chain is given up on, as the kernel does with ELOOP. */
+const MAX_LINK_HOPS = 40;
+
 /**
- * Throw the fence's refusal when `abs`, or the path a link at `abs` names, sits
- * in a directory a data restore is overwriting. A file that is not there in such
- * a directory may only be mid-swap, so its absence is not an answer. One query
- * when nothing is fenced; called only once a file was found missing.
+ * Every spelling `abs` has on the way to the file it names: the path itself,
+ * then, for each link met on a component of it under the compose root (the
+ * file itself, a link to a link, or a linked directory on the way), the path
+ * with that link replaced by where it points. Followed component by component,
+ * so a chain whose last target was moved aside still yields that target's
+ * spelling. Stops at a component that is not there, and after MAX_LINK_HOPS
+ * links.
  */
-async function refuseIfFenced(abs: string, baseDir: string): Promise<void> {
-  const { matchFsWorkToFences } = await import('../services/recovery/restoreFence');
-  const spellings = [abs];
-  // Canonical containment barrier, inline with the readlink below: only a path
-  // under the compose root is asked where it points.
+async function linkSpellings(abs: string, baseDir: string): Promise<string[]> {
   const baseResolved = path.resolve(baseDir);
-  const safePath = path.resolve(baseResolved, abs);
-  if (safePath.startsWith(baseResolved + path.sep)) {
-    try {
-      // A link whose target directory was moved aside dangles: compare where it points.
-      spellings.push(path.resolve(path.dirname(safePath), await fsPromises.readlink(safePath)));
-    } catch {
-      // Not a link, or not there at all.
+  const spellings = [path.resolve(abs)];
+  let pending = path.resolve(abs).split(path.sep).filter(Boolean);
+  let resolved: string = path.sep;
+  let hops = 0;
+  while (pending.length > 0) {
+    const next = path.join(resolved, pending[0]);
+    pending = pending.slice(1);
+    // Canonical containment barrier, inline with the readlink below: only a
+    // path under the compose root is asked where it points.
+    const contained = path.resolve(baseResolved, next);
+    if (!contained.startsWith(baseResolved + path.sep)) {
+      resolved = next;
+      continue;
     }
+    let target: string;
+    try {
+      target = await fsPromises.readlink(contained);
+    } catch (err) {
+      // Not a link: carry on with the next component. Not there at all:
+      // nothing below it can be asked.
+      if ((err as NodeJS.ErrnoException).code === 'EINVAL') {
+        resolved = next;
+        continue;
+      }
+      break;
+    }
+    hops += 1;
+    if (hops > MAX_LINK_HOPS) break;
+    const destination = path.resolve(path.dirname(contained), target);
+    spellings.push(path.join(destination, ...pending));
+    pending = [...destination.split(path.sep).filter(Boolean), ...pending];
+    resolved = path.sep;
   }
-  for (const spelling of spellings) {
+  return [...new Set(spellings)];
+}
+
+/**
+ * Throw the fence's refusal when `abs`, or any path a link on the way to it
+ * names, sits in a directory a data restore is overwriting. A file that is not
+ * there, or cannot be read, in such a directory may only be mid-swap, so its
+ * absence is not an answer. One query when nothing is fenced; called only once
+ * a file was found missing or unreadable. Exported for the env editor's own
+ * absence answers, which must not report a fenced file as missing either.
+ */
+export async function refuseIfFencedSource(abs: string, baseDir: string): Promise<void> {
+  const { matchFsWorkToFences } = await import('../services/recovery/restoreFence');
+  for (const spelling of await linkSpellings(abs, baseDir)) {
     const match = await matchFsWorkToFences(spelling);
     if (match.refusal) throw match.refusal;
   }
@@ -137,7 +176,7 @@ async function existenceOf(fsService: FileSystemService, abs: string, baseDir: s
     await fsService.access(abs);
     return 'present';
   } catch (err) {
-    await refuseIfFenced(abs, baseDir);
+    await refuseIfFencedSource(abs, baseDir);
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unverifiable';
   }
 }
@@ -147,6 +186,7 @@ async function discoverAuthoredComposeFiles(
   fsService: FileSystemService,
   stackName: string,
   stackDir: string,
+  baseDir: string,
 ): Promise<string[]> {
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (spec && Array.isArray(spec.files) && spec.files.length > 0) {
@@ -166,13 +206,13 @@ async function discoverAuthoredComposeFiles(
     } catch {
       // A compose file missing because its directory is being restored is not
       // "no compose file"; otherwise try the next candidate.
-      await refuseIfFenced(abs, stackDir);
+      await refuseIfFencedSource(abs, baseDir);
     }
   }
   return [];
 }
 
-async function parseComposeServices(fsService: FileSystemService, absPath: string): Promise<{
+async function parseComposeServices(fsService: FileSystemService, absPath: string, baseDir: string): Promise<{
   services: Record<string, unknown>;
   text: string;
 } | null> {
@@ -182,8 +222,12 @@ async function parseComposeServices(fsService: FileSystemService, absPath: strin
   } catch (err) {
     // A data restore overwriting the compose file's directory is not "no
     // compose file": answering that would list no env file, and the editor
-    // would offer to create one the next deploy reads.
+    // would offer to create one the next deploy reads. That holds as well for
+    // a read that failed before admission (a link into the fenced directory
+    // that dangles mid-swap, an applied Git deploy spec naming such a link) or
+    // a file gone since it was found.
     if (isDataRestoreFenceError(err)) throw err;
+    await refuseIfFencedSource(absPath, baseDir);
     return null;
   }
   if (content.length > MAX_COMPOSE_PARSE_BYTES) return null;
@@ -207,7 +251,7 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
   const baseDir = fsService.getBaseDir();
   const stackDir = path.join(baseDir, stackName);
 
-  const composeFiles = await discoverAuthoredComposeFiles(fsService, stackName, stackDir);
+  const composeFiles = await discoverAuthoredComposeFiles(fsService, stackName, stackDir, baseDir);
 
   // Physical env files, deduped by resolved absolute path.
   // Seed the project `.env` as the fallback interpolation source. When the stack
@@ -261,7 +305,7 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
   let authoredText = '';
 
   for (const file of composeFiles) {
-    const parsed = await parseComposeServices(fsService, file);
+    const parsed = await parseComposeServices(fsService, file, baseDir);
     if (!parsed) continue;
     authoredText += parsed.text + '\n';
 

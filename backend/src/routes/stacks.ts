@@ -109,7 +109,7 @@ import {
   getCodedError,
   selectFleetSnapshotApplyFiles,
 } from '../helpers/applyFleetSnapshotFiles';
-import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
+import { resolveStackEnvSources, discoverStackLocalEnvFiles, refuseIfFencedSource } from '../helpers/envFileResolution';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import {
   isSelfStack,
@@ -121,6 +121,7 @@ import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../help
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
+import { COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import type { FsWorkLease } from '../services/recovery/restoreFence';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
@@ -350,10 +351,20 @@ export async function requireStackExists(
   const stackDir = path.join(fsSvc.getBaseDir(), stackName);
   try {
     if (!(await fsSvc.hasComposeFile(stackDir))) {
+      // A compose file missing because a data restore is overwriting its
+      // directory (or the one a link to it points into) may only be mid-swap:
+      // the stack is not known to be gone.
+      for (const file of COMPOSE_ROOT_FILENAMES) {
+        await refuseIfFencedSource(path.join(stackDir, file), fsSvc.getBaseDir());
+      }
       notFound();
       return false;
     }
-  } catch {
+  } catch (err) {
+    if (isDataRestoreFenceError(err)) {
+      res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE });
+      return false;
+    }
     notFound();
     return false;
   }
@@ -1009,6 +1020,9 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       if (code !== 'ENOENT') {
         console.error('[Sencho] Unexpected error checking env file existence:', (e as Error).message);
       }
+      // A file a data restore fenced after the env files were resolved may only
+      // be mid-swap: refuse instead of answering that it is not there.
+      await refuseIfFencedSource(envPath, fsService.getBaseDir());
       // No env file at the resolved path. For an explicit ?file= query we
       // surface a 404 (the caller asked for something specific). Otherwise
       // treat it as the empty-stack case above.
@@ -1031,6 +1045,7 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       // that the frontend would otherwise echo as an opaque error.
       const code = (e as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT' && !requestedFile) {
+        await refuseIfFencedSource(envPath, fsService.getBaseDir());
         res.setHeader('X-Env-Exists', 'false');
         return res.send('');
       }
@@ -1048,6 +1063,8 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
 stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  // The file the save writes, once known, so a failure can be checked against a fence.
+  let written: string | undefined;
   try {
     const { content } = req.body;
     if (typeof content !== 'string') {
@@ -1090,6 +1107,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       if (!target) {
         return res.status(409).json({ error: 'No env file target is available for this stack' });
       }
+      written = target;
       const result = forceRequested
         ? await fsService.writeFileIfUnchanged(stackName, target, content, null)
         : await fsService.createFileExclusive(target, content);
@@ -1123,6 +1141,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'No env file exists for this stack' });
     }
 
+    written = envPath;
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await fsService.writeFileIfUnchanged(stackName, envPath, content, expectedMtimeMs);
     if (!result.ok) {
@@ -1145,6 +1164,19 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
     }
     const code = (error as NodeJS.ErrnoException).code;
+    if (written && (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE' || code === 'ENOENT')) {
+      // A link into a directory a data restore fenced since the env files were
+      // resolved dangles mid-swap: answer the fence, not an unusable path or a
+      // missing stack.
+      try {
+        await refuseIfFencedSource(written, FileSystemService.getInstance(req.nodeId).getBaseDir());
+      } catch (fenced) {
+        if (isDataRestoreFenceError(fenced)) {
+          return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
+        }
+        // The check itself failing keeps the save's own answer below.
+      }
+    }
     if (code === 'EISDIR') {
       return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
     }

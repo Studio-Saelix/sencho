@@ -1512,6 +1512,204 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
   });
 
+  /** Every env route a stack's absence answer could come from, asked at once. */
+  async function envRoutes(stack = 'web') {
+    return {
+      list: await request(app).get(`/api/stacks/${stack}/envs`).set('Cookie', adminCookie),
+      read: await request(app).get(`/api/stacks/${stack}/env`).set('Cookie', adminCookie),
+      create: await request(app).put(`/api/stacks/${stack}/env?create=1`).set('Cookie', adminCookie).send({ content: 'A=9\n' }),
+      inventory: await request(app).get(`/api/stacks/${stack}/env-inventory`).set('Cookie', adminCookie),
+    };
+  }
+  /** `envRoutes`, plus the routes that first ask whether the stack has a compose file at all. */
+  async function composeRoutes(stack = 'web') {
+    return {
+      ...await envRoutes(stack),
+      preflight: await request(app).post(`/api/stacks/${stack}/preflight/run`).set('Cookie', adminCookie),
+    };
+  }
+  function expectRefused(variants: Record<string, request.Response>): void {
+    for (const [name, res] of Object.entries(variants)) {
+      expect(res.status, name).toBe(409);
+      expect(res.body.code, name).toBe('data_restore');
+      expect(res.headers['x-env-exists'], name).toBeUndefined();
+    }
+  }
+
+  it('refuses the env routes when an applied Git deploy spec names a compose link that dangles into the fenced directory', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue(
+      { applied_deploy_spec: { files: ['compose.yaml'] } } as never,
+    );
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses the env routes when the compose file reaches the fenced directory through a chain of links', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(dir, 'middle.yaml'));
+    fs.symlinkSync('middle.yaml', path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses the env routes when the compose file reaches the fenced directory through a linked directory', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync('data', path.join(dir, 'source'));
+    fs.symlinkSync(path.join('source', 'compose.yaml'), path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  /** `envStack`, with the declared env file reached through `app.env -> mid.env -> data/app.env`. */
+  function chainedEnvStack(): { dir: string; data: string; envFile: string } {
+    const stack = envStack();
+    fs.writeFileSync(path.join(stack.dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n    env_file: app.env\n');
+    fs.symlinkSync(path.join('data', 'app.env'), path.join(stack.dir, 'mid.env'));
+    fs.symlinkSync('mid.env', path.join(stack.dir, 'app.env'));
+    return stack;
+  }
+
+  it('refuses the env routes and a Secrets import when a declared env file reaches the fenced directory through a chain of links', async () => {
+    const { dir, data, envFile } = chainedEnvStack();
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(envFile, `${envFile}.aside`);
+    expectRefused(await envRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+    const refused = SecretsService.getInstance().readImportOverlay(nodeId, 'web', 'app.env');
+    await expect(refused).rejects.toBeInstanceOf(SecretSourceRefusedError);
+    await expect(refused).rejects.toThrow(/data restore is overwriting/);
+  });
+
+  it('still answers a chained env link that dangles outside any fence as not there', async () => {
+    const { dir, envFile } = chainedEnvStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    fs.renameSync(envFile, `${envFile}.aside`);
+    const listed = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
+    expect(listed.status).toBe(200);
+    expect(listed.body.envFiles).toEqual([]);
+    const read = await request(app).get('/api/stacks/web/env').set('Cookie', adminCookie);
+    expect(read.status).toBe(200);
+    expect(read.headers['x-env-exists']).toBe('false');
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses the env routes when the compose file disappears into the fenced directory between discovery and its read', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fencedOverwriteOf(data, ['web']);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const original = proto.access;
+    const link = path.join(dir, 'compose.yaml');
+    // Found by discovery, then moved aside by the swap before it is read.
+    vi.spyOn(proto, 'access').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      const result = await original.apply(this, args);
+      if (String(args[0]) === link && fs.existsSync(compose)) fs.renameSync(compose, `${compose}.aside`);
+      return result;
+    });
+    const res = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    fs.renameSync(`${compose}.aside`, compose);
+    const created = await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'A=9\n' });
+    expect(created.status).toBe(409);
+    expect(created.body.code).toBe('data_restore');
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
+  it('refuses the env editor\'s read when a fence lands after the env files were resolved and the file is gone by the second check', async () => {
+    for (const query of ['', '?file=']) {
+      vi.restoreAllMocks();
+      const { data, envFile } = chainedEnvStack();
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      const original = proto.access;
+      const link = path.join(path.dirname(data), 'app.env');
+      let calls = 0;
+      // Resolution finds the file; the fence and the swap land before the route checks it again.
+      vi.spyOn(proto, 'access').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        if (String(args[0]) === link && ++calls === 2) {
+          fencedOverwriteOf(data, ['web']);
+          fs.renameSync(envFile, `${envFile}.aside`);
+        }
+        return original.apply(this, args);
+      });
+      const url = `/api/stacks/web/env${query}${query ? encodeURIComponent(link) : ''}`;
+      const res = await request(app).get(url).set('Cookie', adminCookie);
+      expect(calls, query).toBe(2);
+      expect(res.status, query).toBe(409);
+      expect(res.body.code, query).toBe('data_restore');
+      expect(res.headers['x-env-exists'], query).toBeUndefined();
+      fs.rmSync(path.dirname(data), { recursive: true, force: true });
+      recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
+    }
+  });
+
+  it('refuses an env save whose link dangles into a directory fenced since the env files were resolved', async () => {
+    const { dir, data, envFile } = chainedEnvStack();
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const original = proto.writeFileIfUnchanged;
+    vi.spyOn(proto, 'writeFileIfUnchanged').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      fencedOverwriteOf(data, ['web']);
+      fs.renameSync(envFile, `${envFile}.aside`);
+      return original.apply(this, args);
+    });
+    const res = await request(app).put(`/api/stacks/web/env?file=${encodeURIComponent(path.join(dir, 'app.env'))}`)
+      .set('Cookie', adminCookie).send({ content: 'A=9\n' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(fs.existsSync(envFile)).toBe(false);
+    expect(fs.readFileSync(`${envFile}.aside`, 'utf-8')).toBe('A=1\n');
+  });
+
+  it('refuses a Secrets read and write whose link dangles into a directory fenced since the env files were resolved', async () => {
+    const { data, envFile } = chainedEnvStack();
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+    const proto = FileSystemService.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    for (const method of ['readFile', 'writeFile'] as const) {
+      vi.restoreAllMocks();
+      const original = proto[method];
+      vi.spyOn(proto, method).mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        if (path.basename(String(args[0])) === 'app.env' && !fs.existsSync(`${envFile}.aside`)) {
+          fencedOverwriteOf(data, ['web']);
+          fs.renameSync(envFile, `${envFile}.aside`);
+        }
+        return original.apply(this, args);
+      });
+      const secrets = SecretsService.getInstance();
+      if (method === 'readFile') {
+        const refused = secrets.readImportOverlay(nodeId, 'web', 'app.env');
+        await expect(refused).rejects.toBeInstanceOf(SecretSourceRefusedError);
+        await expect(refused).rejects.toThrow(/data restore is overwriting/);
+      } else {
+        const { id } = secrets.create({ name: `push-race-${randomUUID().slice(0, 8)}`, kv: { A: '2' }, user: 'admin' });
+        const selector = { type: 'nodes' as const, ids: [nodeId] };
+        const plan = await secrets.previewPushDiff(id, selector, 'web', 'app.env');
+        const result = await secrets.executePush(id, {
+          selector, stackName: 'web', envFileBasename: 'app.env', expectedVersion: plan.version,
+          expectedTargets: plan.targets.map(({ nodeId: target, fingerprint }) => ({ nodeId: target, fingerprint })),
+          user: 'admin',
+        });
+        expect(result.results[0].status).toBe('failed');
+        expect(JSON.stringify(result.results[0])).toMatch(/data restore is overwriting/);
+      }
+      expect(fs.existsSync(envFile)).toBe(false);
+      fs.renameSync(`${envFile}.aside`, envFile);
+      recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
+    }
+  });
+
   it('refuses a Secrets push into the fenced directory: as a whole when its preview read the target, per target when it did not', async () => {
     const { data, envFile } = envStack();
     const { SecretsService } = await import('../services/SecretsService');

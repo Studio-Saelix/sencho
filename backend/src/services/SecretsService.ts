@@ -12,6 +12,7 @@ import { formatNoTargetError } from '../utils/remoteTarget';
 import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
+import { refuseIfFencedSource } from '../helpers/envFileResolution';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -575,6 +576,15 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
         // read is refused with the fence's reason. An import answers
         // IMPORT_SOURCE_REFUSED; a push reports the target as not readable.
         if (isDataRestoreFenceError(err)) throw new SecretSourceRefusedError(err.message);
+        // A file missing, or a link to it dangling, because a restore fenced its
+        // directory after the env files were resolved is refused the same way,
+        // never read as missing or as a link out of the compose root.
+        try {
+            await refuseIfFencedSource(resolved, fsService.getBaseDir());
+        } catch (fenced) {
+            if (isDataRestoreFenceError(fenced)) throw new SecretSourceRefusedError(fenced.message);
+            throw fenced;
+        }
         const code = (err as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT') {
             if (missingAsEmpty) return '';
@@ -594,7 +604,15 @@ async function writeEnvLocal(nodeId: number, absolutePath: string, content: stri
     if (!isPathWithinBase(path.resolve(absolutePath), fsService.getBaseDir())) {
         throw new SecretSourceError('Invalid env file path');
     }
-    await fsService.writeFile(absolutePath, content, 'utf-8');
+    try {
+        await fsService.writeFile(absolutePath, content, 'utf-8');
+    } catch (err) {
+        // A link into a directory a restore fenced since the push resolved it
+        // dangles mid-swap: the write fails with the fence's reason, as the
+        // admitted write would, not as a link out of the compose root.
+        if (!isDataRestoreFenceError(err)) await refuseIfFencedSource(absolutePath, fsService.getBaseDir());
+        throw err;
+    }
 }
 
 async function readEnvRemote(node: Node, stackName: string, absolutePath: string, missingAsEmpty: boolean): Promise<string> {
