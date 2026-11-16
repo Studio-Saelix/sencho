@@ -36,7 +36,7 @@ describe('onNotificationsReturn', () => {
     stop();
   });
 
-  it('starts from "never dropped" before any state was announced or after the socket came back', () => {
+  it('starts from "never dropped" after the socket came back', () => {
     announceNotificationsConnection(false);
     announceNotificationsConnection(true);
     const onReturn = vi.fn();

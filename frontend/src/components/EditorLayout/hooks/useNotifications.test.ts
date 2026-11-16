@@ -1,7 +1,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { useNotifications } from './useNotifications';
-import { onNotificationsReturn } from '@/lib/notificationsConnection';
+import { announceNotificationsConnection, onNotificationsReturn } from '@/lib/notificationsConnection';
 import type { Node } from '@/context/NodeContext';
 import type { NotificationItem } from '../../dashboard/types';
 
@@ -323,6 +323,24 @@ describe('useNotifications', () => {
     } finally {
       stop();
       vi.useRealTimers();
+    }
+  });
+
+  it('does not record an outage when the hook unmounts, so the next session starts from "never dropped"', () => {
+    const { unmount } = renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    unmount();
+    // The mock socket's close event arrives after the unmount, as a real one does.
+    act(() => { MockWS.instances[0]?.onclose?.({ code: 1000 }); });
+    const onReturn = vi.fn();
+    const stop = onNotificationsReturn(onReturn);
+    try {
+      announceNotificationsConnection(true);
+      expect(onReturn).not.toHaveBeenCalled();
+    } finally {
+      stop();
     }
   });
 

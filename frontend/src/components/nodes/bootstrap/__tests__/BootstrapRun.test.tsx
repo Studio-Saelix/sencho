@@ -788,7 +788,7 @@ describe('readiness announcements reach the open dialog', () => {
     expect(result.current.operation?.readiness?.state).toBe('provisional');
   });
 
-  it('does not read a run when the socket has not dropped, or when the dialog is closed', async () => {
+  it('does not read a run when the socket returns while the dialog is closed', async () => {
     vi.useFakeTimers();
     act(() => { announceNotificationsConnection(false); });
     const { result } = renderHook(() => useBootstrapOperation({ open: false }));
@@ -796,6 +796,50 @@ describe('readiness announcements reach the open dialog', () => {
     act(() => { announceNotificationsConnection(true); });
     await settle();
     expect(fetchBootstrapOperation).not.toHaveBeenCalled();
+  });
+
+  it('reads a run opened from the list again when a readiness change arrived while its first read was out', async () => {
+    vi.useFakeTimers();
+    let answerFirst: (detail: BootstrapOperationDetail) => void = () => {};
+    vi.mocked(fetchBootstrapOperation)
+      .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
+      .mockResolvedValueOnce(enrolled('provisional'));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    let opened: Promise<unknown> = Promise.resolve();
+    act(() => { opened = result.current.openOperation('op-1'); });
+    // The hub demotes the node after it answered, and the announcement reaches the dialog before the answer does.
+    announce();
+    await settle();
+    await act(async () => { answerFirst(enrolled('ready')); await opened; });
+    await settle(0);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+    expect(result.current.operation?.readiness?.state).toBe('provisional');
+  });
+
+  it('reads a run opened from the list again when the socket returned while its first read was out', async () => {
+    vi.useFakeTimers();
+    act(() => { announceNotificationsConnection(false); });
+    let answerFirst: (detail: BootstrapOperationDetail) => void = () => {};
+    vi.mocked(fetchBootstrapOperation)
+      .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
+      .mockResolvedValueOnce(enrolled('provisional'));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    let opened: Promise<unknown> = Promise.resolve();
+    act(() => { opened = result.current.openOperation('op-1'); });
+    act(() => { announceNotificationsConnection(true); });
+    await act(async () => { answerFirst(enrolled('ready')); await opened; });
+    await settle(0);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(2);
+    expect(result.current.operation?.readiness?.state).toBe('provisional');
+  });
+
+  it('does not read a run opened from the list again when no readiness change arrived while it was read', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue(enrolled('ready'));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    await act(async () => { await result.current.openOperation('op-1'); });
+    await settle(SETTLE_POLL_MS * 3);
+    expect(fetchBootstrapOperation).toHaveBeenCalledTimes(1);
   });
 
   it('drops an older read that answers after a newer one, so it cannot bring an earlier verdict back', async () => {
@@ -907,6 +951,37 @@ describe('readiness announcements reach the open dialog', () => {
       act(() => { announceNotificationsConnection(true); });
       await settle(0);
       expect(result.current.operations.map((entry) => operationStateWord(entry).word)).toEqual(['Unverified', 'Ready']);
+    });
+
+    it('reads the list again when a readiness change arrived while its first read was out', async () => {
+      vi.useFakeTimers();
+      let answerFirst: (page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void = () => {};
+      vi.mocked(listBootstrapOperations)
+        .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
+        .mockResolvedValueOnce({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      // The hub demotes the node after the list was read, and the announcement reaches the dialog before the answer does.
+      announce();
+      await settle();
+      await act(async () => { answerFirst({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(0);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
+    });
+
+    it('reads the list again when the socket returned while its first read was out', async () => {
+      vi.useFakeTimers();
+      act(() => { announceNotificationsConnection(false); });
+      let answerFirst: (page: { operations: BootstrapOperationDetail[]; nextCursor: string | null }) => void = () => {};
+      vi.mocked(listBootstrapOperations)
+        .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
+        .mockResolvedValueOnce({ operations: [row('a', 'provisional')], nextCursor: null });
+      const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+      act(() => { announceNotificationsConnection(true); });
+      await act(async () => { answerFirst({ operations: [row('a', 'ready')], nextCursor: null }); });
+      await settle(0);
+      expect(listBootstrapOperations).toHaveBeenCalledTimes(2);
+      expect(operationStateWord(result.current.operations[0]).word).toBe('Unverified');
     });
 
     it('does not read the list when the socket connects without having dropped', async () => {

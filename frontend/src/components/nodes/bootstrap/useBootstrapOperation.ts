@@ -28,7 +28,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * (a dropped tunnel, a new check), and the open dialog then reads the shown
  * enrolled run, or the listed enrolled runs, once more, and so does the
  * notification socket coming back after a drop (announcements sent while it was
- * down are lost), so a node that stopped being ready is not still called ready. Nothing polls while the dialog is closed.
+ * down are lost), so a node that stopped being ready is not still called ready. A change announced while a first read of the list or of an opened run was still out is followed by a read of its own. Nothing polls while the dialog is closed.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -95,6 +95,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const [readinessReadFailed, setReadinessReadFailed] = useState(false);
   // The same for the list: a readiness read of it failed or was overtaken, so its rows are read again until one applies.
   const [listReadPending, setListReadPending] = useState(false);
+  // Counts the readiness announcements and socket returns seen so far. A read that was already out when one arrived may
+  // have been answered from before the change, and the effect below finds nothing loaded to refresh yet, so a read that
+  // starts at one count and applies at another is followed by a readiness read.
+  const readinessSignals = useRef(0);
+  const readNowRef = useRef<(() => Promise<void>) | null>(null);
 
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
     viewEpoch.current += 1;
@@ -114,6 +119,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const refreshList = useCallback(async (signal?: AbortSignal) => {
     listGeneration.current += 1;
     const seq = ++listReadSeq.current;
+    const signals = readinessSignals.current;
     try {
       const page = await client.list(signal);
       // A settle read that started after this one and already answered is newer than this answer.
@@ -124,8 +130,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       firstPageIds.current = new Set(page.operations.map((operation) => operation.id));
       extraPages.current = 0;
       setOperations(page.operations);
+      operationsRef.current = page.operations;
       setNextCursor(page.nextCursor);
       setListFailed(false);
+      // A readiness change arrived while this read was out: its enrolled rows may predate it.
+      if (readinessSignals.current !== signals && page.operations.some((entry) => entry.state === 'enrolled')) void readNowRef.current?.();
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       // The wizard stays usable without the list; the dialog says it is missing.
@@ -223,9 +232,12 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
 
   const openOperation = useCallback(async (id: string): Promise<BootstrapOperationDetail | null> => {
     setBusy('open');
+    const signals = readinessSignals.current;
     try {
       const detail = await client.get(id);
       show(detail);
+      // A readiness change arrived while this read was out: the run may predate it.
+      if (readinessSignals.current !== signals && detail.state === 'enrolled') void readNowRef.current?.();
       return detail;
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : 'The bootstrap could not be loaded.');
@@ -349,7 +361,9 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     };
     const onInvalidate = (event: Event) => {
       const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
-      if (detail?.scope !== 'node-readiness' || timer !== null) return;
+      if (detail?.scope !== 'node-readiness') return;
+      readinessSignals.current += 1;
+      if (timer !== null) return;
       timer = setTimeout(() => {
         timer = null;
         void readNow();
@@ -359,10 +373,15 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     // unverified without any socket to say so), so the socket coming back reads the same views once. That includes a
     // drop already under way when the dialog opened, which this listener never saw begin.
     window.addEventListener('sencho:state-invalidate', onInvalidate);
-    const stopWatchingSocket = onNotificationsReturn(() => { void readNow(); });
+    readNowRef.current = readNow;
+    const stopWatchingSocket = onNotificationsReturn(() => {
+      readinessSignals.current += 1;
+      void readNow();
+    });
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       stopWatchingSocket();
+      readNowRef.current = null;
       if (timer !== null) clearTimeout(timer);
       controller.abort();
     };

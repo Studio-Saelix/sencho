@@ -236,8 +236,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
       ws.onclose = (event) => {
         setTickerConnected(false);
-        announceNotificationsConnection(false);
+        // An unmounted hook has nothing that will reconnect, so its close is not an outage.
         if (!isMounted) return;
+        announceNotificationsConnection(false);
         const delay = Math.min(1000 * Math.pow(2, retryCount), MAX_RETRY_DELAY_MS);
         retryCount++;
         console.debug(`[WS notifications] closed (code=${event.code}), reconnecting in ${delay}ms`);
