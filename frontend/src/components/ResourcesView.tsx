@@ -115,12 +115,12 @@ function PrunePlanPreview({
 }) {
     const { showBusy } = useVisualBusy(loading);
     if (loading) {
-        // Holds the list's height; the placeholder only shows once the plan is slow.
+        // Reserves about the list's space so the layout does not jump; the placeholder only shows once the plan is slow.
         return (
-            <div data-testid="prune-plan-skeleton" role="status" className={cn('space-y-2', !showBusy && 'invisible')}>
+            <div data-testid="prune-plan-skeleton" role="status" className={cn('space-y-2', !showBusy && 'opacity-0')}>
                 <span className="sr-only">Building prune plan</span>
-                <Skeleton className="h-3 w-24" />
-                <Skeleton className="h-24 w-full" />
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-40 w-full" />
             </div>
         );
     }

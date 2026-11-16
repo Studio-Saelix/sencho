@@ -671,9 +671,11 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     const placeholder = await screen.findByTestId('prune-plan-skeleton');
-    expect(placeholder.className).toContain('invisible');
-    await waitFor(() => expect(screen.getByTestId('prune-plan-skeleton').className).not.toContain('invisible'));
+    expect(placeholder.className).toContain('opacity-0');
+    await waitFor(() => expect(screen.getByTestId('prune-plan-skeleton').className).not.toContain('opacity-0'));
     expect(screen.queryByText('Building prune plan...')).not.toBeInTheDocument();
+    // The placeholder stays in the accessibility tree so the wait is announced.
+    expect(screen.getByTestId('prune-plan-skeleton')).toHaveAttribute('role', 'status');
   });
 
   it('discloses extra repository tags in the prune confirm list', async () => {

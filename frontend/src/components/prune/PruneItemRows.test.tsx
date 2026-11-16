@@ -49,4 +49,29 @@ describe('PruneItemRows', () => {
     expect(screen.getByText('Docker refused removal')).toBeInTheDocument();
     expect(screen.queryByText('unused')).not.toBeInTheDocument();
   });
+
+  it('leaves the size off a summary line for an item with none, and shows a zero size in full mode', () => {
+    const empty: PrunePlanItem = { ...volume, id: 'e', name: 'empty', sizeBytes: 0 };
+    const view = render(<PruneItemRows items={[volume, empty]} detail="summary" />);
+    for (const row of screen.getAllByRole('listitem')) expect(row).not.toHaveTextContent(/Bytes|KB|MB/);
+    view.unmount();
+    render(<PruneItemRows items={[empty]} />);
+    expect(screen.getByText('0 Bytes')).toBeInTheDocument();
+  });
+
+  it('colors a removed outcome as success and renders creation time, network facts and ownership labels', () => {
+    const network: PrunePlanItem = {
+      target: 'networks', id: 'n1', name: 'web_default', managed: true, reason: 'unused',
+      network: { driver: 'bridge', scope: 'local', ownershipLabels: { 'com.docker.compose.project': 'web' } },
+    };
+    const dated: PrunePlanItem = { ...image, id: 'd', name: 'dated:1', image: { references: ['dated:1'], createdAt: 1700000000 } };
+    const outcomes = new Map<string, PruneItemOutcome>([[pruneItemKey('networks', 'n1'), { target: 'networks', id: 'n1', status: 'removed' }]]);
+    render(<PruneItemRows items={[network, dated]} outcomes={outcomes} />);
+    expect(screen.getByText('removed')).toHaveClass('text-success');
+    expect(screen.getByText('driver bridge')).toBeInTheDocument();
+    expect(screen.getByText('scope local')).toBeInTheDocument();
+    expect(screen.getByText('com.docker.compose.project=web')).toBeInTheDocument();
+    expect(screen.getByText(new Date(1700000000 * 1000).toLocaleString())).toBeInTheDocument();
+  });
 });
+

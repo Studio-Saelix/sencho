@@ -38,7 +38,8 @@ export interface PruneItemRowsProps {
   /** Outcomes of a finished run, keyed by `pruneItemKey`. */
   outcomes?: ReadonlyMap<string, PruneItemOutcome>;
   /**
-   * `summary` is one line per item (target, name, size) for a confirmation;
+   * `summary` is one line per item (target, name, size) plus any extra image
+   * references, for a confirmation (it ignores `outcomes`);
    * `full` adds ownership, the short id, stack, metadata, the reason and any
    * outcome, for reviewing a plan or its result.
    */
@@ -49,8 +50,8 @@ export interface PruneItemRowsProps {
 /**
  * The evidence list for a prune plan: flat hairline rows, no card per item. One
  * component renders it for every surface that shows a plan (the Resources
- * confirmation and the Fleet Reclaim review), so the two never name the same
- * item differently.
+ * confirmation and the Fleet Reclaim review and result), so both share one set
+ * of item facts and one outcome key.
  */
 export function PruneItemRows({ items, outcomes, detail = 'full', className }: PruneItemRowsProps) {
   return (

@@ -85,7 +85,9 @@ it('shows the exception count on a collapsed finished node and an excluded node 
   };
   render(<PrunePlanResults planResults={[plan, second, down]} executeResults={[execution]} />);
   expect(screen.getByRole('button', { name: /central/ })).toHaveTextContent('1 failed · 1 skipped');
-  expect(screen.getByText('far · excluded').closest('div')?.className).not.toMatch(/\brounded\b|bg-card/);
+  const excluded = screen.getByText('far · excluded').parentElement;
+  expect(excluded?.className).not.toMatch(/\brounded\b|bg-card/);
+  expect(excluded?.querySelector('button')).toBeNull();
   expect(screen.getByText('Pilot tunnel is disconnected')).toBeInTheDocument();
 });
 
@@ -96,4 +98,40 @@ it('does not repeat the total on a lone node but states it per node when there a
   render(<PrunePlanResults planResults={[{ ...plan, reclaimableBytes: 2048 }, { ...plan, nodeId: 2, nodeName: 'edge', reclaimableBytes: 1024 }]} />);
   expect(screen.getByRole('button', { name: /central/ })).toHaveTextContent('central · 2 KB');
   expect(screen.getByRole('button', { name: /edge/ })).toHaveTextContent('edge · 1 KB');
+});
+
+const down: FleetPruneNodeResult = { nodeId: 3, nodeName: 'far', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+
+it('treats the only reachable node as solo even when other nodes are excluded', () => {
+  render(<PrunePlanResults planResults={[{ ...plan, reclaimableBytes: 2048 }, down]} />);
+  const trigger = screen.getByRole('button', { name: /central/ });
+  expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  expect(trigger).not.toHaveTextContent('KB');
+  expect(screen.getByText('far · excluded')).toBeInTheDocument();
+});
+
+it('shows only the flat row, with nothing to open, when the single node is excluded', () => {
+  render(<PrunePlanResults planResults={[down]} />);
+  expect(screen.getByText('far · excluded')).toBeInTheDocument();
+  expect(screen.queryByRole('button')).not.toBeInTheDocument();
+});
+
+it('shows the reclaimed total for a finished node only when several nodes ran, and no exception meta when everything was removed', () => {
+  const run = (nodeId: number, nodeName: string): FleetPruneNodeResult => ({
+    nodeId, nodeName, reachable: true, reclaimedBytes: 2048,
+    outcomes: [{ target: 'images', id: 'removed-id', status: 'removed' }], targets: [],
+  });
+  const first = render(<PrunePlanResults planResults={[plan]} executeResults={[run(1, 'central')]} />);
+  expect(screen.getByRole('button', { name: /central/ })).not.toHaveTextContent('KB');
+  first.unmount();
+  render(<PrunePlanResults planResults={[plan, { ...plan, nodeId: 2, nodeName: 'edge' }]} executeResults={[run(1, 'central'), run(2, 'edge')]} />);
+  const trigger = screen.getByRole('button', { name: /central/ });
+  expect(trigger).toHaveTextContent('central · 2 KB');
+  expect(trigger).not.toHaveTextContent(/failed|skipped|error/);
+});
+
+it('flags a node-level error on the collapsed row', () => {
+  const failedRun: FleetPruneNodeResult = { nodeId: 1, nodeName: 'central', reachable: true, error: 'Docker daemon unreachable', targets: [] };
+  render(<PrunePlanResults planResults={[plan, { ...plan, nodeId: 2, nodeName: 'edge' }]} executeResults={[failedRun]} />);
+  expect(screen.getByRole('button', { name: /central/ })).toHaveTextContent('error');
 });

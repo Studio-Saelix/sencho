@@ -41,7 +41,7 @@ function unremovedSummary(outcomes: PruneItemOutcome[]): string {
     .filter(Boolean).map((part) => ` · ${part}`).join('');
 }
 
-function NodePlan({ plan, execution, open, lone }: { plan: FleetPruneNodeResult; execution?: FleetPruneNodeResult; open: boolean; lone: boolean }) {
+function NodePlan({ plan, execution, solo }: { plan: FleetPruneNodeResult; execution?: FleetPruneNodeResult; solo: boolean }) {
   if (!plan.reachable || !plan.fingerprint) {
     return (
       <div className="border-t border-hairline py-2 first:border-t-0">
@@ -57,11 +57,11 @@ function NodePlan({ plan, execution, open, lone }: { plan: FleetPruneNodeResult;
   return (
     <Disclosure
       variant="row"
-      defaultOpen={open}
+      defaultOpen={solo}
       className="border-t border-hairline first:border-t-0"
-      // A lone node's total is already the status block's answer, so it is not stated again here.
-      label={lone ? plan.nodeName : `${plan.nodeName} · ${execution ? executionSize(execution) : planSize(plan)}`}
-      meta={execution?.outcomes ? unremovedSummary(execution.outcomes).replace(/^ · /, '') || undefined : undefined}
+      // The only reachable node opens to its items, and its total is already the status block's answer, so it is not stated again here.
+      label={solo ? plan.nodeName : `${plan.nodeName} · ${execution ? executionSize(execution) : planSize(plan)}`}
+      meta={execution?.error ? 'error' : execution?.outcomes ? unremovedSummary(execution.outcomes).replace(/^ · /, '') || undefined : undefined}
     >
       {execution?.error && (
         <p className="font-mono text-[11px] text-destructive">{execution.error}</p>
@@ -89,12 +89,12 @@ function NodePlan({ plan, execution, open, lone }: { plan: FleetPruneNodeResult;
 
 export function PrunePlanResults({ planResults, executeResults }: Props) {
   const executionByNode = new Map(executeResults?.map((result) => [result.nodeId, result]));
-  // A single node opens straight to its items; several stay collapsed so a long fleet stays scannable.
+  // The only reachable node opens straight to its items; several stay collapsed so a long fleet stays scannable.
   const reachable = planResults.filter((plan) => plan.reachable && plan.fingerprint).length;
   return (
     <div className="flex flex-col">
       {planResults.map((plan) => (
-        <NodePlan key={plan.nodeId} plan={plan} execution={executionByNode.get(plan.nodeId)} open={reachable === 1} lone={planResults.length === 1} />
+        <NodePlan key={plan.nodeId} plan={plan} execution={executionByNode.get(plan.nodeId)} solo={reachable === 1} />
       ))}
     </div>
   );
