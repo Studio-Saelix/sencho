@@ -261,6 +261,26 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
 }
 
 /**
+ * Read a resolved compose file and its mtime through one descriptor, opened
+ * non-blocking before asking it what it is. O_NONBLOCK has no effect on a
+ * regular file, but a FIFO that replaced the resolved file in the check/open
+ * gap gives this call a descriptor to inspect instead of sleeping until a
+ * writer appears, which under a directory fence would also hold the fence's
+ * drain until it gave up. The descriptor's own type is authoritative, so only
+ * a regular compose file is ever returned.
+ */
+async function readRegularComposeFile(filePath: string): Promise<{ content: string; mtimeMs: number }> {
+  const fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const stat = await fh.stat();
+    if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(filePath));
+    return { content: await fh.readFile('utf-8'), mtimeMs: stat.mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
  * Refuse an env file that is not a regular file. Compose loads these for
  * interpolation on every run, and opening a FIFO in blocking mode has no writer
  * to end the wait. The code lets the caller name the invalid input instead of
@@ -795,8 +815,8 @@ export class FileSystemService {
    * and the conflict read it answers with, writeFileIfUnchanged,
    * createFileExclusive, readFile, writeFile, saveEnvContent) and by
    * deleteStack; the Files routes have their own admission. When nothing is
-   * fenced it costs one query and a readlink per path component under the
-   * compose root.
+   * fenced it costs one query, one realpath of the compose root, and a
+   * readlink per path component under it.
    *
    * `target` is matched and registered by every spelling a link on the way to
    * it gives it, not by its own path alone: a link whose target a restore moved
@@ -831,7 +851,7 @@ export class FileSystemService {
       const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
       return await this.composeStepUnderFences(
         stackName,
-        () => this.underDirectoryFences(filePath, () => fsPromises.readFile(filePath, 'utf-8')),
+        () => this.underDirectoryFences(filePath, async () => (await readRegularComposeFile(filePath)).content),
       );
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
@@ -841,6 +861,22 @@ export class FileSystemService {
       if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH' || code === 'INVALID_STACK_NAME') throw error;
       console.error('Error reading stack content:', sanitizeForLog((error as Error)?.message ?? String(error)));
       throw new Error(`Failed to read stack: ${stackName}`);
+    }
+  }
+
+  /**
+   * Throw the fence's refusal when the stack's compose file sits in, or links
+   * into, a directory a data restore is overwriting: the read getStackContent
+   * makes, asked up front by work that would otherwise record evidence, run a
+   * gate or spend a checked observation before its own read is refused. Any
+   * other read failure is not this check's to answer; the work goes on and
+   * reports it from its own read.
+   */
+  async refuseIfComposeFenced(stackName: string): Promise<void> {
+    try {
+      await this.getStackContent(stackName);
+    } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
     }
   }
 
@@ -860,23 +896,12 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    // Open non-blocking before asking the descriptor what it is. O_NONBLOCK has
-    // no effect on a regular file, but a FIFO that replaced the resolved file in
-    // the check/open gap gives this call a descriptor to inspect instead of
-    // sleeping until a writer appears. The descriptor's own type is authoritative,
-    // so the read still only ever returns a regular compose file.
+    // The stat and read share one non-blocking descriptor (readRegularComposeFile).
     // A read that fails is asked about the fence again: a file gone mid-swap
     // answers with the fence, not as missing.
     return this.composeStepUnderFences(stackName, () => this.underDirectoryFences(safePath, async () => {
-      const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-      try {
-        const stat = await fh.stat();
-        if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
-        const content = await fh.readFile('utf-8');
-        return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
-      } finally {
-        await fh.close();
-      }
+      const { content, mtimeMs } = await readRegularComposeFile(safePath);
+      return { content, mtimeMs, filename: path.basename(safePath) };
     }));
   }
 

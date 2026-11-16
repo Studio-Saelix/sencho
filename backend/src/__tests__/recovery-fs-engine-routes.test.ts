@@ -13,6 +13,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import request from 'supertest';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
@@ -146,6 +147,21 @@ function stackDir(name: string): string {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
   return fs.realpathSync(dir);
+}
+
+/**
+ * The link shapes the late-admission matrices cover: a single link, a chain,
+ * and a chain whose middle hop is spelled through another path to the compose
+ * root, which a check by the configured root's spelling alone would not follow.
+ */
+const LINK_SHAPES = ['single', 'chained', 'alias'] as const;
+type LinkShape = typeof LINK_SHAPES[number];
+
+/** A new link outside the compose root that names it: another path to the same directory. */
+function composeRootAlias(): string {
+  const alias = path.join(shared, `compose-alias-${randomUUID().slice(0, 8)}`);
+  fs.symlinkSync(fs.realpathSync(process.env.COMPOSE_DIR as string), alias);
+  return alias;
 }
 
 function dataDir(stack: string, name = 'data'): string {
@@ -1559,6 +1575,17 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
   });
 
+  it('refuses the env routes when a chained compose link names its middle hop through another path to the compose root', async () => {
+    const { dir, data, compose } = linkedComposeStack();
+    fs.rmSync(path.join(dir, 'compose.yaml'));
+    fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(dir, 'middle.yaml'));
+    fs.symlinkSync(path.join(composeRootAlias(), 'web', 'middle.yaml'), path.join(dir, 'compose.yaml'));
+    fencedOverwriteOf(data, ['web']);
+    fs.renameSync(compose, `${compose}.aside`);
+    expectRefused(await composeRoutes());
+    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
+  });
+
   it('refuses the env routes when the compose file reaches the fenced directory through a linked directory', async () => {
     const { dir, data, compose } = linkedComposeStack();
     fs.rmSync(path.join(dir, 'compose.yaml'));
@@ -1570,25 +1597,32 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
   });
 
-  /** `envStack`, with the declared env file reached through `app.env -> mid.env -> data/app.env`. */
-  function chainedEnvStack(): { dir: string; data: string; envFile: string } {
+  /**
+   * `envStack`, with the declared env file reached through
+   * `app.env -> mid.env -> data/app.env`; with `alias`, the first hop names
+   * mid.env through another path to the compose root.
+   */
+  function chainedEnvStack(alias = false): { dir: string; data: string; envFile: string } {
     const stack = envStack();
     fs.writeFileSync(path.join(stack.dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n    env_file: app.env\n');
     fs.symlinkSync(path.join('data', 'app.env'), path.join(stack.dir, 'mid.env'));
-    fs.symlinkSync('mid.env', path.join(stack.dir, 'app.env'));
+    fs.symlinkSync(alias ? path.join(composeRootAlias(), 'web', 'mid.env') : 'mid.env', path.join(stack.dir, 'app.env'));
     return stack;
   }
 
   it('refuses the env routes and a Secrets import when a declared env file reaches the fenced directory through a chain of links', async () => {
-    const { dir, data, envFile } = chainedEnvStack();
-    fencedOverwriteOf(data, ['web']);
-    fs.renameSync(envFile, `${envFile}.aside`);
-    expectRefused(await envRoutes());
-    expect(fs.existsSync(path.join(dir, '.env'))).toBe(false);
-    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
-    const refused = SecretsService.getInstance().readImportOverlay(nodeId, 'web', 'app.env');
-    await expect(refused).rejects.toBeInstanceOf(SecretSourceRefusedError);
-    await expect(refused).rejects.toThrow(/data restore is overwriting/);
+    for (const alias of [false, true]) {
+      resetStack();
+      const { dir, data, envFile } = chainedEnvStack(alias);
+      fencedOverwriteOf(data, ['web']);
+      fs.renameSync(envFile, `${envFile}.aside`);
+      expectRefused(await envRoutes());
+      expect(fs.existsSync(path.join(dir, '.env')), String(alias)).toBe(false);
+      const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+      const refused = SecretsService.getInstance().readImportOverlay(nodeId, 'web', 'app.env');
+      await expect(refused, String(alias)).rejects.toBeInstanceOf(SecretSourceRefusedError);
+      await expect(refused, String(alias)).rejects.toThrow(/data restore is overwriting/);
+    }
   });
 
   it('still answers a chained env link that dangles outside any fence as not there', async () => {
@@ -1706,6 +1740,25 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     }
   });
 
+  it('answers file work as overlapping when one spelling overlaps the fenced directory and another cannot be placed, in either order', async () => {
+    const data = dataDir('web');
+    fencedOverwriteOf(data, ['web']);
+    const fence = await import('../services/recovery/restoreFence');
+    const fsRoots = await import('../services/recovery/fsRoots');
+    const unplaceable = path.join(stackDir('web'), 'unplaceable');
+    const inside = path.join(data, 'app.env');
+    vi.spyOn(fsRoots, 'relateToFencedDirectory').mockImplementation(async (spelling) =>
+      (spelling === unplaceable ? 'unknown' : spelling === inside ? 'overlap' : 'unrelated'));
+    for (const spellings of [[unplaceable, inside], [inside, unplaceable]]) {
+      const match = await fence.matchFsWorkToFences(spellings);
+      expect(match.refusal?.message, spellings.join(' ')).toMatch(/overlaps the directory/);
+    }
+    const unproven = await fence.matchFsWorkToFences([unplaceable, path.join(stackDir('web'), 'elsewhere')]);
+    expect(unproven.refusal?.message).toMatch(/cannot prove/);
+    const clear = await fence.matchFsWorkToFences([path.join(stackDir('web'), 'elsewhere')]);
+    expect(clear.refusal).toBeNull();
+  });
+
   it('ends a link loop instead of following it, and refuses it as unprovable while a fence is held', async () => {
     const { dir } = chainedEnvStack();
     fs.rmSync(path.join(dir, 'app.env'));
@@ -1816,19 +1869,27 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_fence_members').run();
     recoveryDbModule.recoveryDb().prepare('DELETE FROM recovery_restore_intents').run();
   }
-  /** `linkedComposeStack` with `compose.yaml` reached through a chain: compose.yaml -> mid.yaml -> data/compose.yaml. */
-  function chainedComposeStack(): { dir: string; data: string; compose: string } {
+  /**
+   * `linkedComposeStack` with `compose.yaml` reached through a chain:
+   * compose.yaml -> mid.yaml -> data/compose.yaml. With `alias`, the first hop
+   * names mid.yaml through another path to the compose root.
+   */
+  function chainedComposeStack(alias = false): { dir: string; data: string; compose: string } {
     const stack = linkedComposeStack();
     fs.rmSync(path.join(stack.dir, 'compose.yaml'));
     fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(stack.dir, 'mid.yaml'));
-    fs.symlinkSync('mid.yaml', path.join(stack.dir, 'compose.yaml'));
+    fs.symlinkSync(alias ? path.join(composeRootAlias(), 'web', 'mid.yaml') : 'mid.yaml', path.join(stack.dir, 'compose.yaml'));
     return stack;
+  }
+  /** The compose stack for one link shape of the late-admission matrices. */
+  function composeStackOf(shape: LinkShape): { dir: string; data: string; compose: string } {
+    return shape === 'single' ? linkedComposeStack() : chainedComposeStack(shape === 'alias');
   }
 
   it('refuses a Compose save through a link that dangles into the fenced directory mid-swap, and creates no file', async () => {
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       resetStack();
-      const { dir, data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { dir, data, compose } = composeStackOf(shape);
       const opened = await request(app).get('/api/stacks/web').set('Cookie', adminCookie);
       expect(opened.status, shape).toBe(200);
       fencedOverwriteOf(data, ['web']);
@@ -1876,9 +1937,9 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       preview: request(app).get('/api/stacks/web/update-preview').set('Cookie', adminCookie),
       reconcile: request(app).post('/api/stacks/web/update-preview').set('Cookie', adminCookie),
     });
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       resetStack();
-      const { data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { data, compose } = composeStackOf(shape);
       const opened = await request(app).get('/api/stacks/web/services').set('Cookie', adminCookie);
       expect(opened.status, shape).toBe(200);
       expect(opened.body, shape).toEqual(['app']);
@@ -2169,8 +2230,8 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       return original(paths);
     });
   }
-  /** A stack whose `.env` and `app.env` reach `data/` by a link, directly or through `mid*.env`. */
-  function linkedEnvStack(shape: 'single' | 'chained'): { dir: string; data: string; files: Record<string, string> } {
+  /** A stack whose `.env` and `app.env` reach `data/` by a link, directly or through `mid*.env` (named through an alias of the compose root for `alias`). */
+  function linkedEnvStack(shape: LinkShape): { dir: string; data: string; files: Record<string, string> } {
     const { dir, data } = envStack();
     const files: Record<string, string> = {};
     for (const name of ['.env', 'app.env']) {
@@ -2180,7 +2241,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         fs.symlinkSync(path.join('data', name), path.join(dir, name));
       } else {
         fs.symlinkSync(path.join('data', name), path.join(dir, `mid${name}`));
-        fs.symlinkSync(`mid${name}`, path.join(dir, name));
+        fs.symlinkSync(shape === 'alias' ? path.join(composeRootAlias(), 'web', `mid${name}`) : `mid${name}`, path.join(dir, name));
       }
       files[name] = target;
     }
@@ -2191,7 +2252,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const fence = await import('../services/recovery/restoreFence');
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       // Env writes: direct (the forced editor save and the Secrets write),
       // plain, conditional, the project .env save, and the exclusive create.
       resetStack();
@@ -2222,7 +2283,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       // Compose writes: the automated save, and the editor's plain, If-Match,
       // filename-pinned and pinned-with-If-Match saves.
       resetStack();
-      const { dir, data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { dir, data, compose } = composeStackOf(shape);
       const before = fs.readFileSync(compose, 'utf-8');
       fencedOverwriteOf(data, ['web']);
       const composeMtime = fs.statSync(compose).mtimeMs;
@@ -2253,7 +2314,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const fence = await import('../services/recovery/restoreFence');
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       resetStack();
       const env = linkedEnvStack(shape);
       fencedOverwriteOf(dataDir('other'), ['other']);
@@ -2268,7 +2329,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       }
       expect(fence.fsWorkInFlightCountForTests(), shape).toBe(0);
       resetStack();
-      const { dir, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { dir, compose } = composeStackOf(shape);
       fencedOverwriteOf(dataDir('other'), ['other']);
       expect(await fsService.getStackContent('web'), shape).toContain('image: nginx');
       expect(await fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, 'compose.yaml'), shape).toMatchObject({ ok: true });
@@ -2282,7 +2343,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
   it('makes a fence wait for a write through a link admitted before it, even once the link\'s target is moved aside', async () => {
     const fence = await import('../services/recovery/restoreFence');
     const { FileSystemService } = await import('../services/FileSystemService');
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       resetStack();
       const env = linkedEnvStack(shape);
       const app = path.join(env.dir, 'app.env');
@@ -2316,11 +2377,44 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     }
   });
 
+  it('fails a compose read promptly when a FIFO replaces the file after it was resolved, and leaves no work registered', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    for (const [name, read] of [
+      ['content', () => fsService.getStackContent('web')],
+      ['withMtime', () => fsService.getStackContentWithMtime('web')],
+    ] as const) {
+      resetStack();
+      // Another directory is fenced, so the read is admitted and registered.
+      fencedOverwriteOf(dataDir('other'), ['other']);
+      const compose = path.join(stackDir('web'), 'compose.yaml');
+      await beforeNextAdmission(() => {
+        fs.rmSync(compose);
+        execFileSync('mkfifo', [compose]);
+      });
+      const timedOut = Symbol('timed out');
+      try {
+        const outcome = await Promise.race([
+          read().then(() => 'read', (err: unknown) => err),
+          new Promise((resolve) => setTimeout(() => resolve(timedOut), 3_000)),
+        ]);
+        expect(outcome, name).not.toBe(timedOut);
+        expect(outcome, name).toBeInstanceOf(Error);
+        expect(fence.fsWorkInFlightCountForTests(), name).toBe(0);
+      } finally {
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        // Release a blocking open, should one be waiting for a writer.
+        try { fs.closeSync(fs.openSync(compose, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch { /* no reader */ }
+      }
+    }
+  });
+
   it('answers a compose read that fails after its admission with the fence recorded meanwhile, not as a failed read', async () => {
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);
     for (const [name, method, read] of [
-      ['content', 'readFile', () => fsService.getStackContent('web')],
+      ['content', 'open', () => fsService.getStackContent('web')],
       ['withMtime', 'open', () => fsService.getStackContentWithMtime('web')],
     ] as const) {
       resetStack();
@@ -2361,9 +2455,9 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       await loadStackBuildServices(nodeId, request.stackName);
       throw new Error('reached past the compose read');
     });
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       resetStack();
-      const { data, compose } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { data, compose } = composeStackOf(shape);
       const before = fs.readFileSync(compose, 'utf-8');
       // No recorded dependent stack, so the lifecycle routes take the stack lock
       // and reach the compose read; the fence on the directory alone answers.
@@ -2382,6 +2476,62 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     }
   });
 
+  it('answers the drift view and its re-check with the fence, and reconciles nothing, when the compose file links into the fenced directory', async () => {
+    const drift = await import('../services/DriftDetectionService');
+    vi.spyOn(drift, 'buildStackDriftReport').mockResolvedValue({ stackName: 'web', findings: [] } as never);
+    const { DriftLedgerService } = await import('../services/DriftLedgerService');
+    const reconcile = vi.spyOn(DriftLedgerService.getInstance(), 'reconcile');
+    for (const shape of LINK_SHAPES) {
+      resetStack();
+      const { data } = composeStackOf(shape);
+      fencedOverwriteOf(data, ['web']);
+      for (const [name, pending] of Object.entries({
+        view: request(app).get('/api/stacks/web/drift').set('Cookie', adminCookie),
+        recheck: request(app).post('/api/stacks/web/drift/recheck').set('Cookie', adminCookie),
+      })) {
+        const res = await pending;
+        expect(res.status, `${shape} ${name}`).toBe(409);
+        expect(res.body.code, `${shape} ${name}`).toBe('data_restore');
+      }
+    }
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a manual and an automatic update of a compose file in the fenced directory before the gate runs or a checked observation is spent', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(resolveSenchoLabels({ services: { app: { image: 'nginx:1' } } }), request));
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
+    const { applyAutomaticStackUpdate } = await import('../services/automaticStackUpdate');
+    for (const shape of LINK_SHAPES) {
+      resetStack();
+      const { data } = composeStackOf(shape);
+      fencedOverwriteOf(data);
+      const res = await request(app).post('/api/stacks/web/update').set('Cookie', adminCookie);
+      expect(res.status, shape).toBe(409);
+      expect(res.body.code, shape).toBe('data_restore');
+      const verify = vi.fn();
+      const consume = vi.fn();
+      await expect(applyAutomaticStackUpdate({
+        nodeId, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'auto-update:test' },
+        verificationOwner: 'hub_authority', observation: { verify, consume },
+      }), shape).rejects.toMatchObject({ code: 'data_restore' });
+      expect(verify, shape).not.toHaveBeenCalled();
+      expect(consume, shape).not.toHaveBeenCalled();
+    }
+    expect(gate).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('admits the services list and update preview read of a compose file in the fenced directory under the fence, by any timing', async () => {
     const { ImageUpdateService } = await import('../services/ImageUpdateService');
     vi.spyOn(ImageUpdateService, 'isChecksEnabled').mockReturnValue(true);
@@ -2393,10 +2543,10 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       preview: request(app).get('/api/stacks/web/update-preview').set('Cookie', adminCookie),
       reconcile: request(app).post('/api/stacks/web/update-preview').set('Cookie', adminCookie),
     });
-    for (const shape of ['single', 'chained'] as const) {
+    for (const shape of LINK_SHAPES) {
       // The file is there and the directory is already fenced.
       resetStack();
-      const { data } = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const { data } = composeStackOf(shape);
       fencedOverwriteOf(data, ['web']);
       await expect(fsService.getStackContent('web'), shape).rejects.toMatchObject({ code: 'data_restore' });
       for (const [name, pending] of Object.entries(routes())) {
@@ -2406,7 +2556,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       }
       // The fence lands after the compose file was resolved.
       resetStack();
-      const late = shape === 'single' ? linkedComposeStack() : chainedComposeStack();
+      const late = composeStackOf(shape);
       await beforeNextAdmission(() => { fencedOverwriteOf(late.data, ['web']); });
       await expect(fsService.getStackContent('web'), `${shape} late fence`).rejects.toMatchObject({ code: 'data_restore' });
       vi.mocked(fence.matchFsWorkToFences).mockRestore();

@@ -3,6 +3,7 @@ import { describePolicyBlock, verifyPulledCandidates } from '../helpers/policyGa
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { ComposeService } from './ComposeService';
+import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
@@ -66,6 +67,10 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
           updatePolicy: toUpdatePolicyWire(updatePolicy),
         };
       }
+      // A compose file a data restore is overwriting refuses the update. Asked
+      // before the gate and before the observation is spent, so the refusal
+      // records no scan and leaves the observation for a later attempt.
+      await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
       await input.observation?.verify();
       // An automatic update runs without a person present and pulls every
       // pullable service, so the gate evaluates the registry image and holds it

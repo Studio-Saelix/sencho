@@ -1840,15 +1840,18 @@ async function buildDriftPayload(
   gitopsRevision: GitOpsRevisionProjection;
 }> {
   const report = await buildStackDriftReport(nodeId, stackName);
-  // Only the on-disk read is best-effort: an unreadable compose is already surfaced
-  // by the report as a parse error, so temporal degrades to neutral. computeTemporal
-  // runs outside the try so a real ledger fault (a DB or hashing error) surfaces as a
-  // 500 instead of being hidden behind a misleading "no baseline".
+  // The on-disk read is best-effort for an unreadable compose file, which the
+  // temporal overlay answers as neutral. A compose file a data restore is
+  // overwriting is not unreadable but fenced: that refusal is thrown, before
+  // a re-check reconciles anything, and the route answers it with the fence
+  // instead of a "no baseline" that would read as a fresh stack. computeTemporal
+  // runs outside the try so a real ledger fault (a DB or hashing error) surfaces
+  // as a 500 instead of being hidden behind a misleading "no baseline".
   let content: string | null = null;
   try {
     content = await FileSystemService.getInstance(nodeId).getStackContent(stackName);
-  } catch {
-    // Unreadable compose: the report carries the parseError; temporal stays neutral.
+  } catch (error) {
+    if (isDataRestoreFenceError(error)) throw error;
   }
   const temporal: DriftTemporal = content !== null
     ? DriftLedgerService.getInstance().computeTemporal(nodeId, stackName, content)
@@ -1898,6 +1901,10 @@ stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, false));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build drift report' });
@@ -1915,6 +1922,10 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, true));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to re-check drift' });
@@ -3357,6 +3368,10 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       });
       return;
     }
+    // A compose file a data restore is overwriting refuses the update before the
+    // gate, so the refusal writes no gate evidence and starts no scan. The catch
+    // below answers it with the fence.
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId, {
       imageSource: 'registry',
       unattended: trigger !== 'manual',
