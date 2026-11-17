@@ -12,7 +12,7 @@ const SUCCESS_COPY: Record<SourceControllerAction, string> = {
 /**
  * Outcomes that mean a Retry or Resume ran and the source settled without a
  * failure or a block. A 2xx alone is not enough: the routes answer 200 for a
- * refusal that may leave the source unchanged.
+ * refusal, not only for a completed action.
  */
 const SETTLED_OUTCOMES: ReadonlySet<string> = new Set([
   'converged',
@@ -80,7 +80,7 @@ function sourceControllerFeedback(
     }
     if (SETTLED_OUTCOMES.has(outcome)) return success;
     if (outcome === 'failed_previous_intact') {
-      return refused('reconciliation resumed, but the previous deployment was left as it was.');
+      return refused('reconciliation resumed, but the source still needs attention: the previous deployment was left as it was.');
     }
     return refused('reconciliation resumed, but the source still needs attention.');
   }
