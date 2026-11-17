@@ -8,7 +8,7 @@ import { GITOPS_GIT_SOURCE_EVENT } from '../gitops/portfolio/portfolioNavigation
 import { MobileGitOps } from './MobileGitOps';
 
 const session = vi.hoisted(() => ({ canEdit: true }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
@@ -50,6 +50,8 @@ const emptyList = {
 
 afterEach(() => {
   session.canEdit = true;
+  vi.mocked(toast.success).mockReset();
+  vi.mocked(toast.warning).mockReset();
   vi.mocked(toast.error).mockReset();
   mockFetch.mockReset();
   window.history.replaceState({}, '', '/');
@@ -100,7 +102,7 @@ describe('MobileGitOps', () => {
     ok: true,
     status: 200,
     json: async () => (init?.method === 'POST'
-      ? {}
+      ? { outcome: 'pending_review', reason: 'A candidate is staged and requires review.', nextAction: 'review' }
       : { ...emptyList, summary: { ...emptyList.summary, applications: rows.length }, applications: rows }),
   }) as unknown as Response);
 
@@ -134,6 +136,89 @@ describe('MobileGitOps', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('refused')));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).not.toHaveAttribute('aria-busy', 'true'));
+  });
+
+  it('warns on a Retry the server refused with 200 and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'failed_previous_intact',
+            reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+            nextAction: 'retry',
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_failed'], availableActions: ['retry'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
+  it('warns on a Resume the server refused with 200 and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'suspended',
+            reason: 'Reconciliation is suspended: paused for maintenance',
+            nextAction: 'resume',
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_suspended'], availableActions: ['resume'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith(
+      '/stacks/bookstack/git-source/resume',
+      expect.objectContaining({ method: 'POST' }),
+    ));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
+  it('warns on a Resume whose source no longer exists and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'unknown',
+            reason: 'No GitOps application exists for this stack.',
+            nextAction: 'none',
+            suspensionCleared: false,
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_suspended'], availableActions: ['resume'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('falls back to opening the Git source when the session cannot edit the stack', async () => {

@@ -8271,9 +8271,41 @@ describe('GitSourceService.apply', () => {
             const result = await svc.resume('resume-basic', { actor: 'tester' });
 
             expect(result.outcome).not.toBe('suspended');
+            expect(result.suspensionCleared).toBe(true);
             const app = liveApp('resume-basic');
             expect(app?.suspended_at).toBeNull();
             expect(app?.source_suspended_reason).toBeNull();
+        });
+
+        it('reports a stack with no application as unconfirmed, not as resumed', async () => {
+            const result = await GitSourceService.getInstance().resume('resume-no-app', { actor: 'tester' });
+
+            expect(result).toMatchObject({
+                outcome: 'unknown',
+                reason: 'No GitOps application exists for this stack.',
+                nextAction: 'none',
+                suspensionCleared: false,
+            });
+        });
+
+        it('does not report a cleared suspension when the resume write is refused', async () => {
+            const svc = await seedPending('resume-write-refused', 'services:\n  x:\n    image: alpine\n', 's4s4s4s4s4s4s4s4s4s4s4s4s4s4s4s4s4s4s4s4');
+            await svc.suspend('resume-write-refused', { actor: 'tester', reason: 'pausing' });
+            const writeSpy = vi.spyOn(GitOpsTransitions.prototype, 'sourceUnsuspended')
+                .mockImplementationOnce(() => { throw new Error('database is locked'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+            try {
+                const result = await svc.resume('resume-write-refused', { actor: 'tester' });
+
+                // The row still carries the suspension, so neither the outcome
+                // nor the evidence may claim the source resumed.
+                expect(result.outcome).toBe('suspended');
+                expect(result.suspensionCleared).toBe(false);
+                expect(liveApp('resume-write-refused')?.suspended_at).toBeTruthy();
+            } finally {
+                writeSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
         });
 
         it('resuming a source re-policed into automatic while suspended arms its poll cursor', async () => {
@@ -8336,6 +8368,7 @@ describe('GitSourceService.apply', () => {
             const result = await svc.resume('resume-noop', { actor: 'tester' });
 
             expect(result.outcome).toBe('pending_review');
+            expect(result.suspensionCleared).toBe(true);
         });
 
         it('pulling and applying again succeeds once a suspended source is resumed', async () => {

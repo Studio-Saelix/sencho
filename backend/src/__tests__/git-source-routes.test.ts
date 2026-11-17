@@ -885,7 +885,7 @@ describe('POST /api/stacks/:stackName/git-source/resume', () => {
 
     it('returns the normalized result', async () => {
         const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
-            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none', suspensionCleared: true });
         const { SourceController } = await import('../services/gitops/SourceController');
         const evaluateSpy = vi.spyOn(SourceController.getInstance(), 'evaluateNow').mockResolvedValue();
         const res = await request(app)
@@ -894,6 +894,9 @@ describe('POST /api/stacks/:stackName/git-source/resume', () => {
             .send({});
         expect(res.status).toBe(200);
         expect(res.body.outcome).toBe('no_source_change');
+        // The evidence the caller confirms from survives the route unchanged,
+        // so a proxied or local answer carries the same proof.
+        expect(res.body.suspensionCleared).toBe(true);
         expect(resumeSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
         // The route wakes the source immediately: the controller's resume
         // evaluation is fired for the same stack the service just resumed.
@@ -904,7 +907,7 @@ describe('POST /api/stacks/:stackName/git-source/resume', () => {
 
     it('still returns the resume outcome when the immediate evaluation cannot start', async () => {
         const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
-            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none', suspensionCleared: true });
         const { SourceController } = await import('../services/gitops/SourceController');
         const evaluateSpy = vi.spyOn(SourceController.getInstance(), 'evaluateNow')
             .mockRejectedValue(new Error('database is locked'));

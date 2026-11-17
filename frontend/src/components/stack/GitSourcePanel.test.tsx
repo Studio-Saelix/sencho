@@ -346,6 +346,7 @@ describe('GitSourcePanel hosted on an explicit node', () => {
     nodeCtl.nodeMeta.set(9, { capabilities: [GITOPS_SOURCE_CONTROLLER_CAPABILITY] });
     vi.mocked(apiFetch).mockImplementation(async (_url: string, options?: { method?: string }) => {
       if (options?.method === 'DELETE') return jsonRes({ success: true });
+      if (options?.method === 'POST') return jsonRes({ outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' });
       return jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })));
     });
     render(hostedPanel());
@@ -1558,9 +1559,11 @@ describe('GitSourcePanel controller controls', () => {
   });
 
   it('POSTs suspend after confirm', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
-    );
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/suspend')
+        ? jsonRes({ outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' })
+        : jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })))
+    ));
     render(panel());
     await sheetLoaded();
     openTab('Automation');
@@ -1577,9 +1580,11 @@ describe('GitSourcePanel controller controls', () => {
   });
 
   it('POSTs resume', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
-    );
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/resume')
+        ? jsonRes({ outcome: 'no_source_change', reason: 'The configured ref still resolves to the accepted generation.', nextAction: 'none' })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] })))
+    ));
     render(panel());
     fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
     await waitFor(() => {
@@ -1592,9 +1597,11 @@ describe('GitSourcePanel controller controls', () => {
   });
 
   it('POSTs retry', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
-    );
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/retry')
+        ? jsonRes({ outcome: 'pending_review', reason: 'A candidate is staged and requires review.', nextAction: 'review' })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] })))
+    ));
     render(panel());
     fireEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
     await waitFor(() => {
@@ -1604,6 +1611,64 @@ describe('GitSourcePanel controller controls', () => {
       expect(post?.[0]).toBe('/stacks/web/git-source/retry');
       expect(JSON.parse(String(post?.[1]?.body))).toEqual({});
     });
+  });
+
+  it('reports a retry that left the previous deployment intact as a warning', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/retry')
+        ? jsonRes({
+            outcome: 'failed_previous_intact',
+            reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+            nextAction: 'retry',
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('reports a resume the source did not clear as a warning', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/resume')
+        ? jsonRes({
+            outcome: 'suspended',
+            reason: 'Reconciliation is suspended: paused for maintenance',
+            nextAction: 'resume',
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('reports a resume whose source no longer exists as unconfirmed', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/resume')
+        ? jsonRes({
+            outcome: 'unknown',
+            reason: 'No GitOps application exists for this stack.',
+            nextAction: 'none',
+            suspensionCleared: false,
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it('sends source_policy manual when Manual is chosen', async () => {
@@ -2055,9 +2120,11 @@ describe('GitSourcePanel unsaved changes', () => {
   });
 
   it('does not throw away a pending change when a suspend refreshes the sheet', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
-    );
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/suspend')
+        ? jsonRes({ outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' })
+        : jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })))
+    ));
     render(panel());
     await sheetLoaded();
     openTab('Automation');
@@ -2070,6 +2137,27 @@ describe('GitSourcePanel unsaved changes', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: /^Manual/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /^update$/i })).toBeInTheDocument();
+  });
+
+  it('keeps the suspend dialog open with its reason when the suspension is unconfirmed', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/suspend')
+        ? jsonRes({ outcome: 'recovery_required', reason: 'Recovery from an earlier failed mutation is still outstanding.', nextAction: 'view_target_results' })
+        : jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] })))
+    ));
+    render(panel());
+    await sheetLoaded();
+    openTab('Automation');
+    fireEvent.click(screen.getByRole('button', { name: /^suspend$/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'registry move' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /^suspend$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: the suspension could not be confirmed. Recovery from an earlier failed mutation is still outstanding.',
+    ));
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('textbox')).toHaveValue('registry move');
   });
 
   it('keeps the draft and the form open when a save is refused', async () => {

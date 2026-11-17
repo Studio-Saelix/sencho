@@ -1013,13 +1013,15 @@ stackGitSourceRouter.post('/:stackName/git-source/resume', async (req: Request, 
     const result = await GitSourceService.getInstance().resume(stackName, {
       actor: req.user?.username ?? 'unknown',
     });
-    // A resumed source is re-evaluated immediately rather than idling
+    // The service result is obtained first: it reports the cleared suspension
+    // and the row state as they stand after the write, before any evaluation.
+    // A resumed source is then re-evaluated immediately rather than idling
     // until its next poll or retry cursor: the controller's resume trigger
     // re-resolves source state and, for an automatic source, target
-    // binding through the shared acceptance/dispatch arm. Fire-and-forget
-    // by design: this response reports that suspension was cleared, not
-    // the outcome of a reconcile that has not finished yet, and the
-    // durable row plus the next tick are the authority on the latter.
+    // binding through the shared acceptance/dispatch arm. That wake is
+    // fire-and-forget by design; this response reports what the service
+    // proved, not the outcome of a reconcile that has not started yet, and
+    // the durable row plus the next tick are the authority on the latter.
     // The wake has its own guard: a failure starting it must not
     // retroactively fail a resume that already committed, so it is
     // logged, never sent to sendGitSourceError. evaluateNow absorbs its
