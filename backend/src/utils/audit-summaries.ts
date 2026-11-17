@@ -112,6 +112,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /fleet/snapshots': 'Created fleet backup',
   'DELETE /fleet/snapshots': 'Deleted fleet backup',
   'POST /fleet/snapshots/*/restore': 'Restored fleet backup',
+  'POST /fleet/snapshots/*/restore-all': 'Restored fleet backup to all stacks',
   'PUT /fleet/snapshots/*/node-mapping': 'Mapped fleet backup nodes',
   'POST /fleet/nodes/*/update': 'Triggered fleet node update',
   'POST /fleet/nodes/*/reapply-compose': 'Triggered fleet node compose reapply',
