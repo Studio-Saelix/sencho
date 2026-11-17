@@ -15,9 +15,10 @@ export function byUrgency(a: GitOpsAttentionReason, b: GitOpsAttentionReason): n
 
 /**
  * What this session may do to a Direct application's Git source from a list:
- * the server must offer the action, the session must be able to edit the stack,
- * and the owning node must run the source controller. Anything else falls back to
- * opening the surface, so a button never promises what would be refused.
+ * for a controller verb, the server must offer it, the session must be able to
+ * edit the stack, and the owning node must run the source controller. Anything
+ * else falls back to opening the surface, so a button never promises what would
+ * be refused.
  */
 function useSourceControl(): (row: GitOpsPortfolioRow) => SourceControl {
   const { can } = useAuth();

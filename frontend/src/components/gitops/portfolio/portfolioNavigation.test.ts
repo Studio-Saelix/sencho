@@ -193,7 +193,8 @@ describe('portfolio row actions and attention next steps', () => {
     'source_conflict_blocker',
     'source_reconcile_required',
   ] as const)('opens %s without pulling when the session cannot edit the stack', (reason) => {
-    const next = attentionNextStep(reason, direct, { can: () => false, canReview: () => false });
+    // The verb gate may allow everything; only the review gate decides this.
+    const next = attentionNextStep(reason, direct, { can: () => true, canReview: () => false });
     expect(next.label).toBe('Open Git source');
     // No intent: the sheet opens read-only instead of POSTing a pull the server refuses.
     expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))

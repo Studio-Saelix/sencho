@@ -944,6 +944,16 @@ describe('GitSourcePanel write affordances', () => {
     expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
   });
+
+  it('hides the update review and Pull now when the node runs no source controller', async () => {
+    nodeCtl.hasCapability.mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+    render(panel());
+
+    expect(await screen.findByTestId('gitops-source')).toHaveTextContent(SOURCE_STATE.candidate_ready.label);
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
+  });
 });
 
 function controllerRevision(args: {
@@ -1502,7 +1512,7 @@ describe('GitSourcePanel controller controls', () => {
       jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
     );
     render(panel());
-    await screen.findByRole('button', { name: /pull now/i });
+    await screen.findByTestId('gitops-source');
     expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
   });
 

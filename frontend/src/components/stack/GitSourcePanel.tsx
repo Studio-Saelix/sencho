@@ -777,9 +777,10 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
-  // Reviewing pulls the waiting commit, so it is offered only to a session that
-  // may edit the stack. Everyone else reads the waiting state without a write.
-  const offerReview = showPendingReview && canMutateSource;
+  // Reviewing pulls the waiting commit through the node's source controller, so
+  // it is offered only to a session that may edit the stack on a node that runs
+  // the controller. Everyone else reads the waiting state without a write.
+  const offerReview = showPendingReview && canMutateSource && nodeHasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY);
   // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes. Reviewing pulls the commit, so a session that cannot edit the stack gets no verb here.
   let statusAction: ReactNode;
   if (offerRetry && !showPendingReview) {
@@ -841,7 +842,8 @@ export function GitSourcePanel({
   }, [autoReview, open, loading, offerReview]);
 
   const toolbarLive = !loading && loadError === null;
-  const offerPull = toolbarLive && canMutateSource && source !== null && sourceFacet?.status !== 'source_suspended';
+  const canPullSource = canMutateSource && nodeHasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY);
+  const offerPull = toolbarLive && canPullSource && source !== null && sourceFacet?.status !== 'source_suspended';
   const secondaryActions: SystemSheetAction[] | undefined = offerPull
     ? [{
         label: pulling ? 'Pulling' : 'Pull now',
