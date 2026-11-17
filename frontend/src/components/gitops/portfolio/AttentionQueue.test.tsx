@@ -16,7 +16,7 @@ import { AttentionQueue } from './AttentionQueue';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 const session = vi.hoisted(() => ({
   can: vi.fn<(action: string, type?: string, id?: string, nodeId?: number | null) => boolean>(() => true),
   nodeMeta: new Map<number, { capabilities: string[] }>(),
@@ -31,6 +31,7 @@ afterEach(() => {
   session.nodeMeta.clear();
   mockFetch.mockReset();
   vi.mocked(toast.success).mockReset();
+  vi.mocked(toast.warning).mockReset();
   vi.mocked(toast.error).mockReset();
 });
 
@@ -138,6 +139,30 @@ describe('AttentionQueue', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('web: Nothing to retry'));
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('warns when a Retry answered 200 but left the previous deployment intact', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        outcome: 'failed_previous_intact',
+        reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+        nextAction: 'retry',
+      }),
+    } as unknown as Response);
+    render(<AttentionQueue rows={[row({ attention: ['source_failed'], availableActions: ['retry'] })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('falls back to opening the Git source when the server does not offer the verb', () => {

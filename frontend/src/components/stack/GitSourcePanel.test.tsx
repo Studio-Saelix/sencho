@@ -1553,6 +1553,44 @@ describe('GitSourcePanel controller controls', () => {
     });
   });
 
+  it('reports a retry that left the previous deployment intact as a warning', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/retry')
+        ? jsonRes({
+            outcome: 'failed_previous_intact',
+            reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+            nextAction: 'retry',
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('reports a resume the source did not clear as a warning', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/resume')
+        ? jsonRes({
+            outcome: 'suspended',
+            reason: 'Reconciliation is suspended: paused for maintenance',
+            nextAction: 'resume',
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it('sends source_policy manual when Manual is chosen', async () => {
     // The option that had no affordance at all. Manual is not a flavour of
     // review: it takes the source out of the unattended cadence entirely, so

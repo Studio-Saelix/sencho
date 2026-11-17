@@ -7,7 +7,7 @@ import { GITOPS_GIT_SOURCE_EVENT } from '../gitops/portfolio/portfolioNavigation
 import { MobileGitOps } from './MobileGitOps';
 
 const session = vi.hoisted(() => ({ canEdit: true }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
@@ -49,6 +49,8 @@ const emptyList = {
 
 afterEach(() => {
   session.canEdit = true;
+  vi.mocked(toast.success).mockReset();
+  vi.mocked(toast.warning).mockReset();
   vi.mocked(toast.error).mockReset();
   mockFetch.mockReset();
   window.history.replaceState({}, '', '/');
@@ -133,6 +135,32 @@ describe('MobileGitOps', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('refused')));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).not.toHaveAttribute('aria-busy', 'true'));
+  });
+
+  it('warns on a Retry the server refused with 200 and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'failed_previous_intact',
+            reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+            nextAction: 'retry',
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_failed'], availableActions: ['retry'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('falls back to opening the Git source when the session cannot edit the stack', async () => {
