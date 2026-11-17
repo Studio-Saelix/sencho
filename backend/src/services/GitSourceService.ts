@@ -918,11 +918,14 @@ export async function sweepStaleTempDirs(): Promise<void> {
 /**
  * The resume route's answer. `suspensionCleared` is the evidence that the
  * resume took effect: the live row carries no suspension after the attempted
- * write. The derived result cannot prove that on its own, because this build
- * reports both "no settled result yet" and "no application" as `unknown`. Only
- * the node that performed the write can report it, so a caller talking to a
- * node that predates this field stays unconfirmed rather than assuming a
- * resume it cannot verify.
+ * write. It is required for every outcome that is not settled, because the
+ * derived result cannot prove the resume on its own when it reports "no
+ * settled result yet" or "no application" as `unknown`, and a caller cannot
+ * tell those apart from a row that is still suspended. A settled outcome
+ * proves the resume without the field. Only the node that performed the write
+ * can report it, so a caller talking to a node that predates this field
+ * treats an unsettled outcome as unconfirmed rather than assuming a resume it
+ * cannot verify.
  */
 export type SourceResumeResult = ReconcileResult & { suspensionCleared: boolean };
 
@@ -4293,9 +4296,10 @@ export class GitSourceService {
      * false-safety risk to mirror suspend()'s rethrow.
      * `suspensionCleared` carries that read-back as evidence: it is true only
      * when a live row remains and no longer holds a suspension after the
-     * write. A result with no settled outcome (an in-flight or never-reconciled
-     * projection, or a stack with no application) cannot establish the resume
-     * on its own, so the route's caller confirms from this flag instead.
+     * write. A settled outcome establishes the resume on its own; a result
+     * with no settled outcome (an in-flight or never-reconciled projection,
+     * or a stack with no application) cannot, so the route's caller confirms
+     * that case from this flag instead.
      */
     public async resume(stackName: string, opts: { actor: string }): Promise<SourceResumeResult> {
         return this.withStackLock(stackName, async () => {

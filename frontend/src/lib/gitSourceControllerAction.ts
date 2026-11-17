@@ -58,15 +58,17 @@ function withReason(message: string, reason: string): string {
  * What the operator hears, decided by the outcome the server reported rather
  * than by the HTTP status. Each action states what it needs its answer to
  * say: a Suspend needs `suspended`, and a Retry needs a settled outcome. A
- * Resume needs a settled outcome or the node's own evidence that the
- * suspension cleared. The route reads the result before it starts the
- * re-evaluation, so a projection with no settled outcome cannot prove the
- * resume took, and `unknown` also covers a stack with no application. Only
- * the node that performed the write reports that evidence, so a missing
- * flag, an unrecognized outcome, or a missing outcome stays unconfirmed and
- * never asserts the resume happened. `failed_previous_intact` is the one
- * outcome that reports the previous deployment as intact, which must reach
- * the operator instead of a success line.
+ * Resume is confirmed by either of two independent answers: a settled
+ * outcome, which establishes on its own that the row is no longer suspended,
+ * or the node's own `suspensionCleared` evidence for every other outcome. The
+ * route reads the result before it starts the re-evaluation, so a projection
+ * with no settled outcome cannot prove the resume took, and `unknown` also
+ * covers a stack with no application. Only the node that performed the write
+ * reports that evidence, so a node that predates the field leaves an
+ * unsettled or unrecognized outcome unconfirmed rather than assuming a resume
+ * it cannot verify. `failed_previous_intact` is the one outcome that reports
+ * the previous deployment as intact, which must reach the operator instead of
+ * a success line.
  */
 function sourceControllerFeedback(
   stackName: string,
@@ -93,9 +95,10 @@ function sourceControllerFeedback(
   if (action === 'resume') {
     if (outcome === 'suspended') return refused('the source did not resume.');
     if (SETTLED_OUTCOMES.has(outcome)) return success;
-    // Without the node's own evidence, no other outcome establishes that the
+    // A settled outcome returned above and needs no further evidence. For
+    // every other outcome, only the node's own evidence establishes that the
     // row is no longer suspended: a missing application, an older node that
-    // omits the evidence, and a row still suspended behind an interruption or
+    // omits the field, and a row still suspended behind an interruption or
     // recovery state all reach this warning.
     if (!suspensionCleared) return refused(UNCONFIRMED_COPY.resume);
     // The live row is unsuspended but the projection has no settled result to
@@ -168,8 +171,9 @@ export async function runSourceControllerAction(
     const answer = isRecord(payload) ? payload : {};
     const outcome = typeof answer.outcome === 'string' ? answer.outcome : null;
     const reason = typeof answer.reason === 'string' ? answer.reason.trim() : '';
-    // The node reports this only after reading the row it just wrote, so it is
-    // the evidence a Resume confirms from. An older node omits it.
+    // The node reports this only after reading the row it just wrote. A Resume
+    // needs it for every outcome that is not settled; a settled outcome proves
+    // the resume on its own. An older node omits it.
     const suspensionCleared = answer.suspensionCleared === true;
     // The routes always answer with a ReconcileResult, so a 2xx without an
     // outcome is unreadable evidence, not an accepted action.

@@ -128,8 +128,11 @@ describe('runSourceControllerAction', () => {
     },
   );
 
+  // The fixture omits `suspensionCleared` on purpose: a settled outcome
+  // establishes the resume on its own, which is the contract an older node
+  // relies on. Adding the field here would erase the evidence for it.
   it.each(['converged', 'no_source_change', 'candidate_already_fetched', 'pending_review', 'superseded'])(
-    'keeps the success line for a resume that settled as %s',
+    'confirms a resume that settled as %s without the node evidence field',
     async (outcome) => {
       mockFetch.mockResolvedValue(res(true, { outcome, reason: 'settled', nextAction: 'none' }));
 
@@ -212,7 +215,7 @@ describe('runSourceControllerAction', () => {
     expect(toast.warning).not.toHaveBeenCalled();
   });
 
-  it('does not assume a resume took when an older node omits the evidence', async () => {
+  it('does not assume a resume took when an older node omits the evidence for an unsettled outcome', async () => {
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'unknown',
       reason: 'A reconcile operation is currently in flight; no settled result yet.',
