@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { linkSpellings } from '../helpers/linkSpellings';
+import { linkSpellings, UNPLACEABLE_LINK_CHAIN } from '../helpers/linkSpellings';
 
 let scratch: string;
 let root: string;
@@ -85,6 +85,33 @@ describe('linkSpellings', () => {
     fs.symlinkSync(path.join('..', '..', 'compose', 'web', 'mid.env'), path.join(web, 'app.env'));
     // data/app.env does not exist: the restore moved it aside.
     expect(await linkSpellings(path.join(configured, 'web', 'app.env'))).toContain(path.join(web, 'data', 'app.env'));
+  });
+
+  it('takes a .. after a linked component of a target from where that link points, inside and outside the compose root', async () => {
+    const web = path.join(root, 'web');
+    fs.mkdirSync(path.join(web, 'data', 'inner'));
+    // Inside: web/x -> data/inner, so x/../app.env is data/app.env, not web/app.env.
+    fs.symlinkSync(path.join('data', 'inner'), path.join(web, 'x'));
+    fs.symlinkSync(`x${path.sep}..${path.sep}app.env`, path.join(web, 'in.env'));
+    expect(await linkSpellings(path.join(web, 'in.env'))).toContain(path.join(web, 'data', 'app.env'));
+    // Outside: web/out.env -> <out>/x.env -> lnk/../app.env, with <out>/lnk -> web/data/inner.
+    const out = path.join(scratch, 'out');
+    fs.mkdirSync(out);
+    fs.symlinkSync(path.join(web, 'data', 'inner'), path.join(out, 'lnk'));
+    fs.symlinkSync(`lnk${path.sep}..${path.sep}app.env`, path.join(out, 'x.env'));
+    fs.symlinkSync(path.join(out, 'x.env'), path.join(web, 'out.env'));
+    expect(await linkSpellings(path.join(web, 'out.env'))).toContain(path.join(web, 'data', 'app.env'));
+  });
+
+  it('ends a chain whose spelling grows past the kernel path limit with a spelling no fence can place', async () => {
+    const web = path.join(root, 'web');
+    // l -> l/l/.../x: every hop makes the path longer.
+    fs.symlinkSync(path.join(...Array.from({ length: 200 }, () => 'l'), 'x'), path.join(web, 'l'));
+    const started = Date.now();
+    const spellings = await linkSpellings(path.join(web, 'l'));
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(spellings).toContain(UNPLACEABLE_LINK_CHAIN);
+    expect(spellings.every((s) => Buffer.byteLength(s) <= 4096)).toBe(true);
   });
 
   it('ends a loop after the hop limit', async () => {

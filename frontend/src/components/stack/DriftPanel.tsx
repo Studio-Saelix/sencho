@@ -288,7 +288,6 @@ interface DriftPanelProps {
   onOpenGitSource?: () => void;
 }
 
-
 /**
  * The reason the server gave for refusing a drift read while a data restore
  * overwrites the stack's compose file, so the toast says a restore is under
@@ -306,6 +305,7 @@ async function refusalReason(res: Response): Promise<string | null> {
   }
   return null;
 }
+
 export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpenGitSource }: DriftPanelProps) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;

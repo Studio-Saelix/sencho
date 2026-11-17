@@ -2269,6 +2269,44 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     return { dir, data, files };
   }
 
+  it('refuses an env write through a link whose target climbs out of a linked directory with .., once that target is moved aside', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    resetStack();
+    const { dir, data } = envStack();
+    fs.mkdirSync(path.join(data, 'inner'));
+    const target = path.join(data, 'app.env');
+    // <out>/lnk -> data/inner, and app.env -> <out>/x.env -> lnk/../app.env, which is data/app.env.
+    const out = path.dirname(outsideLinkTo(path.join(data, 'inner')));
+    fs.renameSync(path.join(out, 'inner'), path.join(out, 'lnk'));
+    fs.symlinkSync(`lnk${path.sep}..${path.sep}app.env`, path.join(out, 'x.env'));
+    fs.rmSync(path.join(dir, 'app.env'), { force: true });
+    fs.symlinkSync(path.join(out, 'x.env'), path.join(dir, 'app.env'));
+    fencedOverwriteOf(data, ['web']);
+    await beforeNextAdmission(() => fs.renameSync(target, `${target}.aside`));
+    await expect(fsService.writeFile(path.join(dir, 'app.env'), 'A=2\n')).rejects.toMatchObject({ code: 'data_restore' });
+    vi.mocked(fence.matchFsWorkToFences).mockRestore();
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.readFileSync(`${target}.aside`, 'utf-8')).toBe('A=1\n');
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('refuses a declared env file behind a link chain too long to place promptly, while a fence is held', async () => {
+    const { dir } = envStack();
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n    env_file: grow.env\n');
+    // grow.env -> grow.env/grow.env/.../x: every hop makes the path longer.
+    fs.symlinkSync(Array.from({ length: 200 }, () => 'grow.env').join(path.sep), path.join(dir, 'grow.env'));
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const started = Date.now();
+    const res = await request(app).get('/api/stacks/web/envs').set('Cookie', adminCookie);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(warn.mock.calls.length).toBeLessThan(100);
+  });
+
   it('refuses every env and Compose write whose link target is moved aside just before admission, and changes nothing', async () => {
     const fence = await import('../services/recovery/restoreFence');
     const { FileSystemService } = await import('../services/FileSystemService');
