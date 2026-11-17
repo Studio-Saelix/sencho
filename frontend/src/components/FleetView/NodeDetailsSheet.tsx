@@ -11,6 +11,7 @@ import { formatBytes } from '@/lib/utils';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { parseHostUsage } from '@/lib/hostUsage';
+import { fleetSecondsToMs } from './nodeUtils';
 import { NodeCordonModal } from './NodeCordonModal';
 import type { FleetNode, NodeUpdateStatus } from './types';
 
@@ -41,17 +42,6 @@ const CAPABILITY_LABELS: Partial<Record<string, string>> = {
 
 function formatTimestamp(ms: number): string {
     return new Date(ms).toLocaleString();
-}
-
-// `FleetNode.last_successful_contact` and `FleetNode.pilot_last_seen` come from
-// the fleet-overview endpoint in Unix SECONDS (DatabaseService.updateNodeLastContact
-// writes Math.floor(Date.now()/1000); fleet.ts's pilotLastSeenSeconds() divides the
-// millisecond DB value by 1000 for this same response). `formatTimeAgo`/`formatTimestamp`
-// both expect milliseconds, so any FleetNode-sourced timestamp must convert here before
-// use. `registryNode`-sourced timestamps (e.g. pilot_last_seen from /api/nodes) are
-// already in milliseconds and must NOT be passed through this helper.
-function fleetSecondsToMs(seconds: number): number {
-    return seconds * 1000;
 }
 
 function UsageBar({ percent, color }: { percent: number; color: string }) {
