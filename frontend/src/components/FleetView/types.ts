@@ -41,7 +41,9 @@ export interface FleetNode {
     cordoned_at: number | null;
     cordoned_reason: string | null;
     latency_ms?: number;
+    /** Unix seconds on the fleet-overview wire; convert with fleetSecondsToMs before formatting. */
     last_successful_contact?: number | null;
+    /** Unix seconds on the fleet-overview wire; convert with fleetSecondsToMs before formatting. */
     pilot_last_seen?: number | null;
 }
 

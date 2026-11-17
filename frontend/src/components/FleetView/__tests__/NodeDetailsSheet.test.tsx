@@ -23,7 +23,7 @@ import type { Node } from '@/context/NodeContext';
 
 // FleetNode's last_successful_contact/pilot_last_seen come from the
 // fleet-overview endpoint in Unix SECONDS (see fleetSecondsToMs's comment in
-// the component) — these fixtures must use seconds, not milliseconds, or a
+// nodeUtils) — these fixtures must use seconds, not milliseconds, or a
 // bug in the component's unit handling would go undetected here.
 function fleetNode(overrides: Partial<FleetNode> = {}): FleetNode {
   return {
