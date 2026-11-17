@@ -98,6 +98,19 @@ describe('AttentionQueue', () => {
     expect(items[1]!.textContent).toContain('pending-app');
   });
 
+  it('shows a failed deploy ahead of an unverified artifact and offers its stack', () => {
+    // A stack whose image cannot be pulled carries both reasons; the failure is
+    // the one to look at, and its step is the stack where the logs are.
+    render(<AttentionQueue rows={[row({
+      attention: ['artifact_unqualified', 'deploy_failed'],
+      name: 'deploy-web',
+    })]} />);
+    expect(screen.getByText('deploy failed')).toHaveClass('text-destructive');
+    expect(screen.getByText(/last deployment attempt failed/)).toBeInTheDocument();
+    expect(screen.getByText(/\+1 more/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open stack' })).toBeInTheDocument();
+  });
+
   it('opens the application surface even for a row with no owning surface identity', () => {
     window.history.replaceState({}, '', '/nodes/local/gitops');
     render(<AttentionQueue rows={[row({ attention: ['source_failed'], nodeId: null, stackName: null })]} />);

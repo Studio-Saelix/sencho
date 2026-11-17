@@ -18,6 +18,7 @@ import {
   type GitOpsBlueprintRequest,
   type GitOpsGitSourceTarget,
 } from './portfolioNavigation';
+import { byUrgency } from './useAttentionSteps';
 import { portfolioRow } from '../application/applicationFixtures';
 import { BLUEPRINT_INTENT_EVENT, type BlueprintIntent } from '@/lib/blueprintIntent';
 import { SENCHO_NAVIGATE_EVENT, SENCHO_OPEN_STACK_EVENT, type SenchoNavigateDetail, type SenchoOpenStackDetail } from '@/lib/events';
@@ -149,6 +150,16 @@ describe('portfolio row actions and attention next steps', () => {
     expect(attentionNextStep('deploy_failed', direct).label).toBe('Open stack');
     expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, attentionNextStep('health_failed', direct).run)[0]?.destination).toBe('stack');
     expect(attentionNextStep('source_failed', direct).label).toBe('Open Git source');
+  });
+
+  it('ranks a failed deploy above an unverified artifact and offers its stack', () => {
+    // The server can report both for one stack whose image cannot be pulled.
+    const failedDeploy = portfolioRow({ attention: ['artifact_unqualified', 'deploy_failed'] });
+    const [mostUrgent] = [...failedDeploy.attention].sort(byUrgency);
+    expect(mostUrgent).toBe('deploy_failed');
+    const step = attentionNextStep(mostUrgent!, failedDeploy);
+    expect(step.label).toBe('Open stack');
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, step.run)[0]?.destination).toBe('stack');
   });
 
   it.each([

@@ -36,6 +36,7 @@ export const ATTENTION_LABEL: Readonly<Partial<Record<GitOpsAttentionReason, Por
   source_reconcile_required: { label: 'reconcile required', tone: 'warning', line: 'What was reconciled no longer matches the configuration in force; fetch again to rebuild the candidate.' },
   source_retry_scheduled: { label: 'retry scheduled', tone: 'warning', line: 'The last reconciliation failed and a retry is scheduled.' },
   source_suspended: { label: 'source suspended', tone: 'neutral', line: 'Reconciliation is suspended for this source.' },
+  deploy_failed: { label: 'deploy failed', tone: 'destructive', line: 'The last deployment attempt failed.' },
   placement_review_pending: { label: 'placement review', tone: 'warning', line: 'A target placement decision is waiting for review.' },
   stateful_confirmation_required: { label: 'stateful confirmation', tone: 'warning', line: 'Stateful changes need explicit confirmation before proceeding.' },
   stateful_withdrawal_blocked: { label: 'stateful change blocked', tone: 'warning', line: 'An automatic acceptance was held for review because the candidate removes or renames a stateful service, or that cannot be ruled out.' },
