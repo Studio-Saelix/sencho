@@ -107,18 +107,22 @@ describe('getAuditSummary()', () => {
   });
 
   it('names capture, restore, restore-all, delete, upload and import rows distinctly', () => {
-    const summaries = [
-      getAuditSummary('POST', '/fleet/snapshots'),
-      getAuditSummary('POST', '/fleet/snapshots/42/restore'),
-      getAuditSummary('POST', '/fleet/snapshots/42/restore-all'),
-      getAuditSummary('DELETE', '/fleet/snapshots/42'),
-      getAuditSummary('POST', '/cloud-backup/upload/42'),
-      getAuditSummary('POST', '/cloud-backup/object/abc/import'),
-    ];
-    expect(new Set(summaries).size).toBe(summaries.length);
+    const captureSummary = getAuditSummary('POST', '/fleet/snapshots');
+    const deleteSummary = getAuditSummary('DELETE', '/fleet/snapshots/42');
+    const importSummary = getAuditSummary('POST', '/cloud-backup/object/abc/import');
+    const restoreSummary = getAuditSummary('POST', '/fleet/snapshots/42/restore');
+    const restoreAllSummary = getAuditSummary('POST', '/fleet/snapshots/42/restore-all');
+    const uploadSummary = getAuditSummary('POST', '/cloud-backup/upload/42');
+
+    expect(captureSummary).toBe('Created fleet backup');
+    expect(deleteSummary).toBe('Deleted fleet backup: 42');
+    expect(importSummary).toBe('Imported cloud snapshot: abc');
+    expect(restoreSummary).toBe('Restored fleet backup: 42');
+    expect(restoreAllSummary).toBe('Restored fleet backup to all stacks: 42');
+    expect(uploadSummary).toBe('Uploaded snapshot to cloud: 42');
   });
 
-  it('gives every registered fleet snapshot route its own summary', async () => {
+  it('keeps fleet snapshot sub-route actions from inheriting a shorter summary', async () => {
     const { fleetRouter } = await import('../routes/fleet');
     const routes = fleetRouter.stack.flatMap((layer) => {
       const route = layer.route;
@@ -127,20 +131,30 @@ describe('getAuditSummary()', () => {
         .filter((method) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method));
       return methods.map((method) => ({ method, route: route.path }));
     });
-    expect(routes.length).toBeGreaterThan(0);
+    expect(routes.map(({ method, route }) => `${method} ${route}`)).toEqual(expect.arrayContaining([
+      'POST /snapshots',
+      'POST /snapshots/:id/restore',
+      'POST /snapshots/:id/restore-all',
+      'DELETE /snapshots/:id',
+      'PUT /snapshots/:id/node-mapping',
+    ]));
 
     for (const { method, route } of routes) {
       const path = `/fleet${route.replace(/:[^/]+/g, '42')}`;
       const summary = getAuditSummary(method, path);
       const segments = route.split('/');
       const isSingleSnapshot = segments.length === 3 && segments[2].startsWith(':');
-      // A sub-route action must not inherit the collection route's wording (the
-      // restore-all defect), and every route must have an entry of its own
-      // rather than falling through to the generic method+path string.
-      if (route !== '/snapshots' && !isSingleSnapshot) {
-        const collectionSummary = getAuditSummary(method, '/fleet/snapshots');
-        expect(summary, `${method} ${route} must not reuse the collection summary`).not.toBe(collectionSummary);
-        expect(summary.startsWith(`${collectionSummary}: `), `${method} ${route} must not inherit the collection wording`).toBe(false);
+      // A sub-route action must not reuse the wording of a shorter route that
+      // also matches it, including the collection entry (the restore-all
+      // defect), and no route may fall through to the generic method+path
+      // string. Deleting one snapshot is the collection delete scoped by id,
+      // and the exact-string test above pins that row.
+      for (let length = 2; length < segments.length; length++) {
+        if (method === 'DELETE' && isSingleSnapshot && length === 2) continue;
+        const prefix = `/fleet${segments.slice(0, length).join('/').replace(/:[^/]+/g, '42')}`;
+        const prefixSummary = getAuditSummary(method, prefix);
+        expect(summary, `${method} ${route} must not reuse ${prefix}`).not.toBe(prefixSummary);
+        expect(summary.startsWith(`${prefixSummary}: `), `${method} ${route} must not inherit the wording of ${prefix}`).toBe(false);
       }
       expect(summary, `${method} ${route} needs its own audit summary`).not.toBe(`${method} /api${path}`);
     }
