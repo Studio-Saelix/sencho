@@ -148,6 +148,15 @@ export function isMissingTopologyNetwork(network: NetworkingTopologyNetwork): bo
   return network.runtimeState === 'missing' || network.id.startsWith('missing:');
 }
 
+/** A published port line: `host:startPort/protocol` for one fixed port,
+ *  `host:startPort-endPort/protocol` for a fixed range, and
+ *  `host:auto/protocol` when Docker picks the host port at start. An older node
+ *  reports an auto-assigned port as 0/0 without the `dynamic` flag. */
 export function formatTopologyPort(port: NetworkingTopologyContainer['publishedPorts'][number]): string {
-  return `${port.hostIp ?? '0.0.0.0'}:${port.published ?? port.target}/${port.protocol}`;
+  const host = port.hostIp || '0.0.0.0';
+  if (port.dynamic === true || (port.startPort === 0 && port.endPort === 0)) {
+    return `${host}:auto/${port.protocol}`;
+  }
+  const range = port.startPort === port.endPort ? `${port.startPort}` : `${port.startPort}-${port.endPort}`;
+  return `${host}:${range}/${port.protocol}`;
 }
