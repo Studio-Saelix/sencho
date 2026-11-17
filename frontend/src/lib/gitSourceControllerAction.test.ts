@@ -29,7 +29,11 @@ afterEach(() => {
 describe('runSourceControllerAction', () => {
   it('posts to the stack on its own node, then reports and raises the refresh signal', async () => {
     const seen = invalidations();
-    mockFetch.mockResolvedValue(res(true));
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'no_source_change',
+      reason: 'The configured ref still resolves to the accepted generation.',
+      nextAction: 'none',
+    }));
 
     await expect(runSourceControllerAction('my stack', 4, 'resume')).resolves.toBe(true);
 
@@ -42,7 +46,7 @@ describe('runSourceControllerAction', () => {
   });
 
   it('forwards a body when the action takes one', async () => {
-    mockFetch.mockResolvedValue(res(true));
+    mockFetch.mockResolvedValue(res(true, { outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' }));
     await runSourceControllerAction('web', 1, 'suspend', { reason: 'maintenance' });
     expect(mockFetch).toHaveBeenCalledWith('/stacks/web/git-source/suspend', expect.objectContaining({ body: '{"reason":"maintenance"}' }));
   });
@@ -55,7 +59,7 @@ describe('runSourceControllerAction', () => {
       nextAction: 'retry',
     }));
 
-    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(true);
+    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
       'web: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
@@ -73,7 +77,7 @@ describe('runSourceControllerAction', () => {
       nextAction: 'none',
     }));
 
-    await runSourceControllerAction('web', 1, 'retry');
+    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith('web: A previous attempt failed transiently; retry 2 is scheduled.');
     expect(toast.success).not.toHaveBeenCalled();
@@ -86,24 +90,31 @@ describe('runSourceControllerAction', () => {
       nextAction: 'retry',
     }));
 
-    await runSourceControllerAction('web', 1, 'retry');
+    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith('web: Another operation (deploy) is already in progress for web.');
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it('keeps the success line for a retry that settled', async () => {
-    mockFetch.mockResolvedValue(res(true, {
-      outcome: 'pending_review',
-      reason: 'A candidate is staged and requires explicit review before acceptance.',
-      nextAction: 'review',
-    }));
+  it('says the retry did not start when a refusal carries no reason', async () => {
+    mockFetch.mockResolvedValue(res(true, { outcome: 'blocked', reason: '', nextAction: 'retry' }));
 
     await runSourceControllerAction('web', 1, 'retry');
 
-    expect(toast.success).toHaveBeenCalledWith('Retry started for web');
-    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith('web: the retry did not start.');
   });
+
+  it.each(['converged', 'no_source_change', 'candidate_already_fetched', 'pending_review', 'superseded'])(
+    'keeps the success line for a retry that settled as %s',
+    async (outcome) => {
+      mockFetch.mockResolvedValue(res(true, { outcome, reason: 'settled', nextAction: 'none' }));
+
+      await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(true);
+
+      expect(toast.success).toHaveBeenCalledWith('Retry started for web');
+      expect(toast.warning).not.toHaveBeenCalled();
+    },
+  );
 
   it('reports a resume that cleared suspension as a success', async () => {
     mockFetch.mockResolvedValue(res(true, {
@@ -112,23 +123,42 @@ describe('runSourceControllerAction', () => {
       nextAction: 'none',
     }));
 
-    await runSourceControllerAction('web', 1, 'resume');
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(true);
 
     expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for web');
     expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it('reports a resume the source refused', async () => {
+    const seen = invalidations();
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'suspended',
       reason: 'Reconciliation is suspended: paused for maintenance',
       nextAction: 'resume',
     }));
 
-    await runSourceControllerAction('web', 1, 'resume');
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
       'web: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    // A refusal still reports the row's current evidence.
+    expect(seen.count()).toBe(1);
+    seen.stop();
+  });
+
+  it('reports a resume that cleared suspension but left an unconfirmed state', async () => {
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'unknown',
+      reason: 'The source has never been reconciled.',
+      nextAction: 'none',
+    }));
+
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      "web: reconciliation resumed, but the source's state could not be confirmed. The source has never been reconciled.",
     );
     expect(toast.success).not.toHaveBeenCalled();
   });
@@ -140,7 +170,7 @@ describe('runSourceControllerAction', () => {
       nextAction: 'retry',
     }));
 
-    await runSourceControllerAction('web', 1, 'resume');
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
       'web: reconciliation resumed, but the source still needs attention. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
@@ -155,34 +185,56 @@ describe('runSourceControllerAction', () => {
       nextAction: 'resume',
     }));
 
-    await runSourceControllerAction('web', 1, 'suspend');
+    await expect(runSourceControllerAction('web', 1, 'suspend')).resolves.toBe(true);
 
     expect(toast.success).toHaveBeenCalledWith('Reconciliation suspended for web');
     expect(toast.warning).not.toHaveBeenCalled();
   });
 
-  it('reports a suspend that did not take', async () => {
+  it('does not claim a suspend was refused when the projection outranks it', async () => {
     mockFetch.mockResolvedValue(res(true, {
-      outcome: 'unknown',
-      reason: 'No GitOps application exists for this stack.',
-      nextAction: 'none',
+      outcome: 'recovery_required',
+      reason: 'Recovery from an earlier failed mutation is still outstanding.',
+      nextAction: 'view_target_results',
     }));
 
-    await runSourceControllerAction('web', 1, 'suspend');
+    await expect(runSourceControllerAction('web', 1, 'suspend')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
-      'web: the source was not suspended. No GitOps application exists for this stack.',
+      'web: the suspension could not be confirmed. Recovery from an earlier failed mutation is still outstanding.',
     );
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it('keeps the success line when a 2xx body cannot be read', async () => {
+  it('warns when a 2xx body cannot be read', async () => {
     mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new Error('empty'); } } as unknown as Response);
 
-    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(true);
+    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
 
-    expect(toast.success).toHaveBeenCalledWith('Retry started for web');
-    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith('web: could not confirm the retry started.');
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('warns when a 2xx body carries no outcome', async () => {
+    mockFetch.mockResolvedValue(res(true, {}));
+
+    await expect(runSourceControllerAction('web', 1, 'suspend')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith('web: could not confirm the source was suspended.');
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('warns when a 2xx outcome is not one this build knows', async () => {
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'a_new_outcome',
+      reason: 'Something new happened.',
+      nextAction: 'none',
+    }));
+
+    await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith('web: Something new happened.');
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it('reports a refusal with the server message and raises no refresh signal', async () => {

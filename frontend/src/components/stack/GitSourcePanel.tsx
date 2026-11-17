@@ -706,10 +706,12 @@ export function GitSourcePanel({
     action: 'suspend' | 'resume' | 'retry',
     body?: Record<string, unknown>,
   ): Promise<boolean> => {
-    if (!(await runSourceControllerAction(stackName, nodeId, action, body))) return false;
+    const tookEffect = await runSourceControllerAction(stackName, nodeId, action, body);
+    // A refusal still refreshes: the server may have recorded an attempt the
+    // sheet should show, and a failed suspend must leave its dialog open.
     onSourceChanged?.();
     await load('refresh');
-    return true;
+    return tookEffect;
   };
 
   const suspendSource = async () => {

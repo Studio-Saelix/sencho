@@ -101,7 +101,7 @@ describe('MobileGitOps', () => {
     ok: true,
     status: 200,
     json: async () => (init?.method === 'POST'
-      ? {}
+      ? { outcome: 'pending_review', reason: 'A candidate is staged and requires review.', nextAction: 'review' }
       : { ...emptyList, summary: { ...emptyList.summary, applications: rows.length }, applications: rows }),
   }) as unknown as Response);
 
@@ -161,6 +161,28 @@ describe('MobileGitOps', () => {
     expect(toast.success).not.toHaveBeenCalled();
     expect(refreshed).toHaveBeenCalled();
     window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
+  it('warns on a Resume the server refused with 200', async () => {
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'suspended',
+            reason: 'Reconciliation is suspended: paused for maintenance',
+            nextAction: 'resume',
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_suspended'], availableActions: ['resume'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it('falls back to opening the Git source when the session cannot edit the stack', async () => {
