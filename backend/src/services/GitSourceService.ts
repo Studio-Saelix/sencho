@@ -925,7 +925,9 @@ export async function sweepStaleTempDirs(): Promise<void> {
  * proves the resume without the field. Only the node that performed the write
  * can report it, so a caller talking to a node that predates this field
  * treats an unsettled outcome as unconfirmed rather than assuming a resume it
- * cannot verify.
+ * cannot verify. A true value means the suspension cleared, not that the
+ * reconcile was harmless: the outcome still decides whether the caller
+ * announces a success or an attention warning.
  */
 export type SourceResumeResult = ReconcileResult & { suspensionCleared: boolean };
 
@@ -4298,8 +4300,8 @@ export class GitSourceService {
      * when a live row remains and no longer holds a suspension after the
      * write. A settled outcome establishes the resume on its own; a result
      * with no settled outcome (an in-flight or never-reconciled projection,
-     * or a stack with no application) cannot, so the route's caller confirms
-     * that case from this flag instead.
+     * or a stack with no application) cannot, so this flag is the only
+     * evidence a caller has for that case.
      */
     public async resume(stackName: string, opts: { actor: string }): Promise<SourceResumeResult> {
         return this.withStackLock(stackName, async () => {

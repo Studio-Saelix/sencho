@@ -57,18 +57,23 @@ function withReason(message: string, reason: string): string {
 /**
  * What the operator hears, decided by the outcome the server reported rather
  * than by the HTTP status. Each action states what it needs its answer to
- * say: a Suspend needs `suspended`, and a Retry needs a settled outcome. A
- * Resume is confirmed by either of two independent answers: a settled
- * outcome, which establishes on its own that the row is no longer suspended,
- * or the node's own `suspensionCleared` evidence for every other outcome. The
- * route reads the result before it starts the re-evaluation, so a projection
- * with no settled outcome cannot prove the resume took, and `unknown` also
- * covers a stack with no application. Only the node that performed the write
- * reports that evidence, so a node that predates the field leaves an
- * unsettled or unrecognized outcome unconfirmed rather than assuming a resume
- * it cannot verify. `failed_previous_intact` is the one outcome that reports
- * the previous deployment as intact, which must reach the operator instead of
- * a success line.
+ * say: a Suspend needs `suspended`, and a Retry needs a settled outcome.
+ *
+ * A Resume is confirmed as a success by a settled outcome, which establishes
+ * on its own that the row is no longer suspended. A `suspended` outcome is a
+ * refusal on its own. Every other outcome needs the node's `suspensionCleared`
+ * evidence before the resume can be acknowledged, and even then only
+ * `unknown` keeps the success line: `failed_previous_intact` warns that the
+ * previous deployment was left as it was, the attention outcomes warn that
+ * the source still needs attention, and an unrecognized outcome stays
+ * unconfirmed.
+ *
+ * The route reads the result before it starts the re-evaluation, so a
+ * projection with no settled outcome cannot prove the resume took, and
+ * `unknown` also covers a stack with no application. Only the node that
+ * performed the write reports that evidence, so a node that predates the
+ * field leaves an unsettled or unrecognized outcome unconfirmed rather than
+ * assuming a resume it cannot verify.
  */
 function sourceControllerFeedback(
   stackName: string,
@@ -96,10 +101,12 @@ function sourceControllerFeedback(
     if (outcome === 'suspended') return refused('the source did not resume.');
     if (SETTLED_OUTCOMES.has(outcome)) return success;
     // A settled outcome returned above and needs no further evidence. For
-    // every other outcome, only the node's own evidence establishes that the
-    // row is no longer suspended: a missing application, an older node that
-    // omits the field, and a row still suspended behind an interruption or
-    // recovery state all reach this warning.
+    // every other outcome, the node's own evidence establishes that the row
+    // is no longer suspended, but not that the resume was harmless: a missing
+    // application, an older node that omits the field, and a row still
+    // suspended behind an interruption or recovery state all reach this
+    // warning, and the branches below decide whether the cleared suspension
+    // earns a success line.
     if (!suspensionCleared) return refused(UNCONFIRMED_COPY.resume);
     // The live row is unsuspended but the projection has no settled result to
     // show yet: the resume took and its re-evaluation is still pending.

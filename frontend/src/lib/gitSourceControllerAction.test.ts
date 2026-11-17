@@ -130,7 +130,7 @@ describe('runSourceControllerAction', () => {
 
   // The fixture omits `suspensionCleared` on purpose: a settled outcome
   // establishes the resume on its own, which is the contract an older node
-  // relies on. Adding the field here would erase the evidence for it.
+  // relies on. Adding a true value here would erase what the test proves.
   it.each(['converged', 'no_source_change', 'candidate_already_fetched', 'pending_review', 'superseded'])(
     'confirms a resume that settled as %s without the node evidence field',
     async (outcome) => {
@@ -144,7 +144,7 @@ describe('runSourceControllerAction', () => {
   );
 
   it.each(['blocked', 'recovery_required', 'retry_scheduled'])(
-    'does not report a resume that settled as %s as resumed',
+    'does not report a resume that ended as %s as resumed',
     async (outcome) => {
       mockFetch.mockResolvedValue(res(true, {
         outcome,
@@ -157,6 +157,24 @@ describe('runSourceControllerAction', () => {
 
       expect(toast.warning).toHaveBeenCalledWith(
         `web: reconciliation resumed, but the source still needs attention. The resume settled as ${outcome}.`,
+      );
+      expect(toast.success).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['blocked', 'recovery_required', 'retry_scheduled', 'failed_previous_intact'])(
+    'does not confirm a resume that ended as %s when the node omits the evidence',
+    async (outcome) => {
+      mockFetch.mockResolvedValue(res(true, {
+        outcome,
+        reason: `The resume ended as ${outcome}.`,
+        nextAction: 'none',
+      }));
+
+      await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+
+      expect(toast.warning).toHaveBeenCalledWith(
+        `web: could not confirm the source resumed. The resume ended as ${outcome}.`,
       );
       expect(toast.success).not.toHaveBeenCalled();
     },
