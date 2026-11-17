@@ -580,11 +580,14 @@ describe('node-aware Git source webhooks', () => {
         const forward = vi.spyOn(service, 'remoteStackRequest').mockResolvedValue(
             new Response(JSON.stringify({ error: refusal, code: 'data_restore' }), { status: 409 }),
         );
-        const result = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
-        expect(forward).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', 'update', 'POST', undefined);
-        expect(result).toMatchObject({ success: false, error: refusal });
-        const history = db.getWebhookExecutions(webhookId);
-        expect(history[0]).toMatchObject({ status: 'failure', error: refusal });
-        db.deleteNode(remoteNodeId);
+        try {
+            const result = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
+            expect(forward).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', 'update', 'POST', undefined);
+            expect(result).toMatchObject({ success: false, error: refusal });
+            const history = db.getWebhookExecutions(webhookId);
+            expect(history[0]).toMatchObject({ status: 'failure', error: refusal });
+        } finally {
+            db.deleteNode(remoteNodeId);
+        }
     });
 });

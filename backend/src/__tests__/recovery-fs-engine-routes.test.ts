@@ -2474,7 +2474,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);
     for (const [name, save, fails] of [
-      // An expected mtime makes the save stat and read the file it replaces.
+      // An expected mtime makes the save open and stat the file it replaces.
       ['conditional', () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', 1, null), true],
       // A different expected filename answers with the current file's content.
       ['conflict', () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, 'docker-compose.yml'), true],
@@ -2509,6 +2509,68 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         try { fs.closeSync(fs.openSync(compose, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch { /* no reader */ }
       }
     }
+  });
+
+  it('fails every env read and write promptly when a FIFO replaces the env file after it was resolved, and leaves no work registered', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    const sinks: Array<[string, (dir: string) => Promise<unknown>]> = [
+      ['conditional', (dir) => fsService.writeFileIfUnchanged('web', path.join(dir, '.env'), 'B=2\n', 1)],
+      ['unconditional', (dir) => fsService.writeFileIfUnchanged('web', path.join(dir, '.env'), 'B=2\n', null)],
+      ['write', (dir) => fsService.writeFile(path.join(dir, '.env'), 'B=2\n')],
+      ['read', (dir) => fsService.readFile(path.join(dir, '.env'))],
+      ['project', () => fsService.saveEnvContent('web', 'B=2\n')],
+      // A FIFO at the target makes the exclusive create read it as the conflict.
+      ['create', (dir) => fsService.createFileExclusive(path.join(dir, '.env'), 'B=2\n')],
+    ];
+    for (const [name, sink] of sinks) {
+      resetStack();
+      // Another directory is fenced, so the work is admitted and registered.
+      fencedOverwriteOf(dataDir('other'), ['other']);
+      const dir = stackDir('web');
+      const env = path.join(dir, '.env');
+      fs.writeFileSync(env, 'B=1\n');
+      await beforeNextAdmission(() => {
+        fs.rmSync(env);
+        execFileSync('mkfifo', [env]);
+      });
+      const timedOut = Symbol('timed out');
+      try {
+        const outcome = await Promise.race([
+          sink(dir).then(() => 'done', (err: unknown) => err),
+          new Promise((resolve) => setTimeout(() => resolve(timedOut), 3_000)),
+        ]);
+        expect(outcome, name).not.toBe(timedOut);
+        expect(outcome, name).toBeInstanceOf(Error);
+        if (name !== 'project') expect(outcome, name).toMatchObject({ code: 'NOT_A_FILE' });
+        expect(fs.lstatSync(env).isFIFO(), name).toBe(true);
+        expect(fence.fsWorkInFlightCountForTests(), name).toBe(0);
+      } finally {
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        // Release a blocking open, should one be waiting for the other end.
+        for (const flags of [fs.constants.O_WRONLY, fs.constants.O_RDONLY]) {
+          try { fs.closeSync(fs.openSync(env, flags | fs.constants.O_NONBLOCK)); } catch { /* no other end */ }
+        }
+      }
+    }
+    // The env editor answers a FIFO that took the file's place as a conflict, not a server fault.
+    resetStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    const env = path.join(stackDir('web'), '.env');
+    fs.writeFileSync(env, 'B=1\n');
+    const opened = await request(app).get('/api/stacks/web/env').set('Cookie', adminCookie);
+    expect(opened.status).toBe(200);
+    await beforeNextAdmission(() => {
+      fs.rmSync(env);
+      execFileSync('mkfifo', [env]);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const saved = await request(app).put('/api/stacks/web/env').set('Cookie', adminCookie)
+      .set('If-Match', opened.headers.etag as string).send({ content: 'B=2\n' });
+    vi.mocked(fence.matchFsWorkToFences).mockRestore();
+    expect(saved.status).toBe(409);
+    expect(saved.body.error).toContain('not a regular file');
   });
 
   it('writes an env file whose link climbs out of a linked directory with .. to where the kernel puts it, not into a fenced directory its text collapses to', async () => {
@@ -2667,11 +2729,13 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
       ...rendering, evaluateDockerEndpoint: async () => null,
     } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    // The webhook pull gates through assertPolicyGateAllows before execute; the
+    // service update gates inside execute, along with the rollback capture and
+    // Docker Compose, so execute never running covers all three there.
     const enforcement = await import('../services/PolicyEnforcement');
     const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
     const policyGate = await import('../helpers/policyGate');
     const webhookGate = vi.spyOn(policyGate, 'assertPolicyGateAllows');
-    // The rollback capture and Docker Compose both run inside execute.
     const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
     const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
     const { WebhookService } = await import('../services/WebhookService');

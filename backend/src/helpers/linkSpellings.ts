@@ -42,15 +42,17 @@ export const UNPLACEABLE_LINK_CHAIN = 'link chain too long to place';
  * reached, never by collapsing the target's text (`lnk/..` is the parent of
  * where `lnk` points, not the directory `lnk` sits in). A link's spelling is
  * recorded once the rest of the path has no `..` behind a name the walk has
- * not read yet, so it is the path the kernel opens. So a chain whose last
- * target was moved aside still yields that target's spelling, however its hops
- * spell their way there. Only where the links point is read, never what a
+ * not read yet, so it is the path the kernel opens; a link followed while an
+ * earlier one's spelling is still owed is covered by that one spelling. So a
+ * chain whose last target was moved aside still yields that target's
+ * spelling, however its hops spell their way there. Only where the links point is read, never what a
  * file holds, and the spellings are used only to match the work against the
  * directory fences.
  *
  * Stops at a component that cannot be read as a link or a plain entry (not
  * there, not a directory, not readable), and after MAX_LINK_HOPS links, so a
- * loop ends. A chain whose spellings grow past MAX_SPELLING_BYTES each, or
+ * loop ends. A spelling still owed at such a stop is recorded from the text of
+ * what is left. A chain whose spellings grow past MAX_SPELLING_BYTES each, or
  * MAX_TOTAL_SPELLING_BYTES together, is answered by the path itself and
  * UNPLACEABLE_LINK_CHAIN alone.
  */
@@ -58,16 +60,20 @@ export async function linkSpellings(abs: string): Promise<string[]> {
   const absResolved = path.resolve(abs);
   const spellings = [absResolved];
   let totalBytes = Buffer.byteLength(absResolved);
-  let pending = absResolved.split(path.sep).filter(Boolean);
+  // What is left to walk, last part first, so taking the next part and putting
+  // a link's target in front of the rest cost nothing per part already there.
+  const pending = absResolved.split(path.sep).filter(Boolean).reverse();
+  // How many `..` are in `pending` (none in a resolved path to start with).
+  let dotDots = 0;
   // Always a path with no link in it: every component was read and found not to be one.
   let resolved: string = path.sep;
   let hops = 0;
-  // A link was followed and its spelling is not recorded yet, because the rest
-  // of the path still had a `..` behind a name the walk has not read.
+  // A link was followed and its spelling is not recorded yet. It is recorded
+  // as soon as the rest of the path can be joined onto `resolved` as text.
   let owed = false;
-  /** Records `resolved` plus `tail`; false when the chain grew past the bounds. */
-  const record = (tail: string[]): boolean => {
-    const spelling = path.join(resolved, ...tail);
+  /** Records `resolved` plus what is left; false when the chain grew past the bounds. */
+  const record = (): boolean => {
+    const spelling = path.join(resolved, ...[...pending].reverse());
     const bytes = Buffer.byteLength(spelling);
     totalBytes += bytes;
     if (bytes > MAX_SPELLING_BYTES || totalBytes > MAX_TOTAL_SPELLING_BYTES) return false;
@@ -76,16 +82,19 @@ export async function linkSpellings(abs: string): Promise<string[]> {
     return true;
   };
   while (pending.length > 0) {
+    const name = pending[pending.length - 1];
     // `resolved` holds no link, so the text of what is left can be joined onto
     // it, unless a `..` in that text sits behind a name not read yet: that name
-    // may be a link, and the kernel takes the `..` from where it points.
-    if (owed && !hasDotDotBehindName(pending) && !record(pending)) {
+    // may be a link, and the kernel takes the `..` from where it points. A
+    // leading `.` or `..` is applied first; joining it as text is the same.
+    // With a name next, any `..` left is behind it.
+    if (owed && name !== '.' && name !== '..' && dotDots === 0 && !record()) {
       return [absResolved, UNPLACEABLE_LINK_CHAIN];
     }
-    const name = pending[0];
-    pending = pending.slice(1);
+    pending.pop();
     if (name === '.') continue;
     if (name === '..') {
+      dotDots -= 1;
       resolved = path.dirname(resolved);
       continue;
     }
@@ -100,34 +109,29 @@ export async function linkSpellings(abs: string): Promise<string[]> {
         resolved = next;
         continue;
       }
-      pending = [name, ...pending];
+      pending.push(name);
       break;
     }
     hops += 1;
     if (hops > MAX_LINK_HOPS) {
-      pending = [name, ...pending];
+      pending.push(name);
       break;
     }
     if (path.isAbsolute(target)) resolved = path.sep;
-    pending = [...target.split(path.sep).filter(Boolean), ...pending];
+    const parts = target.split(path.sep).filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i -= 1) {
+      if (parts[i] === '..') dotDots += 1;
+      pending.push(parts[i]);
+    }
     owed = true;
   }
-  // A spelling still owed when the walk stops at a name it cannot read: that
-  // name is missing or unreadable, so if it comes back it is most likely a
-  // plain directory, and the text of the rest is the best spelling there is.
-  if (owed && !record(pending)) return [absResolved, UNPLACEABLE_LINK_CHAIN];
+  // The walk ended with a spelling still owed: it ran out of parts (all of
+  // them `.` or `..`), or it stopped at a name it could not read (missing,
+  // not a directory, unreadable) or at the hop limit, with a `..` behind that
+  // name. The kernel would open nothing there, but a missing name may be a
+  // directory a restore moved aside and will put back, most likely a plain
+  // one, so the text of what is left is the best spelling there is.
+  if (owed && !record()) return [absResolved, UNPLACEABLE_LINK_CHAIN];
   return [...new Set(spellings)];
 }
 
-/** True when a `..` comes after a name in `parts`, so the text cannot be collapsed safely. */
-function hasDotDotBehindName(parts: string[]): boolean {
-  let sawName = false;
-  for (const part of parts) {
-    if (part === '..') {
-      if (sawName) return true;
-    } else if (part !== '.') {
-      sawName = true;
-    }
-  }
-  return false;
-}

@@ -1064,6 +1064,9 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
     if (isDataRestoreFenceError(error)) {
       return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
     }
+    if ((error as NodeJS.ErrnoException)?.code === 'NOT_A_FILE') {
+      return res.status(409).json({ error: 'The env file is not a regular file' });
+    }
     console.error('Failed to read env file:', error);
     res.status(500).json({ error: 'Failed to read env file' });
   }
@@ -1188,6 +1191,10 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     }
     if (code === 'EISDIR') {
       return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
+    }
+    if (code === 'NOT_A_FILE') {
+      // A FIFO, socket or directory took the file's place after it was resolved.
+      return res.status(409).json({ error: `${stackName}'s env file is not a regular file` });
     }
     if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
       // The target became unusable between resolution and write (symlink,
@@ -3104,8 +3111,9 @@ async function handleServiceScopedMutation(
       );
     }
   } catch (error: unknown) {
-    // Refused by a data restore's fence before anything ran: a refusal, not a
-    // failure to log or notify.
+    // A data restore's fence refusal, however it was raised (the pre-check
+    // above, or a fenced read inside the update or restore), is answered as
+    // the fence and is not logged or notified as a failure.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, serviceName });
       return;

@@ -279,22 +279,64 @@ async function readRegularComposeFile(filePath: string): Promise<{ content: stri
   }
 }
 
-/**
- * Open a resolved compose file non-blocking and refuse it unless the
- * descriptor is a regular file, as readRegularComposeFile does. For a caller
- * that reads only when the stat calls for it; it closes the handle it gets.
- */
-async function openRegularComposeFile(
+/** Open a resolved compose file for reading as openRegularFile does. */
+function openRegularComposeFile(
   filePath: string,
 ): Promise<{ fh: import('fs/promises').FileHandle; stat: import('fs').Stats }> {
-  const fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  return openRegularFile(filePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
+}
+
+/**
+ * Open `filePath` with `flags` plus O_NONBLOCK and refuse it with `refuse`
+ * unless the descriptor is a regular file. O_NONBLOCK has no effect on a
+ * regular file, but a FIFO swapped in for one opens at once (or, for writing
+ * with no reader, fails with ENXIO) instead of sleeping until the other end
+ * appears, which under the directory fences would hold a fence's drain until
+ * its wait ran out. A directory opened for writing keeps its EISDIR. On
+ * success the caller owns the handle and closes it; on any refusal or error
+ * this function has already closed it.
+ */
+async function openRegularFile(
+  filePath: string,
+  flags: number,
+  refuse: (file: string) => Error,
+  mode?: number,
+): Promise<{ fh: import('fs/promises').FileHandle; stat: import('fs').Stats }> {
+  let fh: import('fs/promises').FileHandle;
+  try {
+    fh = await fsPromises.open(filePath, flags | fsConstants.O_NONBLOCK, mode);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENXIO') throw refuse(path.basename(filePath));
+    throw err;
+  }
   try {
     const stat = await fh.stat();
-    if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(filePath));
+    if (!stat.isFile()) throw refuse(path.basename(filePath));
     return { fh, stat };
   } catch (err) {
     await fh.close();
     throw err;
+  }
+}
+
+/**
+ * Write `content` to `filePath` through openRegularFile, creating or
+ * truncating it as fsPromises.writeFile does, so a FIFO in its place is
+ * refused instead of holding the write (and any fence registration) open.
+ */
+async function writeRegularFile(
+  filePath: string,
+  content: string,
+  encoding: BufferEncoding,
+  refuse: (file: string) => Error,
+): Promise<void> {
+  const { fh } = await openRegularFile(
+    filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC, refuse, 0o666,
+  );
+  try {
+    await fh.writeFile(content, encoding);
+  } finally {
+    await fh.close();
   }
 }
 
@@ -1234,9 +1276,10 @@ export class FileSystemService {
       if (expectedMtimeMs !== null) {
         let fh: import('fs/promises').FileHandle | null = null;
         try {
-          // Non-blocking and regular files only, so a FIFO swapped in after
-          // the admission fails at once instead of holding the fence's drain.
-          const opened = await openRegularComposeFile(safePath);
+          // Non-blocking and regular files only, here and at the write below,
+          // so a FIFO swapped in after the admission fails at once instead of
+          // holding the fence's drain.
+          const opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularEnvFileError);
           fh = opened.fh;
           const stat = opened.stat;
           if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
@@ -1257,7 +1300,7 @@ export class FileSystemService {
       if (!contained.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      await fsPromises.writeFile(contained, content, 'utf-8');
+      await writeRegularFile(contained, content, 'utf-8', nonRegularEnvFileError);
       const newStat = await fsPromises.stat(contained);
       return { ok: true, mtimeMs: newStat.mtimeMs };
     });
@@ -1322,7 +1365,9 @@ export class FileSystemService {
         await this.assertRealWithinBase(safePath);
         let reader: import('fs/promises').FileHandle | null = null;
         try {
-          reader = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          // Non-blocking and regular files only, so a FIFO at the target
+          // cannot hold the lease this read runs under.
+          reader = (await openRegularFile(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW, nonRegularEnvFileError)).fh;
           const stat = await reader.stat();
           const currentContent = await reader.readFile('utf-8');
           return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
@@ -1428,7 +1473,13 @@ export class FileSystemService {
       if (!contained.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      return fsPromises.readFile(contained, encoding);
+      // Non-blocking and regular files only, so a FIFO cannot hold the lease.
+      const { fh } = await openRegularFile(contained, fsConstants.O_RDONLY, nonRegularEnvFileError);
+      try {
+        return await fh.readFile(encoding);
+      } finally {
+        await fh.close();
+      }
     });
   }
 
@@ -1492,7 +1543,7 @@ export class FileSystemService {
       if (!contained.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      return fsPromises.writeFile(contained, content, encoding);
+      return writeRegularFile(contained, content, encoding, nonRegularEnvFileError);
     });
   }
 
@@ -1544,7 +1595,7 @@ export class FileSystemService {
         if (!contained.startsWith(baseResolved + path.sep)) {
           throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
         }
-        await fsPromises.writeFile(contained, content, 'utf-8');
+        await writeRegularFile(contained, content, 'utf-8', nonRegularEnvFileError);
       });
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;

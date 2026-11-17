@@ -141,6 +141,27 @@ describe('OrchestratorResult to HTTP mapping', () => {
     expect(res.body.code).toBe('service_update_compose_failed');
   });
 
+  it('answers a data restore fence raised inside the update or the restore as 409 data_restore, and raises no failure alert', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const { NotificationService } = await import('../services/NotificationService');
+    const alerts = vi.mocked(NotificationService.getInstance().dispatchAlert);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const before = alerts.mock.calls.length;
+    mockExecute.mockRejectedValue(new DataRestoreFenceError('/srv/web/data', 'files_recheck', 'directory'));
+    mockRestore.mockRejectedValue(new DataRestoreFenceError('/srv/web/data', 'files_recheck', 'directory'));
+    const update = await request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie);
+    const restore = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId: 'r1' });
+    for (const res of [update, restore]) {
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'data_restore', serviceName: 'app' });
+    }
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+    expect(mockRestore).toHaveBeenCalledTimes(1);
+    expect(alerts.mock.calls.length).toBe(before);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
   it('maps a restore service_done to 200', async () => {
     mockRestore.mockResolvedValue({
       kind: 'service_done',

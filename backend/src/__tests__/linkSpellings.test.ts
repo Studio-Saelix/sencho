@@ -122,6 +122,64 @@ describe('linkSpellings', () => {
     expect(await linkSpellings(path.join(web, 'via-gone.env'))).toContain(path.join(web, 'data', 'app.env'));
   });
 
+  it('records the kernel path for a .. behind two links, and for links followed while a spelling is owed', async () => {
+    const web = path.join(root, 'web');
+    const o1 = path.join(scratch, 'o1');
+    const o2 = path.join(scratch, 'o2', 'q');
+    fs.mkdirSync(o1, { recursive: true });
+    fs.mkdirSync(path.join(o2, 'r'), { recursive: true });
+    // web/j1 -> o1, o1/j2 -> o2/q/r, so j1/j2/../data/x is o2/q/data/x.
+    fs.symlinkSync(o1, path.join(web, 'j1'));
+    fs.symlinkSync(path.join(o2, 'r'), path.join(o1, 'j2'));
+    fs.symlinkSync(['j1', 'j2', '..', 'data', 'x'].join(path.sep), path.join(web, 'two.env'));
+    const spellings = await linkSpellings(path.join(web, 'two.env'));
+    expect(spellings).toContain(path.join(o2, 'data', 'x'));
+    expect(spellings).not.toContain(path.join(web, 'data', 'x'));
+    expect(spellings).not.toContain(path.join(web, 'j1', 'data', 'x'));
+    expect(spellings).not.toContain(path.join(o1, 'data', 'x'));
+  });
+
+  it('ends a chain that grows with a .. behind a name, as unplaceable', async () => {
+    const web = path.join(root, 'web');
+    // g -> g/g/.../x/.. : every hop is longer, and a spelling stays owed.
+    fs.symlinkSync([...Array.from({ length: 200 }, () => 'g'), 'x', '..'].join(path.sep), path.join(web, 'g'));
+    const spellings = await linkSpellings(path.join(web, 'g'));
+    expect(spellings).toContain(UNPLACEABLE_LINK_CHAIN);
+    expect(spellings.every((s) => Buffer.byteLength(s) <= 4096)).toBe(true);
+  });
+
+  it('records the text of what is left at the hop limit, where the kernel opens nothing', async () => {
+    const web = path.join(root, 'web');
+    const outside = path.join(scratch, 'outside');
+    fs.mkdirSync(path.join(outside, 'j'), { recursive: true });
+    // A chain of 40 links ending at jump, so jump is the 41st: the kernel answers ELOOP.
+    fs.symlinkSync(path.join(outside, 'j'), path.join(web, 'jump'));
+    fs.symlinkSync(['jump', '..', 'data', 'note.env'].join(path.sep), path.join(web, 'c40'));
+    for (let i = 39; i >= 1; i -= 1) fs.symlinkSync(`c${i + 1}`, path.join(web, `c${i}`));
+    const spellings = await linkSpellings(path.join(web, 'c1'));
+    expect(spellings).toContain(path.join(web, 'c40'));
+    expect(spellings).toContain(path.join(web, 'data', 'note.env'));
+    expect(spellings).not.toContain(path.join(outside, 'data', 'note.env'));
+  });
+
+  it('walks a chain of long runs of .. behind a name in linear time', async () => {
+    const web = path.join(root, 'web');
+    fs.mkdirSync(path.join(web, 'end'));
+    fs.mkdirSync(path.join(web, 'x'));
+    // Each Li -> L(i+1)/../../.../<web>/end: a name, then a run of .. that keeps
+    // a spelling owed, and every run resolves back to web/end, so the walk
+    // reads all of them (about 40 x 1300 parts).
+    const dots = Array.from({ length: 1300 }, () => '..').join(path.sep);
+    for (let i = 1; i < 40; i += 1) {
+      fs.symlinkSync([`L${i + 1}`, dots, web.slice(1), 'end'].join(path.sep), path.join(web, `L${i}`));
+    }
+    fs.symlinkSync('x', path.join(web, 'L40'));
+    const started = Date.now();
+    const spellings = await linkSpellings(path.join(web, 'L1'));
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(spellings).toContain(path.join(web, 'end'));
+  });
+
   it('ends a chain whose spelling grows past the kernel path limit with a spelling no fence can place', async () => {
     const web = path.join(root, 'web');
     // l -> l/l/.../x: every hop makes the path longer.
