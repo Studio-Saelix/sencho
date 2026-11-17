@@ -363,8 +363,10 @@ export async function requireStackExists(
       return false;
     }
   } catch (err) {
+    // A pre-check, so nothing has moved: a hub restoring through this node (a
+    // rollout rollback) is told so.
     if (isDataRestoreFenceError(err)) {
-      res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE });
+      res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
       return false;
     }
     notFound();

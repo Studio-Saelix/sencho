@@ -3806,7 +3806,7 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
-  /** Machine-readable refusal code (registry delivery or Docker endpoint guard), when the redeploy failed on one. */
+  /** Machine-readable refusal code (registry delivery, Docker endpoint guard, or a data restore's fence), when the redeploy failed on one. */
   code?: string;
   /** Set when the redeploy proceeded on evidence that was not a clean pass. */
   policyEvidence?: AllowedPolicyEvidence;

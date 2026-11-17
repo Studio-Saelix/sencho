@@ -2953,6 +2953,12 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         }
         const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'update', stackNames: ['web'] });
         expect(bulk.body.results[0], `${label} bulk`).toMatchObject({ stackName: 'web', ok: false, code: expected });
+        // A rollback a hub runs through this node is refused before anything moved, and says so.
+        const rollback = await request(app).post('/api/stacks/web/rollback').set('Cookie', adminCookie);
+        expect(rollback.status, `${label} rollback`).toBe(409);
+        expect(rollback.body, `${label} rollback`).toMatchObject(fenced
+          ? { code: 'data_restore', failureClass: 'pre_mutation' }
+          : { code: 'docker_endpoint_protected' });
         if (dangling) continue;
         // The checks inside the operations, reached by a caller past the route's.
         const verify = vi.fn();
