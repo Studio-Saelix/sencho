@@ -2793,6 +2793,161 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('refuses a service restore of a compose file in the fenced directory before the render, the gate, the claim or the recreate', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    // The service path's own gate, inside restore.
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyForImageRefs');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const orchestrator = StackUpdateOrchestrator.getInstance();
+    const loadSpec = vi.spyOn(orchestrator as unknown as { loadServiceSpec: () => Promise<unknown> }, 'loadServiceSpec');
+    const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
+    const recoveries = ServiceUpdateRecoveryService.getInstance();
+    for (const shape of LINK_SHAPES) {
+      resetStack();
+      const { data } = composeStackOf(shape);
+      const recoveryId = randomUUID();
+      const now = Date.now();
+      DatabaseService.getInstance().insertServiceUpdateRecovery({
+        id: recoveryId, node_id: nodeId, stack_name: 'web', service_name: 'app',
+        replicas_json: JSON.stringify([{ imageId: 'sha256:aaaa', repoDigest: null }]),
+        majority_image_id: 'sha256:aaaa', declared_image_ref: 'nginx:1', weak_floating_tag: 0,
+        health_gate_id: null, status: 'active', expires_at: now + 3_600_000, claim_expires_at: null,
+        created_at: now, created_by: 'test',
+      });
+      fencedOverwriteOf(data);
+      const restoreCall = vi.spyOn(orchestrator, 'restore');
+      const res = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId });
+      expect(res.status, shape).toBe(409);
+      expect(res.body, shape).toMatchObject({ code: 'data_restore', serviceName: 'app' });
+      expect(restoreCall, shape).not.toHaveBeenCalled();
+      restoreCall.mockRestore();
+      // A caller that reaches restore directly is refused by restore itself.
+      await expect(orchestrator.restore(
+        { nodeId, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'manual', actor: 'test' },
+        { policyOptions: { bypass: false, actor: 'test' }, terminalWs: null, recoveryId },
+      ), shape).rejects.toMatchObject({ code: 'data_restore' });
+      // Nothing claimed: the snapshot can still be restored once the fence is gone.
+      expect(recoveries.get(recoveryId)?.status, shape).toBe('active');
+    }
+    expect(loadSpec).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+  });
+
+  it('answers an update whose compose file cannot be rendered with the fence, not the update policy, on every entry point, while the fence holds the file', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    // Docker Compose could not render the file: a block for a manual trigger, a skip otherwise.
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy({ renderable: false }, request));
+    const recorded = vi.spyOn(updatePolicy, 'recordUpdatePolicyDecision');
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
+    const imageGate = vi.spyOn(enforcement, 'enforcePolicyForImageRefs');
+    const policyGate = await import('../helpers/policyGate');
+    const webhookGate = vi.spyOn(policyGate, 'assertPolicyGateAllows');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
+    const { WebhookService } = await import('../services/WebhookService');
+    const { applyAutomaticStackUpdate } = await import('../services/automaticStackUpdate');
+    const db = DatabaseService.getInstance();
+    // A readable link the render still failed on, and a link moved aside mid-swap.
+    for (const dangling of [false, true]) {
+      for (const shape of LINK_SHAPES) {
+        const label = `${shape}${dangling ? ' dangling' : ''}`;
+        resetStack();
+        const { data, compose } = composeStackOf(shape);
+        fencedOverwriteOf(data);
+        if (dangling) fs.renameSync(compose, `${compose}.aside`);
+        const service = await request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie);
+        expect(service.status, label).toBe(409);
+        expect(service.body, label).toMatchObject({ code: 'data_restore' });
+        for (const [name, pending] of Object.entries({
+          update: request(app).post('/api/stacks/web/update').set('Cookie', adminCookie),
+          pull: request(app).post('/api/stacks/web/pull-images').set('Cookie', adminCookie),
+        })) {
+          const res = await pending;
+          expect(res.status, `${label} ${name}`).toBe(409);
+          expect(res.body.code, `${label} ${name}`).toBe('data_restore');
+        }
+        const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'update', stackNames: ['web'] });
+        expect(bulk.body.results[0], `${label} bulk`).toMatchObject({ stackName: 'web', ok: false, code: 'data_restore' });
+        const verify = vi.fn();
+        await expect(applyAutomaticStackUpdate({
+          nodeId, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'auto-update:test' },
+          verificationOwner: 'hub_authority', observation: { verify, consume: vi.fn() },
+        }), label).rejects.toMatchObject({ code: 'data_restore' });
+        expect(verify, label).not.toHaveBeenCalled();
+        const webhookId = db.addWebhook({
+          node_id: nodeId, name: `unrendered-pull-${label}`, stack_name: 'web', action: 'pull',
+          secret: WebhookService.getInstance().generateSecret(), enabled: true,
+        });
+        const outcome = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
+        expect(outcome, label).toMatchObject({ success: false });
+        const runs = db.getWebhookExecutions(webhookId);
+        expect(runs, label).toHaveLength(1);
+        expect(runs[0], label).toMatchObject({ status: 'failure' });
+        expect(runs[0].error, label).toContain('which a data restore is overwriting');
+      }
+    }
+    expect(recorded).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+    expect(imageGate).not.toHaveBeenCalled();
+    expect(webhookGate).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the update policy answer for a compose file that is not fenced but cannot be rendered, and for a rendered file whose policy refuses while it is fenced', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    let renderable = false;
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(renderable
+        ? resolveSenchoLabels({ services: { app: { image: 'nginx:1', labels: { 'io.sencho.update': 'disabled' } } } })
+        : { renderable: false }, request));
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
+    const { WebhookService } = await import('../services/WebhookService');
+    const db = DatabaseService.getInstance();
+    for (const fenced of [false, true]) {
+      renderable = fenced;
+      resetStack();
+      const { data } = composeStackOf('single');
+      // Unfenced: another directory holds the fence, so the check runs and finds this file clear.
+      if (fenced) fencedOverwriteOf(data);
+      else fencedOverwriteOf(dataDir('other'), ['other']);
+      const service = await request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie);
+      expect(service.status, String(fenced)).toBe(409);
+      expect(service.body.code, String(fenced)).toBe('update_policy_blocked');
+      const webhookId = db.addWebhook({
+        node_id: nodeId, name: `policy-pull-${fenced}`, stack_name: 'web', action: 'pull',
+        secret: WebhookService.getInstance().generateSecret(), enabled: true,
+      });
+      const outcome = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
+      expect(outcome, String(fenced)).toMatchObject({ success: true });
+      const runs = db.getWebhookExecutions(webhookId);
+      expect(runs[0], String(fenced)).toMatchObject({ status: 'success' });
+      expect(runs[0].error, String(fenced)).toBeTruthy();
+    }
+    expect(gate).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('leaves a compose read failure that is not the fence to the update and the drift view, unlogged by the pre-check', async () => {
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);

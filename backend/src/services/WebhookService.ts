@@ -247,6 +247,12 @@ export class WebhookService {
                             const updatePolicy = await resolveUpdatePolicy(nodeId, {
                                 stack: stackName, target: { scope: 'stack' }, trigger: 'webhook',
                             });
+                            // A compose file a data restore is swapping does
+                            // not render: the fence answers before the skip,
+                            // and the catch below records it as the failure.
+                            if (updatePolicy.evaluation === 'unrenderable') {
+                                await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
+                            }
                             if (updatePolicy.decision !== 'allow') {
                                 recordUpdatePolicyDecision(nodeId, updatePolicy, 'system:webhook');
                                 policySkipNote = describePolicySkip(updatePolicy);

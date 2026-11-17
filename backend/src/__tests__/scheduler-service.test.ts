@@ -1010,6 +1010,51 @@ describe('SchedulerService - executeUpdate', () => {
     );
   });
 
+  it('answers a scheduled update whose compose file cannot be rendered with the fence when a data restore holds it, and with the policy skip otherwise', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const actual = await vi.importActual<typeof import('../services/updatePolicy')>('../services/updatePolicy');
+    const resolve = vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      actual.evaluateUpdatePolicy({ renderable: false }, request));
+    const recorded = vi.spyOn(updatePolicy, 'recordUpdatePolicyDecision').mockImplementation(() => undefined);
+    mockGetScheduledTask.mockReturnValue({
+      id: 82,
+      name: 'update-unrendered',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    try {
+      mockRefuseIfComposeFenced.mockRejectedValueOnce(new DataRestoreFenceError('/srv/web-app/data', 'browse', 'directory'));
+      await SchedulerService.getInstance().triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
+      expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('web-app');
+      expect(recorded).not.toHaveBeenCalled();
+      expect(mockUpdateScheduledTaskRun).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.objectContaining({ output: expect.stringMatching(/Stack "web-app" failed: .*data restore is overwriting/) }),
+      );
+
+      // Not fenced: the skip stands and is recorded.
+      await SchedulerService.getInstance().triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
+      expect(recorded).toHaveBeenCalledTimes(1);
+      expect(mockUpdateScheduledTaskRun).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.objectContaining({ output: expect.not.stringMatching(/failed/) }),
+      );
+      expect(mockEnforcePolicyPreDeploy).not.toHaveBeenCalled();
+      expect(mockUpdateStack).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      recorded.mockRestore();
+    }
+  });
+
   it('blocks scheduled Compose apply when a sibling image check failed', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 186,

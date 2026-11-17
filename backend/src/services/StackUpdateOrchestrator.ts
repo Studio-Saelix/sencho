@@ -477,6 +477,14 @@ export class StackUpdateOrchestrator {
     if (restoreRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, restoreRefusal.message, { serviceName, recoveryId });
     }
+    // A compose file a data restore is overwriting throws the fence's refusal
+    // here, before the render, the rollback gate, the claim or the recreate.
+    // The route asks the same before calling restore; this keeps the order for
+    // every caller.
+    {
+      const { FileSystemService } = await import('./FileSystemService');
+      await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
+    }
 
     AutoHealService.getInstance().suppress(nodeId, stackName, serviceName);
     let observing = false;

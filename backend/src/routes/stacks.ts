@@ -205,6 +205,9 @@ function updatePolicyRefusalText(prefix: string, policy: { reason: string | null
  * Every image-refresh caller resolves the policy the same way: inside the stack
  * lock, before the security policy gate, so a refused update never writes the
  * gate's evidence. A block or skip is recorded as an activity row exactly once.
+ * A compose file a data restore is swapping renders as nothing, so an
+ * unrenderable answer asks the directory fence first and throws its refusal in
+ * place of the block or skip; the caller's catch answers it with the fence.
  */
 async function evaluateUpdatePolicyFor(
   nodeId: number,
@@ -212,6 +215,9 @@ async function evaluateUpdatePolicyFor(
   actor: string | null,
 ) {
   const policy = await resolveUpdatePolicy(nodeId, request);
+  if (policy.evaluation === 'unrenderable') {
+    await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(request.stack);
+  }
   if (policy.decision !== 'allow') recordUpdatePolicyDecision(nodeId, policy, actor);
   return policy;
 }
@@ -3046,7 +3052,11 @@ async function handleServiceScopedMutation(
   try {
     let result: OrchestratorResult;
     if (options.recoveryId) {
-      // Restore is not an image refresh, so it carries no policy decision.
+      // Restore is not an image refresh, so it carries no policy decision. A
+      // compose file a data restore is overwriting refuses it before the
+      // render, the rollback gate, the claim and the recreate inside restore;
+      // the catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       result = await StackUpdateOrchestrator.getInstance().restore(
         { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor },
         {
@@ -3111,9 +3121,10 @@ async function handleServiceScopedMutation(
       );
     }
   } catch (error: unknown) {
-    // A data restore's fence refusal, however it was raised (the pre-check
-    // above, or a fenced read inside the update or restore), is answered as
-    // the fence and is not logged or notified as a failure.
+    // A data restore's fence refusal, raised by the pre-check above on either
+    // branch, by the policy read of an unrenderable compose file, or by a
+    // fenced read inside the update, is answered as the fence and is not
+    // logged or notified as a failure.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, serviceName });
       return;
