@@ -1,8 +1,7 @@
-import { useId, useState, type ReactNode } from 'react';
-import { ChevronRight, type LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
+import type { LucideIcon } from 'lucide-react';
 
-import { AutoHeight } from '@/components/animate-ui/primitives/effects/auto-height';
-import { useReducedTransition } from '@/components/animate-ui/primitives/use-reduced-transition';
+import { Disclosure } from '@/components/ui/disclosure';
 import { STATUS_CARD_CLASS, STATUS_DOT_CLASS, type StatusTone } from '@/lib/statusTone';
 import { cn } from '@/lib/utils';
 
@@ -78,11 +77,7 @@ export interface StatusPathProps {
  * partial evidence is never hidden: the Answer carries a marker for it.
  */
 export function StatusPath({ answer, stages, proof, className, 'data-testid': testId }: StatusPathProps) {
-  const [open, setOpen] = useState(false);
-  const proofId = useId();
   const AnswerIcon = answer.icon;
-  // AutoHeight springs the height, which the MotionConfig reduced-motion path does not cover.
-  const heightTransition = useReducedTransition({ type: 'spring', stiffness: 300, damping: 30, bounce: 0, restDelta: 0.01 } as const);
   const speaking = stages.filter(stage => stage.line);
 
   return (
@@ -149,29 +144,9 @@ export function StatusPath({ answer, stages, proof, className, 'data-testid': te
       )}
 
       {proof && (
-        <div>
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-controls={proofId}
-            onClick={() => setOpen(value => !value)}
-            className="flex items-center gap-1 rounded-sm px-1 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle transition-colors hover:text-stat-value focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 max-md:min-h-11"
-          >
-            <ChevronRight
-              className={cn('h-3 w-3 transition-transform', open && 'rotate-90')}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-            {proof.label}
-          </button>
-          <AutoHeight deps={[open]} transition={heightTransition}>
-            {open && (
-              <div id={proofId} data-testid="status-proof" className="flex flex-col gap-3 pt-2">
-                {proof.children}
-              </div>
-            )}
-          </AutoHeight>
-        </div>
+        <Disclosure label={proof.label} contentTestId="status-proof">
+          {proof.children}
+        </Disclosure>
       )}
     </div>
   );

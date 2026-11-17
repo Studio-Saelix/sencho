@@ -28,7 +28,9 @@ import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/event
 import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { formatBytes } from '@/lib/utils';
+import { cn, formatBytes } from '@/lib/utils';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import { PruneItemRows } from '@/components/prune/PruneItemRows';
 import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type UsageLoad } from './resources/resourcesMasthead';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
@@ -111,8 +113,16 @@ function PrunePlanPreview({
     loading: boolean;
     error: string | null;
 }) {
+    const { showBusy } = useVisualBusy(loading);
     if (loading) {
-        return <p className="text-sm text-stat-subtitle">Building prune plan...</p>;
+        // Reserves about the list's space so the layout does not jump; the placeholder only shows once the plan is slow.
+        return (
+            <div data-testid="prune-plan-skeleton" role="status" className={cn('space-y-2', !showBusy && 'opacity-0')}>
+                <span className="sr-only">Building prune plan</span>
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-40 w-full" />
+            </div>
+        );
     }
     if (error) {
         return <p className="text-sm text-destructive">{error}</p>;
@@ -130,23 +140,7 @@ function PrunePlanPreview({
                 {plan.reclaimableBytes > 0 ? ` · ${formatBytes(plan.reclaimableBytes)}` : ''}
             </p>
             <ScrollArea type="hover" className="max-h-40">
-                <ul className="space-y-1 font-mono text-[12px] text-stat-subtitle/90">
-                    {shown.map((item) => (
-                        <li key={`${item.target}:${item.id}`} className="block">
-                            <span className="block truncate">
-                                <span className="text-stat-subtitle/60">{item.target}</span>
-                                {' · '}
-                                {item.name}
-                                {item.sizeBytes != null && item.sizeBytes > 0 ? ` · ${formatBytes(item.sizeBytes)}` : ''}
-                            </span>
-                            {item.target === 'images' && item.image.references
-                                .filter((ref) => ref !== item.name)
-                                .map((ref) => (
-                                    <span key={ref} className="block break-all">{ref}</span>
-                                ))}
-                        </li>
-                    ))}
-                </ul>
+                <PruneItemRows items={shown} detail="summary" />
             </ScrollArea>
             {remaining > 0 && (
                 <p className="text-xs text-stat-subtitle/70">and {remaining} more</p>
