@@ -3066,6 +3066,10 @@ async function handleServiceScopedMutation(
         });
         return;
       }
+      // A compose file a data restore is overwriting refuses the update before
+      // the gate inside execute, so it writes no gate evidence and runs no
+      // Compose. The catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       result = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor, policy },
         {
@@ -3100,6 +3104,12 @@ async function handleServiceScopedMutation(
       );
     }
   } catch (error: unknown) {
+    // Refused by a data restore's fence before anything ran: a refusal, not a
+    // failure to log or notify.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, serviceName });
+      return;
+    }
     console.error(
       '[Stacks] Service %s failed: %s/%s: %s',
       sanitizeForLog(options.notifyFailureAction),

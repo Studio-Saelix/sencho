@@ -252,6 +252,11 @@ export class WebhookService {
                                 policySkipNote = describePolicySkip(updatePolicy);
                                 break;
                             }
+                            // A compose file a data restore is overwriting
+                            // refuses the pull before the gate and the rollback
+                            // capture, as the update route does; the catch
+                            // below records the fence's reason as the failure.
+                            await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
                             const webhookGate = await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,

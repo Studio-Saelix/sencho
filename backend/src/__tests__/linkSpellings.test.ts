@@ -103,6 +103,25 @@ describe('linkSpellings', () => {
     expect(await linkSpellings(path.join(web, 'out.env'))).toContain(path.join(web, 'data', 'app.env'));
   });
 
+  it('records the path the kernel opens for a .. behind a linked component, not the one its text collapses to', async () => {
+    const web = path.join(root, 'web');
+    const outside = path.join(scratch, 'outside');
+    fs.mkdirSync(path.join(outside, 'j'), { recursive: true });
+    // web/jump -> <outside>/j, so jump/../data/note.env is <outside>/data/note.env.
+    fs.symlinkSync(path.join(outside, 'j'), path.join(web, 'jump'));
+    fs.symlinkSync(['jump', '..', 'data', 'note.env'].join(path.sep), path.join(web, 'note.env'));
+    const spellings = await linkSpellings(path.join(web, 'note.env'));
+    expect(spellings).toContain(path.join(outside, 'data', 'note.env'));
+    expect(spellings).not.toContain(path.join(web, 'data', 'note.env'));
+    // A .. behind a plain directory collapses as its text says.
+    fs.mkdirSync(path.join(web, 'plain'));
+    fs.symlinkSync(['plain', '..', 'data', 'app.env'].join(path.sep), path.join(web, 'via-plain.env'));
+    expect(await linkSpellings(path.join(web, 'via-plain.env'))).toContain(path.join(web, 'data', 'app.env'));
+    // A .. behind a missing name, as in a target moved aside, keeps the text's spelling.
+    fs.symlinkSync(['gone', '..', 'data', 'app.env'].join(path.sep), path.join(web, 'via-gone.env'));
+    expect(await linkSpellings(path.join(web, 'via-gone.env'))).toContain(path.join(web, 'data', 'app.env'));
+  });
+
   it('ends a chain whose spelling grows past the kernel path limit with a spelling no fence can place', async () => {
     const web = path.join(root, 'web');
     // l -> l/l/.../x: every hop makes the path longer.

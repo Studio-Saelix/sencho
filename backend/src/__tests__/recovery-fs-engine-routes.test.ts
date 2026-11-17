@@ -2469,6 +2469,69 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     }
   });
 
+  it('fails a conditional save and the conflict read promptly when a FIFO replaces the compose file after it was resolved, and a plain save replaces it', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    for (const [name, save, fails] of [
+      // An expected mtime makes the save stat and read the file it replaces.
+      ['conditional', () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', 1, null), true],
+      // A different expected filename answers with the current file's content.
+      ['conflict', () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, 'docker-compose.yml'), true],
+      // A plain save never opens the file it replaces: it renames over it.
+      ['plain', () => fsService.saveStackContentIfUnchanged('web', 'services: {}\n', null, null), false],
+    ] as const) {
+      resetStack();
+      // Another directory is fenced, so the work is admitted and registered.
+      fencedOverwriteOf(dataDir('other'), ['other']);
+      const compose = path.join(stackDir('web'), 'compose.yaml');
+      await beforeNextAdmission(() => {
+        fs.rmSync(compose);
+        execFileSync('mkfifo', [compose]);
+      });
+      const timedOut = Symbol('timed out');
+      try {
+        const outcome = await Promise.race([
+          save().then(() => 'saved', (err: unknown) => err),
+          new Promise((resolve) => setTimeout(() => resolve(timedOut), 3_000)),
+        ]);
+        expect(outcome, name).not.toBe(timedOut);
+        if (fails) {
+          expect(outcome, name).toMatchObject({ code: 'NOT_A_FILE' });
+        } else {
+          expect(outcome, name).toBe('saved');
+          expect(fs.readFileSync(compose, 'utf-8'), name).toBe('services: {}\n');
+        }
+        expect(fence.fsWorkInFlightCountForTests(), name).toBe(0);
+      } finally {
+        vi.mocked(fence.matchFsWorkToFences).mockRestore();
+        // Release a blocking open, should one be waiting for a writer.
+        try { fs.closeSync(fs.openSync(compose, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch { /* no reader */ }
+      }
+    }
+  });
+
+  it('writes an env file whose link climbs out of a linked directory with .. to where the kernel puts it, not into a fenced directory its text collapses to', async () => {
+    const fence = await import('../services/recovery/restoreFence');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fsService = FileSystemService.getInstance(nodeId);
+    resetStack();
+    const { dir, data } = envStack();
+    // web/jump -> other/deep/j, so jump/../data/note.env is other/deep/data/note.env;
+    // its text alone collapses to web/data/note.env, inside the fenced directory.
+    const deep = path.join(stackDir('other'), 'deep');
+    fs.mkdirSync(path.join(deep, 'j'), { recursive: true });
+    fs.mkdirSync(path.join(deep, 'data'));
+    fs.writeFileSync(path.join(deep, 'data', 'note.env'), 'N=0\n');
+    fs.symlinkSync(path.join(deep, 'j'), path.join(dir, 'jump'));
+    fs.symlinkSync(['jump', '..', 'data', 'note.env'].join(path.sep), path.join(dir, 'note.env'));
+    fencedOverwriteOf(data, ['web']);
+    await fsService.writeFile(path.join(dir, 'note.env'), 'N=1\n');
+    expect(fs.readFileSync(path.join(deep, 'data', 'note.env'), 'utf-8')).toBe('N=1\n');
+    expect(fs.existsSync(path.join(data, 'note.env'))).toBe(false);
+    expect(fence.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
   it('answers a compose read that fails after its admission with the fence recorded meanwhile, not as a failed read', async () => {
     const { FileSystemService } = await import('../services/FileSystemService');
     const fsService = FileSystemService.getInstance(nodeId);
@@ -2591,6 +2654,49 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       expect(consume, shape).not.toHaveBeenCalled();
     }
     expect(gate).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses a single-service update and a local webhook pull of a compose file in the fenced directory before the gate, the capture or Compose', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(resolveSenchoLabels({ services: { app: { image: 'nginx:1' } } }), request));
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
+    const policyGate = await import('../helpers/policyGate');
+    const webhookGate = vi.spyOn(policyGate, 'assertPolicyGateAllows');
+    // The rollback capture and Docker Compose both run inside execute.
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
+    const { WebhookService } = await import('../services/WebhookService');
+    const db = DatabaseService.getInstance();
+    for (const shape of LINK_SHAPES) {
+      resetStack();
+      const { data } = composeStackOf(shape);
+      fencedOverwriteOf(data);
+      const res = await request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie);
+      expect(res.status, shape).toBe(409);
+      expect(res.body, shape).toMatchObject({ code: 'data_restore', serviceName: 'app' });
+      const webhookId = db.addWebhook({
+        node_id: nodeId, name: `fenced-pull-${shape}`, stack_name: 'web', action: 'pull',
+        secret: WebhookService.getInstance().generateSecret(), enabled: true,
+      });
+      const outcome = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
+      expect(outcome, shape).toMatchObject({ success: false });
+      expect(outcome.error, shape).toContain('which a data restore is overwriting');
+      const runs = db.getWebhookExecutions(webhookId);
+      expect(runs, shape).toHaveLength(1);
+      expect(runs[0], shape).toMatchObject({ status: 'failure' });
+      expect(runs[0].error, shape).toContain('which a data restore is overwriting');
+    }
+    expect(gate).not.toHaveBeenCalled();
+    expect(webhookGate).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
 

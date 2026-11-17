@@ -271,13 +271,30 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
  * a regular compose file is ever returned.
  */
 async function readRegularComposeFile(filePath: string): Promise<{ content: string; mtimeMs: number }> {
+  const { fh, stat } = await openRegularComposeFile(filePath);
+  try {
+    return { content: await fh.readFile('utf-8'), mtimeMs: stat.mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * Open a resolved compose file non-blocking and refuse it unless the
+ * descriptor is a regular file, as readRegularComposeFile does. For a caller
+ * that reads only when the stat calls for it; it closes the handle it gets.
+ */
+async function openRegularComposeFile(
+  filePath: string,
+): Promise<{ fh: import('fs/promises').FileHandle; stat: import('fs').Stats }> {
   const fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   try {
     const stat = await fh.stat();
     if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(filePath));
-    return { content: await fh.readFile('utf-8'), mtimeMs: stat.mtimeMs };
-  } finally {
+    return { fh, stat };
+  } catch (err) {
     await fh.close();
+    throw err;
   }
 }
 
@@ -816,8 +833,9 @@ export class FileSystemService {
    * and the conflict read it answers with, writeFileIfUnchanged,
    * createFileExclusive, readFile, writeFile, saveEnvContent) and by
    * deleteStack; the Files routes have their own admission. When nothing is
-   * fenced it costs one query, one realpath of the compose root, and a
-   * readlink per path component under it.
+   * fenced it costs one spelling walk (a readlink per path component, from the
+   * filesystem root, and per component of every link target it follows) and
+   * one fence query.
    *
    * `target` is matched and registered by every spelling a link on the way to
    * it gives it, not by its own path alone: a link whose target a restore moved
@@ -1036,8 +1054,11 @@ export class FileSystemService {
       if (expectedMtimeMs !== null && resolved) {
         let fh: import('fs/promises').FileHandle | null = null;
         try {
-          fh = await fsPromises.open(safePath, 'r');
-          const stat = await fh.stat();
+          // Non-blocking and regular files only, so a FIFO swapped in after
+          // the admission fails at once instead of holding the fence's drain.
+          const opened = await openRegularComposeFile(safePath);
+          fh = opened.fh;
+          const stat = opened.stat;
           if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
             const currentContent = await fh.readFile('utf-8');
             return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
@@ -1085,16 +1106,8 @@ export class FileSystemService {
     // The conflict answer carries these bytes back to the editor, so the read is
     // file work on the file actually read: a link into a fenced directory is
     // refused like the editor's own read, never answered with what is mid-restore.
-    return this.underDirectoryFences(safePath, async () => {
-      const fh = await fsPromises.open(safePath, 'r');
-      try {
-        const stat = await fh.stat();
-        const content = await fh.readFile('utf-8');
-        return { content, mtimeMs: stat.mtimeMs };
-      } finally {
-        await fh.close();
-      }
-    });
+    // Opened as the editor's read is, so a FIFO cannot hold the fence's drain.
+    return this.underDirectoryFences(safePath, () => readRegularComposeFile(safePath));
   }
 
   /**
@@ -1221,8 +1234,11 @@ export class FileSystemService {
       if (expectedMtimeMs !== null) {
         let fh: import('fs/promises').FileHandle | null = null;
         try {
-          fh = await fsPromises.open(safePath, 'r');
-          const stat = await fh.stat();
+          // Non-blocking and regular files only, so a FIFO swapped in after
+          // the admission fails at once instead of holding the fence's drain.
+          const opened = await openRegularComposeFile(safePath);
+          fh = opened.fh;
+          const stat = opened.stat;
           if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
             const currentContent = await fh.readFile('utf-8');
             return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };

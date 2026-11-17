@@ -40,7 +40,9 @@ export const UNPLACEABLE_LINK_CHAIN = 'link chain too long to place';
  * target is walked part by part too: a relative target from the directory the
  * link really is in, and a `..` in it from the directory the walk has really
  * reached, never by collapsing the target's text (`lnk/..` is the parent of
- * where `lnk` points, not the directory `lnk` sits in). So a chain whose last
+ * where `lnk` points, not the directory `lnk` sits in). A link's spelling is
+ * recorded once the rest of the path has no `..` behind a name the walk has
+ * not read yet, so it is the path the kernel opens. So a chain whose last
  * target was moved aside still yields that target's spelling, however its hops
  * spell their way there. Only where the links point is read, never what a
  * file holds, and the spellings are used only to match the work against the
@@ -60,7 +62,26 @@ export async function linkSpellings(abs: string): Promise<string[]> {
   // Always a path with no link in it: every component was read and found not to be one.
   let resolved: string = path.sep;
   let hops = 0;
+  // A link was followed and its spelling is not recorded yet, because the rest
+  // of the path still had a `..` behind a name the walk has not read.
+  let owed = false;
+  /** Records `resolved` plus `tail`; false when the chain grew past the bounds. */
+  const record = (tail: string[]): boolean => {
+    const spelling = path.join(resolved, ...tail);
+    const bytes = Buffer.byteLength(spelling);
+    totalBytes += bytes;
+    if (bytes > MAX_SPELLING_BYTES || totalBytes > MAX_TOTAL_SPELLING_BYTES) return false;
+    spellings.push(spelling);
+    owed = false;
+    return true;
+  };
   while (pending.length > 0) {
+    // `resolved` holds no link, so the text of what is left can be joined onto
+    // it, unless a `..` in that text sits behind a name not read yet: that name
+    // may be a link, and the kernel takes the `..` from where it points.
+    if (owed && !hasDotDotBehindName(pending) && !record(pending)) {
+      return [absResolved, UNPLACEABLE_LINK_CHAIN];
+    }
     const name = pending[0];
     pending = pending.slice(1);
     if (name === '.') continue;
@@ -79,21 +100,34 @@ export async function linkSpellings(abs: string): Promise<string[]> {
         resolved = next;
         continue;
       }
+      pending = [name, ...pending];
       break;
     }
     hops += 1;
-    if (hops > MAX_LINK_HOPS) break;
+    if (hops > MAX_LINK_HOPS) {
+      pending = [name, ...pending];
+      break;
+    }
     if (path.isAbsolute(target)) resolved = path.sep;
     pending = [...target.split(path.sep).filter(Boolean), ...pending];
-    // The spelling this link gives: `resolved` holds no link, so the text of
-    // what is left can be joined onto it; a later link in it adds its own.
-    const spelling = path.join(resolved, ...pending);
-    const bytes = Buffer.byteLength(spelling);
-    totalBytes += bytes;
-    if (bytes > MAX_SPELLING_BYTES || totalBytes > MAX_TOTAL_SPELLING_BYTES) {
-      return [absResolved, UNPLACEABLE_LINK_CHAIN];
-    }
-    spellings.push(spelling);
+    owed = true;
   }
+  // A spelling still owed when the walk stops at a name it cannot read: that
+  // name is missing or unreadable, so if it comes back it is most likely a
+  // plain directory, and the text of the rest is the best spelling there is.
+  if (owed && !record(pending)) return [absResolved, UNPLACEABLE_LINK_CHAIN];
   return [...new Set(spellings)];
+}
+
+/** True when a `..` comes after a name in `parts`, so the text cannot be collapsed safely. */
+function hasDotDotBehindName(parts: string[]): boolean {
+  let sawName = false;
+  for (const part of parts) {
+    if (part === '..') {
+      if (sawName) return true;
+    } else if (part !== '.') {
+      sawName = true;
+    }
+  }
+  return false;
 }
