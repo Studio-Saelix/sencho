@@ -17,7 +17,7 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('hunter2');
   });
 
-  // A Doctor message wraps a quoted value in parentheses, so a closer after a
+  // A Doctor message wraps the value in parentheses, so a closer after a
   // keyword secret is the sentence's punctuation and must survive the pass. A
   // secret that itself ends in `)` gives up those unmatched closers: the two
   // cannot be told apart, and the message reads as a sentence.

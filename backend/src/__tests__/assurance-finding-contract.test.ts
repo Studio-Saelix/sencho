@@ -398,7 +398,8 @@ describe('secret-safe serialization', () => {
   });
 
   // The stored message already carries the redacted image, so the read applies
-  // the text pass again; the closer that ends the quoted image must survive it.
+  // the text pass again; the closer that ends the parenthesized image must
+  // survive it.
   it.each([
     ['a token keyword', 'postgres:16?token=SECRETST12', 'postgres:16?token=[redacted]'],
     ['a password keyword', 'postgres:16?password=SECRETSP12', 'postgres:16?password=[redacted]'],
