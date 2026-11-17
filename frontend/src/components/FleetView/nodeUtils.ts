@@ -1,5 +1,18 @@
 import type { FleetNode } from './types';
 
+/**
+ * `FleetNode.last_successful_contact` and `FleetNode.pilot_last_seen` come from
+ * the fleet-overview endpoint in Unix SECONDS (DatabaseService.updateNodeLastContact
+ * writes Math.floor(Date.now()/1000); fleet.ts's pilotLastSeenSeconds() divides the
+ * millisecond DB value by 1000 for this same response). `formatTimeAgo` and the
+ * phone's `formatAgo` both expect milliseconds, so convert every FleetNode-sourced
+ * timestamp here before formatting. `Node.pilot_last_seen` from /api/nodes is
+ * already in milliseconds and must NOT be passed through this helper.
+ */
+export function fleetSecondsToMs(seconds: number): number {
+    return seconds * 1000;
+}
+
 // A null reading means the node cannot measure that dimension without leaking
 // the outer machine's numbers (Sencho or a Pilot agent inside an LXC with no
 // cgroup mount). It is not zero: callers must render it as unknown and leave

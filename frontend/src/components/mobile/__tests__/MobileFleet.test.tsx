@@ -476,3 +476,32 @@ describe('MobileFleet host usage unknown', () => {
     expect(screen.getAllByText('Show usage…')).toHaveLength(2);
   });
 });
+
+// The phone's FleetNode comes from /fleet/overview, which sends
+// last_successful_contact and pilot_last_seen in Unix SECONDS. The detail row
+// and the footer kicker must convert to milliseconds before subtracting them
+// from `now`; subtracting the raw seconds rendered an age in the hundreds of
+// thousands of hours (SEN-1060).
+describe('MobileFleet node last seen', () => {
+  const recent = () => Math.floor(Date.now() / 1000) - 30;
+
+  const cases: Array<{ label: string; overrides: () => Partial<FleetNode> }> = [
+    { label: 'last_successful_contact', overrides: () => ({ mode: 'proxy', last_successful_contact: recent() }) },
+    { label: 'pilot_last_seen', overrides: () => ({ mode: 'pilot_agent', pilot_last_seen: recent() }) },
+  ];
+
+  it.each(cases)('reads a recent $label in seconds as a short age on both detail lines', async ({ overrides }) => {
+    // The detail screen mounts NodeDetailsSheet, which reads nodeMeta from the node context.
+    useNodesMock.mockReturnValue({ nodes: [], activeNode: null, nodeMeta: new Map(), hasCapability: vi.fn(() => false) });
+    setupFetch([makeNode({ id: 2, name: 'Edge', type: 'remote', status: 'offline', ...overrides() })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
+
+    // Row subtitle and footer kicker, both recent (30s, or 31s if the test
+    // straddled a second boundary between the fixture and the render).
+    expect(await screen.findByText(/· last seen 3[01]s$/)).toBeInTheDocument();
+    expect(screen.getByText(/^last seen 3[01]s ago · auto-refreshes every 30s$/)).toBeInTheDocument();
+    expect(screen.queryByText(/last seen \d{3,}h/)).not.toBeInTheDocument();
+  });
+});

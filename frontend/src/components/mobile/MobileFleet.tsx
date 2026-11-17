@@ -8,7 +8,7 @@ import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { BusyButton } from '@/components/ui/busy-button';
 import { cn, formatBytes } from '@/lib/utils';
-import { getNodeCpuUsage, getNodeMemUsage, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { fleetSecondsToMs, getNodeCpuUsage, getNodeMemUsage, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
 import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConfirmDialog';
@@ -280,7 +280,7 @@ function NodeDetail({
           <StatePill tone={tone} live={!online}>{node.cordoned ? 'cordoned' : online ? (isCritical(node) ? 'degraded' : 'online') : 'offline'}</StatePill>
         </div>
         <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">
-          {`${nodeConnection(node.type, registryNode?.mode ?? node.mode)} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - lastSeen)}` : ''}`}
+          {`${nodeConnection(node.type, registryNode?.mode ?? node.mode)} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - fleetSecondsToMs(lastSeen))}` : ''}`}
         </div>
       </div>
 
@@ -337,7 +337,7 @@ function NodeDetail({
       </div>
 
       <div className="border-t border-hairline bg-band px-4 py-2.5">
-        <Kicker>{`${lastSeen ? `last seen ${formatAgo(now - lastSeen)} ago · ` : ''}auto-refreshes every 30s`}</Kicker>
+        <Kicker>{`${lastSeen ? `last seen ${formatAgo(now - fleetSecondsToMs(lastSeen))} ago · ` : ''}auto-refreshes every 30s`}</Kicker>
       </div>
 
       <ConfirmModal
