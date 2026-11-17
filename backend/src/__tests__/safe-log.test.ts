@@ -17,22 +17,36 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('hunter2');
   });
 
-  // A message wraps a quoted value in parentheses, so a closer that ends a
-  // keyword value is the sentence's punctuation and must survive the pass.
+  // A Doctor message wraps a quoted value in parentheses, so a closer after a
+  // keyword secret is the sentence's punctuation and must survive the pass. A
+  // secret that itself ends in `)` with no `(` of its own gives that character
+  // up: the two cannot be told apart, and the message reads as a sentence.
   it.each([
     ['a token', 'token=SECRET12)', 'token=[redacted])'],
     ['a password', 'password=SECRET12)', 'password=[redacted])'],
     ['an api-key', 'api-key=SECRET12)', 'api-key=[redacted])'],
     ['a secret', 'secret=SECRET12)', 'secret=[redacted])'],
-    ['a Bearer credential', 'Bearer SECRET12)', 'Bearer [redacted])'],
   ])('keeps the closing parenthesis after %s in prose', (_variant, input, expected) => {
     const text = redactSensitiveText(`see (${input} and done`);
     expect(text).toBe(`see (${expected} and done`);
     expect(text).not.toContain('SECRET12');
   });
 
-  it('still redacts a keyword value that holds a closing parenthesis mid-token', () => {
-    expect(redactSensitiveText('token=ab)cd')).toBe('token=[redacted]');
+  it('keeps the closing parenthesis after a Bearer credential, which already stops at it', () => {
+    expect(redactSensitiveText('see (Bearer SECRET12) and done')).toBe('see (Bearer [redacted]) and done');
+  });
+
+  it.each([
+    ['a mid-token closing parenthesis', 'token=ab)cd', 'token=[redacted]'],
+    ['a value ending in a closing parenthesis', 'password=SECRET12)', 'password=[redacted])'],
+    ['a value whose own parentheses are balanced', 'token=ab(cd)', 'token=[redacted]'],
+    ['nested message parentheses', '((token=SECRET12))', '((token=[redacted]))'],
+    ['a parenthesized secret inside the message parentheses', 'token=a(b))', 'token=[redacted])'],
+    ['a JSON-quoted value', '{"token":"SECRET12)"}', '{"token":"[redacted])"}'],
+    ['a comma after the closer', 'token=SECRET12),', 'token=[redacted]),'],
+    ['a mid-token closer and a trailing one', 'token=ab)cd)', 'token=[redacted])'],
+  ])('redacts a keyword value with %s', (_variant, input, expected) => {
+    expect(redactSensitiveText(input)).toBe(expected);
   });
 
   it('leaves its own keyword-redacted message unchanged', () => {
@@ -77,6 +91,7 @@ describe('redactSensitiveText', () => {
   it.each([
     ['a long run with no dot', 'A'.repeat(60_000)],
     ['a run just past one JWT segment', 'A'.repeat(60_000) + '.'],
+    ['a keyword value with a long paren run', `token=${')'.repeat(120_000)}x`],
   ])('stays linear on %s, which is what a 60 kB Docker label looks like', (_shape, input) => {
     // A container label is attacker-controlled through any stack author; the
     // greedy JWT first segment used to retry at every offset without a dot,

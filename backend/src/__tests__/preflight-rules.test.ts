@@ -939,6 +939,7 @@ describe('exposure-intent rules', () => {
     ['a token keyword', 'postgres:16?token=SECRETTOK12', 'postgres:16?token=[redacted]'],
     ['an api_key keyword', 'postgres:16?api_key=SECRETKEY12', 'postgres:16?api_key=[redacted]'],
     ['a secret keyword', 'postgres:16?secret=SECRETSEC12', 'postgres:16?secret=[redacted]'],
+    ['a Bearer credential', 'postgres:16?x=Bearer SECRETBEAR12', 'postgres:16?x=Bearer [redacted]'],
   ])('keeps the closing parenthesis after %s when the finding reaches the wire', (_variant, image, expected) => {
     const m = model([svc({ name: 'db', image, ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
     const [raw] = runRules(ctx({ model: m })).filter(f => f.ruleId === 'sensitive-service-broad-exposure');

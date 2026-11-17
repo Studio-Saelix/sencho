@@ -18,14 +18,23 @@ export function sanitizeForLog(value: unknown): string {
 }
 
 /**
- * The run of `)` that ends a matched keyword value and pairs no `(` inside it.
- * Only `)` characters are ever returned, so the caller still hides the whole
- * value: a secret that holds a `)` mid-token has no trailing run to split off.
+ * The closing parentheses at the end of a matched keyword value that are not
+ * accounted for by a `(` inside it. A Doctor message wraps the quoted image in
+ * parentheses, so those are the sentence's punctuation; the rest are kept
+ * redacted. Only `)` characters are ever returned, so everything else in the
+ * value stays hidden. A secret that itself ends in `)` gives up that character;
+ * that is the price of the message reading as a sentence, since the two cannot
+ * be told apart. The scan is a backward walk plus one count, both linear, so a
+ * long run of `)` costs no more than the rest of the pass.
  */
 function trailingParentheses(value: string): string {
-  const run = /\)+$/.exec(value);
-  if (run === null || value.slice(0, run.index).includes('(')) return '';
-  return run[0];
+  let runStart = value.length;
+  while (runStart > 0 && value[runStart - 1] === ')') runStart -= 1;
+  let opens = 0;
+  for (let i = 0; i < runStart; i += 1) {
+    if (value[i] === '(') opens += 1;
+  }
+  return ')'.repeat(Math.max(0, value.length - runStart - opens));
 }
 
 export function redactSensitiveText(value: unknown): string {
@@ -97,11 +106,11 @@ export function redactSensitiveText(value: unknown): string {
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
     // key and its separator, so `"PASSWORD": "s3cret"` is caught like
     // `PASSWORD=s3cret`. A value ends at whitespace, a comma, a semicolon, or a
-    // quote; a closing parenthesis that ends it and pairs no `(` inside it is
-    // the sentence's punctuation, not the value, so it stays. A Doctor message
-    // wraps the quoted image in parentheses, and eating that closer left the
-    // sentence reading as truncated. The value still runs through a `)` inside
-    // it, so a secret holding one is never left half-shown.
+    // quote. A closing parenthesis at the end of it is the sentence's
+    // punctuation when the value opened no parenthesis of its own; a Doctor
+    // message wraps the quoted image in parentheses, and eating that closer left
+    // the sentence reading as truncated. The helper returns only `)` characters,
+    // so a secret holding one mid-token is still redacted whole.
     .replace(
       /((?:authorization|token|password|secret|api[_-]?key)["']?\s*[:=]\s*["']?)([^\s,;"']+)/gi,
       (_match, prefix: string, value: string) => `${prefix}[redacted]${trailingParentheses(value)}`,
