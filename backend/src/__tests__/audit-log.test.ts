@@ -101,6 +101,51 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/fleet/snapshots/42/restore')).toBe('Restored fleet backup: 42');
   });
 
+  it('resolves fleet snapshot restore-all with the snapshot id, not the capture wording', () => {
+    expect(getAuditSummary('POST', '/fleet/snapshots/42/restore-all')).toBe('Restored fleet backup to all stacks: 42');
+    expect(getAuditSummary('POST', '/fleet/snapshots/42/restore-all')).not.toBe('Created fleet backup: 42');
+  });
+
+  it('names capture, restore, restore-all, delete, upload and import rows distinctly', () => {
+    const summaries = [
+      getAuditSummary('POST', '/fleet/snapshots'),
+      getAuditSummary('POST', '/fleet/snapshots/42/restore'),
+      getAuditSummary('POST', '/fleet/snapshots/42/restore-all'),
+      getAuditSummary('DELETE', '/fleet/snapshots/42'),
+      getAuditSummary('POST', '/cloud-backup/upload/42'),
+      getAuditSummary('POST', '/cloud-backup/object/abc/import'),
+    ];
+    expect(new Set(summaries).size).toBe(summaries.length);
+  });
+
+  it('gives every registered fleet snapshot route its own summary', async () => {
+    const { fleetRouter } = await import('../routes/fleet');
+    const routes = fleetRouter.stack.flatMap((layer) => {
+      const route = layer.route;
+      if (!route || (route.path !== '/snapshots' && !route.path.startsWith('/snapshots/'))) return [];
+      const methods = [...new Set(route.stack.map((entry) => entry.method.toUpperCase()))]
+        .filter((method) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method));
+      return methods.map((method) => ({ method, route: route.path }));
+    });
+    expect(routes.length).toBeGreaterThan(0);
+
+    for (const { method, route } of routes) {
+      const path = `/fleet${route.replace(/:[^/]+/g, '42')}`;
+      const summary = getAuditSummary(method, path);
+      const segments = route.split('/');
+      const isSingleSnapshot = segments.length === 3 && segments[2].startsWith(':');
+      // A sub-route action must not inherit the collection route's wording (the
+      // restore-all defect), and every route must have an entry of its own
+      // rather than falling through to the generic method+path string.
+      if (route !== '/snapshots' && !isSingleSnapshot) {
+        const collectionSummary = getAuditSummary(method, '/fleet/snapshots');
+        expect(summary, `${method} ${route} must not reuse the collection summary`).not.toBe(collectionSummary);
+        expect(summary.startsWith(`${collectionSummary}: `), `${method} ${route} must not inherit the collection wording`).toBe(false);
+      }
+      expect(summary, `${method} ${route} needs its own audit summary`).not.toBe(`${method} /api${path}`);
+    }
+  });
+
   it('resolves label actions', () => {
     expect(getAuditSummary('POST', '/labels')).toBe('Created label');
     expect(getAuditSummary('POST', '/labels/5/action')).toBe('Executed label action: 5');
