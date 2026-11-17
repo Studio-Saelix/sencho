@@ -201,6 +201,25 @@ describe('NodeDetailsSheet', () => {
     expect(screen.getByText('Up to date')).toBeInTheDocument();
   });
 
+  it('shows the Pinned status muted at the sheet height, not in the bright primary tone', () => {
+    render(
+      <NodeDetailsSheet
+        {...baseProps({
+          updateStatus: {
+            ...UPDATE_STATUS,
+            updateAvailable: true,
+            updateBlocked: true,
+            updateBlockedReason: 'Digest pin blocks automatic update.',
+          },
+        })}
+      />,
+    );
+    const pinned = screen.getByText('Pinned').closest('div');
+    expect(pinned).toHaveClass('h-5', 'bg-muted', 'text-muted-foreground');
+    expect(pinned).not.toHaveClass('bg-primary');
+    expect(pinned).toHaveAttribute('title', 'Digest pin blocks automatic update.');
+  });
+
   describe('toolbar actions', () => {
     const ONLINE_NODES = [{ id: 1, type: 'local' }, { id: 2, type: 'remote' }];
 

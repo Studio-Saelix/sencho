@@ -534,7 +534,9 @@ describe('NodeUpdatesSheet', () => {
       updateBlockedReason: 'Digest pin blocks automatic update.',
     };
     render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], blocked, STATUSES[2]] })} />);
-    expect(screen.getByText('Pinned')).toBeInTheDocument();
+    const pinned = screen.getByText('Pinned').closest('div');
+    expect(pinned).toHaveClass('h-5', 'bg-muted', 'text-muted-foreground');
+    expect(pinned).not.toHaveClass('bg-primary');
     expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
   });
 

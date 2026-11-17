@@ -915,6 +915,22 @@ export async function sweepStaleTempDirs(): Promise<void> {
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
+/**
+ * The resume route's answer. `suspensionCleared` is the evidence that the
+ * resume took effect: the live row carries no suspension after the attempted
+ * write. It is required for every outcome that is not settled, because the
+ * derived result cannot prove the resume on its own when it reports "no
+ * settled result yet" or "no application" as `unknown`, and a caller cannot
+ * tell those apart from a row that is still suspended. A settled outcome
+ * proves the resume without the field. Only the node that performed the write
+ * can report it, so a caller talking to a node that predates this field
+ * treats an unsettled outcome as unconfirmed rather than assuming a resume it
+ * cannot verify. A true value means the suspension cleared, not that the
+ * reconcile was harmless: the outcome still decides whether the caller
+ * announces a success or an attention warning.
+ */
+export type SourceResumeResult = ReconcileResult & { suspensionCleared: boolean };
+
 export class GitSourceService {
     private static instance: GitSourceService;
     private crypto: CryptoService;
@@ -4273,24 +4289,35 @@ export class GitSourceService {
      * binding through the shared acceptance/dispatch arm) instead of idling
      * until the next scheduled poll or retry.
      *
-     * Unlike suspend(), a refused resume is tolerated rather than surfaced.
-     * The result is read back from the row after the attempted write, so a
-     * resume that did not take (already not suspended, the application
-     * vanished, a transient persistence failure) still truthfully reports
-     * {outcome:'suspended', nextAction:'resume'} rather than a false
-     * "resumed". The caller cannot be told the source is unsuspended when it
-     * is not, so there is no false-safety risk to mirror suspend()'s rethrow.
+     * Unlike suspend(), a refused resume is tolerated rather than surfaced:
+     * the result is read back from the row after the attempted write, so a
+     * resume whose write did not take reports the row as it stands (a
+     * suspension, when nothing outranks it) rather than a false "resumed",
+     * and a stack with no live application reports no application. The caller
+     * cannot be told the source is unsuspended when it is not, so there is no
+     * false-safety risk to mirror suspend()'s rethrow.
+     * `suspensionCleared` carries that read-back as evidence: it is true only
+     * when a live row remains and no longer holds a suspension after the
+     * write. A settled outcome establishes the resume on its own; a result
+     * with no settled outcome (an in-flight or never-reconciled projection,
+     * or a stack with no application) cannot, so this flag is the only
+     * evidence a caller has for that case.
      */
-    public async resume(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+    public async resume(stackName: string, opts: { actor: string }): Promise<SourceResumeResult> {
         return this.withStackLock(stackName, async () => {
             const app = this.liveSourceApplication(stackName);
-            if (!app) return GitSourceService.noApplicationResult();
+            if (!app) return { ...GitSourceService.noApplicationResult(), suspensionCleared: false };
             const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'resume');
             this.recordGitOps(stackName, 'source resume', () => {
                 GitOpsTransitions.getInstance().sourceUnsuspended(app.id, envelope);
             });
             this.armInitialPollCursor(stackName, 'resume');
-            return this.deriveReconcileResult(stackName);
+            const derived = this.deriveReconcileResult(stackName);
+            // Read the flag after the derivation so it describes the same row
+            // the answer was derived from; the stack lock keeps a concurrent
+            // suspend from interleaving.
+            const cleared = this.liveSourceApplication(stackName)?.suspended_at === null;
+            return { ...derived, suspensionCleared: cleared };
         });
     }
 
