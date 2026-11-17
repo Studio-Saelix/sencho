@@ -161,6 +161,25 @@ describe('a refused lifecycle request', () => {
     expect(mockRestartContainer).not.toHaveBeenCalled();
   });
 
+  it.each(cases)('%s %s answers 409 data_restore when the guard meets a compose file a data restore is swapping', async (method, url) => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockEvaluate.mockRejectedValue(new DataRestoreFenceError('/srv/infra/data', 'browse', 'directory'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = method === 'DELETE'
+      ? await request(app).delete(url).set('Cookie', authCookie)
+      : await request(app).post(url).set('Cookie', authCookie).send({ recoveryId: 'rec-1' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('data_restore');
+    expect(res.body.error).toContain('data restore is overwriting');
+    expect(logged).not.toHaveBeenCalled();
+    expect(mockDeployStack).not.toHaveBeenCalled();
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockRunCommand).not.toHaveBeenCalled();
+    expect(mockRunDown).not.toHaveBeenCalled();
+  });
+
   it('releases the stack lock when it refuses, so the next request is not told the stack is busy', async () => {
     mockEvaluate.mockResolvedValueOnce(refusal);
     mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
@@ -419,6 +438,29 @@ describe('POST /api/stacks/bulk', () => {
     // The check failed; no refusal was made, so the row is a failed operation, not a protected one.
     expect(infra).toMatchObject({ ok: false, code: 'op_failed' });
     expect(infra.error).toContain('Could not verify');
+    expect(blog.ok).toBe(true);
+    expect(mockUpdateStack).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a stack whose guard meets a compose file a data restore is swapping with the fence, and still runs the others', async () => {
+    writeStack('blog');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockEvaluate.mockImplementation(async (stackName: string) => {
+      if (stackName === 'infra') throw new DataRestoreFenceError('/srv/infra/data', 'browse', 'directory');
+      return null;
+    });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+
+    const res = await request(app)
+      .post('/api/stacks/bulk')
+      .set('Cookie', authCookie)
+      .send({ action: 'update', stackNames: ['infra', 'blog'] });
+
+    expect(res.status).toBe(200);
+    const infra = res.body.results.find((r: { stackName: string }) => r.stackName === 'infra');
+    const blog = res.body.results.find((r: { stackName: string }) => r.stackName === 'blog');
+    expect(infra).toMatchObject({ ok: false, code: 'data_restore' });
+    expect(infra.error).toContain('data restore is overwriting');
     expect(blog.ok).toBe(true);
     expect(mockUpdateStack).toHaveBeenCalledTimes(1);
   });

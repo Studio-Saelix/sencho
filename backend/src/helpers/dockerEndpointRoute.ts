@@ -5,6 +5,7 @@ import {
   isDockerEndpointProtectedError,
   type EndpointMutation,
 } from './dockerEndpointGuard';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from './dataRestoreFenceError';
 
 /**
  * Route-level front of the Docker endpoint guard: when `mutation` would stop or
@@ -25,6 +26,11 @@ export async function refuseIfDockerEndpoint(
     res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {
+    // A compose file a data restore is swapping: the answer is the fence's.
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return true;
+    }
     console.error('[DockerEndpointGuard] Check failed; refusing the request:', error);
     res.status(500).json({ error: 'Could not verify that this operation keeps the Docker connection safe.' });
     return true;

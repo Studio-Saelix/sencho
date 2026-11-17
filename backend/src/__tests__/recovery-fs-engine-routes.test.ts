@@ -2807,9 +2807,10 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const loadSpec = vi.spyOn(orchestrator as unknown as { loadServiceSpec: () => Promise<unknown> }, 'loadServiceSpec');
     const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
     const recoveries = ServiceUpdateRecoveryService.getInstance();
-    for (const shape of LINK_SHAPES) {
+    // A readable link, and one moved aside mid-swap.
+    for (const [shape, dangling] of LINK_SHAPES.flatMap((s) => [[s, false], [s, true]] as const)) {
       resetStack();
-      const { data } = composeStackOf(shape);
+      const { data, compose } = composeStackOf(shape);
       const recoveryId = randomUUID();
       const now = Date.now();
       DatabaseService.getInstance().insertServiceUpdateRecovery({
@@ -2820,10 +2821,12 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         created_at: now, created_by: 'test',
       });
       fencedOverwriteOf(data);
+      if (dangling) fs.renameSync(compose, `${compose}.aside`);
       const restoreCall = vi.spyOn(orchestrator, 'restore');
       const res = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId });
       expect(res.status, shape).toBe(409);
-      expect(res.body, shape).toMatchObject({ code: 'data_restore', serviceName: 'app' });
+      // A dangling link is already refused when the route asks whether the stack exists.
+      expect(res.body, shape).toMatchObject(dangling ? { code: 'data_restore' } : { code: 'data_restore', serviceName: 'app' });
       expect(restoreCall, shape).not.toHaveBeenCalled();
       restoreCall.mockRestore();
       // A caller that reaches restore directly is refused by restore itself.
@@ -2923,6 +2926,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
     const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
     const { WebhookService } = await import('../services/WebhookService');
+    const { applyAutomaticStackUpdate } = await import('../services/automaticStackUpdate');
     const db = DatabaseService.getInstance();
     for (const fenced of [false, true]) {
       renderable = fenced;
@@ -2942,7 +2946,14 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       expect(outcome, String(fenced)).toMatchObject({ success: true });
       const runs = db.getWebhookExecutions(webhookId);
       expect(runs[0], String(fenced)).toMatchObject({ status: 'success' });
-      expect(runs[0].error, String(fenced)).toBeTruthy();
+      expect(runs[0].error, String(fenced)).toMatch(fenced ? /disabled/ : /render/i);
+      const verify = vi.fn();
+      const automatic = await applyAutomaticStackUpdate({
+        nodeId, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'auto-update:test' },
+        verificationOwner: 'hub_authority', observation: { verify, consume: vi.fn() },
+      });
+      expect(automatic, String(fenced)).toMatchObject({ result: 'update_policy_skipped', applied: false });
+      expect(verify, String(fenced)).not.toHaveBeenCalled();
     }
     expect(gate).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
