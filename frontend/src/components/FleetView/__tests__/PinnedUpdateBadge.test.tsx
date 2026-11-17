@@ -15,9 +15,14 @@ it('renders compact with the muted tone by default', () => {
   expect(badge).toHaveAttribute('title', 'Pinned to a tag');
 });
 
-it('lets the caller render it taller', () => {
-  render(<PinnedUpdateBadge reason="Pinned to a tag" className="h-5 bg-muted" />);
+it('keeps the muted tone when the caller only changes the height', () => {
+  render(<PinnedUpdateBadge reason="Pinned to a tag" className="h-5" />);
   const badge = screen.getByText('Pinned').closest('div');
-  expect(badge).toHaveClass('h-5', 'bg-muted');
+  expect(badge).toHaveClass(
+    'h-5',
+    'bg-muted',
+    'text-muted-foreground',
+    'border-card-border/40',
+  );
   expect(badge).not.toHaveClass('h-4');
 });

@@ -464,7 +464,7 @@ export function NodeUpdatesSheet({
                                         {(s.updateBlocked && s.imageChannel !== 'hardened') && s.updateAvailable && !s.updateStatus && !s.skipActive && (
                                             <PinnedUpdateBadge
                                                 reason={s.updateBlockedReason}
-                                                className="h-5 bg-muted text-muted-foreground border-card-border/40"
+                                                className="h-5"
                                             />
                                         )}
                                         {(s.updateAvailable || s.devBuildUpdateAvailable) && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && isAdmin && (
