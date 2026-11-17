@@ -2599,6 +2599,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     fs.mkdirSync(path.join(stackDir('web'), '.env'));
     const dirCreate = await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'B=2\n' });
     expect(dirCreate.status).toBe(409);
+    expect(dirCreate.body.error).toContain('is a directory');
   });
 
   it('writes an env file whose link climbs out of a linked directory with .. to where the kernel puts it, not into a fenced directory its text collapses to', async () => {
