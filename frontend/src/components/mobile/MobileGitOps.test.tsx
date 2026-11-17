@@ -163,7 +163,9 @@ describe('MobileGitOps', () => {
     window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
-  it('warns on a Resume the server refused with 200', async () => {
+  it('warns on a Resume the server refused with 200 and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
     mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
       ok: true,
       status: 200,
@@ -179,10 +181,16 @@ describe('MobileGitOps', () => {
     render(<MobileGitOps headerActions={null} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
 
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith(
+      '/stacks/bookstack/git-source/resume',
+      expect.objectContaining({ method: 'POST' }),
+    ));
     await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
       'bookstack: the source did not resume. Reconciliation is suspended: paused for maintenance',
     ));
     expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('falls back to opening the Git source when the session cannot edit the stack', async () => {

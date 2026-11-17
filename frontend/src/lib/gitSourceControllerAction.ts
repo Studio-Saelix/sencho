@@ -12,7 +12,7 @@ const SUCCESS_COPY: Record<SourceControllerAction, string> = {
 /**
  * Outcomes that mean a Retry or Resume ran and the source settled without a
  * failure or a block. A 2xx alone is not enough: the routes answer 200 for a
- * refusal that leaves the source exactly as it was.
+ * refusal that may leave the source unchanged.
  */
 const SETTLED_OUTCOMES: ReadonlySet<string> = new Set([
   'converged',
@@ -48,9 +48,9 @@ function withReason(message: string, reason: string): string {
  * than by the HTTP status. Each action states what it needs its answer to
  * say: a Suspend needs `suspended`, and a Retry needs a settled outcome. A
  * Resume needs a settled outcome too, with a warning when the suspension
- * cleared but the source still reports a failure. `failed_previous_intact`
- * is the one Retry outcome that reports the previous deployment as intact,
- * which must reach the operator instead of a success line.
+ * cleared but the source still needs attention. `failed_previous_intact`
+ * is the one outcome that reports the previous deployment as intact, which
+ * must reach the operator instead of a success line.
  */
 function sourceControllerFeedback(
   stackName: string,
@@ -76,9 +76,12 @@ function sourceControllerFeedback(
   if (action === 'resume') {
     if (outcome === 'suspended') return refused('the source did not resume.');
     if (outcome === 'unknown') {
-      return refused("reconciliation resumed, but the source's state could not be confirmed.");
+      return refused("could not confirm the source's state after the resume.");
     }
     if (SETTLED_OUTCOMES.has(outcome)) return success;
+    if (outcome === 'failed_previous_intact') {
+      return refused('reconciliation resumed, but the previous deployment was left as it was.');
+    }
     return refused('reconciliation resumed, but the source still needs attention.');
   }
   if (SETTLED_OUTCOMES.has(outcome)) return success;

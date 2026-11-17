@@ -104,6 +104,18 @@ describe('runSourceControllerAction', () => {
     expect(toast.warning).toHaveBeenCalledWith('web: the retry did not start.');
   });
 
+  it.each(['suspended', 'blocked', 'recovery_required', 'retry_scheduled', 'unknown'])(
+    'does not report a retry that settled as %s as started',
+    async (outcome) => {
+      mockFetch.mockResolvedValue(res(true, { outcome, reason: `The retry settled as ${outcome}.`, nextAction: 'none' }));
+
+      await expect(runSourceControllerAction('web', 1, 'retry')).resolves.toBe(false);
+
+      expect(toast.warning).toHaveBeenCalledWith(`web: The retry settled as ${outcome}.`);
+      expect(toast.success).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['converged', 'no_source_change', 'candidate_already_fetched', 'pending_review', 'superseded'])(
     'keeps the success line for a retry that settled as %s',
     async (outcome) => {
@@ -116,18 +128,17 @@ describe('runSourceControllerAction', () => {
     },
   );
 
-  it('reports a resume that cleared suspension as a success', async () => {
-    mockFetch.mockResolvedValue(res(true, {
-      outcome: 'no_source_change',
-      reason: 'The configured ref still resolves to the accepted generation.',
-      nextAction: 'none',
-    }));
+  it.each(['converged', 'no_source_change', 'candidate_already_fetched', 'pending_review', 'superseded'])(
+    'keeps the success line for a resume that settled as %s',
+    async (outcome) => {
+      mockFetch.mockResolvedValue(res(true, { outcome, reason: 'settled', nextAction: 'none' }));
 
-    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(true);
+      await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(true);
 
-    expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for web');
-    expect(toast.warning).not.toHaveBeenCalled();
-  });
+      expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for web');
+      expect(toast.warning).not.toHaveBeenCalled();
+    },
+  );
 
   it('reports a resume the source refused', async () => {
     const seen = invalidations();
@@ -148,7 +159,7 @@ describe('runSourceControllerAction', () => {
     seen.stop();
   });
 
-  it('reports a resume that cleared suspension but left an unconfirmed state', async () => {
+  it('reports a resume that left the state unconfirmed', async () => {
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'unknown',
       reason: 'The source has never been reconciled.',
@@ -158,7 +169,7 @@ describe('runSourceControllerAction', () => {
     await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
-      "web: reconciliation resumed, but the source's state could not be confirmed. The source has never been reconciled.",
+      "web: could not confirm the source's state after the resume. The source has never been reconciled.",
     );
     expect(toast.success).not.toHaveBeenCalled();
   });
@@ -173,7 +184,7 @@ describe('runSourceControllerAction', () => {
     await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
 
     expect(toast.warning).toHaveBeenCalledWith(
-      'web: reconciliation resumed, but the source still needs attention. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+      'web: reconciliation resumed, but the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
     );
     expect(toast.success).not.toHaveBeenCalled();
   });
