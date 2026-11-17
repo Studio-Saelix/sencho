@@ -240,11 +240,11 @@ export interface NodeNetworkingOverview {
   renderFailedStacks: string[];
 }
 
-/** Mirrors the backend `NetworkFactPort`: a resolved host publication, not the
- *  authored Compose mapping. `startPort`/`endPort` are 0 when Docker assigns the
- *  host port at start, which is what `dynamic` marks. */
+/** Mirrors the backend `NetworkFactPort`: a host publication from the effective
+ *  Compose model. `startPort`/`endPort` are 0 when Docker assigns the host port
+ *  at start, which is what `dynamic` marks. */
 export interface NetworkFactPort {
-  /** '' / '0.0.0.0' / '::' means all interfaces. */
+  /** '' / '0.0.0.0' / '::' / '[::]' means all interfaces. */
   hostIp: string;
   /** First host port, or 0 when `dynamic`. */
   startPort: number;

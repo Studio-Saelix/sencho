@@ -148,12 +148,23 @@ export function isMissingTopologyNetwork(network: NetworkingTopologyNetwork): bo
   return network.runtimeState === 'missing' || network.id.startsWith('missing:');
 }
 
+/** The backend's all-interface sentinels, all shown as `0.0.0.0`. */
+const ALL_INTERFACE_HOSTS = new Set(['', '0.0.0.0', '::', '[::]']);
+
+/** A host as it belongs in `host:port`: an IPv6 literal needs brackets, and an
+ *  all-interface binding reads as the canonical `0.0.0.0`. */
+function formatTopologyHost(hostIp: string): string {
+  if (ALL_INTERFACE_HOSTS.has(hostIp)) return '0.0.0.0';
+  if (hostIp.startsWith('[') || !hostIp.includes(':')) return hostIp;
+  return `[${hostIp}]`;
+}
+
 /** A published port line: `host:startPort/protocol` for one fixed port,
  *  `host:startPort-endPort/protocol` for a fixed range, and
- *  `host:auto/protocol` when Docker picks the host port at start. An older node
- *  reports an auto-assigned port as 0/0 without the `dynamic` flag. */
+ *  `host:auto/protocol` when Docker picks the host port at start. A payload
+ *  that omits `dynamic` still marks an auto-assigned port as 0/0. */
 export function formatTopologyPort(port: NetworkingTopologyContainer['publishedPorts'][number]): string {
-  const host = port.hostIp || '0.0.0.0';
+  const host = formatTopologyHost(port.hostIp);
   if (port.dynamic === true || (port.startPort === 0 && port.endPort === 0)) {
     return `${host}:auto/${port.protocol}`;
   }

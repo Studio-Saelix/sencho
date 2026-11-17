@@ -10,9 +10,12 @@ const missingNetwork: NetworkingTopologyNetwork = {
 };
 
 function publishedPort(over: Partial<NetworkFactPort> = {}): NetworkFactPort {
+  const hostIp = over.hostIp ?? '';
   return {
-    hostIp: '', startPort: 8080, endPort: 8080, protocol: 'tcp',
-    allInterfaces: true, loopbackOnly: false, ...over,
+    hostIp, startPort: 8080, endPort: 8080, protocol: 'tcp',
+    allInterfaces: hostIp === '' || hostIp === '0.0.0.0' || hostIp === '::' || hostIp === '[::]',
+    loopbackOnly: hostIp.startsWith('127.') || hostIp === '::1' || hostIp === '[::1]',
+    ...over,
   };
 }
 
@@ -46,13 +49,22 @@ describe('formatTopologyPort', () => {
       .toBe('0.0.0.0:auto/udp');
   });
 
-  it('reads an older node 0/0 publication as auto-assigned', () => {
+  it('treats a 0/0 publication without the dynamic flag as auto-assigned', () => {
     expect(formatTopologyPort(publishedPort({ startPort: 0, endPort: 0 }))).toBe('0.0.0.0:auto/tcp');
   });
 
   it('renders all interfaces as 0.0.0.0 and never leaks an undefined value', () => {
     const line = formatTopologyPort(publishedPort());
     expect(line).toBe('0.0.0.0:8080/tcp');
+    expect(formatTopologyPort(publishedPort({ hostIp: '::' }))).toBe('0.0.0.0:8080/tcp');
+    expect(formatTopologyPort(publishedPort({ hostIp: '[::]' }))).toBe('0.0.0.0:8080/tcp');
     expect(line).not.toContain('undefined');
+  });
+
+  it('brackets an IPv6 host so the port stays readable', () => {
+    expect(formatTopologyPort(publishedPort({ hostIp: '::1' }))).toBe('[::1]:8080/tcp');
+    expect(formatTopologyPort(publishedPort({ hostIp: '[::1]' }))).toBe('[::1]:8080/tcp');
+    expect(formatTopologyPort(publishedPort({ hostIp: 'fe80::1', startPort: 0, endPort: 0, dynamic: true })))
+      .toBe('[fe80::1]:auto/tcp');
   });
 });
