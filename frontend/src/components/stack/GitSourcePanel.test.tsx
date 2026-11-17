@@ -428,6 +428,26 @@ describe('GitSourcePanel hosted on an explicit node', () => {
     openTab('Automation');
     expect(await screen.findByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
   });
+
+  it('reads the pull verbs\' capability from the hosted node, not the active one', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+
+    // The active node has the capability; the hosted node does not.
+    nodeCtl.hasCapability.mockReturnValue(true);
+    nodeCtl.nodeMeta.set(9, { capabilities: [] });
+    const { unmount } = render(hostedPanel());
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
+    unmount();
+
+    // And the reverse.
+    nodeCtl.hasCapability.mockReturnValue(false);
+    nodeCtl.nodeMeta.set(9, { capabilities: [GITOPS_SOURCE_CONTROLLER_CAPABILITY] });
+    render(hostedPanel());
+    expect(await screen.findByRole('button', { name: 'Review update' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /pull now/i })).toBeInTheDocument();
+  });
 });
 
 describe('GitSourcePanel stale plan handling', () => {
