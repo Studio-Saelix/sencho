@@ -175,6 +175,23 @@ describe('AttentionQueue', () => {
     expect(screen.getByRole('button', { name: 'Open Git source' })).toBeInTheDocument();
   });
 
+  it('opens a waiting update read-only when the session cannot edit the stack', () => {
+    // The review pull is a stack:edit write. Without it the step must not open
+    // the sheet with the review intent, which POSTs the refused pull.
+    session.can.mockImplementation(() => false);
+    const seen: unknown[] = [];
+    const onEvent = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener(GITOPS_GIT_SOURCE_EVENT, onEvent);
+    render(<AttentionQueue rows={[row({ attention: ['source_review_pending'] })]} />);
+
+    expect(screen.queryByRole('button', { name: 'Review update' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Git source' }));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(seen).toEqual([{ nodeId: 1, stackName: 'web', applicationName: 'web' }]);
+    window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, onEvent);
+  });
+
   it('falls back when the owning node does not run the source controller', () => {
     session.nodeMeta.set(1, { capabilities: [] });
     render(<AttentionQueue rows={[row({ attention: ['source_failed'], availableActions: ['retry'] })]} />);

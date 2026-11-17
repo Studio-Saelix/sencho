@@ -146,6 +146,23 @@ describe('MobileGitOps', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 
+  it('opens a waiting update read-only when the session cannot edit the stack', async () => {
+    // Reviewing pulls the waiting commit, a stack:edit write; the row must not
+    // send it from this session, whichever surface renders the step.
+    session.canEdit = false;
+    withRows([portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_review_pending'] })]);
+    const opened = vi.fn();
+    window.addEventListener(GITOPS_GIT_SOURCE_EVENT, opened);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Git source' }));
+
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect((opened.mock.calls[0][0] as CustomEvent).detail.intent).toBeUndefined();
+    window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, opened);
+  });
+
   it('opens the update review in place for a waiting update', async () => {
     withRows([portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_review_pending'] })]);
     const opened = vi.fn();

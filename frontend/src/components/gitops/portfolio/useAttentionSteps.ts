@@ -28,9 +28,12 @@ function useSourceControl(): (row: GitOpsPortfolioRow) => SourceControl {
       const meta = nodeMeta.get(row.nodeId);
       // Optimistic while the node's capabilities are unknown, as the Git source sheet is; a refusal still toasts.
       const capable = meta ? meta.capabilities.includes(GITOPS_SOURCE_CONTROLLER_CAPABILITY) : true;
+      // Reviewing pulls the waiting commit, a write the server gates on
+      // stack:edit; the projection has no separate verb for it, so edit access
+      // is the whole gate.
       return capable
         && can('stack:edit', 'stack', row.stackName, row.nodeId)
-        && row.availableActions.includes(action);
+        && (action === 'review' || row.availableActions.includes(action));
     },
   });
 }

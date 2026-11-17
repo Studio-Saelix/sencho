@@ -920,6 +920,29 @@ describe('GitSourcePanel GitOps state', () => {
       await screen.findByRole('button', { name: 'Review update' });
       expect(pullCalls()).toBe(0);
     });
+
+    it('opens without pulling when the account cannot edit the stack', async () => {
+      // The pull is a stack:edit write. The outside step still opens the sheet
+      // so a deployer can read what is waiting, but it must send nothing.
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+      render(panel({ autoReview: true, canEdit: false }));
+
+      expect(await screen.findByTestId('gitops-source')).toHaveTextContent(SOURCE_STATE.candidate_ready.label);
+      expect(pullCalls()).toBe(0);
+      expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe('GitSourcePanel write affordances', () => {
+  it('hides the update review and Pull now from an account that cannot edit the stack', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(sourceRevision('candidate_ready'))));
+    render(panel({ canEdit: false }));
+
+    // The waiting state stays visible; only its write verbs go.
+    expect(await screen.findByTestId('gitops-source')).toHaveTextContent(SOURCE_STATE.candidate_ready.label);
+    expect(screen.queryByRole('button', { name: 'Review update' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
   });
 });
 
@@ -1490,7 +1513,7 @@ describe('GitSourcePanel controller controls', () => {
     render(
       <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
     );
-    await screen.findByRole('button', { name: /pull now/i });
+    await screen.findByTestId('gitops-source');
     expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
   });
 

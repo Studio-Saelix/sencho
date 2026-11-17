@@ -777,6 +777,9 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
+  // Reviewing pulls the waiting commit, so it is offered only to a session that
+  // may edit the stack. Everyone else reads the waiting state without a write.
+  const offerReview = showPendingReview && canMutateSource;
   // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes.
   let statusAction: ReactNode;
   if (offerRetry && !showPendingReview) {
@@ -805,7 +808,7 @@ export function GitSourcePanel({
         Resume
       </BusyButton>
     );
-  } else if (showPendingReview) {
+  } else if (offerReview) {
     statusAction = (
       <BusyButton
         size="sm"
@@ -821,6 +824,8 @@ export function GitSourcePanel({
   }
 
   // "Review update" from outside the sheet: do what its button would, once per opening.
+  // A session that cannot edit the stack opens the sheet without pulling, so the
+  // outside step never sends a write the server would refuse.
   const autoReviewed = useRef(false);
   useEffect(() => {
     if (!open) {
@@ -828,15 +833,15 @@ export function GitSourcePanel({
       return;
     }
     // loadedForOpen: the state read for THIS opening, never what a reopened sheet still held.
-    if (!autoReview || loading || !loadedForOpen.current || autoReviewed.current || !showPendingReview) return;
+    if (!autoReview || loading || !loadedForOpen.current || autoReviewed.current || !offerReview) return;
     autoReviewed.current = true;
     void pullNow();
     // pullNow is a fresh closure each render; the ref makes this run once per opening.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoReview, open, loading, showPendingReview]);
+  }, [autoReview, open, loading, offerReview]);
 
   const toolbarLive = !loading && loadError === null;
-  const offerPull = toolbarLive && !claimedByBlueprint && source !== null && sourceFacet?.status !== 'source_suspended';
+  const offerPull = toolbarLive && canMutateSource && source !== null && sourceFacet?.status !== 'source_suspended';
   const secondaryActions: SystemSheetAction[] | undefined = offerPull
     ? [{
         label: pulling ? 'Pulling' : 'Pull now',

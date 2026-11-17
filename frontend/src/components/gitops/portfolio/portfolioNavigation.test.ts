@@ -177,10 +177,22 @@ describe('portfolio row actions and attention next steps', () => {
   });
 
   it('opens a Direct pending update review in the Git source, which pulls and shows the diff', () => {
-    const next = attentionNextStep('source_review_pending', direct);
+    const next = attentionNextStep('source_review_pending', direct, { can: action => action === 'review' });
     expect(next.label).toBe('Review update');
     expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
       .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name, intent: 'review' }]);
+  });
+
+  it.each([
+    'source_review_pending',
+    'source_conflict_blocker',
+    'source_reconcile_required',
+  ] as const)('opens %s without pulling when the session cannot edit the stack', (reason) => {
+    const next = attentionNextStep(reason, direct, { can: () => false });
+    expect(next.label).toBe('Open Git source');
+    // No intent: the sheet opens read-only instead of POSTing a pull the server refuses.
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
   });
 
   it('opens the application for a Blueprint failure, which has no single stack', () => {
