@@ -62,6 +62,13 @@ describe('attentionLabel', () => {
     expect(attentionLabel('source_failed').label).toBe('source failed');
   });
 
+  it('reads a failed deploy as a destructive failure with its own words', () => {
+    const label = attentionLabel('deploy_failed');
+    expect(label.label).toBe('deploy failed');
+    expect(label.tone).toBe('destructive');
+    expect(label.line).toBe('The last deployment attempt failed.');
+  });
+
   it('renders a reason this build never heard of as its raw code, not a blank', () => {
     const future = attentionLabel('quantum_entanglement_required');
     expect(future.label).toBe('quantum entanglement required');

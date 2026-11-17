@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { detailResponse, portfolioRow } from '@/components/gitops/application/applicationFixtures';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import { GITOPS_GIT_SOURCE_EVENT } from '../gitops/portfolio/portfolioNavigation';
 import { MobileGitOps } from './MobileGitOps';
 
@@ -156,6 +157,23 @@ describe('MobileGitOps', () => {
     expect(opened).toHaveBeenCalledTimes(1);
     expect((opened.mock.calls[0][0] as CustomEvent).detail.intent).toBe('review');
     window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, opened);
+  });
+
+  it('reads a failed deploy as the urgent reason and names its stack', async () => {
+    withRows([portfolioRow({
+      id: '1:app-1',
+      name: 'bookstack',
+      attention: ['artifact_unqualified', 'deploy_failed'],
+    })]);
+    const opened = vi.fn();
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, opened);
+
+    render(<MobileGitOps headerActions={null} />);
+
+    expect(await screen.findByText('deploy failed')).toHaveClass('text-destructive');
+    fireEvent.click(screen.getByRole('button', { name: 'Open stack' }));
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 1, stackName: 'bookstack', destination: 'stack' });
+    window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
   });
 
   it('offers no step on an application that needs nothing', async () => {
