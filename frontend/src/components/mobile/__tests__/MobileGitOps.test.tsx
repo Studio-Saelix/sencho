@@ -11,6 +11,8 @@ import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
 // The sheet host has its own tests; here it only needs to mount.
 vi.mock('@/components/gitops/portfolio/GitOpsGitSourceHost', () => ({ GitOpsGitSourceHost: () => null }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ nodeMeta: new Map<number, { capabilities: string[] }>() }) }));
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
 }));
