@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { ComposeService } from '../services/ComposeService';
+import { FileSystemService } from '../services/FileSystemService';
 import {
   DOCKER_ENDPOINT_PROTECTED_CODE,
   isDockerEndpointProtectedError,
@@ -23,6 +24,8 @@ export async function refuseIfDockerEndpoint(
   try {
     const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, mutation);
     if (!refusal) return false;
+    // A compose file a data restore is swapping does not render: the fence answers.
+    if (refusal?.renderFailed) await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
     res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {

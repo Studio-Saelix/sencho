@@ -941,6 +941,7 @@ function renderFailureRefusal(stackName: string, detail: string): DockerEndpoint
   return {
     reason: 'unresolved',
     service: null,
+    renderFailed: true,
     message: `Sencho could not render the Compose configuration of "${stackName}" (${detail}), so it cannot tell whether this operation would stop or recreate the container that carries its Docker connection. `
       + 'Fix the configuration (rendering it must also take under 20 seconds and produce no more than 5 MiB of output), then retry.',
   };

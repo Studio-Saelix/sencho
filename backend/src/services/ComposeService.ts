@@ -7,7 +7,6 @@ import WebSocket from 'ws';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
-import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { MeshService } from './MeshService';
 import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
@@ -327,13 +326,12 @@ export class ComposeService {
    * service even when the operation it compensates did not. Only `start` is not
    * guarded (it stops nothing).
    */
-  public async evaluateDockerEndpoint(
+  public evaluateDockerEndpoint(
     stackName: string,
     mutation: EndpointMutation,
     stackDirOverride?: string,
   ): Promise<DockerEndpointRefusal | null> {
-    let renderFailed = false;
-    const refusal = await evaluateDockerEndpointGuard({
+    return evaluateDockerEndpointGuard({
       nodeId: this.nodeId,
       stackName,
       mutation,
@@ -341,7 +339,6 @@ export class ComposeService {
         renderConfig: async () => {
           const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
           if (result.rendered) return result.rendered;
-          renderFailed = true;
           // The guard refuses what it cannot see, so say why the render failed. The
           // diagnostics are withheld for an overlay render (they quote secrets);
           // Sencho's own refusal names the file and the reason, so it is safe.
@@ -356,14 +353,6 @@ export class ComposeService {
         composeVersion: () => this.composeVersion(),
       },
     });
-    // A compose file a data restore is swapping does not render, so a refusal
-    // that follows a failed render asks the directory fence first and throws its
-    // refusal instead: the operation is answered with the fence's reason, not
-    // as an unreadable configuration.
-    if (refusal && renderFailed && !stackDirOverride) {
-      await FileSystemService.getInstance(this.nodeId).refuseIfComposeFenced(stackName);
-    }
-    return refusal;
   }
 
   private async assertDockerEndpointSafe(
@@ -375,8 +364,6 @@ export class ComposeService {
     try {
       refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
     } catch (error) {
-      // The fence's refusal is the answer as it stands.
-      if (isDataRestoreFenceError(error)) throw error;
       // A guard that cannot run is not a pass. Raised as a refusal so callers
       // that tolerate other teardown failures (delete, template rollback) keep
       // the stack's files and records.

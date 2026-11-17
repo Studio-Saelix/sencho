@@ -7,7 +7,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, onTestFinished, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
@@ -161,9 +161,13 @@ describe('a refused lifecycle request', () => {
     expect(mockRestartContainer).not.toHaveBeenCalled();
   });
 
-  it.each(cases)('%s %s answers 409 data_restore when the guard meets a compose file a data restore is swapping', async (method, url) => {
+  it.each(cases)('%s %s answers 409 data_restore when the guard could not render a compose file a data restore is swapping', async (method, url) => {
     const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
-    mockEvaluate.mockRejectedValue(new DataRestoreFenceError('/srv/infra/data', 'browse', 'directory'));
+    const { FileSystemService } = await import('../services/FileSystemService');
+    mockEvaluate.mockResolvedValue({ reason: 'unresolved', service: null, message: 'could not render', renderFailed: true });
+    const fenced = vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced')
+      .mockRejectedValue(new DataRestoreFenceError('/srv/infra/data', 'browse', 'directory'));
+    onTestFinished(() => fenced.mockRestore());
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     const res = method === 'DELETE'
@@ -173,11 +177,27 @@ describe('a refused lifecycle request', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('data_restore');
     expect(res.body.error).toContain('data restore is overwriting');
+    expect(fenced).toHaveBeenCalledWith('infra');
     expect(logged).not.toHaveBeenCalled();
     expect(mockDeployStack).not.toHaveBeenCalled();
     expect(mockUpdateStack).not.toHaveBeenCalled();
     expect(mockRunCommand).not.toHaveBeenCalled();
     expect(mockRunDown).not.toHaveBeenCalled();
+  });
+
+  it('keeps the guard\'s answer when the compose file is not fenced, and never asks the fence for a refusal that is not a failed render', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fenced = vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced').mockResolvedValue(undefined);
+    onTestFinished(() => fenced.mockRestore());
+    mockEvaluate.mockResolvedValueOnce({ reason: 'unresolved', service: null, message: 'could not render', renderFailed: true });
+    const unrendered = await request(app).post('/api/stacks/infra/update').set('Cookie', authCookie);
+    expect(unrendered.status).toBe(409);
+    expect(unrendered.body).toMatchObject({ code: 'docker_endpoint_protected', error: 'could not render' });
+    expect(fenced).toHaveBeenCalledTimes(1);
+    mockEvaluate.mockResolvedValueOnce(refusal);
+    const protectedStop = await request(app).post('/api/stacks/infra/stop').set('Cookie', authCookie);
+    expect(protectedStop.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+    expect(fenced).toHaveBeenCalledTimes(1);
   });
 
   it('releases the stack lock when it refuses, so the next request is not told the stack is busy', async () => {
@@ -442,13 +462,16 @@ describe('POST /api/stacks/bulk', () => {
     expect(mockUpdateStack).toHaveBeenCalledTimes(1);
   });
 
-  it('reports a stack whose guard meets a compose file a data restore is swapping with the fence, and still runs the others', async () => {
+  it('reports a stack whose guard could not render a compose file a data restore is swapping with the fence, and still runs the others', async () => {
     writeStack('blog');
     const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
-    mockEvaluate.mockImplementation(async (stackName: string) => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fenced = vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced').mockImplementation(async (stackName: string) => {
       if (stackName === 'infra') throw new DataRestoreFenceError('/srv/infra/data', 'browse', 'directory');
-      return null;
     });
+    onTestFinished(() => fenced.mockRestore());
+    mockEvaluate.mockImplementation(async (stackName: string) =>
+      stackName === 'infra' ? { reason: 'unresolved', service: null, message: 'could not render', renderFailed: true } : null);
     mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
 
     const res = await request(app)

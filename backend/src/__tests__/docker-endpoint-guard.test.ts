@@ -226,6 +226,8 @@ describe('the Docker socket proxy', () => {
     const refusal = await run(mutation);
 
     expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    // Only a failed render is marked; a protected container never asks the fence.
+    expect(refusal?.renderFailed).toBeUndefined();
     expect(refusal?.message).toContain('Docker connection');
   });
 
@@ -969,7 +971,8 @@ describe('io.sencho.infrastructure', () => {
       ] as EndpointMutation[])('refuses %j, since the model it would act on is unknown', async (mutation) => {
         const refusal = await run(mutation, probes({ renderConfig: failing() }), 'blog');
 
-        expect(refusal).toMatchObject({ reason: 'unresolved', service: null });
+        // Marked, so a pre-check can answer a file a data restore is swapping with its fence.
+        expect(refusal).toMatchObject({ reason: 'unresolved', service: null, renderFailed: true });
         expect(refusal?.message).toContain('could not render the Compose configuration of "blog"');
       });
 

@@ -2908,6 +2908,89 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('answers a Docker endpoint refusal of a compose file it could not render with the fence when a data restore holds the file, and as the refusal otherwise', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(resolveSenchoLabels({ services: { app: { image: 'nginx:1' }, db: { image: 'postgres:16' } } }), request));
+    const unrendered = { reason: 'unresolved' as const, service: null, message: 'could not render', renderFailed: true as const };
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      evaluateDockerEndpoint: async () => unrendered,
+      // Two services, so a service update reaches its endpoint check.
+      renderConfig: async () => ({
+        rendered: JSON.stringify({ name: 'web', services: { app: { image: 'nginx:1' }, db: { image: 'postgres:16' } }, networks: {}, volumes: {} }),
+        stderr: '', code: 0, timedOut: false,
+      }),
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyPreDeploy');
+    const imageGate = vi.spyOn(enforcement, 'enforcePolicyForImageRefs');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const orchestrator = StackUpdateOrchestrator.getInstance();
+    const { applyAutomaticStackUpdate } = await import('../services/automaticStackUpdate');
+    for (const fenced of [true, false]) {
+      for (const [shape, dangling] of LINK_SHAPES.flatMap((s) => [[s, false], [s, true]] as const)) {
+        // The unfenced control needs a file that can be read: a dangling link is refused as missing.
+        if (!fenced && dangling) continue;
+        const label = `${fenced ? 'fenced' : 'clear'} ${shape}${dangling ? ' dangling' : ''}`;
+        resetStack();
+        const { data, compose } = composeStackOf(shape);
+        if (fenced) fencedOverwriteOf(data);
+        else fencedOverwriteOf(dataDir('other'), ['other']);
+        if (dangling) fs.renameSync(compose, `${compose}.aside`);
+        const expected = fenced ? 'data_restore' : 'docker_endpoint_protected';
+        for (const [name, pending] of Object.entries({
+          update: request(app).post('/api/stacks/web/update').set('Cookie', adminCookie),
+          service: request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie),
+          restore: request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId: 'rec-1' }),
+        })) {
+          const res = await pending;
+          expect(res.status, `${label} ${name}`).toBe(409);
+          expect(res.body.code, `${label} ${name}`).toBe(expected);
+        }
+        const bulk = await request(app).post('/api/stacks/bulk').set('Cookie', adminCookie).send({ action: 'update', stackNames: ['web'] });
+        expect(bulk.body.results[0], `${label} bulk`).toMatchObject({ stackName: 'web', ok: false, code: expected });
+        if (dangling) continue;
+        // The checks inside the operations, reached by a caller past the route's.
+        const verify = vi.fn();
+        const automatic = applyAutomaticStackUpdate({
+          nodeId, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'auto-update:test' },
+          verificationOwner: 'hub_authority', observation: { verify: async () => { verify(); }, consume: vi.fn() },
+        });
+        if (fenced) await expect(automatic, label).rejects.toMatchObject({ code: 'data_restore' });
+        else await expect(automatic, label).resolves.toMatchObject({ result: 'rejected', endpointRefusal: 'could not render' });
+        const policy = await updatePolicy.resolveUpdatePolicy(nodeId, { stack: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'manual' });
+        const serviceUpdate = orchestrator.execute(
+          { nodeId, stackName: 'web', target: { scope: 'service', serviceName: 'app' }, trigger: 'manual', actor: 'test', policy },
+          { policyOptions: { bypass: false, actor: 'test' }, terminalWs: null },
+        );
+        if (fenced) await expect(serviceUpdate, label).rejects.toMatchObject({ code: 'data_restore' });
+        else await expect(serviceUpdate, label).resolves.toMatchObject({ kind: 'service_failed', code: 'docker_endpoint_protected' });
+      }
+      // Fenced runs come first and reach no gate; an unfenced automatic update gates before its endpoint check.
+      if (fenced) {
+        expect(gate).not.toHaveBeenCalled();
+        expect(imageGate).not.toHaveBeenCalled();
+      }
+    }
+    // A fence recorded after an automatic update's own pre-check is still the
+    // answer at its endpoint check, with the observation left unspent.
+    resetStack();
+    const { data } = composeStackOf('single');
+    fencedOverwriteOf(data);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced').mockImplementationOnce(async () => undefined);
+    const consume = vi.fn();
+    await expect(applyAutomaticStackUpdate({
+      nodeId, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'auto-update:test' },
+      verificationOwner: 'hub_authority', observation: { verify: async () => undefined, consume },
+    })).rejects.toMatchObject({ code: 'data_restore' });
+    expect(consume).not.toHaveBeenCalled();
+  });
+
   it('keeps the update policy answer for a compose file that is not fenced but cannot be rendered, and for a rendered file whose policy refuses while it is fenced', async () => {
     const updatePolicy = await import('../services/updatePolicy');
     const { resolveSenchoLabels } = await import('../helpers/senchoLabels');

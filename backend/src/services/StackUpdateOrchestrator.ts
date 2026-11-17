@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
+import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { AutoHealService } from './AutoHealService';
 import { ImageUpdateService } from './ImageUpdateService';
@@ -296,6 +297,8 @@ export class StackUpdateOrchestrator {
     // leaves nothing behind.
     const updateRefusal = await ComposeService.getInstance(nodeId)
       .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    // A compose file a data restore is swapping does not render: the fence answers.
+    if (updateRefusal?.renderFailed) await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     if (updateRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, updateRefusal.message, { serviceName });
     }
@@ -471,20 +474,17 @@ export class StackUpdateOrchestrator {
         { recoveryId },
       );
     }
+    // A compose file a data restore is overwriting throws the fence's refusal
+    // here, before the endpoint check's render, the spec load, the rollback
+    // gate, the claim or the recreate, so a file the swap moved aside is
+    // answered with the fence and not as one that cannot be rendered. The route
+    // asks the same before calling restore; this keeps the order for every caller.
+    await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     // Before the claim, the retag, or the gate: a refusal here leaves nothing behind.
     const restoreRefusal = await ComposeService.getInstance(nodeId)
       .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
     if (restoreRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, restoreRefusal.message, { serviceName, recoveryId });
-    }
-    // A compose file a data restore is overwriting throws the fence's refusal
-    // here, before the spec load, the rollback gate, the claim or the recreate.
-    // The route asks the same before calling restore; this keeps the order for
-    // every caller. (The endpoint check above renders the file; a render that
-    // fails there asks the fence itself.)
-    {
-      const { FileSystemService } = await import('./FileSystemService');
-      await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     }
 
     AutoHealService.getInstance().suppress(nodeId, stackName, serviceName);

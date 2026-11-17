@@ -24,7 +24,7 @@ const {
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
-  mockGetStackContent, mockGetEnvContent, mockRefuseIfComposeFenced,
+  mockGetStackContent, mockGetEnvContent,
   mockLoadStackBuildServices,
   mockResolveMissingExternalNetworks,
   mockCreateNetwork,
@@ -87,7 +87,6 @@ const {
   mockGetBindMounts: vi.fn().mockResolvedValue(null),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
-  mockRefuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
   mockLoadStackBuildServices: vi.fn().mockResolvedValue([]),
   mockResolveMissingExternalNetworks: vi.fn().mockResolvedValue({
     status: 'ok',
@@ -254,7 +253,6 @@ vi.mock('../services/FileSystemService', () => ({
       getOverrideFilename: mockGetOverrideFilename,
       getStackContent: mockGetStackContent,
       getEnvContent: mockGetEnvContent,
-      refuseIfComposeFenced: mockRefuseIfComposeFenced,
     }),
   },
 }));
@@ -592,46 +590,6 @@ describe('ComposeService - Docker endpoint guard', () => {
     await check;
 
     expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/overlay-dir' }));
-  });
-
-  it('answers a refusal that follows a failed render with the fence when a data restore holds the compose file, and as the refusal otherwise', async () => {
-    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
-    const render = vi.spyOn(ComposeService.prototype, 'renderConfig');
-    const refusal = { reason: 'unresolved', service: null, message: 'could not render' };
-    // The guard reads the render the way the real one does: a throw is a failed render.
-    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
-      try {
-        await input.probes.renderConfig();
-      } catch {
-        return refusal;
-      }
-      return refusal;
-    });
-    try {
-      render.mockResolvedValue({ rendered: null, stderr: 'open compose.yaml: no such file or directory', code: 1, timedOut: false });
-      mockRefuseIfComposeFenced.mockRejectedValueOnce(new DataRestoreFenceError('/srv/my-stack/data', 'browse', 'directory'));
-      await expect(ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'update' }))
-        .rejects.toMatchObject({ code: 'data_restore' });
-      expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack');
-
-      // An operation that runs the guard inside itself is refused with the fence too, not as protected.
-      mockRefuseIfComposeFenced.mockRejectedValueOnce(new DataRestoreFenceError('/srv/my-stack/data', 'browse', 'directory'));
-      await expect(ComposeService.getInstance(1).deployStack('my-stack'))
-        .rejects.toMatchObject({ code: 'data_restore' });
-
-      // Not fenced: the refusal stands.
-      await expect(ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'update' })).resolves.toBe(refusal);
-
-      // A render that worked never asks the fence, and neither does an overlay render, which is not the stack's file.
-      mockRefuseIfComposeFenced.mockClear();
-      render.mockResolvedValue({ rendered: '{"services":{}}', stderr: '', code: 0, timedOut: false });
-      await expect(ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'update' })).resolves.toBe(refusal);
-      render.mockResolvedValue({ rendered: null, stderr: 'bad', code: 1, timedOut: false });
-      await expect(ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' }, '/tmp/overlay-dir')).resolves.toBe(refusal);
-      expect(mockRefuseIfComposeFenced).not.toHaveBeenCalled();
-    } finally {
-      render.mockRestore();
-    }
   });
 
   it('hands the guard the overlay a Git deploy runs, so the hash is computed against it', async () => {

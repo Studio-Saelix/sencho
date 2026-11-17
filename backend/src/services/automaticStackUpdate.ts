@@ -105,6 +105,8 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       // Before the observation is spent: a refused update leaves it usable for a
       // later attempt, and the caller is told why instead of seeing a failure.
       const endpointRefusal = await ComposeService.getInstance(nodeId).evaluateDockerEndpoint(stackName, { kind: 'update' });
+      // A compose file a data restore is swapping does not render: the fence answers.
+      if (endpointRefusal?.renderFailed) await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
       if (endpointRefusal) {
         return {
           result: 'rejected' as const, applied: false, healthGateId: null,

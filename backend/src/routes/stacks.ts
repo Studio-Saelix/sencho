@@ -697,6 +697,8 @@ async function runStackBulkOp(
         stackName,
         action === 'update' ? { kind: 'update' } : { kind: action },
       );
+      // A compose file a data restore is swapping does not render: the fence answers.
+      if (refusal?.renderFailed) await fsSvc.refuseIfComposeFenced(stackName);
       if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
     } catch (error) {
       // A compose file a data restore is swapping: the row carries the fence's reason.
