@@ -16,7 +16,7 @@ import { AttentionQueue } from './AttentionQueue';
 import type { GitOpsPortfolioRow } from '@/types/gitopsPortfolio';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 const session = vi.hoisted(() => ({
   can: vi.fn<(action: string, type?: string, id?: string, nodeId?: number | null) => boolean>(() => true),
   nodeMeta: new Map<number, { capabilities: string[] }>(),
@@ -31,6 +31,7 @@ afterEach(() => {
   session.nodeMeta.clear();
   mockFetch.mockReset();
   vi.mocked(toast.success).mockReset();
+  vi.mocked(toast.warning).mockReset();
   vi.mocked(toast.error).mockReset();
 });
 
@@ -132,13 +133,18 @@ describe('AttentionQueue', () => {
   it('retries a failed Direct source in place on the row\'s own node', async () => {
     const refreshed = vi.fn();
     window.addEventListener('sencho:state-invalidate', refreshed);
-    mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ outcome: 'pending_review', reason: 'A candidate is staged and requires review.', nextAction: 'review' }),
+    } as unknown as Response);
     render(<AttentionQueue rows={[row({ attention: ['source_failed'], availableActions: ['retry'], nodeId: 2 })]} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
     await waitFor(() => expect(refreshed).toHaveBeenCalledTimes(1));
     expect(mockFetch).toHaveBeenCalledWith('/stacks/web/git-source/retry', expect.objectContaining({ method: 'POST', nodeId: 2 }));
+    expect(toast.success).toHaveBeenCalledWith('Retry started for web');
     expect(window.location.search).toBe('');
     window.removeEventListener('sencho:state-invalidate', refreshed);
   });
@@ -151,6 +157,30 @@ describe('AttentionQueue', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('web: Nothing to retry'));
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('warns when a Retry answered 200 but left the previous deployment intact', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        outcome: 'failed_previous_intact',
+        reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+        nextAction: 'retry',
+      }),
+    } as unknown as Response);
+    render(<AttentionQueue rows={[row({ attention: ['source_failed'], availableActions: ['retry'] })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: retry failed, the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('falls back to opening the Git source when the server does not offer the verb', () => {
@@ -227,12 +257,70 @@ describe('AttentionQueue', () => {
   });
 
   it('resumes a suspended source in place', async () => {
-    mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ outcome: 'no_source_change', reason: 'The configured ref still resolves to the accepted generation.', nextAction: 'none' }),
+    } as unknown as Response);
     render(<AttentionQueue rows={[row({ attention: ['source_suspended'], availableActions: ['resume'] })]} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
 
     await waitFor(() => expect(mockFetch).toHaveBeenCalledWith('/stacks/web/git-source/resume', expect.objectContaining({ method: 'POST' })));
+    expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for web');
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
+  it('warns when a Resume answered 200 but the source is still suspended', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        outcome: 'suspended',
+        reason: 'Reconciliation is suspended: paused for maintenance',
+        nextAction: 'resume',
+      }),
+    } as unknown as Response);
+    render(<AttentionQueue rows={[row({ attention: ['source_suspended'], availableActions: ['resume'] })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: the source did not resume. Reconciliation is suspended: paused for maintenance',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
+  it('warns when a Resume answered 200 but the source no longer exists', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        outcome: 'unknown',
+        reason: 'No GitOps application exists for this stack.',
+        nextAction: 'none',
+        suspensionCleared: false,
+      }),
+    } as unknown as Response);
+    render(<AttentionQueue rows={[row({ attention: ['source_suspended'], availableActions: ['resume'] })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
   it('keeps each row busy on its own while its request is in flight', async () => {
