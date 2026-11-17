@@ -780,7 +780,7 @@ export function GitSourcePanel({
   // Reviewing pulls the waiting commit, so it is offered only to a session that
   // may edit the stack. Everyone else reads the waiting state without a write.
   const offerReview = showPendingReview && canMutateSource;
-  // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes.
+  // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes. Reviewing pulls the commit, so a session that cannot edit the stack gets no verb here.
   let statusAction: ReactNode;
   if (offerRetry && !showPendingReview) {
     statusAction = (

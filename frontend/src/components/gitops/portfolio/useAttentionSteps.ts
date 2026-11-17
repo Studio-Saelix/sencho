@@ -22,20 +22,22 @@ export function byUrgency(a: GitOpsAttentionReason, b: GitOpsAttentionReason): n
 function useSourceControl(): (row: GitOpsPortfolioRow) => SourceControl {
   const { can } = useAuth();
   const { nodeMeta } = useNodes();
-  return (row) => ({
-    can: (action) => {
-      if (row.nodeId === null || row.stackName === null) return false;
-      const meta = nodeMeta.get(row.nodeId);
-      // Optimistic while the node's capabilities are unknown, as the Git source sheet is; a refusal still toasts.
-      const capable = meta ? meta.capabilities.includes(GITOPS_SOURCE_CONTROLLER_CAPABILITY) : true;
-      // Reviewing pulls the waiting commit, a write the server gates on
-      // stack:edit; the projection has no separate verb for it, so edit access
-      // is the whole gate.
-      return capable
-        && can('stack:edit', 'stack', row.stackName, row.nodeId)
-        && (action === 'review' || row.availableActions.includes(action));
-    },
-  });
+  return (row) => {
+    if (row.nodeId === null || row.stackName === null) {
+      return { can: () => false, canReview: () => false };
+    }
+    const meta = nodeMeta.get(row.nodeId);
+    // Optimistic while the node's capabilities are unknown, as the Git source sheet is; a refusal still toasts.
+    const capable = meta ? meta.capabilities.includes(GITOPS_SOURCE_CONTROLLER_CAPABILITY) : true;
+    const mayWrite = capable && can('stack:edit', 'stack', row.stackName, row.nodeId);
+    return {
+      can: (action) => mayWrite && row.availableActions.includes(action),
+      // Reviewing pulls the waiting commit, the same stack:edit write as a
+      // controller verb. The projection carries no review verb to consult, so
+      // edit access and the controller capability are the whole gate.
+      canReview: () => mayWrite,
+    };
+  };
 }
 
 /**

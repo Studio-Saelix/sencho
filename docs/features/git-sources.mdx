@@ -28,7 +28,7 @@ Writes land in the stack's existing directory, using the same storage as the in-
 
 Git Source opens as a right-side sheet from the editor toolbar. It has a crumb (`Stack › {name} › Git source`, or `GitOps › {name} › Git source` when opened from the portfolio), a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs; the sheet opens on the form.
 
-The toolbar offers **Pull now** when a source is linked and not suspended, **Detach** when a source is linked, **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored. Confirmations open as separate dialogs on top of the sheet.
+The toolbar offers **Pull now** when a source is linked, not suspended, and your account can edit the stack, **Detach** when a source is linked, **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored. Confirmations open as separate dialogs on top of the sheet.
 
 A linked source groups the sheet into tabs:
 
@@ -143,7 +143,7 @@ Secret-bearing paths appear as "secret-bearing managed path" instead of a filena
 
 ### Pending updates
 
-While a fetched commit is staged, whatever the apply behavior, the stack gets a Git branch icon in the sidebar and a pulsing dot on the **Git Source** button. Hovering the icon names the state, and clicking it opens the [GitOps portfolio](/features/gitops-portfolio) on that stack. The **Git Source** button opens the sheet, where **Review update** on the **Overview** re-fetches the commit and opens the change plan; it is offered to an account that can edit the stack. **Review update** in the portfolio does the same from there. If the stack also has an image update, the image-update dot takes priority in the sidebar, and the pending source is still shown on the **Git Source** button.
+While a fetched commit is staged, whatever the apply behavior, the stack gets a Git branch icon in the sidebar and a pulsing dot on the **Git Source** button. Hovering the icon names the state, and clicking it opens the [GitOps portfolio](/features/gitops-portfolio) on that stack. The **Git Source** button opens the sheet, where **Review update** on the **Overview** re-fetches the commit and opens the change plan; it is offered to an account that can edit the stack. The portfolio's **Review update** does the same from there, for the same accounts. If the stack also has an image update, the image-update dot takes priority in the sidebar, and the pending source is still shown on the **Git Source** button.
 
 <Frame>
   <img src="/images/git-sources/sidebar-badge.png" alt="Sidebar stack list with a small GitBranch icon next to the demo-app entry indicating a pending Git source update" />

@@ -299,16 +299,12 @@ const UPDATE_REVIEW_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOps
   'source_reconcile_required',
 ]);
 
-/**
- * The decisions the queue makes about a Direct application's Git source before
- * it opens a surface: retry or resume it in place, or open its waiting update
- * to review.
- */
-type SourceAction = SourceVerb | 'review';
-
 /** What this session may do with a Direct application's Git source from a list. */
 export interface SourceControl {
-  can: (action: SourceAction) => boolean;
+  /** The server offers this controller verb and the session may run it. */
+  can: (action: SourceVerb) => boolean;
+  /** The session may pull the waiting commit to review it. */
+  canReview: () => boolean;
 }
 
 /** A step either opens a surface (synchronously) or acts in place and settles when the server answers. */
@@ -340,7 +336,7 @@ export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPort
   }
   if (RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row) };
   if (UPDATE_REVIEW_REASONS.has(reason)) {
-    if (control?.can('review')) {
+    if (control?.canReview()) {
       return { label: 'Review update', run: () => openGitSourceInPlace(row, 'review') };
     }
     // The review pull is a write. Opening the sheet without the intent lets the

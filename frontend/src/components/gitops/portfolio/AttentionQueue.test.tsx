@@ -192,6 +192,27 @@ describe('AttentionQueue', () => {
     window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, onEvent);
   });
 
+  it('opens the waiting update with the review intent for a session that may edit', () => {
+    const seen: unknown[] = [];
+    const onEvent = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener(GITOPS_GIT_SOURCE_EVENT, onEvent);
+    render(<AttentionQueue rows={[row({ attention: ['source_review_pending'], nodeId: 2, stackName: 'web' })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review update' }));
+
+    // Per-stack and per-node, never a global edit check.
+    expect(session.can).toHaveBeenCalledWith('stack:edit', 'stack', 'web', 2);
+    expect(seen).toEqual([{ nodeId: 2, stackName: 'web', applicationName: 'web', intent: 'review' }]);
+    window.removeEventListener(GITOPS_GIT_SOURCE_EVENT, onEvent);
+  });
+
+  it('falls back when the owning node does not run the source controller for a waiting update', () => {
+    session.nodeMeta.set(1, { capabilities: [] });
+    render(<AttentionQueue rows={[row({ attention: ['source_review_pending'] })]} />);
+    expect(screen.queryByRole('button', { name: 'Review update' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open Git source' })).toBeInTheDocument();
+  });
+
   it('falls back when the owning node does not run the source controller', () => {
     session.nodeMeta.set(1, { capabilities: [] });
     render(<AttentionQueue rows={[row({ attention: ['source_failed'], availableActions: ['retry'] })]} />);
