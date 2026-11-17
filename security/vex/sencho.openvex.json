@@ -4,8 +4,8 @@
   "author": "Studio Saelix",
   "role": "Vendor",
   "timestamp": "2026-05-18T00:00:00Z",
-  "last_updated": "2026-10-16T00:00:00Z",
-  "version": 10,
+  "last_updated": "2026-11-17T00:00:00Z",
+  "version": 11,
   "statements": [
     {
       "vulnerability": {
@@ -35,6 +35,27 @@
       "status": "not_affected",
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "impact_statement": "braces 3.0.3 can exhaust the stack while parsing a deeply nested glob pattern, so exploitation requires an adversary to control the pattern text that braces compiles. In Sencho, braces enters the production image through micromatch, which http-proxy-middleware uses to compile the proxy context and path-filter patterns once at startup from static configuration; request URLs are matched against the compiled matcher and are never compiled as patterns. The remaining occurrences are development-time watchers (chokidar under nodemon and the TypeScript watcher) watching fixed paths. No request-controlled input reaches the braces parser, so the vulnerable code cannot be triggered by a remote adversary. No patched release exists: 3.0.3 is the newest published version and the advisory lists no fixed version, so the dependency audit gate honors this statement instead of blocking every change."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+        "name": "CVE-2026-112366",
+        "description": "picomatch is vulnerable to regex denial of service through single-branch repeated extglob patterns (GHSA-fc5q-39xc-vjpf)"
+      },
+      "products": [
+        {
+          "@id": "pkg:npm/picomatch@2.3.2"
+        },
+        {
+          "@id": "pkg:npm/picomatch@4.0.4"
+        },
+        {
+          "@id": "pkg:npm/picomatch@4.0.7"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "picomatch can backtrack exponentially while parsing a single-branch repeated extglob pattern, so exploitation requires an adversary to control the glob text that picomatch compiles. The only copy in the production image is picomatch 2.3.2, reached through http-proxy-middleware's micromatch dependency and also used by the development watchers (chokidar, nodemon, readdirp); the proxy sets no context or pathFilter, so that path filter never runs and request URLs are never compiled as glob patterns. The 4.0.4 and 4.0.7 copies are development-only (vite, vitest, tinyglobby, rollup-plugin-visualizer), and every development consumer compiles project configuration and fixed paths at build or watch time. No request-controlled input reaches the picomatch parser. The npm registry lists 4.0.7 as the newest published version and the advisory lists no first patched version, so the dependency audit gate honors this statement instead of blocking every change."
     }
   ]
 }
