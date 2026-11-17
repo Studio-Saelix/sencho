@@ -173,19 +173,17 @@ describe('runSourceControllerAction', () => {
     seen.stop();
   });
 
-  it('reports a resume that left the state unconfirmed', async () => {
+  it('reports a resume whose re-evaluation is still running as a success', async () => {
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'unknown',
-      reason: 'The source has never been reconciled.',
+      reason: 'A reconcile operation is currently in flight; no settled result yet.',
       nextAction: 'none',
     }));
 
-    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(true);
 
-    expect(toast.warning).toHaveBeenCalledWith(
-      "web: could not confirm the source's state after the resume. The source has never been reconciled.",
-    );
-    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith('Reconciliation resumed for web');
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it('reports a resume that cleared suspension but left a failing source', async () => {

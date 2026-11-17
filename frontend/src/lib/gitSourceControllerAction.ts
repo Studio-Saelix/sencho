@@ -47,8 +47,9 @@ function withReason(message: string, reason: string): string {
  * What the operator hears, decided by the outcome the server reported rather
  * than by the HTTP status. Each action states what it needs its answer to
  * say: a Suspend needs `suspended`, and a Retry needs a settled outcome. A
- * Resume needs a settled outcome too, with a warning when the suspension
- * cleared but the source still needs attention. `failed_previous_intact`
+ * Resume needs a settled or unconfirmed outcome too, because it answers
+ * before the re-evaluation it starts finishes; it warns when the suspension
+ * did not clear or the source still needs attention. `failed_previous_intact`
  * is the one outcome that reports the previous deployment as intact, which
  * must reach the operator instead of a success line.
  */
@@ -75,10 +76,7 @@ function sourceControllerFeedback(
   }
   if (action === 'resume') {
     if (outcome === 'suspended') return refused('the source did not resume.');
-    if (outcome === 'unknown') {
-      return refused("could not confirm the source's state after the resume.");
-    }
-    if (SETTLED_OUTCOMES.has(outcome)) return success;
+    if (SETTLED_OUTCOMES.has(outcome) || outcome === 'unknown') return success;
     if (outcome === 'failed_previous_intact') {
       return refused('reconciliation resumed, but the source still needs attention: the previous deployment was left as it was.');
     }
