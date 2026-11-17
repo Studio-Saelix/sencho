@@ -53,6 +53,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /nodes/bootstrap/operations/*/retry': 'Approved bootstrap retry',
   'POST /nodes/bootstrap/operations/*/cancel': 'Cancelled bootstrap run',
   'POST /nodes/bootstrap/operations/*/release': 'Released bootstrap server',
+  'POST /nodes/bootstrap/operations/*/verify': 'Checked bootstrapped node readiness',
   'PUT /nodes': 'Updated node',
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
@@ -290,6 +291,7 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
       if (/^nodes\/bootstrap\/operations\/[^/]+\/retry/.test(normalized)) return `Bootstrap retry refused (${statusCode})`;
       if (/^nodes\/bootstrap\/operations\/[^/]+\/cancel/.test(normalized)) return `Bootstrap cancel refused (${statusCode})`;
       if (/^nodes\/bootstrap\/operations\/[^/]+\/release/.test(normalized)) return `Bootstrap release refused (${statusCode})`;
+      if (/^nodes\/bootstrap\/operations\/[^/]+\/verify/.test(normalized)) return `Bootstrap readiness check refused (${statusCode})`;
       if (normalized.startsWith('nodes/bootstrap/operations')) return `Bootstrap plan approval refused (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {

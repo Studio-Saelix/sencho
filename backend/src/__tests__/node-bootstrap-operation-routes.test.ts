@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -63,6 +63,7 @@ const routes: Array<['get' | 'post', string]> = [
   ['post', `/api/nodes/bootstrap/operations/${ID}/retry`],
   ['post', `/api/nodes/bootstrap/operations/${ID}/cancel`],
   ['post', `/api/nodes/bootstrap/operations/${ID}/release`],
+  ['post', `/api/nodes/bootstrap/operations/${ID}/verify`],
 ];
 
 describe('bootstrap operation routes: authorization', () => {
@@ -79,6 +80,12 @@ describe('bootstrap operation routes: authorization', () => {
 });
 
 describe('bootstrap operation routes: refusals', () => {
+  it('refuses to verify an operation that does not exist', async () => {
+    const res = await request(app).post(`/api/nodes/bootstrap/operations/${ID}/verify`).set('Authorization', adminAuth).send({});
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('OPERATION_NOT_FOUND');
+  });
+
   it('refuses a plan that was never reviewed', async () => {
     const res = await request(app).post('/api/nodes/bootstrap/operations').set('Authorization', adminAuth).send(BODY);
     expect(res.status).toBe(409);
@@ -173,6 +180,35 @@ describe('bootstrap operation routes: refusals', () => {
     expect(opened.status).toBe(200);
     expect(opened.body.actions).toMatchObject({ release: true });
     for (const id of ids) db.transitionNodeBootstrapOperation(id, ['partial'], { active: 0 }, Date.now());
+  });
+
+  it('checks an enrolled run\'s node and answers with the verdict, never ready without a tunnel', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const nodeId = db.addNode({ name: 'route-verify', type: 'remote', compose_dir: '/opt/docker/sencho', is_default: false, api_url: '', api_token: '', mode: 'pilot_agent' });
+    const id = '00000000-0000-4000-8000-000000003001';
+    db.insertNodeBootstrapOperation({
+      id, target_key: 'route-verify.example.com:22', host: 'route-verify.example.com', port: 22, username: 'ubuntu', address: '192.168.1.91',
+      target_name: 'route-verify', host_key_fingerprint: 'SHA256:route-verify', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: 'admin', approved_at: now, attempt: 1, state: 'enrolled', stage: null, step: null,
+      node_id: nodeId, changes_made: 1, agent_started: 1, active: 0, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: now,
+    });
+    db.markNodeReadinessProvisional(nodeId, id, 'https://hub.example.com', now);
+    const res = await request(app).post(`/api/nodes/bootstrap/operations/${id}/verify`).set('Authorization', adminAuth).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.readiness).toMatchObject({ state: 'not_ready', gates: [expect.objectContaining({ id: 'tunnel', status: 'fail' })] });
+    expect(res.body.actions.verify).toBe(true);
+    await vi.waitFor(() => {
+      const summaries = db.getAuditLogs({ page: 1, limit: 200 }).entries.map((entry) => entry.summary);
+      expect(summaries.some((summary) => summary.startsWith(`Checked bootstrapped node readiness: ${id}`))).toBe(true);
+      expect(summaries.some((summary) => summary.startsWith(`Approved bootstrap plan: ${id}`))).toBe(false);
+    });
+    // A run whose node carries no readiness (another run enrolled it, or it was never registered) cannot be checked.
+    db.deleteNode(nodeId);
+    const gone = await request(app).post(`/api/nodes/bootstrap/operations/${id}/verify`).set('Authorization', adminAuth).send({});
+    expect(gone.status).toBe(409);
+    expect(gone.body.code).toBe('OPERATION_NOT_VERIFIABLE');
   });
 
   it('refuses a page cursor that is not one the list returned', async () => {

@@ -61,6 +61,7 @@ import { dashboardRouter } from './routes/dashboard';
 import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
 import { nodeBootstrapRouter } from './routes/nodeBootstrap';
+import { pilotReadinessRouter } from './routes/pilotReadiness';
 import { stacksRouter } from './routes/stacks';
 import { stackObservationRouter } from './routes/stackObservation';
 import { stackActivityRouter } from './routes/stackActivity';
@@ -149,6 +150,8 @@ app.use('/api/fleet-actions', fleetActionsRouter);
 // answered by this instance's own copy instead of by the node it names.
 app.use('/api/readiness', readinessRouter);
 app.use('/api/recovery', recoveryRouter);
+// A Pilot agent's readiness report, read by the hub through the tunnel (404 outside Pilot mode).
+app.use('/api/pilot', pilotReadinessRouter);
 app.use('/api/cloud-backup', cloudBackupRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/gitops/applications', gitopsApplicationsRouter);

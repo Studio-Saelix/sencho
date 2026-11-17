@@ -1,15 +1,14 @@
 /**
  * What a bootstrap run is, stated wherever the user decides or reads the
  * result. A run executes the approved plan (checking each step's result) and
- * enrolls the Pilot; it does not check the node from inside the Pilot, so it
- * does not show the node is ready for deployments. docs/features/node-bootstrap.mdx
- * states the same fact.
+ * enrolls the Pilot. The run does not decide that the node is ready: once the
+ * Pilot connects, the hub asks it for a fresh readiness report and marks the
+ * node ready only when no check fails or goes unanswered (warnings do not
+ * block). docs/features/node-bootstrap.mdx states the same facts.
  */
 export const BOOTSTRAP_SCOPE =
-  'Bootstrap is execution and enrollment only: it runs the plan and enrolls the Pilot. It is not a complete, verified provisioning, and it does not check that the node is ready for deployments.';
-
-export const BOOTSTRAP_SCOPE_AFTER_RUN =
-  'The run only executed the plan and enrolled the Pilot. It did not verify that the node is ready for deployments.';
+  'Bootstrap runs the plan and enrolls the Pilot. The node is ready for deployments only after the hub checks it through the Pilot once it connects: identity, Docker, Compose and the Compose directory.';
 
 export const BOOTSTRAP_READINESS_NOTE =
-  'Items marked readiness are not checked by the run, except that the Pilot connects.';
+  'Items marked readiness are checked by the hub through the Pilot once it connects, before the node is called ready.';
+

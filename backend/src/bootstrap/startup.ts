@@ -48,6 +48,7 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { NodeReadinessService } from '../services/nodeBootstrap/NodeReadinessService';
 import { getErrorMessage } from '../utils/errors';
 
 function isPilotMode(): boolean {
@@ -277,6 +278,14 @@ export async function startServer(server: Server): Promise<void> {
     NodeBootstrapOperationService.getInstance().recoverOnStartup();
   } catch (err) {
     console.error('[Startup] Node bootstrap operation recovery failed:', sanitizeForLog(getErrorMessage(err, 'unknown error')));
+  }
+  // Bootstrapped nodes are checked for readiness on each tunnel-up; a check cut short by a restart is settled first.
+  if (!isPilotMode()) {
+    try {
+      NodeReadinessService.getInstance().start();
+    } catch (err) {
+      console.error('[Startup] Node readiness service failed to start:', sanitizeForLog(getErrorMessage(err, 'unknown error')));
+    }
   }
 
   runRecoveryReconcile();

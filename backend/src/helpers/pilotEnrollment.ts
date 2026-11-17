@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { DatabaseService } from '../services/DatabaseService';
+import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
 import { isNativeTlsEnabled, loadNativeTlsMaterial } from './nativeTls';
 import { buildPilotEnrollmentCompose } from './pilotEnrollmentCompose';
 
@@ -25,6 +26,8 @@ export function mintPilotEnrollmentToken(nodeId: number): { token: string; expir
   );
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   db.createPilotEnrollment(nodeId, tokenHash, expiresAt);
+  // A refusal of an earlier enrollment says nothing about this one.
+  PilotEnrollmentAttempts.getInstance().clear(nodeId);
   return { token, expiresAt };
 }
 

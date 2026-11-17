@@ -1,6 +1,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { useNotifications } from './useNotifications';
+import { announceNotificationsConnection, onNotificationsReturn } from '@/lib/notificationsConnection';
 import type { Node } from '@/context/NodeContext';
 import type { NotificationItem } from '../../dashboard/types';
 
@@ -302,6 +303,45 @@ describe('useNotifications', () => {
       });
     });
     expect(onGitOpsChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the local socket state, so a view that subscribes during an outage still sees the return', () => {
+    vi.useFakeTimers();
+    renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    act(() => { MockWS.instances[0]?.onclose?.({ code: 1006 }); });
+    // This view mounts after the close, so it never saw the event.
+    const onReturn = vi.fn();
+    const stop = onNotificationsReturn(onReturn);
+    try {
+      expect(onReturn).not.toHaveBeenCalled();
+      act(() => { vi.advanceTimersByTime(1000); });
+      act(() => { MockWS.instances[1]?.onopen?.(); });
+      expect(onReturn).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not record an outage when the hook unmounts, so the next session starts from "never dropped"', () => {
+    const { unmount } = renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    unmount();
+    // The mock socket's close event arrives after the unmount, as a real one does.
+    act(() => { MockWS.instances[0]?.onclose?.({ code: 1000 }); });
+    const onReturn = vi.fn();
+    const stop = onNotificationsReturn(onReturn);
+    try {
+      announceNotificationsConnection(true);
+      expect(onReturn).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
   });
 
   describe('remote socket reopening', () => {

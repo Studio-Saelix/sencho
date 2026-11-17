@@ -7,6 +7,7 @@ import {
   stablePlanDigest,
   type ExecuteRequest,
 } from '../services/nodeBootstrap/NodeBootstrapOperationService';
+import { PilotEnrollmentAttempts } from '../services/PilotEnrollmentAttempts';
 import { buildBootstrapPlan } from '../services/nodeBootstrap/planBuilder';
 import { SshTransportError } from '../services/nodeBootstrap/sshProbeClient';
 import { NodeBootstrapService as RealPreflightService } from '../services/nodeBootstrap/NodeBootstrapService';
@@ -288,7 +289,7 @@ interface Harness {
 
 let hostCounter = 0;
 
-function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number; aptLockRetry?: { intervalMs: number; totalMs: number } } = {}): Harness {
+function harness(options: { attempts?: { lastRefusal: (nodeId: number) => { reason: 'enrollment_expired' | 'enrollment_used' | 'credential_expired'; at: number } | null; recordRefusal?: (nodeId: number, reason: string) => void }; facts?: BootstrapFacts; enrollWaitMs?: number; connectOnStart?: boolean; caPem?: string | null; tokenTtlMs?: number; aptLockRetry?: { intervalMs: number; totalMs: number } } = {}): Harness {
   hostCounter += 1;
   const hostname = `server-${hostCounter}.example.com`;
   const base = options.facts ?? freshFacts();
@@ -318,6 +319,7 @@ function harness(options: { facts?: BootstrapFacts; enrollWaitMs?: number; conne
       return { token: `eyJhbGciOiJIUzI1NiJ9.enroll-${nodeId}-${minted.length}.signature-material`, expiresAt: Date.now() + (options.tokenTtlMs ?? 15 * 60_000) };
     },
     enrollWaitMs: options.enrollWaitMs ?? 2_000,
+    ...(options.attempts ? { attempts: { recordRefusal: () => undefined, ...options.attempts } } : {}),
     aptLockRetry: options.aptLockRetry ?? { intervalMs: 5, totalMs: 1_000 },
   });
   if (options.connectOnStart !== false) {
@@ -489,8 +491,53 @@ describe('bootstrap operations: a clean run', () => {
     const node = db.getNode(op.nodeId as number);
     expect(node).toMatchObject({ name: h.name, type: 'remote', mode: 'pilot_agent', compose_dir: '/opt/docker/sencho' });
     expect(h.minted).toEqual([op.nodeId]);
-    expect(op.events.at(-1)?.message).toMatch(/does not verify that the node is ready for deployments/);
+    expect(op.events.at(-1)?.message).toMatch(/the hub now checks that it is ready for deployments/);
+    // Enrolled is not ready: the node this run registered is provisional until its Pilot is checked.
+    expect(db.getNodeReadiness(op.nodeId as number)).toMatchObject({ state: 'provisional', operation_id: op.id, hub_url: HUB_URL });
+    expect(op.readiness).toMatchObject({ state: 'provisional', operationId: op.id, checkedAt: null, gates: [] });
+    expect(op.actions.verify).toBe(true);
     db.deleteNode(op.nodeId as number);
+    expect(db.getNodeReadiness(op.nodeId as number)).toBeUndefined();
+  });
+
+  it('checks readiness only for an enrolled run, through the node readiness service', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    // While the run is in flight there is nothing to verify yet.
+    await expect(h.service.verifyReadiness(op.id, AUDIT)).rejects.toMatchObject({ code: 'OPERATION_NOT_VERIFIABLE' });
+    await h.service.settled();
+    const nodeId = h.service.get(op.id).nodeId as number;
+    const verify = vi.fn(async () => {
+      db.markNodeReadinessVerifying(nodeId, op.id, Date.now());
+      db.recordNodeReadinessResult(nodeId, op.id, {
+        state: 'ready',
+        gatesJson: JSON.stringify([{ id: 'tunnel', label: 'Pilot tunnel', status: 'pass', summary: 'Connected.' }]),
+        agentVersion: '1.0.0',
+        checkedAt: Date.now(),
+      });
+      return null;
+    });
+    const checked = new NodeBootstrapOperationService({
+      db,
+      preflight: { preflight: h.preflight } as unknown as Pick<NodeBootstrapService, 'preflight'>,
+      exec: h.host.transport(),
+      tunnels: h.tunnels,
+      readiness: {
+        get: (id) => {
+          const row = db.getNodeReadiness(id);
+          return row ? { state: row.state, operationId: row.operation_id, checkedAt: row.checked_at, agentVersion: row.agent_version, gates: [] } : null;
+        },
+        verify,
+        markProvisional: () => undefined,
+      },
+    });
+    const detail = await checked.verifyReadiness(op.id, AUDIT);
+    expect(verify).toHaveBeenCalledWith(nodeId, AUDIT);
+    expect(detail.readiness).toMatchObject({ state: 'ready', operationId: op.id });
+    expect(detail.state).toBe('enrolled');
+    db.deleteNode(nodeId);
+    await expect(checked.verifyReadiness(op.id, AUDIT)).rejects.toMatchObject({ code: 'OPERATION_NOT_VERIFIABLE' });
   });
 
   it('mints the enrollment only after every Docker step has run', async () => {
@@ -609,7 +656,7 @@ describe('bootstrap operations: stopping honestly', () => {
     expect(detail.state).toBe('partial');
     expect(detail.active).toBe(true);
     expect(detail.step).toBe('install-docker-packages');
-    expect(detail.actions).toEqual({ cancel: false, retry: true, release: true });
+    expect(detail.actions).toEqual({ cancel: false, retry: true, release: true, verify: false });
     expect(detail.events.at(-1)?.detail).toContain('Could not get lock');
     expect(h.minted).toEqual([]);
     expect(detail.nodeId).toBeNull();
@@ -750,6 +797,230 @@ describe('bootstrap operations: enrollment and retry', () => {
     const reconciled = h.service.get(op.id);
     expect(reconciled).toMatchObject({ state: 'enrolled', active: false });
     db.deleteNode(stopped.nodeId as number);
+  });
+
+  it.each([
+    ['a Pilot that was refused for an expired enrollment', { reason: 'enrollment_expired' as const, at: 1 }, 'ENROLLMENT_EXPIRED', /its enrollment had already expired/, 20_000],
+    ['a Pilot that was refused for a used or replaced enrollment', { reason: 'enrollment_used' as const, at: 1 }, 'ENROLLMENT_USED', /already used, or a newer enrollment replaced it/, 20_000],
+    ['a Pilot that was refused for an expired saved credential', { reason: 'credential_expired' as const, at: 1 }, 'PILOT_CREDENTIAL_EXPIRED', /saved credential that had expired[\s\S]*docker logs sencho-agent/, 20_000],
+    ['a used enrollment on a token that has also run out', { reason: 'enrollment_used' as const, at: 1 }, 'ENROLLMENT_USED', /already used, or a newer enrollment replaced it/, 1],
+    ['an enrollment that ran out before any Pilot used it', null, 'ENROLLMENT_EXPIRED', /expired[\s\S]*before any Pilot used it, and no connection attempt reached the hub[\s\S]*docker logs sencho-agent/, 1],
+    ['nothing reaching the hub at all', null, 'ENROLLMENT_NOT_CONNECTED', /no connection attempt from it reached the hub[\s\S]*docker logs sencho-agent[\s\S]*WebSocket upgrade/, 20_000],
+  ])('names the cause of a Pilot that never connected: %s', async (_label, refusal, code, message, tokenTtlMs) => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs, attempts: { lastRefusal: () => refusal } });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped).toMatchObject({ state: 'partial', active: true, agentStarted: true, error: { code } });
+    expect(stopped.error?.message).toMatch(message);
+    // Every one is still a stopped run the operator can Retry, which mints a new enrollment.
+    expect(stopped.actions).toMatchObject({ retry: true });
+    db.deleteNode(stopped.nodeId as number);
+  });
+
+  it('reads a refusal the tunnel handler recorded in the hub\'s own record, through the default wiring', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    h.host.override = (command) => {
+      if (command.includes('up -d')) {
+        const row = allOperations().find((entry) => entry.host === h.facts.current.target.host);
+        // The Pilot reaches the hub and is refused while the run waits for it.
+        if (row?.node_id) PilotEnrollmentAttempts.getInstance().recordRefusal(row.node_id, 'enrollment_expired');
+      }
+      return undefined;
+    };
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(op.id);
+    expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_EXPIRED', message: expect.stringMatching(/its enrollment had already expired/) });
+    PilotEnrollmentAttempts.getInstance().clear(stopped.nodeId as number);
+    db.deleteNode(stopped.nodeId as number);
+  });
+
+  describe('a Pilot that never reached the hub: what its own log says', () => {
+    const hubName = 'hub.example.com';
+    type LogScript = string | (() => never) | { exit: number } | { timedOut: true } | { transport: 'CONNECTION_LOST' };
+    const withLog = (h: Harness, log: LogScript) => {
+      h.host.override = (command) => {
+        if (!command.includes('docker logs')) return undefined;
+        if (typeof log === 'function') return log();
+        if (typeof log === 'object' && 'timedOut' in log) return { exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: true, error: null };
+        if (typeof log === 'object' && 'transport' in log) return { exitCode: null, stdout: '', stderr: '', truncated: false, timedOut: false, error: 'CONNECTION_LOST' };
+        if (typeof log === 'object') return { exitCode: log.exit, stdout: '', stderr: 'Error: No such container', truncated: false, timedOut: false, error: null };
+        return { exitCode: 0, stdout: log, stderr: '', truncated: false, timedOut: false, error: null };
+      };
+    };
+    const run = async (log: LogScript) => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      withLog(h, log);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await h.service.settled();
+      const stopped = h.service.get(op.id);
+      return { h, op, stopped, nodeId: stopped.nodeId as number };
+    };
+    const cleanUp = (nodeId: number) => {
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+      db.deleteNode(nodeId);
+    };
+
+    it.each([
+      ['a name that does not resolve', `[Pilot] Tunnel error: getaddrinfo ENOTFOUND ${hubName}`, 'ENROLLMENT_DNS_FAILED', /cannot resolve the hub's name/, 'dns_unresolved'],
+      ['a lookup that timed out', `[Pilot] Tunnel error: getaddrinfo EAI_AGAIN ${hubName}`, 'ENROLLMENT_DNS_FAILED', /cannot resolve the hub's name/, 'dns_unresolved'],
+      ['a certificate chain it cannot verify', '[Pilot] Tunnel error: unable to verify the first certificate', 'ENROLLMENT_TLS_FAILED', /does not trust the hub's TLS certificate[\s\S]*SENCHO_PILOT_CA_FILE/, 'tls_untrusted'],
+      ['a self-signed certificate', '[Pilot] Tunnel error: self-signed certificate in certificate chain', 'ENROLLMENT_TLS_FAILED', /does not trust the hub's TLS certificate/, 'tls_untrusted'],
+      ['a proxy that answers the upgrade with 200', '[Pilot] Tunnel closed: 200 ', 'ENROLLMENT_UPGRADE_BLOCKED', /answered its WebSocket upgrade with HTTP 200[\s\S]*\/api\/pilot\/tunnel/, 'upgrade_blocked'],
+      ['a proxy that answers the upgrade with 502', '[Pilot] Tunnel error: Unexpected server response: 502', 'ENROLLMENT_UPGRADE_BLOCKED', /HTTP 502/, 'upgrade_blocked'],
+    ])('names %s, with the log line as the evidence, and keeps it for the readiness check', async (_label, line, code, message, recorded) => {
+      const { stopped, nodeId } = await run(`[Pilot] Tunnel connecting\n${line}\n[Pilot] Reconnecting in 5s`);
+      expect(stopped).toMatchObject({ state: 'partial', active: true, agentStarted: true, error: { code } });
+      expect(stopped.error?.message).toMatch(message);
+      expect(stopped.actions).toMatchObject({ retry: true });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toMatchObject({ reason: recorded });
+      const failed = stopped.events.find((event) => event.status === 'failed');
+      expect(failed?.detail).toBe(line.trim());
+      cleanUp(nodeId);
+    });
+
+    it('reads the log over a session of its own with the run\'s pinned host key, and only by reading', async () => {
+      const { h, stopped, nodeId } = await run(`[Pilot] Tunnel error: getaddrinfo ENOTFOUND ${hubName}`);
+      expect(h.host.opened).toBe(2);
+      expect(h.host.openedWith[1]).toEqual(h.host.openedWith[0]);
+      const logCommands = h.host.commands.filter((entry) => entry.command.includes('docker logs'));
+      expect(logCommands).toHaveLength(1);
+      expect(logCommands[0].command).toMatch(/docker logs --tail 200 sencho-agent 2>&1$/);
+      expect(stopped.error?.code).toBe('ENROLLMENT_DNS_FAILED');
+      cleanUp(nodeId);
+    });
+
+    it('keeps the cause unknown when the log names nothing the hub recognizes, and says so', async () => {
+      const { stopped, nodeId } = await run('[Pilot] Tunnel connecting\n[Pilot] Reconnecting in 5s\nsome other line: ENOTFOUND in a container that is not the agent');
+      expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_NOT_CONNECTED', message: expect.stringMatching(/its log shows no failure the hub recognizes, so the hub cannot tell why/) });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
+    it.each([
+      ['the container has no log to read', { exit: 1 }],
+      ['the log command cannot run', () => { throw new Error('connection reset'); }],
+      ['the log command times out', { timedOut: true }],
+      ['the transport fails the command', { transport: 'CONNECTION_LOST' }],
+    ])('keeps the cause unknown, and says the log could not be read, when %s', async (_label, log) => {
+      const { stopped, nodeId } = await run(log as LogScript);
+      expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_NOT_CONNECTED', message: expect.stringMatching(/the hub could not read the Pilot's log, so it cannot tell why/) });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
+    it('does not take a failure from before a later successful connection, or a 401 the hub itself sent, for the cause', async () => {
+      const { stopped, nodeId } = await run('[Pilot] Tunnel error: getaddrinfo ENOTFOUND hub.example.com\n[Pilot] Tunnel connected to https://hub.example.com\n[Pilot] Tunnel closed: 401 ');
+      expect(stopped.error?.code).toBe('ENROLLMENT_NOT_CONNECTED');
+      cleanUp(nodeId);
+    });
+
+    it('does not read the log when the hub itself saw the Pilot refused', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20, attempts: { lastRefusal: () => ({ reason: 'enrollment_used', at: 1 }) } });
+      withLog(h, '[Pilot] Tunnel error: getaddrinfo ENOTFOUND hub.example.com');
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await h.service.settled();
+      const stopped = h.service.get(op.id);
+      expect(stopped.error?.code).toBe('ENROLLMENT_USED');
+      expect(h.host.opened).toBe(1);
+      expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(false);
+      db.deleteNode(stopped.nodeId as number);
+    });
+
+    it('scrubs the enrollment token a log line echoes out of the recorded evidence', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      const token = () => `eyJhbGciOiJIUzI1NiJ9.enroll-${h.minted[0]}-1.signature-material`;
+      h.host.override = (command) => (command.includes('docker logs')
+        ? { exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo ENOTFOUND ${hubName} token=${token()}`, stderr: '', truncated: false, timedOut: false, error: null }
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await h.service.settled();
+      const stopped = h.service.get(op.id);
+      const failed = stopped.events.find((event) => event.status === 'failed');
+      expect(failed?.detail).toContain('token=[redacted]');
+      expect(JSON.stringify(stopped)).not.toContain('signature-material');
+      cleanUp(stopped.nodeId as number);
+    });
+
+    it('settles as enrolled, and keeps no cause, when the Pilot connects while the log is being read', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      h.host.override = (command) => (command.includes('docker logs')
+        ? gate.then(() => ({ exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo EAI_AGAIN ${hubName}`, stderr: '', truncated: false, timedOut: false, error: null }))
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(true), { timeout: 10_000 });
+      const nodeId = h.service.get(op.id).nodeId as number;
+      // The tunnel registers and the hub forgets earlier history, as it does for an accepted connection, before the log answers.
+      h.tunnels.connect(nodeId);
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+      release();
+      await h.service.settled();
+      expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', active: false, error: null });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
+    it('keeps no cause when the Pilot connected and dropped again before the log answered', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      h.host.override = (command) => (command.includes('docker logs')
+        ? gate.then(() => ({ exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo EAI_AGAIN ${hubName}`, stderr: '', truncated: false, timedOut: false, error: null }))
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(true), { timeout: 10_000 });
+      const nodeId = h.service.get(op.id).nodeId as number;
+      h.tunnels.connect(nodeId);
+      PilotEnrollmentAttempts.getInstance().clear(nodeId);
+      // The tunnel is gone again by the time the log answers, so the check at that moment alone would call it disconnected.
+      h.tunnels.active.delete(nodeId);
+      release();
+      await h.service.settled();
+      expect(h.service.get(op.id)).toMatchObject({ state: 'enrolled', error: null });
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(nodeId)).toBeNull();
+      cleanUp(nodeId);
+    });
+
+    it('says the log could not be read when the enrollment also ran out', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20, tokenTtlMs: 1 });
+      withLog(h, { exit: 1 });
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await h.service.settled();
+      const stopped = h.service.get(op.id);
+      expect(stopped.error).toMatchObject({ code: 'ENROLLMENT_EXPIRED', message: expect.stringMatching(/hub could not read the Pilot's log[\s\S]*docker logs sencho-agent/) });
+      cleanUp(stopped.nodeId as number);
+    });
+
+    it('ends as cancelled when the operator cancels while the log is being read', async () => {
+      const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      h.host.override = (command) => (command.includes('docker logs')
+        ? gate.then(() => ({ exitCode: 0, stdout: `[Pilot] Tunnel error: getaddrinfo ENOTFOUND ${hubName}`, stderr: '', truncated: false, timedOut: false, error: null }))
+        : undefined);
+      const { request } = approve(h);
+      const op = h.service.start(request, context());
+      await vi.waitFor(() => expect(h.host.commands.some((entry) => entry.command.includes('docker logs'))).toBe(true), { timeout: 10_000 });
+      h.service.cancel(op.id, AUDIT);
+      release();
+      await h.service.settled();
+      const cancelled = h.service.get(op.id);
+      expect(cancelled.state).toBe('cancelled');
+      // A run that ended as cancelled leaves no cause behind for the node.
+      expect(PilotEnrollmentAttempts.getInstance().lastRefusal(cancelled.nodeId as number)).toBeNull();
+      cleanUp(cancelled.nodeId as number);
+    });
   });
 
   it('retries on the same node with a new enrollment and replaces only its own compose file', async () => {
@@ -1032,7 +1303,7 @@ describe('bootstrap operations: failure paths found in review', () => {
     const op = h.service.start(request, context());
     await h.service.settled();
     expect(Date.now() - started).toBeLessThan(10_000);
-    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_NOT_CONNECTED' } });
+    expect(h.service.get(op.id)).toMatchObject({ state: 'partial', error: { code: 'ENROLLMENT_EXPIRED' } });
     h.service.release(op.id, AUDIT);
     db.deleteNode(h.service.get(op.id).nodeId as number);
   });

@@ -32,7 +32,8 @@ function operation(index: number, overrides: Partial<BootstrapOperation> = {}): 
     createdAt: 1_000 + index,
     updatedAt: 1_000 + index,
     finishedAt: 2_000 + index,
-    actions: { cancel: false, retry: true, release: true },
+    actions: { cancel: false, retry: true, release: true, verify: false },
+    readiness: null,
     ...overrides,
   };
 }
@@ -86,7 +87,7 @@ describe('BootstrapOperationsList', () => {
 
   it('cuts only finished runs, keeping the held ones before the latest three finished ones', () => {
     const holds = Array.from({ length: 22 }, (_, index) => operation(index));
-    const finished = Array.from({ length: 6 }, (_, index) => operation(100 + index, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false } }));
+    const finished = Array.from({ length: 6 }, (_, index) => operation(100 + index, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false, verify: false } }));
     renderList([...holds, ...finished]);
     for (const hold of holds) expect(screen.getByTestId(`bootstrap-run-${hold.id}`)).toBeInTheDocument();
     expect(screen.getAllByTestId(/^bootstrap-run-op-1\d\d$/)).toHaveLength(3);
@@ -95,7 +96,7 @@ describe('BootstrapOperationsList', () => {
   });
 
   it('says nothing about hidden runs when every finished run is listed', () => {
-    renderList([operation(1), operation(100, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false } })]);
+    renderList([operation(1), operation(100, { active: false, state: 'enrolled', actions: { cancel: false, retry: false, release: false, verify: false } })]);
     expect(screen.queryByTestId('bootstrap-runs-older-hidden')).not.toBeInTheDocument();
   });
 });

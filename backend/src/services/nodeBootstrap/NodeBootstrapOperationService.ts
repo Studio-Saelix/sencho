@@ -12,6 +12,7 @@ import {
   type NodeBootstrapOperationTransition,
 } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
+import { PilotEnrollmentAttempts, type PilotConnectFailure } from '../PilotEnrollmentAttempts';
 import { PilotTunnelManager } from '../PilotTunnelManager';
 import { recordBootstrapAudit, type BootstrapAuditContext } from './audit';
 import {
@@ -20,7 +21,10 @@ import {
   validateInstallPaths,
   type BootstrapPreflightRequest,
 } from './NodeBootstrapService';
+import { agentLogCommand } from './executionCommands';
+import { classifyAgentLog, type AgentLogFinding } from './agentLogCause';
 import { canonicalJson, sha256Hex } from './planBuilder';
+import { NodeReadinessService, type NodeReadinessView } from './NodeReadinessService';
 import { DEFAULT_AGENT_DIR, DEFAULT_COMPOSE_DIR, HUB_CA_STEP_ID } from './pathPolicy';
 import { sshExecClient, type BootstrapExecTransport, type ExecSession } from './sshExecClient';
 import { parsePrivateKey, SshTransportError } from './sshProbeClient';
@@ -29,6 +33,7 @@ import {
   RunCancelled,
   StepFailure,
   TOKEN_PLACEHOLDER,
+  dockerNeedsSudo,
   lastDockerStage,
   runPlanStep,
   verifyAgentContainer,
@@ -138,7 +143,9 @@ export interface OperationView {
   createdAt: number;
   updatedAt: number;
   finishedAt: number | null;
-  actions: { cancel: boolean; retry: boolean; release: boolean };
+  actions: { cancel: boolean; retry: boolean; release: boolean; verify: boolean };
+  /** The hub's readiness verdict for the node this run registered; null before it registered one. */
+  readiness: NodeReadinessView | null;
 }
 
 export interface OperationDetail extends OperationView {
@@ -165,7 +172,14 @@ interface OperationDeps {
   now: () => number;
   mintToken: (nodeId: number) => { token: string; expiresAt: number };
   registerNode: (name: string, composeDir: string) => number;
+  /** Readiness of the node a run registers: reset to provisional on each enrollment, checked once its Pilot connects. */
+  readiness: Pick<NodeReadinessService, 'get' | 'verify'> & { markProvisional: (nodeId: number, operationId: string, hubUrl: string) => void };
   enrollWaitMs: number;
+  /**
+   * What the hub saw when this node's Pilot was refused, read when the wait for its connection ends (minting an enrollment
+   * clears it), and where a failure the agent's own log named is kept for the readiness check.
+   */
+  attempts: Pick<PilotEnrollmentAttempts, 'lastRefusal' | 'recordRefusal'>;
   /** How long the package metadata refresh is retried while another apt job holds its lock. */
   aptLockRetry?: { intervalMs: number; totalMs: number };
 }
@@ -210,8 +224,45 @@ function holdsLock(state: NodeBootstrapOperationState, changesMade: boolean): bo
   return changesMade;
 }
 
+/** How early the wait's timer may fire before the enrollment's recorded expiry and still count as the enrollment having run out. */
+const ENROLLMENT_EXPIRY_TOLERANCE_MS = 1_000;
+
 /** Effects a step can leave behind partly even when it exits with an error. */
 const PARTIAL_EFFECTS: ReadonlySet<string> = new Set(['package-install', 'service-change', 'container-start']);
+
+/** The agent's log is read once, after the wait: a short command over a session of its own. */
+const AGENT_LOG_TIMEOUT_MS = 20_000;
+const AGENT_LOG_MAX_BYTES = 64 * 1024;
+
+interface AgentLogRead {
+  /** The log was read; false when the session, the command or the read failed. */
+  read: boolean;
+  finding: AgentLogFinding | null;
+}
+type AgentLogReader = () => Promise<AgentLogRead>;
+
+/** A failure that names no cause from the agent's log, so nothing is recorded for the readiness check. */
+function refused(failure: StepFailure): { failure: StepFailure; cause: null } {
+  return { failure, cause: null };
+}
+
+/** The failure a line of the agent's log named, as the operator reads it. The line itself is the step's detail. */
+function connectFailure(finding: AgentLogFinding, hubUrl: string): StepFailure {
+  switch (finding.cause) {
+    case 'dns_unresolved':
+      return new StepFailure('failed', 'ENROLLMENT_DNS_FAILED',
+        `The Pilot started, but the server cannot resolve the hub's name: the Pilot's log shows a name lookup error while it dialled ${hubUrl}. Fix the server's DNS (or the hub URL the enrollment carries, the Public URL setting), then retry; a retry mints a new enrollment.`,
+        finding.evidence);
+    case 'tls_untrusted':
+      return new StepFailure('failed', 'ENROLLMENT_TLS_FAILED',
+        `The Pilot started, but it does not trust the hub's TLS certificate at ${hubUrl}: its log shows a certificate error. For a hub with its own CA, check that the CA file is mounted in the sencho-agent project and SENCHO_PILOT_CA_FILE points at it; otherwise fix the certificate (expired, a missing intermediate, or a host name it does not cover). Then retry; a retry mints a new enrollment.`,
+        finding.evidence);
+    case 'upgrade_blocked':
+      return new StepFailure('failed', 'ENROLLMENT_UPGRADE_BLOCKED',
+        `The Pilot started and reached a server at ${hubUrl}, but that server answered its WebSocket upgrade with HTTP ${finding.status}, so the tunnel never opened. A reverse proxy in front of the hub must pass WebSocket upgrades for /api/pilot/tunnel (or the hub URL names another server). Fix it, then retry; a retry mints a new enrollment.`,
+        finding.evidence);
+  }
+}
 
 interface RunContext {
   hubUrl: string;
@@ -233,7 +284,13 @@ export class NodeBootstrapOperationService {
       now: () => Date.now(),
       mintToken: mintPilotEnrollmentToken,
       registerNode: defaultRegisterNode,
+      readiness: {
+        get: (nodeId) => NodeReadinessService.getInstance().get(nodeId),
+        verify: (nodeId, audit) => NodeReadinessService.getInstance().verify(nodeId, audit),
+        markProvisional: (nodeId, operationId, hubUrl) => DatabaseService.getInstance().markNodeReadinessProvisional(nodeId, operationId, hubUrl, Date.now()),
+      },
       enrollWaitMs: ENROLL_WAIT_MS,
+      attempts: PilotEnrollmentAttempts.getInstance(),
       ...deps,
     };
   }
@@ -481,6 +538,23 @@ export class NodeBootstrapOperationService {
   }
 
   /**
+   * Check again that an enrolled bootstrap's node is ready for deployments.
+   * Read-only on the host: the hub asks the Pilot for a fresh report. The
+   * verdict is stored on the node, not on the run, which stays `enrolled`.
+   */
+  public async verifyReadiness(id: string, audit: BootstrapAuditContext): Promise<OperationDetail> {
+    const op = this.reconcile(this.requireOperation(id));
+    if (op.state !== 'enrolled' || op.node_id === null || !this.deps.readiness.get(op.node_id)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_VERIFIABLE', 'Only an enrolled bootstrap\'s node can be checked for readiness.');
+    }
+    if (!this.deps.db.getNode(op.node_id)) {
+      throw new BootstrapError(409, 'OPERATION_NOT_VERIFIABLE', 'The node this bootstrap registered was removed from Fleet.');
+    }
+    await this.deps.readiness.verify(op.node_id, audit);
+    return this.detail(id);
+  }
+
+  /**
    * The runs that still hold their server, a page at a time (newest first),
    * and with the first page the latest finished ones. A hold is the way back
    * to a run that needs recovery, so every one is reachable: each page names
@@ -686,7 +760,7 @@ export class NodeBootstrapOperationService {
       }
       session.close();
       session = null;
-      await this.awaitEnrollment(id, signal, context);
+      await this.awaitEnrollment(id, signal, context, () => this.readAgentLog(id, request, plan, signal, secrets));
     } catch (error: unknown) {
       this.finishWithError(id, error, signal, context);
     } finally {
@@ -779,13 +853,15 @@ export class NodeBootstrapOperationService {
       this.deps.db.updateNodeBootstrapOperation(id, { node_id: nodeId, changes_made: 1 }, this.deps.now());
       this.audit(context.audit, 'bootstrap.node.created', op, { nodeId });
     }
+    // A new enrollment voids any earlier verdict: the node is provisional until its Pilot connects and is checked.
+    this.deps.readiness.markProvisional(nodeId, id, plan.hubUrl);
     const { token, expiresAt } = this.deps.mintToken(nodeId);
     this.deps.db.updateNodeBootstrapOperation(id, { enrollment_expires_at: expiresAt }, this.deps.now());
     this.event(this.requireOperation(id), 'info', `Enrollment minted for node ${nodeId}; it expires at ${new Date(expiresAt).toISOString()}.`, 'agent_project', COMPOSE_STEP_ID);
     return { token, compose: composeFor(token) };
   }
 
-  private async awaitEnrollment(id: string, signal: AbortSignal, context: RunContext): Promise<void> {
+  private async awaitEnrollment(id: string, signal: AbortSignal, context: RunContext, readLog: AgentLogReader): Promise<void> {
     const op = this.transition(id, ['running'], { state: 'enrolling', stage: 'enroll', step: null });
     const nodeId = op.node_id;
     if (nodeId === null) throw new StepFailure('recovery', 'NODE_MISSING', 'The Pilot started, but no node was registered for it.');
@@ -817,13 +893,90 @@ export class NodeBootstrapOperationService {
     });
     if (outcome === 'cancelled') throw new RunCancelled();
     if (outcome === 'timeout') {
-      throw new StepFailure(
-        'failed',
-        'ENROLLMENT_NOT_CONNECTED',
-        'The Pilot started but did not connect before the wait ended. Check that the host can reach the hub URL, then retry; a retry mints a new enrollment.',
-      );
+      // A Pilot that connects while the log is read, even one that drops again before it returns, has an enrollment that
+      // was used: what the log said is history, so it is neither kept nor reported.
+      let connectedDuringRead = false;
+      const onUp = (upId: number) => {
+        if (upId === nodeId) connectedDuringRead = true;
+      };
+      this.deps.tunnels.on('tunnel-up', onUp);
+      let result: Awaited<ReturnType<typeof this.enrollmentTimeout>>;
+      try {
+        result = await this.enrollmentTimeout(nodeId, op.enrollment_expires_at, context.hubUrl, readLog);
+      } finally {
+        this.deps.tunnels.off('tunnel-up', onUp);
+      }
+      // A cancel that arrived while the log was read stops the run as cancelled, as one during the wait does.
+      if (signal.aborted) throw new RunCancelled();
+      if (!connectedDuringRead && !this.deps.tunnels.hasActiveTunnel(nodeId)) {
+        if (result.cause) this.deps.attempts.recordRefusal(nodeId, result.cause, this.deps.now());
+        throw result.failure;
+      }
     }
-    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled. The run does not verify that the node is ready for deployments.');
+    this.finish(id, 'enrolled', null, context, 'The Pilot connected. The node is enrolled; the hub now checks that it is ready for deployments.');
+  }
+
+  /**
+   * Why the wait for the Pilot ended. The hub names what it saw: a Pilot that reached it and was refused for an expired or
+   * already used enrollment. When nothing reached the hub, the cause is on the host, so the hub reads the tail of the agent's
+   * own log over SSH and names a cause only when a line in it matches a known failure (a name that does not resolve, a
+   * certificate the agent does not trust, a connection answered with an HTTP status instead of a WebSocket upgrade). When
+   * the log cannot be read, or names nothing the hub recognizes, the cause stays unknown and the message says which.
+   */
+  private async enrollmentTimeout(nodeId: number, expiresAt: number | null, hubUrl: string, readLog: AgentLogReader): Promise<{ failure: StepFailure; cause: PilotConnectFailure | null }> {
+    const refusal = this.deps.attempts.lastRefusal(nodeId);
+    if (refusal?.reason === 'enrollment_used') {
+      return refused(new StepFailure('failed', 'ENROLLMENT_USED',
+        'The Pilot reached the hub, but the enrollment it presented was no longer valid: it was already used, or a newer enrollment replaced it (a compose file started earlier keeps its old token). Retry, which mints a new enrollment and rewrites the file.'));
+    }
+    if (refusal?.reason === 'credential_expired') {
+      return refused(new StepFailure('failed', 'PILOT_CREDENTIAL_EXPIRED',
+        'The Pilot reached the hub with a saved credential that had expired (kept in the sencho-agent-data volume by an earlier enrollment). Retry, which mints a new enrollment for the Pilot to fall back to; if it still does not connect, `docker logs sencho-agent` on the server says why.'));
+    }
+    if (refusal?.reason === 'enrollment_expired') {
+      return refused(new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        'The Pilot reached the hub, but its enrollment had already expired (an enrollment is valid for 15 minutes). Retry, which mints a new enrollment.'));
+    }
+    // Nothing the hub signed was refused, so what the Pilot says about itself is the only evidence there is.
+    const log = await readLog();
+    if (log.finding) return { failure: connectFailure(log.finding, hubUrl), cause: log.finding.cause };
+    // The wait ends on a timer set to the expiry, which can fire a moment before it.
+    const ranOut = expiresAt !== null && this.deps.now() >= expiresAt - ENROLLMENT_EXPIRY_TOLERANCE_MS;
+    const seen = log.read
+      ? 'its log shows no failure the hub recognizes, so the hub cannot tell why. '
+      : 'the hub could not read the Pilot\'s log, so it cannot tell why. ';
+    if (ranOut) {
+      return refused(new StepFailure('failed', 'ENROLLMENT_EXPIRED',
+        `The enrollment expired (it is valid for 15 minutes) before any Pilot used it, and no connection attempt reached the hub, and ${seen}`
+        + 'If the host was slow to start the Pilot, retry, which mints a new enrollment; if it keeps happening, `docker logs sencho-agent` on the server names why the Pilot cannot reach the hub.'));
+    }
+    return refused(new StepFailure('failed', 'ENROLLMENT_NOT_CONNECTED',
+      `The Pilot started, but no connection attempt from it reached the hub before the wait ended, and ${seen}`
+      + 'The cause is on the server: `docker logs sencho-agent` names it (a hub name that does not resolve, a TLS or CA certificate error, or a reverse proxy that does not pass the WebSocket upgrade). '
+      + 'Fix it, then retry; a retry mints a new enrollment.'));
+  }
+
+  /**
+   * The tail of the Pilot container's log, read over a new SSH session with the key the run already holds, and the failure
+   * it names. Read-only and bounded; it never throws, because a log that could not be read only leaves the cause unknown.
+   */
+  private async readAgentLog(id: string, request: ExecuteRequest, plan: BootstrapPlan, signal: AbortSignal, secrets: string[]): Promise<AgentLogRead> {
+    if (signal.aborted) return { read: false, finding: null };
+    const op = this.requireOperation(id);
+    let session: ExecSession | null = null;
+    try {
+      session = await this.deps.exec.open(
+        { host: op.host, address: op.address, port: op.port, username: op.username, privateKey: request.privateKey, passphrase: request.passphrase ?? null },
+        { expectedFingerprint: op.host_key_fingerprint, signal },
+      );
+      const result = await session.run(agentLogCommand(dockerNeedsSudo(plan)), { timeoutMs: AGENT_LOG_TIMEOUT_MS, keep: { mode: 'tail', maxBytes: AGENT_LOG_MAX_BYTES } });
+      if (result.error || result.timedOut || result.exitCode !== 0) return { read: false, finding: null };
+      return { read: true, finding: classifyAgentLog(result.stdout, secrets) };
+    } catch {
+      return { read: false, finding: null };
+    } finally {
+      session?.close();
+    }
   }
 
   // --- state ----------------------------------------------------------------
@@ -930,7 +1083,7 @@ export class NodeBootstrapOperationService {
     }, now)) {
       return this.requireOperation(op.id);
     }
-    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled. The run does not verify that the node is ready for deployments.', 'enroll', null);
+    this.event(op, 'done', 'The Pilot connected after the run stopped. The node is enrolled; the hub checks that it is ready for deployments.', 'enroll', null);
     this.audit(SYSTEM_AUDIT, 'bootstrap.execute.finished', op, { state: 'enrolled', code: null, attempt: op.attempt, nodeId: op.node_id });
     return this.requireOperation(op.id);
   }
@@ -975,6 +1128,9 @@ export class NodeBootstrapOperationService {
   private view(op: NodeBootstrapOperation): OperationView {
     const running = RUNNING_STATES.includes(op.state) && this.runs.has(op.id);
     const stopped = !RUNNING_STATES.includes(op.state) && !this.runs.has(op.id);
+    // Only the run that last enrolled the node speaks for its readiness; an earlier run for the same node does not.
+    const nodeReadiness = op.node_id !== null ? this.deps.readiness.get(op.node_id) : null;
+    const readiness = nodeReadiness && nodeReadiness.operationId === op.id ? nodeReadiness : null;
     return {
       id: op.id,
       targetName: op.target_name,
@@ -1006,7 +1162,9 @@ export class NodeBootstrapOperationService {
         cancel: running && op.cancel_requested !== 1,
         retry: stopped && op.active === 1 && RETRYABLE_STATES.includes(op.state),
         release: stopped && op.active === 1,
+        verify: op.state === 'enrolled' && readiness !== null && readiness.state !== 'verifying',
       },
+      readiness,
     };
   }
 

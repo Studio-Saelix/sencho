@@ -168,6 +168,11 @@ export function releaseBootstrapOperation(id: string): Promise<BootstrapOperatio
   return sendOperation(`/nodes/bootstrap/operations/${encodeURIComponent(id)}/release`, undefined);
 }
 
+/** Ask the enrolled node's Pilot for a fresh readiness report. Read-only on the host. */
+export function verifyBootstrapOperation(id: string): Promise<BootstrapOperationDetail> {
+  return sendOperation(`/nodes/bootstrap/operations/${encodeURIComponent(id)}/verify`, undefined);
+}
+
 export async function fetchBootstrapOperation(id: string, signal?: AbortSignal): Promise<BootstrapOperationDetail> {
   const res = await apiFetch(`/nodes/bootstrap/operations/${encodeURIComponent(id)}`, { localOnly: true, signal });
   if (!res.ok) throw await toError(res);

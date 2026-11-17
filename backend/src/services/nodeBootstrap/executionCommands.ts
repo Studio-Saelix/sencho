@@ -527,6 +527,14 @@ export function dockerServiceStateCommand(sudo: boolean): string {
   return withSudo("sh -c 'systemctl is-active docker; systemctl is-enabled docker'", sudo);
 }
 
+/** How much of the agent's log is read: enough to hold several reconnect attempts, small enough to scan whole. */
+export const AGENT_LOG_LINES = 200;
+
+/** The tail of the Pilot container's own log, standard error included. Read-only: it changes nothing on the host. */
+export function agentLogCommand(sudo: boolean): string {
+  return withSudo(`${DOCKER_LOCAL_ENV} docker logs --tail ${AGENT_LOG_LINES} ${PILOT_CONTAINER_NAME} 2>&1`, sudo);
+}
+
 /** State and Compose labels of the Pilot container, separated by `|`. */
 export function agentContainerCommand(sudo: boolean): string {
   const format = '{{.State.Status}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}';

@@ -255,7 +255,7 @@ test.describe('Node bootstrap wizard', () => {
 
     await expect(page.getByText('1. Pilot Agent installation directory')).toBeVisible();
     await expect(page.getByText('Not changed')).toBeVisible();
-    await expect(page.getByTestId('bootstrap-scope-note')).toContainText('execution and enrollment only');
+    await expect(page.getByTestId('bootstrap-scope-note')).toContainText('ready for deployments only after the hub checks it through the Pilot');
     await expect(page.getByText('/srv/sencho-stacks').first()).toBeVisible();
     await expect(page.getByText('/srv/sencho-agent').first()).toBeVisible();
     await expect(page.getByText(/sencho-mkdir .* '0700'/)).toBeVisible();
@@ -289,6 +289,9 @@ test.describe('Node bootstrap wizard', () => {
       nodeId: state === 'enrolled' ? 7 : null, changesMade: state !== 'rechecking', active: state !== 'enrolled', cancelRequested: false,
       error: null, enrollmentExpiresAt: null, createdAt: 1_762_300_000_000, updatedAt: 1_762_300_000_000, finishedAt: null,
       actions: { cancel: state !== 'enrolled', retry: false, release: false }, plan, events: [],
+      readiness: state === 'enrolled'
+        ? { state: 'provisional', operationId, checkedAt: null, agentVersion: null, gates: [] }
+        : null,
     });
     let executeBody: Record<string, unknown> | null = null;
     await page.route('**/api/nodes/bootstrap/operations', (route: Route) => {
@@ -316,7 +319,9 @@ test.describe('Node bootstrap wizard', () => {
     await confirm.getByRole('button', { name: 'Approve and run' }).click();
 
     await expect(page.getByTestId('bootstrap-run-answer')).toContainText('Re-checking');
-    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('did not verify that the node is ready for deployments', { timeout: 10_000 });
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('Unverified', { timeout: 10_000 });
+    // Enrollment alone is not readiness: the run waits for the hub's check instead of calling the node ready.
+    await expect(page.getByTestId('bootstrap-run-answer')).toContainText('The hub checks it for readiness once its tunnel is up.');
     expect(executeBody).toMatchObject({ planDigest: plan.digest, host: 'server.example.com', targetName: 'media-server' });
   });
 });

@@ -1,14 +1,15 @@
 import type { StatusPathAnswer, StatusPathStage } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
-import { BOOTSTRAP_SCOPE_AFTER_RUN } from './scope';
-import type { BootstrapOperation, BootstrapOperationDetail, BootstrapOperationState } from './types';
+import type { BootstrapOperation, BootstrapOperationDetail, BootstrapOperationState, NodeReadiness, ReadinessGate } from './types';
 
 /**
  * Maps a bootstrap operation onto the Answer and Path of `StatusPath`.
  *
  * The Answer is the operation's state in one sentence. The Path groups the
  * plan's stages into the phases an operator recognizes (recheck, Docker, Pilot
- * files, start, enrollment); a phase the plan does not contain is omitted.
+ * files, start, enrollment, readiness); a phase the plan does not contain is
+ * omitted. An enrolled run is not the end: its Answer is the hub's readiness
+ * verdict for the node, and only a verdict of ready reads as ready.
  */
 
 const RUNNING_STATES: readonly BootstrapOperationState[] = ['rechecking', 'running', 'enrolling'];
@@ -30,7 +31,20 @@ export function canSettleOnRead(op: Pick<BootstrapOperation, 'state' | 'active' 
   return op.active && op.nodeId !== null && op.agentStarted && SETTLEABLE_STATES.includes(op.state);
 }
 
-type Phase = 'recheck' | 'docker' | 'files' | 'start' | 'enroll';
+/** An enrolled run whose node the hub has not finished checking; the dialog reads it again until the verdict lands. */
+export function awaitsReadiness(op: Pick<BootstrapOperation, 'state' | 'readiness'>): boolean {
+  return op.state === 'enrolled' && (op.readiness?.state === 'provisional' || op.readiness?.state === 'verifying');
+}
+
+/** The gates that keep a node from ready: failed first, then the ones whose evidence was unknown. */
+export function blockingGates(readiness: Pick<NodeReadiness, 'gates'>): ReadinessGate[] {
+  const order = { fail: 0, unknown: 1, warn: 2, pass: 3 } as const;
+  return readiness.gates
+    .filter((gate) => gate.status === 'fail' || gate.status === 'unknown')
+    .sort((a, b) => order[a.status] - order[b.status]);
+}
+
+type Phase = 'recheck' | 'docker' | 'files' | 'start' | 'enroll' | 'verify';
 
 const PHASE_LABEL: Record<Phase, string> = {
   recheck: 'recheck',
@@ -38,6 +52,7 @@ const PHASE_LABEL: Record<Phase, string> = {
   files: 'pilot files',
   start: 'start',
   enroll: 'enroll',
+  verify: 'readiness',
 };
 
 const STAGE_PHASE: Record<string, Phase> = {
@@ -52,10 +67,10 @@ const STAGE_PHASE: Record<string, Phase> = {
   enroll: 'enroll',
 };
 
-const ORDER: Phase[] = ['recheck', 'docker', 'files', 'start', 'enroll'];
+const ORDER: Phase[] = ['recheck', 'docker', 'files', 'start', 'enroll', 'verify'];
 
 function phasesIn(op: BootstrapOperationDetail): Phase[] {
-  const present = new Set<Phase>(['recheck', 'enroll']);
+  const present = new Set<Phase>(['recheck', 'enroll', 'verify']);
   for (const stage of op.plan.stages) {
     const phase = STAGE_PHASE[stage.id];
     if (phase) present.add(phase);
@@ -117,14 +132,7 @@ export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAn
     };
   }
   const stopped = stoppedState(op.state);
-  if (op.state === 'enrolled') {
-    return {
-      tone: stopped.tone,
-      title: stopped.title,
-      status: op.state,
-      line: `${op.targetName} is enrolled. ${BOOTSTRAP_SCOPE_AFTER_RUN}`,
-    };
-  }
+  if (op.state === 'enrolled') return readinessAnswer(op);
   return {
     tone: stopped.tone,
     title: stopped.title,
@@ -136,6 +144,59 @@ export function operationAnswer(op: BootstrapOperationDetail): Omit<StatusPathAn
   };
 }
 
+function warningNote(readiness: Pick<NodeReadiness, 'gates'>): string {
+  const warnings = readiness.gates.filter((gate) => gate.status === 'warn').length;
+  return warnings === 0 ? '' : `, with ${warnings} warning${warnings === 1 ? '' : 's'}`;
+}
+
+function checkedAt(at: number | null): string {
+  return at === null ? '' : ` at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+/** The Answer for an enrolled run: the hub's readiness verdict for its node, never the connection alone. */
+function readinessAnswer(op: BootstrapOperationDetail): Omit<StatusPathAnswer, 'action'> {
+  const readiness = op.readiness;
+  if (!readiness) {
+    return {
+      tone: 'neutral',
+      title: 'Enrolled',
+      status: 'enrolled',
+      line: `${op.targetName} is enrolled. This run no longer speaks for the node's readiness: a later enrollment replaced it, or the node was removed.`,
+    };
+  }
+  switch (readiness.state) {
+    case 'provisional':
+      return { tone: 'brand', title: 'Unverified', status: 'provisional', line: `The Pilot on ${op.targetName} is enrolled. The hub checks it for readiness once its tunnel is up.` };
+    case 'verifying':
+      return { tone: 'brand', title: 'Verifying', status: 'verifying', line: `Checking the Pilot on ${op.targetName}: identity, Docker, Compose and the Compose directory.` };
+    case 'ready':
+      return {
+        tone: 'success',
+        title: 'Ready',
+        status: 'ready',
+        line: `${op.targetName} passed the readiness check${checkedAt(readiness.checkedAt)}${warningNote(readiness)}. It is ready for deployments.`,
+      };
+    case 'not_ready': {
+      const [first, ...rest] = blockingGates(readiness);
+      return {
+        tone: 'warning',
+        // Only a tunnel that is down reads as not connected; a request that failed on a live tunnel is a node that is not ready.
+        title: first?.id === 'tunnel' && first.status === 'fail' ? 'Not connected' : 'Not ready',
+        status: 'not_ready',
+        line: first ? `${first.label}: ${first.summary}` : `${op.targetName} did not pass the readiness check.`,
+        detail: [first?.remediation, rest.length > 0 ? `${rest.length} more check${rest.length === 1 ? '' : 's'} failed.` : null].filter(Boolean).join(' ') || null,
+      };
+    }
+  }
+}
+
+const READINESS_STAGE: Record<NodeReadiness['state'], Pick<StatusPathStage, 'tone' | 'word'>> = {
+  provisional: { tone: 'neutral', word: 'pending' },
+  verifying: { tone: 'brand', word: 'checking' },
+  ready: { tone: 'success', word: 'ready' },
+  not_ready: { tone: 'warning', word: 'unverified' },
+};
+
 export function operationStages(op: BootstrapOperationDetail): StatusPathStage[] {
   const phases = phasesIn(op);
   const reached = phases.indexOf(currentPhase(op));
@@ -143,7 +204,11 @@ export function operationStages(op: BootstrapOperationDetail): StatusPathStage[]
   const stopped = running ? null : stoppedState(op.state);
   return phases.map((phase, index): StatusPathStage => {
     const base = { id: phase, label: PHASE_LABEL[phase], 'data-testid': `bootstrap-phase-${phase}` };
-    if (op.state === 'enrolled') return { ...base, tone: 'success', word: phase === 'enroll' ? 'connected' : 'done', status: 'done' };
+    if (op.state === 'enrolled') {
+      if (phase !== 'verify') return { ...base, tone: 'success', word: phase === 'enroll' ? 'connected' : 'done', status: 'done' };
+      const state = op.readiness?.state;
+      return state ? { ...base, ...READINESS_STAGE[state], status: state } : { ...base, tone: 'neutral', word: 'not recorded', status: 'unknown' };
+    }
     if (index < reached) return { ...base, tone: 'success', word: 'done', status: 'done' };
     if (index === reached) {
       if (running) return { ...base, tone: 'brand', word: phase === 'enroll' ? 'waiting' : 'running', status: 'running' };
@@ -154,7 +219,12 @@ export function operationStages(op: BootstrapOperationDetail): StatusPathStage[]
 }
 
 /** The state word for a compact row in the operations list. */
-export function operationStateWord(op: Pick<BootstrapOperation, 'state'>): { tone: StatusTone; word: string } {
+export function operationStateWord(op: Pick<BootstrapOperation, 'state' | 'readiness'>): { tone: StatusTone; word: string } {
+  if (op.state === 'enrolled' && op.readiness) {
+    const words = { provisional: 'Unverified', verifying: 'Verifying', ready: 'Ready', not_ready: 'Unverified' } as const;
+    const tones = { provisional: 'brand', verifying: 'brand', ready: 'success', not_ready: 'warning' } as const;
+    return { tone: tones[op.readiness.state], word: words[op.readiness.state] };
+  }
   if (op.state === 'rechecking') return { tone: 'brand', word: 'Re-checking' };
   if (op.state === 'running') return { tone: 'brand', word: 'Running' };
   if (op.state === 'enrolling') return { tone: 'brand', word: 'Enrolling' };

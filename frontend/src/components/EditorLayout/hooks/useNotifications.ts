@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { beginSpan, endSpan, markMilestone } from '@/lib/hydrationTiming';
+import { announceNotificationsConnection } from '@/lib/notificationsConnection';
 import { toast } from '@/components/ui/toast-store';
 import type { Node } from '@/context/NodeContext';
 import type { NotificationItem } from '../../dashboard/types';
@@ -198,7 +199,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
         if (!isMounted) { ws?.close(); return; }
         setTickerConnected(true);
         retryCount = 0;
-        window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: true } }));
+        announceNotificationsConnection(true);
       };
 
       ws.onmessage = (event) => {
@@ -235,8 +236,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
       ws.onclose = (event) => {
         setTickerConnected(false);
-        window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: false } }));
+        // An unmounted hook has nothing that will reconnect, so its close is not an outage.
         if (!isMounted) return;
+        announceNotificationsConnection(false);
         const delay = Math.min(1000 * Math.pow(2, retryCount), MAX_RETRY_DELAY_MS);
         retryCount++;
         console.debug(`[WS notifications] closed (code=${event.code}), reconnecting in ${delay}ms`);

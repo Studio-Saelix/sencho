@@ -311,6 +311,13 @@ describe('collectEnvironmentReport', () => {
             const c = byId(checks, 'disk_space');
             expect(c.status).toBe('warn');
             expect(remediationOf(c)).toBeTruthy();
+            // The warning stays a warning on a preflight surface, but it is marked as no reading at all.
+            expect(c).toMatchObject({ unmeasured: true });
+        });
+
+        it('does not mark a measured low-space warning as unmeasured', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({ diskUsage: async () => ({ usePercent: 95, freeBytes: 20 * 1024 ** 3 }) }));
+            expect(byId(checks, 'disk_space')).not.toHaveProperty('unmeasured');
         });
     });
 
@@ -337,6 +344,13 @@ describe('collectEnvironmentReport', () => {
             expect(got).toEqual({ usePercent: 10, freeBytes: 999 });
         });
 
+        it('returns null when the mount reports no usage figures, instead of inventing 0% used and 0 bytes free', () => {
+            expect(pickBackingMount([{ mount: '/' }], '/app/compose')).toBeNull();
+            expect(pickBackingMount([{ mount: '/', use: 50 }], '/app/compose')).toBeNull();
+            expect(pickBackingMount([{ mount: '/', available: 5 }], '/app/compose')).toBeNull();
+            expect(pickBackingMount([{ mount: '/', use: Number.NaN, available: 5 }], '/app/compose')).toBeNull();
+        });
+
         it('falls back to the C: mount on Windows when nothing matches', () => {
             const got = pickBackingMount([
                 { mount: 'D:', use: 20, available: 10 },
@@ -357,5 +371,7 @@ describe('collectEnvironmentReport', () => {
         expect(byId(checks, 'compose_dir').status).toBe('fail');
         expect(byId(checks, 'path_mapping').status).toBe('warn');
         expect(byId(checks, 'disk_space').status).toBe('warn');
+        // Each of the three rows that could not take a reading says so, apart from a measured warning.
+        for (const id of ['path_mapping', 'disk_space'] as const) expect(byId(checks, id)).toMatchObject({ status: 'warn', unmeasured: true });
     });
 });

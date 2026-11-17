@@ -1,7 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { apiFetch } from '@/lib/api';
 import { beginNodeSession, markMilestone } from '@/lib/hydrationTiming';
+import { onNotificationsReturn } from '@/lib/notificationsConnection';
 import type { Capability } from '@/lib/capabilities';
+import type { BootstrapOperationState, NodeReadinessState } from '@/components/nodes/bootstrap/types';
+
+/** How long a burst of readiness announcements is gathered before the node list is refetched once. */
+const READINESS_REFRESH_DELAY_MS = 500;
+/** How long after a catch-up read that did not apply the next one starts; it doubles up to the cap while reads keep failing. */
+const READINESS_RETRY_BASE_MS = 5_000;
+const READINESS_RETRY_MAX_MS = 30_000;
 
 export type NodeMode = 'proxy' | 'pilot_agent';
 
@@ -22,6 +30,17 @@ export interface Node {
   sealingKeyFingerprint?: string | null;
   pilot_last_seen?: number | null;
   pilot_agent_version?: string | null;
+  /**
+   * Set only for a node the bootstrap registered: the hub's readiness verdict
+   * and the state of the run that registered it. Null (or absent) for every
+   * other node, whose status keeps its usual meaning.
+   */
+  readiness?: {
+    state: NodeReadinessState;
+    checkedAt: number | null;
+    operationId: string | null;
+    operationState: BootstrapOperationState | null;
+  } | null;
 }
 
 export type ImagePinKind = 'floating' | 'semver' | 'digest' | 'unknown';
@@ -80,6 +99,8 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     beginNodeSession(activeNode.id);
   }
 
+  const metaSeqRef = useRef<Map<number, number>>(new Map());
+
   const fetchNodeMeta = useCallback(async (nodeId: number, force = false) => {
     const cached = nodeMetaRef.current.get(nodeId);
     if (cached && !force) {
@@ -91,12 +112,18 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       if (Date.now() - cached.fetchedAt < ttl) return;
     }
 
-    const setMeta = (meta: NodeMeta) =>
+    // Reads for one node can overlap (a selection, a forced refresh after a readiness change). Only the newest
+    // read may write, so a slow older answer cannot put an offline or stale reading back over a newer one.
+    const seq = (metaSeqRef.current.get(nodeId) ?? 0) + 1;
+    metaSeqRef.current.set(nodeId, seq);
+    const setMeta = (meta: NodeMeta) => {
+      if (metaSeqRef.current.get(nodeId) !== seq) return;
       setNodeMeta(prev => {
         const next = new Map(prev);
         next.set(nodeId, meta);
         return next;
       });
+    };
 
     try {
       const res = await apiFetch(`/nodes/${nodeId}/meta`, { localOnly: true });
@@ -124,12 +151,39 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Refetches can overlap (mount, node-not-found, readiness announcements, a manual refresh). A response
+  // older than the one already applied is dropped, so a slow earlier answer cannot bring back a list (and a
+  // readiness verdict) that a later answer replaced. An older answer still applies when the newer request
+  // fails or has not answered yet.
+  const nodesRequestSeqRef = useRef(0);
+  const nodesAppliedSeqRef = useRef(0);
+  const appliedNodesRef = useRef<Node[]>([]);
+  // Readiness announcements and notification-socket returns seen so far, and the highest count a read that applied had
+  // already seen when it started. A read answers for every signal that came before it began, so while the second is
+  // behind the first, the list on screen may still hold a verdict the hub has withdrawn, and a catch-up read is owed.
+  const readinessSignalsSeenRef = useRef(0);
+  const readinessSignalsCoveredRef = useRef(0);
+
   const refreshNodes = useCallback(async () => {
+    const seq = ++nodesRequestSeqRef.current;
+    const signals = readinessSignalsSeenRef.current;
     try {
       const res = await apiFetch('/nodes');
       if (res.ok) {
         const data = await res.json();
+        if (seq < nodesAppliedSeqRef.current) return;
+        nodesAppliedSeqRef.current = seq;
+        readinessSignalsCoveredRef.current = Math.max(readinessSignalsCoveredRef.current, signals);
+        const before = appliedNodesRef.current;
+        appliedNodesRef.current = data;
         setNodes(data);
+        // A node that just became ready is usable now: what the dashboard cached about it while it was provisional (a failed
+        // read, no capabilities, an older release) is stale, so its metadata is read again without waiting out the cache.
+        for (const node of data as Node[]) {
+          if (node.readiness?.state !== 'ready') continue;
+          if (before.find((previous) => previous.id === node.id)?.readiness?.state === 'ready') continue;
+          if (nodeMetaRef.current.has(node.id) || activeNodeRef.current?.id === node.id) void fetchNodeMeta(node.id, true);
+        }
 
         const currentActive = activeNodeRef.current;
         if (!currentActive) {
@@ -147,7 +201,9 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
         } else {
           const updatedActive = data.find((n: Node) => n.id === currentActive.id);
           if (updatedActive) {
-            setActiveNodeState(updatedActive);
+            // Keep the same object when nothing about the active node changed, so a list refresh
+            // (such as another node's readiness changing) does not re-run every activeNode effect.
+            setActiveNodeState((prev) => (prev && JSON.stringify(prev) === JSON.stringify(updatedActive) ? prev : updatedActive));
             localStorage.setItem('sencho-active-node', String(updatedActive.id));
           } else {
             const fallback = data.find((n: Node) => n.is_default) ?? data[0] ?? null;
@@ -183,8 +239,60 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       refreshNodes();
     };
 
+    // A read of the list made because the readiness changed. One that does not apply (the request failed, the answer was
+    // not OK or not JSON, or a newer read overtook it) leaves the signal unanswered, so it is tried again at a bounded
+    // pace until a read that began after the signal applies. The change is never consumed by a read that failed.
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelay = READINESS_RETRY_BASE_MS;
+    let disposed = false;
+    const catchUp = () => {
+      void refreshNodes().then(() => {
+        if (disposed) return;
+        if (readinessSignalsCoveredRef.current >= readinessSignalsSeenRef.current) {
+          retryDelay = READINESS_RETRY_BASE_MS;
+          return;
+        }
+        if (retryTimer !== null) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          // Another read answered for the signal while this one waited: nothing is owed, and the next failure starts at the base pace.
+          if (readinessSignalsCoveredRef.current < readinessSignalsSeenRef.current) catchUp();
+          else retryDelay = READINESS_RETRY_BASE_MS;
+        }, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, READINESS_RETRY_MAX_MS);
+      });
+    };
+
+    // The hub announces a changed readiness verdict, so badges in Fleet, the switcher and Settings do not go stale.
+    // Announcements that arrive within one window share a refetch; a check that outlasts it refetches again for its verdict.
+    let readinessTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleStateInvalidate = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: unknown }>).detail;
+      if (detail?.scope !== 'node-readiness') return;
+      readinessSignalsSeenRef.current += 1;
+      if (readinessTimer !== null) return;
+      readinessTimer = setTimeout(() => {
+        readinessTimer = null;
+        catchUp();
+      }, READINESS_REFRESH_DELAY_MS);
+    };
+
+    // Announcements sent while the notification socket was down are lost, so its return reads the list once.
+    const stopWatchingSocket = onNotificationsReturn(() => {
+      readinessSignalsSeenRef.current += 1;
+      catchUp();
+    });
+
     window.addEventListener('node-not-found', handleNodeNotFound);
-    return () => window.removeEventListener('node-not-found', handleNodeNotFound);
+    window.addEventListener('sencho:state-invalidate', handleStateInvalidate);
+    return () => {
+      window.removeEventListener('node-not-found', handleNodeNotFound);
+      window.removeEventListener('sencho:state-invalidate', handleStateInvalidate);
+      stopWatchingSocket();
+      disposed = true;
+      if (readinessTimer !== null) clearTimeout(readinessTimer);
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
   }, [refreshNodes]);
 
   // One-shot boot milestone: nodes have finished loading and an active node is

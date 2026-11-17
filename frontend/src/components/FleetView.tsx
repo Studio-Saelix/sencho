@@ -88,7 +88,7 @@ export function FleetView({
         [can, isAdmin],
     );
     const canExportDossier = can('node:read') && can('stack:read');
-    const { hasCapability, nodes: registryNodes, isLoading: registryLoading } = useNodes();
+    const { hasCapability, nodes: registryNodes, isLoading: registryLoading, refreshNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; permission gates still apply when on.
@@ -409,7 +409,7 @@ export function FleetView({
             />
 
             {NodeActionModals}
-            <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} />
+            <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} onNodesChanged={() => { void refreshNodes(); }} />
         </div>
     );
 }

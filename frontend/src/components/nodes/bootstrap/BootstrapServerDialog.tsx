@@ -252,6 +252,7 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
             onCancel={() => { void run.cancel(); }}
             onRetry={() => { if (run.operation) wizard.startRetry(run.operation); }}
             onRelease={run.release}
+            onVerify={() => { void run.verify(); }}
           />
         )}
 
@@ -329,9 +330,26 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
   );
 }
 
-export function BootstrapServerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function BootstrapServerDialog({
+  open,
+  onOpenChange,
+  onNodesChanged,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Read the node list again; Fleet, the node switcher and Settings show readiness from it. */
+  onNodesChanged?: () => void;
+}) {
   const wizard = useNodeBootstrap({ open });
   const run = useBootstrapOperation({ open });
+  // Fleet, the node switcher and Settings read readiness from the node list, so it is read again whenever the shown
+  // run's state or its node's verdict changes: a node that turns ready, or stays unverified, shows it everywhere at once.
+  const nodeSignal = run.operation ? `${run.operation.id}:${run.operation.state}:${run.operation.readiness?.state ?? ''}:${run.operation.readiness?.checkedAt ?? ''}` : null;
+  const nodesChanged = useRef(onNodesChanged);
+  useEffect(() => { nodesChanged.current = onNodesChanged; }, [onNodesChanged]);
+  useEffect(() => {
+    if (nodeSignal) nodesChanged.current?.();
+  }, [nodeSignal]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const reachablePlan = wizard.result?.plan != null && wizard.resultIsCurrent;
   // The dialog is opened from a menu item, which unmounts when the menu closes.

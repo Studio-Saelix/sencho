@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { DatabaseService } from '../services/DatabaseService';
 import { PilotTunnelCapacityError, PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
+import { PilotEnrollmentAttempts, type PilotRefusal } from '../services/PilotEnrollmentAttempts';
 import { encodeJsonFrame as encodePilotJsonFrame, PROTOCOL_VERSION as PILOT_PROTOCOL_VERSION } from '../pilot/protocol';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as rejectSocket } from './reject';
@@ -38,6 +39,27 @@ function rejectPilot(
 }
 
 /**
+ * Record a refusal for the node. Not while the node's tunnel is up: a refused attempt then is a stale or duplicate agent,
+ * and it says nothing about why the node's own Pilot would be disconnected later.
+ */
+function noteRefusal(nodeId: number, reason: PilotRefusal): void {
+  if (PilotTunnelManager.getInstance().hasActiveTunnel(nodeId)) return;
+  PilotEnrollmentAttempts.getInstance().recordRefusal(nodeId, reason);
+}
+
+/** Remember that a Pilot of a known node presented a credential the hub signed and that has since expired. */
+function noteExpiredCredential(db: DatabaseService, token: string): void {
+  const claims = jwt.decode(token);
+  if (!claims || typeof claims !== 'object') return;
+  const { scope, nodeId } = claims as { scope?: unknown; nodeId?: unknown };
+  if (typeof nodeId !== 'number') return;
+  const node = db.getNode(nodeId);
+  if (!node || node.type !== 'remote' || node.mode !== 'pilot_agent') return;
+  if (scope === 'pilot_enroll') noteRefusal(nodeId, 'enrollment_expired');
+  else if (scope === 'pilot_tunnel') noteRefusal(nodeId, 'credential_expired');
+}
+
+/**
  * Handle an inbound pilot-agent tunnel upgrade. Accepts either:
  *   - pilot_enroll (15m, one-time): consume the enrollment row, mint a
  *     long-lived pilot_tunnel token, send it back in a ctrl enroll_ack frame.
@@ -64,7 +86,9 @@ export async function handlePilotTunnel(
   let decoded: { scope?: string; nodeId?: number; enrollNonce?: string };
   try {
     decoded = jwt.verify(token, jwtSecret) as typeof decoded;
-  } catch {
+  } catch (error) {
+    // An expired token passed the signature check first, so the claims it still carries are the hub's own.
+    if (error instanceof jwt.TokenExpiredError) noteExpiredCredential(db, token);
     return rejectPilot(socket, 401, 'Unauthorized', 'invalid_token');
   }
 
@@ -83,6 +107,7 @@ export async function handlePilotTunnel(
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const row = db.consumePilotEnrollment(tokenHash);
     if (!row || row.node_id !== decoded.nodeId) {
+      noteRefusal(decoded.nodeId, 'enrollment_used');
       return rejectPilot(socket, 401, 'Unauthorized', 'enrollment_used');
     }
     mintedTunnelToken = jwt.sign(
@@ -130,6 +155,8 @@ export async function handlePilotTunnel(
         agentVersion,
         tunnelConfidential,
       );
+      // Only a registered tunnel makes an earlier refusal history; one that hit the capacity limit did not connect.
+      PilotEnrollmentAttempts.getInstance().clear(decoded.nodeId!);
     } catch (err) {
       if (err instanceof PilotTunnelCapacityError) {
         // 1013 (Try Again Later) signals the agent to back off rather than

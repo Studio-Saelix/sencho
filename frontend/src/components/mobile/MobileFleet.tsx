@@ -17,6 +17,8 @@ import { useFleetUpdateStatus } from '@/components/FleetView/hooks/useFleetUpdat
 import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
 import { NodeConnectionPin } from '@/components/FleetView/NodeConnectionPin';
 import { nodeConnection } from '@/components/FleetView/nodeConnection';
+import { NodeReadinessBadge } from '@/components/nodes/NodeReadinessBadge';
+import type { Node } from '@/context/NodeContext';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
 
@@ -113,7 +115,7 @@ function nodeExceptions(node: FleetNode): NodeException[] {
   return exceptions;
 }
 
-function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNode; mode: string | undefined; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
+function NodeCard({ node, mode, readiness, isActive, isDevImage, onOpen }: { node: FleetNode; mode: string | undefined; readiness: Node['readiness']; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
   const tone = nodeTone(node);
   const cardOnline = node.status === 'online';
   const cardCpu = cardOnline ? getNodeCpuUsage(node) : null;
@@ -164,6 +166,7 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
               {exceptions.join(' · ')}
             </Kicker>
           ) : null}
+          <NodeReadinessBadge readiness={readiness} className="shrink-0" />
           <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
         </span>
       </div>
@@ -487,11 +490,13 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
             <div className="flex flex-col gap-2.5">
               {nodes.map(node => {
                 const nodeUpdateStatus = updateStatusByNodeId.get(node.id);
+                const registryNode = registryNodes.find(n => n.id === node.id);
                 return (
                   <div key={node.id} className="flex flex-col gap-2.5">
                     <NodeCard
                       node={node}
-                      mode={registryNodes.find(n => n.id === node.id)?.mode ?? node.mode}
+                      mode={registryNode?.mode ?? node.mode}
+                      readiness={registryNode?.readiness ?? null}
                       isActive={activeNode?.id === node.id}
                       isDevImage={Boolean(nodeUpdateStatus?.isDevImage)}
                       onOpen={() => setSelectedId(node.id)}

@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { NodeReadinessBadge } from './nodes/NodeReadinessBadge';
+import { BootstrapServerDialog } from './nodes/bootstrap/BootstrapServerDialog';
 import { useNodes } from '@/context/NodeContext';
 import type { Node } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
@@ -40,6 +42,7 @@ export function NodeManager() {
   // stay isAdmin-only to match their requireAdmin backend guards.
   const canManageNodes = isAdmin || can('node:manage');
   const { nodes, refreshNodes, refreshNodeMeta } = useNodes();
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
     {
@@ -217,7 +220,12 @@ export function NodeManager() {
           every role with node:read. */}
       {canManageNodes && (
         <>
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            {isAdmin && (
+              <Button size="sm" variant="outline" className="shrink-0" onClick={() => setBootstrapOpen(true)}>
+                Bootstrap new Linux server
+              </Button>
+            )}
             <SettingsPrimaryButton
               size="sm"
               className="gap-1 shrink-0"
@@ -355,6 +363,7 @@ export function NodeManager() {
                     <div className="flex items-center gap-2">
                       {getNodeIcon(node.type)}
                       {node.name}
+                      <NodeReadinessBadge readiness={node.readiness} />
                     </div>
                     {node.type === 'remote' && node.sealingKeyFingerprint && (
                       <div className="flex flex-wrap items-center gap-2 pl-6 text-xs text-muted-foreground max-md:pl-0">
@@ -574,6 +583,9 @@ export function NodeManager() {
       )}
 
       {NodeActionModals}
+      {isAdmin && (
+        <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} onNodesChanged={() => { void refreshNodes(); }} />
+      )}
     </div>
   );
 }

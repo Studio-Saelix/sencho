@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { NodeReadinessBadge } from './nodes/NodeReadinessBadge';
 import {
     ChevronsUpDown,
     Star,
@@ -171,6 +172,7 @@ export function NodeSwitcher({ onManageNodes, compact = false }: NodeSwitcherPro
                                         )}
                                     >
                                         {node.name}
+                                        <NodeReadinessBadge readiness={node.readiness} className="ml-2 align-middle" />
                                     </div>
                                     <div className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
                                         {metaParts.join(' · ')}

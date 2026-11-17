@@ -87,7 +87,7 @@ beforeEach(() => {
 describe('BootstrapServerDialog scope', () => {
   it('pins the wording of the scope sentence the docs repeat', () => {
     expect(BOOTSTRAP_SCOPE).toBe(
-      'Bootstrap is execution and enrollment only: it runs the plan and enrolls the Pilot. It is not a complete, verified provisioning, and it does not check that the node is ready for deployments.',
+      'Bootstrap runs the plan and enrolls the Pilot. The node is ready for deployments only after the hub checks it through the Pilot once it connects: identity, Docker, Compose and the Compose directory.',
     );
   });
 
