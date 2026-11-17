@@ -22,6 +22,17 @@ const SETTLED_OUTCOMES: ReadonlySet<string> = new Set([
   'superseded',
 ]);
 
+/**
+ * Live-source outcomes that raise something the operator must see after a
+ * resume. They are not refusals: the suspension cleared, but the reconcile
+ * needs attention.
+ */
+const ATTENTION_OUTCOMES: ReadonlySet<string> = new Set([
+  'blocked',
+  'recovery_required',
+  'retry_scheduled',
+]);
+
 /** What to say when a 2xx carries no outcome this build can read. */
 const UNCONFIRMED_COPY: Record<SourceControllerAction, string> = {
   suspend: 'could not confirm the source was suspended.',
@@ -47,17 +58,22 @@ function withReason(message: string, reason: string): string {
  * What the operator hears, decided by the outcome the server reported rather
  * than by the HTTP status. Each action states what it needs its answer to
  * say: a Suspend needs `suspended`, and a Retry needs a settled outcome. A
- * Resume accepts a settled or `unknown` outcome because it answers before the
- * re-evaluation it starts finishes; a source that stays suspended warns, and
- * so does one that settles blocked, retrying, or failed. `failed_previous_intact`
- * is the one outcome that reports the previous deployment as intact, which
- * must reach the operator instead of a success line.
+ * Resume needs a settled outcome or the node's own evidence that the
+ * suspension cleared. The route reads the result before it starts the
+ * re-evaluation, so a projection with no settled outcome cannot prove the
+ * resume took, and `unknown` also covers a stack with no application. Only
+ * the node that performed the write reports that evidence, so a missing
+ * flag, an unrecognized outcome, or a missing outcome stays unconfirmed and
+ * never asserts the resume happened. `failed_previous_intact` is the one
+ * outcome that reports the previous deployment as intact, which must reach
+ * the operator instead of a success line.
  */
 function sourceControllerFeedback(
   stackName: string,
   action: SourceControllerAction,
   outcome: string,
   reason: string,
+  suspensionCleared: boolean,
 ): ControllerFeedback {
   const success: ControllerFeedback = {
     tone: 'success',
@@ -76,13 +92,24 @@ function sourceControllerFeedback(
   }
   if (action === 'resume') {
     if (outcome === 'suspended') return refused('the source did not resume.');
-    // Resume answers before the re-evaluation it starts finishes, so the
-    // projection can still be in flight. That is not a refusal.
-    if (SETTLED_OUTCOMES.has(outcome) || outcome === 'unknown') return success;
+    if (SETTLED_OUTCOMES.has(outcome)) return success;
+    // Without the node's own evidence, no other outcome establishes that the
+    // row is no longer suspended: a missing application, an older node that
+    // omits the evidence, and a row still suspended behind an interruption or
+    // recovery state all reach this warning.
+    if (!suspensionCleared) return refused(UNCONFIRMED_COPY.resume);
+    // The live row is unsuspended but the projection has no settled result to
+    // show yet: the resume took and its re-evaluation is still pending.
+    if (outcome === 'unknown') return success;
     if (outcome === 'failed_previous_intact') {
       return refused('reconciliation resumed, but the source still needs attention: the previous deployment was left as it was.');
     }
-    return refused('reconciliation resumed, but the source still needs attention.');
+    if (ATTENTION_OUTCOMES.has(outcome)) {
+      return refused('reconciliation resumed, but the source still needs attention.');
+    }
+    // The suspension cleared, but this build cannot say what the source did
+    // with the resume, so it must not assume the reconcile was harmless.
+    return refused(UNCONFIRMED_COPY.resume);
   }
   if (SETTLED_OUTCOMES.has(outcome)) return success;
   if (outcome === 'failed_previous_intact') {
@@ -141,6 +168,9 @@ export async function runSourceControllerAction(
     const answer = isRecord(payload) ? payload : {};
     const outcome = typeof answer.outcome === 'string' ? answer.outcome : null;
     const reason = typeof answer.reason === 'string' ? answer.reason.trim() : '';
+    // The node reports this only after reading the row it just wrote, so it is
+    // the evidence a Resume confirms from. An older node omits it.
+    const suspensionCleared = answer.suspensionCleared === true;
     // The routes always answer with a ReconcileResult, so a 2xx without an
     // outcome is unreadable evidence, not an accepted action.
     const feedback = outcome === null
@@ -148,7 +178,7 @@ export async function runSourceControllerAction(
           tone: 'warning' as const,
           message: withReason(`${stackName}: ${UNCONFIRMED_COPY[action]}`, reason),
         }
-      : sourceControllerFeedback(stackName, action, outcome, reason);
+      : sourceControllerFeedback(stackName, action, outcome, reason, suspensionCleared);
     if (feedback.tone === 'success') toast.success(feedback.message);
     else toast.warning(feedback.message);
     raiseGitOpsStateInvalidate(nodeId);

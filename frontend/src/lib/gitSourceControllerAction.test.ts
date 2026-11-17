@@ -143,7 +143,12 @@ describe('runSourceControllerAction', () => {
   it.each(['blocked', 'recovery_required', 'retry_scheduled'])(
     'does not report a resume that settled as %s as resumed',
     async (outcome) => {
-      mockFetch.mockResolvedValue(res(true, { outcome, reason: `The resume settled as ${outcome}.`, nextAction: 'none' }));
+      mockFetch.mockResolvedValue(res(true, {
+        outcome,
+        reason: `The resume settled as ${outcome}.`,
+        nextAction: 'none',
+        suspensionCleared: true,
+      }));
 
       await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
 
@@ -173,11 +178,32 @@ describe('runSourceControllerAction', () => {
     seen.stop();
   });
 
-  it('reports a resume whose re-evaluation is still running as a success', async () => {
+  it('reports the real missing-application resume as unconfirmed and still refreshes', async () => {
+    const seen = invalidations();
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'unknown',
-      reason: 'A reconcile operation is currently in flight; no settled result yet.',
+      reason: 'No GitOps application exists for this stack.',
       nextAction: 'none',
+      suspensionCleared: false,
+    }));
+
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. No GitOps application exists for this stack.',
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    // A refusal still reports the row's current evidence.
+    expect(seen.count()).toBe(1);
+    seen.stop();
+  });
+
+  it('reports a resume whose re-evaluation is still pending as a success when the node cleared the suspension', async () => {
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'unknown',
+      reason: 'The source has advanced but reconciliation has not evaluated it yet.',
+      nextAction: 'none',
+      suspensionCleared: true,
     }));
 
     await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(true);
@@ -186,11 +212,27 @@ describe('runSourceControllerAction', () => {
     expect(toast.warning).not.toHaveBeenCalled();
   });
 
+  it('does not assume a resume took when an older node omits the evidence', async () => {
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'unknown',
+      reason: 'A reconcile operation is currently in flight; no settled result yet.',
+      nextAction: 'none',
+    }));
+
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. A reconcile operation is currently in flight; no settled result yet.',
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it('reports a resume that cleared suspension but left a failing source', async () => {
     mockFetch.mockResolvedValue(res(true, {
       outcome: 'failed_previous_intact',
       reason: 'The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
       nextAction: 'retry',
+      suspensionCleared: true,
     }));
 
     await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
@@ -198,6 +240,20 @@ describe('runSourceControllerAction', () => {
     expect(toast.warning).toHaveBeenCalledWith(
       'web: reconciliation resumed, but the source still needs attention: the previous deployment was left as it was. The fetch stage failed (AUTH). The previously accepted generation is unchanged.',
     );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('does not report an unrecognized resume outcome as resumed even when the suspension cleared', async () => {
+    mockFetch.mockResolvedValue(res(true, {
+      outcome: 'a_new_outcome',
+      reason: 'Something new happened.',
+      nextAction: 'none',
+      suspensionCleared: true,
+    }));
+
+    await expect(runSourceControllerAction('web', 1, 'resume')).resolves.toBe(false);
+
+    expect(toast.warning).toHaveBeenCalledWith('web: could not confirm the source resumed. Something new happened.');
     expect(toast.success).not.toHaveBeenCalled();
   });
 

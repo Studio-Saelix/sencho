@@ -43,7 +43,7 @@ Your queue will differ. The steps work the same way on whatever it lists.
     `status-page` reads `+1 more` because it has a second reason, the source drift counted in the masthead. The list shows the most urgent reason and counts the others. Selecting the body of an entry opens that application. The button runs the step without leaving the page.
   </Step>
   <Step title="Retry the source that failed">
-    The Git host is back, so select **Retry** on `status-page`. Retry fetches the source again now instead of waiting for the next scheduled poll. A toast reads `Retry started for status-page`. The toast means the attempt began, not that it worked.
+    The Git host is back, so select **Retry** on `status-page`. Retry fetches the source again now instead of waiting for the next scheduled poll. A toast reads `Retry started for status-page` because the server reported the retry ran. If the retry is refused or fails again, a warning names the reason instead, and a failure that leaves the previous deployment in place says so.
 
     <Frame caption="After a few seconds the entry changes from source failed to review required.">
       <img src="/images/tutorials/work-the-gitops-portfolio/after-retry.png" alt="The Attention required list with a single entry, review required on status-page, with a Review update button." />
@@ -134,7 +134,7 @@ The verdict here reads **Partially known** rather than **Converged**. That verdi
 
 ## If something goes wrong
 
-The mistake most likely to cost you time is trusting the **Retry** toast. The toast appears as soon as Sencho accepts the request, even when the Git host is still unreachable. If the entry still reads **source failed** a few seconds later, the cause is still there. Select the row to open the Git Source sheet, read the failure, and fix the repository address, credentials, or host key on the **Source** tab. Then select **Retry** again. [Git Sources](/features/git-sources) has the troubleshooting table, and [Git hosts and authentication](/features/git-authentication) covers private repositories.
+The mistake most likely to cost you time is reading the first **Retry** toast as proof the source is healthy again. The toast reports what the server returned: **Retry started** means the retry ran, and a warning means Sencho reports the refusal or the failed attempt instead, naming the previous deployment when that was left intact. Either way, if the entry still reads **source failed** a few seconds later, the cause is still there. Select the row to open the Git Source sheet, read the failure, and fix the repository address, credentials, or host key on the **Source** tab. Then select **Retry** again. [Git Sources](/features/git-sources) has the troubleshooting table, and [Git hosts and authentication](/features/git-authentication) covers private repositories.
 
 ## Related
 

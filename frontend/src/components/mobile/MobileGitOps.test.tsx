@@ -193,6 +193,33 @@ describe('MobileGitOps', () => {
     window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
+  it('warns on a Resume whose source no longer exists and still refreshes the row', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => (init?.method === 'POST'
+        ? {
+            outcome: 'unknown',
+            reason: 'No GitOps application exists for this stack.',
+            nextAction: 'none',
+            suspensionCleared: false,
+          }
+        : { ...emptyList, summary: { ...emptyList.summary, applications: 1 }, applications: [portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_suspended'], availableActions: ['resume'] })] }),
+    }) as unknown as Response);
+
+    render(<MobileGitOps headerActions={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'bookstack: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalled();
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
   it('falls back to opening the Git source when the session cannot edit the stack', async () => {
     session.canEdit = false;
     withRows([portfolioRow({ id: '1:app-1', name: 'bookstack', attention: ['source_failed'], availableActions: ['retry'] })]);

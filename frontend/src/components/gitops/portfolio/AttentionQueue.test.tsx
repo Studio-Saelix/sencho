@@ -247,6 +247,31 @@ describe('AttentionQueue', () => {
     window.removeEventListener('sencho:state-invalidate', refreshed);
   });
 
+  it('warns when a Resume answered 200 but the source no longer exists', async () => {
+    const refreshed = vi.fn();
+    window.addEventListener('sencho:state-invalidate', refreshed);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        outcome: 'unknown',
+        reason: 'No GitOps application exists for this stack.',
+        nextAction: 'none',
+        suspensionCleared: false,
+      }),
+    } as unknown as Response);
+    render(<AttentionQueue rows={[row({ attention: ['source_suspended'], availableActions: ['resume'] })]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(refreshed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('sencho:state-invalidate', refreshed);
+  });
+
   it('keeps each row busy on its own while its request is in flight', async () => {
     let finishFirst: (res: Response) => void = () => {};
     mockFetch

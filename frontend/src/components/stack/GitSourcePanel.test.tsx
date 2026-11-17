@@ -1598,6 +1598,26 @@ describe('GitSourcePanel controller controls', () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 
+  it('reports a resume whose source no longer exists as unconfirmed', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => (
+      init?.method === 'POST' && String(url).includes('/git-source/resume')
+        ? jsonRes({
+            outcome: 'unknown',
+            reason: 'No GitOps application exists for this stack.',
+            nextAction: 'none',
+            suspensionCleared: false,
+          })
+        : jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] })))
+    ));
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(
+      'web: could not confirm the source resumed. No GitOps application exists for this stack.',
+    ));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it('sends source_policy manual when Manual is chosen', async () => {
     // The option that had no affordance at all. Manual is not a flavour of
     // review: it takes the source out of the unattended cadence entirely, so
