@@ -5,6 +5,7 @@ import { BusyButton } from '@/components/ui/busy-button';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { scanBannerFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
+import { cn } from '@/lib/utils';
 
 type ScanOutcome = 'ok' | 'partial' | 'failed' | 'skipped';
 
@@ -25,16 +26,30 @@ const HEADLINE: Record<Exclude<ScanOutcome, 'ok'>, string> = {
 interface ScanStatusBannerProps {
   stackName: string;
   nodeId: number | undefined;
+  /**
+   * Render without the warning tint. The host sets it while another block on the
+   * same view (a tinted update banner or check notice) carries the tone, so the
+   * view has one toned block. The words, Rescan and Dismiss are unchanged.
+   */
+  quiet?: boolean;
+  /**
+   * Reports whether the strip is showing, so the host can decide who is toned.
+   * It also reports false before every change and on unmount, and the strip
+   * re-reports whenever the callback identity changes, so pass a stable one
+   * (a state setter).
+   */
+  onShownChange?: (shown: boolean) => void;
 }
 
 /**
- * The amber strip that says the last post-deploy scan did not finish cleanly.
+ * The strip that says the last post-deploy scan did not finish cleanly (amber, or
+ * plain when `quiet`).
  * Rescan runs the same scan again on the node that owns the stack and the strip
  * follows it to the new result; Dismiss hides this result until a scan changes
  * it. Rescan is offered only to an account that can deploy the stack, the same
  * authority as the deploys that start this scan.
  */
-export function ScanStatusBanner({ stackName, nodeId }: ScanStatusBannerProps) {
+export function ScanStatusBanner({ stackName, nodeId, quiet = false, onShownChange }: ScanStatusBannerProps) {
   const { can } = useAuth();
   const canRescan = can('stack:deploy', 'stack', stackName, nodeId);
   const [scan, setScan] = useState<StackScanStatus | null>(null);
@@ -113,18 +128,29 @@ export function ScanStatusBanner({ stackName, nodeId }: ScanStatusBannerProps) {
     }
   };
 
-  if (!scan || !scan.status || scan.status === 'ok' || dismissed) return null;
+  const visibleScan = scan && scan.status && scan.status !== 'ok' && !dismissed ? scan : null;
+  const shown = visibleScan !== null;
+  useEffect(() => {
+    onShownChange?.(shown);
+    return () => onShownChange?.(false);
+  }, [shown, onShownChange]);
+
+  if (!visibleScan || !visibleScan.status || visibleScan.status === 'ok') return null;
 
   return (
     <div
-      className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-xs text-warning"
+      data-tone={quiet ? 'neutral' : 'warning'}
+      className={cn(
+        'mx-3 my-2 flex items-start gap-2 rounded-md border px-2 py-1.5 text-xs',
+        quiet ? 'border-muted bg-card/40 text-stat-subtitle' : 'border-warning/40 bg-warning/[0.06] text-warning',
+      )}
       role="status"
-      title={scan.errorMessage ?? undefined}
+      title={visibleScan.errorMessage ?? undefined}
     >
       <span className="font-mono text-[9px] uppercase tracking-wide shrink-0 mt-0.5">scan</span>
       <span className="flex-1">
-        {HEADLINE[scan.status]}
-        {scan.errorMessage ? ` ${scan.errorMessage}` : ''}
+        {HEADLINE[visibleScan.status]}
+        {visibleScan.errorMessage ? ` ${visibleScan.errorMessage}` : ''}
       </span>
       {canRescan && (
         <BusyButton
@@ -133,7 +159,7 @@ export function ScanStatusBanner({ stackName, nodeId }: ScanStatusBannerProps) {
           pending={starting || scanning}
           busyLabel="Scanning"
           data-testid="scan-rescan"
-          className="h-6 shrink-0 px-2 text-xs text-warning hover:text-warning max-md:min-h-11"
+          className={cn('h-6 shrink-0 px-2 text-xs max-md:min-h-11', quiet ? 'text-stat-subtitle hover:text-foreground' : 'text-warning hover:text-warning')}
           onClick={() => void rescan()}
         >
           Rescan
@@ -141,7 +167,7 @@ export function ScanStatusBanner({ stackName, nodeId }: ScanStatusBannerProps) {
       )}
       <button
         type="button"
-        className="shrink-0 ml-2 p-0.5 rounded hover:bg-warning/10 transition-colors"
+        className={cn('shrink-0 ml-2 p-0.5 rounded transition-colors', quiet ? 'hover:bg-muted/40' : 'hover:bg-warning/10')}
         onClick={dismiss}
         aria-label="Dismiss"
       >

@@ -268,6 +268,138 @@ describe('StackAnatomyPanel update banner', () => {
     expect(screen.queryByText(/checks the image already installed, not the new one/i)).toBeNull();
   });
 
+  describe('one toned block on the Anatomy tab', () => {
+    const FAILED_SCAN = { status: 'failed', attemptedAt: 100, errorMessage: 'registry unreachable', scanning: false };
+
+    beforeEach(() => { localStorage.clear(); });
+
+    function serve(bump: 'patch' | 'minor' | null, scan: unknown) {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) {
+          const body = previewBody(bump !== null);
+          if (bump === 'minor') {
+            body.summary.semver_bump = 'minor';
+            body.summary.update_kind = 'tag';
+            body.images[0].semver_bump = 'minor';
+          }
+          return jsonRes(body);
+        }
+        if (url.includes('/scan-status')) return jsonRes(scan);
+        return jsonRes(null, false);
+      });
+    }
+
+    it('keeps the scan strip toned when it is the only banner', async () => {
+      serve(null, FAILED_SCAN);
+      render(panel(false));
+      const strip = await screen.findByText(/Last post-deploy scan failed/);
+      expect(strip.closest('[data-tone]')).toHaveAttribute('data-tone', 'warning');
+      expect(screen.queryByTestId('update-available-banner')).not.toBeInTheDocument();
+    });
+
+    it('quiets the scan strip under an update banner that is a warning', async () => {
+      serve('minor', FAILED_SCAN);
+      render(panel(false));
+      const banner = await screen.findByTestId('update-available-banner');
+      expect(banner).toHaveAttribute('data-tone', 'warning');
+      const strip = (await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]');
+      expect(strip).toHaveAttribute('data-tone', 'neutral');
+      // Words and verb are unchanged; only the tint is gone.
+      expect(screen.getByTestId('scan-rescan')).toBeInTheDocument();
+    });
+
+    it('lets a scan warning outrank a green safe-to-apply banner', async () => {
+      serve('patch', FAILED_SCAN);
+      render(panel(false));
+      const banner = await screen.findByTestId('update-available-banner');
+      await screen.findByText(/Last post-deploy scan failed/);
+      await waitFor(() => expect(banner).toHaveAttribute('data-tone', 'neutral'));
+      expect(screen.getByRole('button', { name: 'apply' })).toBeInTheDocument();
+      expect(screen.getByText(/Last post-deploy scan failed/).closest('[data-tone]')).toHaveAttribute('data-tone', 'warning');
+    });
+
+    it('keeps the incomplete-check notice as the toned block over the scan strip', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) {
+          return jsonRes(previewBody(false, [], { verification_failed: true, verification_error: 'Registry unreachable', check_error: 'Registry unreachable' }));
+        }
+        if (url.includes('/scan-status')) return jsonRes(FAILED_SCAN);
+        return jsonRes(null, false);
+      });
+      render(panel(false));
+      const notice = await screen.findByTestId('update-check-status-banner');
+      expect(notice.className).toContain('bg-warning');
+      expect((await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]')).toHaveAttribute('data-tone', 'neutral');
+    });
+
+    it('keeps a breaking update banner destructive and quiets the scan strip under it', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) {
+          const body = previewBody(true);
+          body.summary.semver_bump = 'major';
+          body.summary.update_kind = 'tag';
+          body.images[0].semver_bump = 'major';
+          return jsonRes(body);
+        }
+        if (url.includes('/scan-status')) return jsonRes(FAILED_SCAN);
+        return jsonRes(null, false);
+      });
+      render(panel(false));
+      expect(await screen.findByTestId('update-available-banner')).toHaveAttribute('data-tone', 'destructive');
+      expect((await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]')).toHaveAttribute('data-tone', 'neutral');
+    });
+
+    it('keeps a blocked update banner destructive and quiets the scan strip under it', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) {
+          const body = previewBody(true);
+          body.summary.blocked = true;
+          body.summary.blocked_reason = 'Major version bump';
+          return jsonRes(body);
+        }
+        if (url.includes('/scan-status')) return jsonRes(FAILED_SCAN);
+        return jsonRes(null, false);
+      });
+      render(panel(false));
+      expect(await screen.findByTestId('update-available-banner')).toHaveAttribute('data-tone', 'destructive');
+      expect((await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]')).toHaveAttribute('data-tone', 'neutral');
+    });
+
+    it('returns the update banner to green when the scan strip is dismissed', async () => {
+      serve('patch', FAILED_SCAN);
+      render(panel(false));
+      const banner = await screen.findByTestId('update-available-banner');
+      await waitFor(() => expect(banner).toHaveAttribute('data-tone', 'neutral'));
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      await waitFor(() => expect(banner).toHaveAttribute('data-tone', 'success'));
+      expect(screen.queryByText(/Last post-deploy scan failed/)).not.toBeInTheDocument();
+    });
+
+    it('does not carry one stack scan strip over to the next stack', async () => {
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/update-preview')) return jsonRes(previewBody(true));
+        if (url.includes('/stacks/web/scan-status')) return jsonRes(FAILED_SCAN);
+        if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+        return jsonRes(null, false);
+      });
+      const view = render(panel(false, vi.fn(), 'web'));
+      await waitFor(() => expect(screen.getByTestId('update-available-banner')).toHaveAttribute('data-tone', 'neutral'));
+      view.rerender(panel(false, vi.fn(), 'api'));
+      await waitFor(() => expect(screen.getByTestId('update-available-banner')).toHaveAttribute('data-tone', 'success'));
+    });
+
+    it('keeps the update banner green when the scan strip is not showing', async () => {
+      serve('patch', { status: 'ok' });
+      render(panel(false));
+      expect(await screen.findByTestId('update-available-banner')).toHaveAttribute('data-tone', 'success');
+    });
+  });
+
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {
     const onApply = vi.fn();
     render(panel(false, onApply));

@@ -224,3 +224,46 @@ describe('ScanStatusBanner', () => {
     expect((screen.getByTestId('scan-rescan') as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe('ScanStatusBanner quiet mode and visibility report', () => {
+  it('drops the tint but keeps the words, Rescan and Dismiss when quiet', async () => {
+    serve([failed]);
+    render(<ScanStatusBanner stackName="web" nodeId={1} quiet />);
+    const strip = (await screen.findByText(/Last post-deploy scan failed/)).closest('[data-tone]');
+    expect(strip).toHaveAttribute('data-tone', 'neutral');
+    expect(strip?.className).not.toContain('bg-warning');
+    expect(screen.getByTestId('scan-rescan')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+  });
+
+  it('reports when the strip shows and when it is dismissed', async () => {
+    serve([failed]);
+    const onShownChange = vi.fn();
+    render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    await screen.findByText(/Last post-deploy scan failed/);
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it.each([['partial'], ['skipped'], ['failed']])('reports shown for a %s result and hidden for ok', async (outcome) => {
+    serve([{ status: outcome, attemptedAt: 100, errorMessage: null, scanning: false }]);
+    const onShownChange = vi.fn();
+    const view = render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    await waitFor(() => expect(onShownChange).toHaveBeenLastCalledWith(true));
+    view.unmount();
+    expect(onShownChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports hidden for a clean result', async () => {
+    serve([{ status: 'ok', attemptedAt: 100, errorMessage: null, scanning: false }]);
+    const onShownChange = vi.fn();
+    render(<ScanStatusBanner stackName="web" nodeId={1} onShownChange={onShownChange} />);
+    // Let the read settle: the mock resolves on the next microtask turns.
+    await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText(/post-deploy scan/i)).not.toBeInTheDocument();
+    expect(onShownChange).not.toHaveBeenCalledWith(true);
+  });
+});
+

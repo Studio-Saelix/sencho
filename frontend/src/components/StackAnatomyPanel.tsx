@@ -189,10 +189,13 @@ export default function StackAnatomyPanel({
   // changes. Adjusting during render means the next stack never paints revealed.
   const revealIdentity = `${activeNode?.id ?? 'local'}:${stackName}`;
   const [showHiddenServices, setShowHiddenServices] = useState(false);
+  const [scanBannerShown, setScanBannerShown] = useState(false);
   const [revealIdentitySeen, setRevealIdentitySeen] = useState(revealIdentity);
   if (revealIdentitySeen !== revealIdentity) {
     setRevealIdentitySeen(revealIdentity);
     setShowHiddenServices(false);
+    // The scan strip remounts per stack; do not let the last stack's state tone this one.
+    setScanBannerShown(false);
   }
 
   useEffect(() => {
@@ -455,16 +458,26 @@ export default function StackAnatomyPanel({
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
     : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
-  const bannerTone = bannerSeverity === 'danger'
-    ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
-    : bannerSeverity === 'warn'
-      ? 'border-warning/40 bg-warning/[0.06] text-warning'
-      : 'border-success/40 bg-success/[0.06] text-success';
-  const applyBtnTone = bannerSeverity === 'danger'
-    ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
-    : bannerSeverity === 'warn'
-      ? 'border-warning/40 text-warning hover:bg-warning/10'
-      : 'border-success/40 text-success hover:bg-success/10';
+  // One toned block per view. The update banner and the incomplete-check notice are
+  // the tab's Answer, so the post-deploy scan strip goes quiet under either. The one
+  // exception is a green update banner (severity ok): it does not outrank a scan
+  // warning, so it goes plain and the strip keeps the tone.
+  const updateBannerQuiet = showUpdateBanner && scanBannerShown && bannerSeverity === 'ok';
+  const scanBannerQuiet = scanBannerShown && !updateBannerQuiet && (showUpdateBanner || showCheckStatusBanner);
+  const bannerTone = updateBannerQuiet
+    ? 'border-muted bg-card/40 text-stat-subtitle'
+    : bannerSeverity === 'danger'
+      ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
+      : bannerSeverity === 'warn'
+        ? 'border-warning/40 bg-warning/[0.06] text-warning'
+        : 'border-success/40 bg-success/[0.06] text-success';
+  const applyBtnTone = updateBannerQuiet
+    ? 'border-muted text-foreground hover:bg-muted/40'
+    : bannerSeverity === 'danger'
+      ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
+      : bannerSeverity === 'warn'
+        ? 'border-warning/40 text-warning hover:bg-warning/10'
+        : 'border-success/40 text-success hover:bg-success/10';
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
   const tagOnlyAdvisory = isTagOnlyAdvisory(updatePreview);
   const canApplyPreview = isActionableUpdatePreview(updatePreview);
@@ -729,7 +742,7 @@ export default function StackAnatomyPanel({
           </div>
         )}
         {showUpdateBanner && updatePreview && (
-          <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
+          <div data-testid="update-available-banner" data-tone={updateBannerQuiet ? 'neutral' : bannerSeverity === 'danger' ? 'destructive' : bannerSeverity === 'warn' ? 'warning' : 'success'} className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-mono text-xs uppercase tracking-wide">
@@ -798,7 +811,7 @@ export default function StackAnatomyPanel({
             </div>
           </div>
         )}
-        <ScanStatusBanner key={`${activeNode?.id ?? 'local'}:${stackName}`} stackName={stackName} nodeId={activeNode?.id} />
+        <ScanStatusBanner key={`${activeNode?.id ?? 'local'}:${stackName}`} stackName={stackName} nodeId={activeNode?.id} quiet={scanBannerQuiet} onShownChange={setScanBannerShown} />
       </div>
       {anatomy && anatomy.services.length > 0 && (
         <div className="border-t border-muted px-3 py-2 flex items-center justify-between">
