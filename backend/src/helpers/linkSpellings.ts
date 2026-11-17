@@ -45,9 +45,9 @@ export const UNPLACEABLE_LINK_CHAIN = 'link chain too long to place';
  * not read yet, so it is the path the kernel opens; a link followed while an
  * earlier one's spelling is still owed is covered by that one spelling. So a
  * chain whose last target was moved aside still yields that target's
- * spelling, however its hops spell their way there. Only where the links point is read, never what a
- * file holds, and the spellings are used only to match the work against the
- * directory fences.
+ * spelling, however its hops spell their way there. Only where the links
+ * point is read, never what a file holds, and the spellings are used only to
+ * match the work against the directory fences.
  *
  * Stops at a component that cannot be read as a link or a plain entry (not
  * there, not a directory, not readable), and after MAX_LINK_HOPS links, so a
@@ -134,4 +134,3 @@ export async function linkSpellings(abs: string): Promise<string[]> {
   if (owed && !record()) return [absResolved, UNPLACEABLE_LINK_CHAIN];
   return [...new Set(spellings)];
 }
-

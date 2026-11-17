@@ -175,6 +175,22 @@ function composeRootAlias(): string {
   return alias;
 }
 
+/**
+ * Hold the next open of `file` for writing (the env sinks open it, then write
+ * through the handle) until `held` settles, calling `entered` once it is held.
+ */
+function holdWriteOpenOf(file: string, entered: () => void, held: Promise<void>) {
+  const original = fs.promises.open.bind(fs.promises);
+  return vi.spyOn(fs.promises, 'open').mockImplementation((async (...args: Parameters<typeof fs.promises.open>) => {
+    const flags = args[1];
+    if (String(args[0]) === file && typeof flags === 'number' && (flags & fs.constants.O_WRONLY) !== 0) {
+      entered();
+      await held;
+    }
+    return original(...args);
+  }) as typeof fs.promises.open);
+}
+
 function dataDir(stack: string, name = 'data'): string {
   const dir = path.join(stackDir(stack), name);
   fs.mkdirSync(dir, { recursive: true });
@@ -2406,18 +2422,11 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       resetStack();
       const env = linkedEnvStack(shape);
       const app = path.join(env.dir, 'app.env');
-      const original = fs.promises.writeFile.bind(fs.promises);
       let entered!: () => void;
       const inside = new Promise<void>((resolve) => { entered = resolve; });
       let finish!: () => void;
       const held = new Promise<void>((resolve) => { finish = resolve; });
-      const spy = vi.spyOn(fs.promises, 'writeFile').mockImplementation((async (...args: Parameters<typeof fs.promises.writeFile>) => {
-        if (String(args[0]) === app) {
-          entered();
-          await held;
-        }
-        return original(...args);
-      }) as typeof fs.promises.writeFile);
+      const spy = holdWriteOpenOf(app, entered, held);
       // Admitted with nothing fenced, so registered by its spellings alone.
       const writing = FileSystemService.getInstance(nodeId).writeFile(app, 'A=2\n');
       await inside;
@@ -2571,6 +2580,25 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     vi.mocked(fence.matchFsWorkToFences).mockRestore();
     expect(saved.status).toBe(409);
     expect(saved.body.error).toContain('not a regular file');
+    // A Secrets import refuses it as a source, not as a server fault.
+    resetStack();
+    fencedOverwriteOf(dataDir('other'), ['other']);
+    stackDir('web');
+    fs.writeFileSync(env, 'B=1\n');
+    await beforeNextAdmission(() => {
+      fs.rmSync(env);
+      execFileSync('mkfifo', [env]);
+    });
+    const { SecretsService, SecretSourceRefusedError } = await import('../services/SecretsService');
+    const imported = SecretsService.getInstance().readImportOverlay(nodeId, 'web', '.env');
+    await expect(imported).rejects.toBeInstanceOf(SecretSourceRefusedError);
+    await expect(imported).rejects.toThrow('not a regular file');
+    vi.mocked(fence.matchFsWorkToFences).mockRestore();
+    // A directory in the env file's place keeps the editor's answer for a directory.
+    resetStack();
+    fs.mkdirSync(path.join(stackDir('web'), '.env'));
+    const dirCreate = await request(app).put('/api/stacks/web/env?create=1').set('Cookie', adminCookie).send({ content: 'B=2\n' });
+    expect(dirCreate.status).toBe(409);
   });
 
   it('writes an env file whose link climbs out of a linked directory with .. to where the kernel puts it, not into a fenced directory its text collapses to', async () => {
@@ -2838,18 +2866,11 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
   it('makes a fence recorded while an env save is writing wait for it', async () => {
     const { data, envFile } = envStack();
     const fence = await import('../services/recovery/restoreFence');
-    const original = fs.promises.writeFile.bind(fs.promises);
     let entered!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
     let finish!: () => void;
     const held = new Promise<void>((resolve) => { finish = resolve; });
-    vi.spyOn(fs.promises, 'writeFile').mockImplementation((async (...args: Parameters<typeof fs.promises.writeFile>) => {
-      if (String(args[0]) === envFile) {
-        entered();
-        await held;
-      }
-      return original(...args);
-    }) as typeof fs.promises.writeFile);
+    holdWriteOpenOf(envFile, entered, held);
     const saving = putEnv(envFile).then((res) => res.status);
     await inside;
     fencedOverwriteOf(data, ['web']);

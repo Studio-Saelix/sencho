@@ -595,6 +595,10 @@ async function readEnvLocal(nodeId: number, absolutePath: string, missingAsEmpty
         if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
             throw new SecretSourceRefusedError('The env file resolves outside the compose directory');
         }
+        // A FIFO, socket or directory in the env file's place is not something to import.
+        if (code === 'NOT_A_FILE' || code === 'EISDIR') {
+            throw new SecretSourceRefusedError(`${path.basename(absolutePath)} is not a regular file`);
+        }
         throw err;
     }
 }

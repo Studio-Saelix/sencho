@@ -271,7 +271,7 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
  * a regular compose file is ever returned.
  */
 async function readRegularComposeFile(filePath: string): Promise<{ content: string; mtimeMs: number }> {
-  const { fh, stat } = await openRegularComposeFile(filePath);
+  const { fh, stat } = await openRegularFile(filePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
   try {
     return { content: await fh.readFile('utf-8'), mtimeMs: stat.mtimeMs };
   } finally {
@@ -279,12 +279,7 @@ async function readRegularComposeFile(filePath: string): Promise<{ content: stri
   }
 }
 
-/** Open a resolved compose file for reading as openRegularFile does. */
-function openRegularComposeFile(
-  filePath: string,
-): Promise<{ fh: import('fs/promises').FileHandle; stat: import('fs').Stats }> {
-  return openRegularFile(filePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
-}
+type OpenedFile = { fh: import('fs/promises').FileHandle; stat: import('fs').Stats };
 
 /**
  * Open `filePath` with `flags` plus O_NONBLOCK and refuse it with `refuse`
@@ -292,46 +287,41 @@ function openRegularComposeFile(
  * regular file, but a FIFO swapped in for one opens at once (or, for writing
  * with no reader, fails with ENXIO) instead of sleeping until the other end
  * appears, which under the directory fences would hold a fence's drain until
- * its wait ran out. A directory opened for writing keeps its EISDIR. On
- * success the caller owns the handle and closes it; on any refusal or error
- * this function has already closed it.
+ * its wait ran out. A directory opened for writing keeps its EISDIR; one
+ * opened for reading is handed to `refuse` with its stat. On success the
+ * caller owns the handle and closes it; on any refusal or error this function
+ * has already closed it.
  */
 async function openRegularFile(
   filePath: string,
   flags: number,
-  refuse: (file: string) => Error,
-  mode?: number,
-): Promise<{ fh: import('fs/promises').FileHandle; stat: import('fs').Stats }> {
+  refuse: (file: string, stat?: import('fs').Stats) => Error,
+): Promise<OpenedFile> {
   let fh: import('fs/promises').FileHandle;
   try {
-    fh = await fsPromises.open(filePath, flags | fsConstants.O_NONBLOCK, mode);
+    fh = await fsPromises.open(filePath, flags | fsConstants.O_NONBLOCK);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENXIO') throw refuse(path.basename(filePath));
     throw err;
   }
   try {
     const stat = await fh.stat();
-    if (!stat.isFile()) throw refuse(path.basename(filePath));
+    if (!stat.isFile()) throw refuse(path.basename(filePath), stat);
     return { fh, stat };
   } catch (err) {
-    await fh.close();
+    await fh.close().catch(() => undefined);
     throw err;
   }
 }
 
 /**
- * Write `content` to `filePath` through openRegularFile, creating or
- * truncating it as fsPromises.writeFile does, so a FIFO in its place is
- * refused instead of holding the write (and any fence registration) open.
+ * Write an env file through openRegularFile, creating or truncating it as
+ * fsPromises.writeFile does, so a FIFO in its place is refused instead of
+ * holding the write (and any fence registration) open.
  */
-async function writeRegularFile(
-  filePath: string,
-  content: string,
-  encoding: BufferEncoding,
-  refuse: (file: string) => Error,
-): Promise<void> {
+async function writeRegularEnvFile(filePath: string, content: string, encoding: BufferEncoding): Promise<void> {
   const { fh } = await openRegularFile(
-    filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC, refuse, 0o666,
+    filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC, nonRegularEnvTargetError,
   );
   try {
     await fh.writeFile(content, encoding);
@@ -350,6 +340,18 @@ function nonRegularEnvFileError(file: string): Error & { code: 'NOT_A_FILE' } {
   return Object.assign(new Error(`Env file ${file} is not a regular file`), {
     code: 'NOT_A_FILE' as const,
   });
+}
+
+/**
+ * nonRegularEnvFileError for the editor and Secrets sinks, except that a
+ * directory keeps the EISDIR a plain read or write of it gives, which the env
+ * routes answer as a path that is a directory.
+ */
+function nonRegularEnvTargetError(file: string, stat?: import('fs').Stats): Error {
+  if (stat?.isDirectory()) {
+    return Object.assign(new Error(`EISDIR: illegal operation on a directory, ${file}`), { code: 'EISDIR' });
+  }
+  return nonRegularEnvFileError(file);
 }
 
 // Explorer-only protection: includes the blueprint ownership marker without
@@ -1094,16 +1096,14 @@ export class FileSystemService {
     // or waits for it.
     return this.underDirectoryFences(safePath, async () => {
       if (expectedMtimeMs !== null && resolved) {
-        let fh: import('fs/promises').FileHandle | null = null;
+        let opened: OpenedFile | null = null;
         try {
           // Non-blocking and regular files only, so a FIFO swapped in after
           // the admission fails at once instead of holding the fence's drain.
-          const opened = await openRegularComposeFile(safePath);
-          fh = opened.fh;
-          const stat = opened.stat;
-          if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-            const currentContent = await fh.readFile('utf-8');
-            return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
+          opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
+          if (Math.floor(opened.stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await opened.fh.readFile('utf-8');
+            return { ok: false, reason: 'mtime', currentMtimeMs: opened.stat.mtimeMs, currentContent, filename };
           }
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -1111,7 +1111,7 @@ export class FileSystemService {
             return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
           }
         } finally {
-          if (fh) await fh.close();
+          await opened?.fh.close();
         }
       }
 
@@ -1274,22 +1274,20 @@ export class FileSystemService {
 
     return this.underDirectoryFences(safePath, async () => {
       if (expectedMtimeMs !== null) {
-        let fh: import('fs/promises').FileHandle | null = null;
+        let opened: OpenedFile | null = null;
         try {
           // Non-blocking and regular files only, here and at the write below,
           // so a FIFO swapped in after the admission fails at once instead of
           // holding the fence's drain.
-          const opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularEnvFileError);
-          fh = opened.fh;
-          const stat = opened.stat;
-          if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-            const currentContent = await fh.readFile('utf-8');
-            return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularEnvTargetError);
+          if (Math.floor(opened.stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await opened.fh.readFile('utf-8');
+            return { ok: false, currentMtimeMs: opened.stat.mtimeMs, currentContent };
           }
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         } finally {
-          if (fh) await fh.close();
+          await opened?.fh.close();
         }
       }
 
@@ -1300,7 +1298,7 @@ export class FileSystemService {
       if (!contained.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      await writeRegularFile(contained, content, 'utf-8', nonRegularEnvFileError);
+      await writeRegularEnvFile(contained, content, 'utf-8');
       const newStat = await fsPromises.stat(contained);
       return { ok: true, mtimeMs: newStat.mtimeMs };
     });
@@ -1361,16 +1359,16 @@ export class FileSystemService {
         // the check and read through a handle that never follows a link: the
         // conflict payload must not become a way to read outside the compose
         // root. A vanished or linked target is refused as an invalid path;
-        // EISDIR propagates and the route answers 409.
+        // EISDIR (a directory) and NOT_A_FILE (a FIFO or socket) propagate and
+        // the route answers 409.
         await this.assertRealWithinBase(safePath);
-        let reader: import('fs/promises').FileHandle | null = null;
+        let reader: OpenedFile | null = null;
         try {
           // Non-blocking and regular files only, so a FIFO at the target
           // cannot hold the lease this read runs under.
-          reader = (await openRegularFile(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW, nonRegularEnvFileError)).fh;
-          const stat = await reader.stat();
-          const currentContent = await reader.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          reader = await openRegularFile(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW, nonRegularEnvTargetError);
+          const currentContent = await reader.fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: reader.stat.mtimeMs, currentContent };
         } catch (readErr) {
           const code = (readErr as NodeJS.ErrnoException).code;
           if (code === 'ELOOP') {
@@ -1381,7 +1379,7 @@ export class FileSystemService {
           }
           throw readErr;
         } finally {
-          if (reader) await reader.close();
+          await reader?.fh.close();
         }
       }
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
@@ -1474,7 +1472,7 @@ export class FileSystemService {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
       // Non-blocking and regular files only, so a FIFO cannot hold the lease.
-      const { fh } = await openRegularFile(contained, fsConstants.O_RDONLY, nonRegularEnvFileError);
+      const { fh } = await openRegularFile(contained, fsConstants.O_RDONLY, nonRegularEnvTargetError);
       try {
         return await fh.readFile(encoding);
       } finally {
@@ -1543,7 +1541,7 @@ export class FileSystemService {
       if (!contained.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      return writeRegularFile(contained, content, encoding, nonRegularEnvFileError);
+      return writeRegularEnvFile(contained, content, encoding);
     });
   }
 
@@ -1595,7 +1593,7 @@ export class FileSystemService {
         if (!contained.startsWith(baseResolved + path.sep)) {
           throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
         }
-        await writeRegularFile(contained, content, 'utf-8', nonRegularEnvFileError);
+        await writeRegularEnvFile(contained, content, 'utf-8');
       });
     } catch (error) {
       if (isDataRestoreFenceError(error)) throw error;
