@@ -170,7 +170,7 @@ describe('MobileGitOps', () => {
 
     render(<MobileGitOps headerActions={null} />);
 
-    expect(await screen.findByText('deploy failed')).toBeInTheDocument();
+    expect(await screen.findByText('deploy failed')).toHaveClass('text-destructive');
     fireEvent.click(screen.getByRole('button', { name: 'Open stack' }));
     expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ nodeId: 1, stackName: 'bookstack', destination: 'stack' });
     window.removeEventListener(SENCHO_OPEN_STACK_EVENT, opened);
