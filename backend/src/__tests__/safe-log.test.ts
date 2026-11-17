@@ -17,6 +17,29 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('hunter2');
   });
 
+  // A message wraps a quoted value in parentheses, so a closer that ends a
+  // keyword value is the sentence's punctuation and must survive the pass.
+  it.each([
+    ['a token', 'token=SECRET12)', 'token=[redacted])'],
+    ['a password', 'password=SECRET12)', 'password=[redacted])'],
+    ['an api-key', 'api-key=SECRET12)', 'api-key=[redacted])'],
+    ['a secret', 'secret=SECRET12)', 'secret=[redacted])'],
+    ['a Bearer credential', 'Bearer SECRET12)', 'Bearer [redacted])'],
+  ])('keeps the closing parenthesis after %s in prose', (_variant, input, expected) => {
+    const text = redactSensitiveText(`see (${input} and done`);
+    expect(text).toBe(`see (${expected} and done`);
+    expect(text).not.toContain('SECRET12');
+  });
+
+  it('still redacts a keyword value that holds a closing parenthesis mid-token', () => {
+    expect(redactSensitiveText('token=ab)cd')).toBe('token=[redacted]');
+  });
+
+  it('leaves its own keyword-redacted message unchanged', () => {
+    const once = redactSensitiveText('see (postgres:16?token=SECRET12) and publishes');
+    expect(redactSensitiveText(once)).toBe(once);
+  });
+
   it.each([
     ['postgres', 'see postgres://bob:s3cretPASS@host/db', 'postgres://[redacted]@host/db'],
     ['redis', 'redis://default:hunter2@cache:6379/0 refused', 'redis://[redacted]@cache:6379/0 refused'],

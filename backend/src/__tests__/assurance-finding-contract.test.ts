@@ -397,6 +397,36 @@ describe('secret-safe serialization', () => {
     expect(finding.message).toMatch(ruleId === 'image-latest' ? /moving latest tag\. Deploys/ : /and publishes 5432 on all interfaces/);
   });
 
+  // The stored message already carries the redacted image, so the read applies
+  // the text pass again; the closer that ends the quoted image must survive it.
+  it.each([
+    ['a token keyword', 'postgres:16?token=SECRETST12', 'postgres:16?token=[redacted]'],
+    ['a password keyword', 'postgres:16?password=SECRETSP12', 'postgres:16?password=[redacted]'],
+    ['an api_key keyword', 'postgres:16?api_key=SECRETSK12', 'postgres:16?api_key=[redacted]'],
+    ['a secret keyword', 'postgres:16?secret=SECRETSS12', 'postgres:16?secret=[redacted]'],
+  ])('keeps the closing parenthesis after %s in a stored sensitive image row', (_variant, image, redacted) => {
+    const row: PreflightFindingRow = {
+      id: 'row-store-paren',
+      run_id: 'run-1',
+      rule_id: 'sensitive-service-broad-exposure',
+      severity: 'high',
+      title: 'Sensitive service "web" is exposed on all interfaces',
+      message: `Service "web" looks like a database or admin service (${image}) and publishes 5432 on all interfaces. Broadly exposing it is a common source of compromise.`,
+      source_path: 'web',
+      remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',
+      service: 'web',
+      created_at: 1,
+      rule_version: 1,
+      subject_kind: 'service',
+      subject_key: 'web',
+    };
+    const finding = normalizeStoredFinding(row, 1, STACK);
+    expect(finding.message).toBe(
+      `Service "web" looks like a database or admin service (${redacted}) and publishes 5432 on all interfaces. Broadly exposing it is a common source of compromise.`,
+    );
+    expect(finding.message).not.toContain('SECRET');
+  });
+
   it.each(['constructor', 'toString', '__proto__'])('reads a stored row whose rule id is %s without throwing', ruleId => {
     const row: PreflightFindingRow = {
       id: 'row-odd', run_id: 'run-1', rule_id: ruleId, severity: 'low', title: 't', message: 'm',
