@@ -168,19 +168,37 @@ describe('portfolio row actions and attention next steps', () => {
     ['source_unknown_outcome', 'retry'],
     ['source_suspended', 'resume'],
   ] as const)('runs %s as %s in place when the session may', (reason, action) => {
-    const next = attentionNextStep(reason, direct, { can: wanted => wanted === action });
+    const next = attentionNextStep(reason, direct, { can: wanted => wanted === action, canReview: () => false });
     expect(next.label).toBe(action === 'resume' ? 'Resume' : 'Retry');
   });
 
   it('falls back to opening the Git source when the session may not run the verb', () => {
-    expect(attentionNextStep('source_suspended', direct, { can: () => false }).label).toBe('Open Git source');
+    expect(attentionNextStep('source_suspended', direct, { can: () => false, canReview: () => false }).label)
+      .toBe('Open Git source');
   });
 
-  it('opens a Direct pending update review in the Git source, which pulls and shows the diff', () => {
-    const next = attentionNextStep('source_review_pending', direct);
+  it.each([
+    'source_review_pending',
+    'source_conflict_blocker',
+    'source_reconcile_required',
+  ] as const)('opens %s in the Git source with the review intent when the session may', (reason) => {
+    const next = attentionNextStep(reason, direct, { can: () => false, canReview: () => true });
     expect(next.label).toBe('Review update');
     expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
       .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name, intent: 'review' }]);
+  });
+
+  it.each([
+    'source_review_pending',
+    'source_conflict_blocker',
+    'source_reconcile_required',
+  ] as const)('opens %s without pulling when the review gate refuses', (reason) => {
+    // The verb gate may allow everything; only the review gate decides this.
+    const next = attentionNextStep(reason, direct, { can: () => true, canReview: () => false });
+    expect(next.label).toBe('Open Git source');
+    // No intent: the sheet opens read-only instead of POSTing a pull the server refuses.
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
   });
 
   it('opens the application for a Blueprint failure, which has no single stack', () => {

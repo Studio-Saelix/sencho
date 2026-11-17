@@ -15,24 +15,30 @@ export function byUrgency(a: GitOpsAttentionReason, b: GitOpsAttentionReason): n
 
 /**
  * What this session may do to a Direct application's Git source from a list:
- * the server must offer the action, the session must be able to edit the stack,
- * and the owning node must run the source controller. Anything else falls back to
- * opening the surface, so a button never promises what would be refused.
+ * for a controller verb, the server must offer it, the session must be able to
+ * edit the stack, and the owning node must run the source controller. Anything
+ * else falls back to opening the surface, so a button never promises what would
+ * be refused.
  */
 function useSourceControl(): (row: GitOpsPortfolioRow) => SourceControl {
   const { can } = useAuth();
   const { nodeMeta } = useNodes();
-  return (row) => ({
-    can: (action) => {
-      if (row.nodeId === null || row.stackName === null) return false;
-      const meta = nodeMeta.get(row.nodeId);
-      // Optimistic while the node's capabilities are unknown, as the Git source sheet is; a refusal still toasts.
-      const capable = meta ? meta.capabilities.includes(GITOPS_SOURCE_CONTROLLER_CAPABILITY) : true;
-      return capable
-        && can('stack:edit', 'stack', row.stackName, row.nodeId)
-        && row.availableActions.includes(action);
-    },
-  });
+  return (row) => {
+    if (row.nodeId === null || row.stackName === null) {
+      return { can: () => false, canReview: () => false };
+    }
+    const meta = nodeMeta.get(row.nodeId);
+    // Optimistic while the node's capabilities are unknown, as the Git source sheet is; a refusal still toasts.
+    const capable = meta ? meta.capabilities.includes(GITOPS_SOURCE_CONTROLLER_CAPABILITY) : true;
+    const mayWrite = capable && can('stack:edit', 'stack', row.stackName, row.nodeId);
+    return {
+      can: (action) => mayWrite && row.availableActions.includes(action),
+      // Reviewing pulls the waiting commit, the same stack:edit write as a
+      // controller verb. The projection carries no review verb to consult, so
+      // edit access and the controller capability are the whole gate.
+      canReview: () => mayWrite,
+    };
+  };
 }
 
 /**

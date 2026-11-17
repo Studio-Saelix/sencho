@@ -299,9 +299,12 @@ const UPDATE_REVIEW_REASONS: ReadonlySet<GitOpsAttentionReason> = new Set<GitOps
   'source_reconcile_required',
 ]);
 
-/** What this session may do to a Direct application's Git source without opening anything. */
+/** What this session may do with a Direct application's Git source from a list. */
 export interface SourceControl {
+  /** The server offers this controller verb and the session may run it. */
   can: (action: SourceVerb) => boolean;
+  /** The session may pull the waiting commit to review it. */
+  canReview: () => boolean;
 }
 
 /** A step either opens a surface (synchronously) or acts in place and settles when the server answers. */
@@ -316,13 +319,13 @@ export interface AttentionStep {
  *
  * A Direct application's failed or suspended source is retried or resumed in
  * place when the server offers it and the session may; its waiting update opens
- * the Git source sheet, which pulls straight into the diff when an update is
- * waiting; a runtime failure goes to the stack, where the logs are. A Blueprint
- * decision opens the application sheet, whose authority actions own permission
- * and confirmation, and any other Direct reason opens that application's Git
- * source sheet. A retry or resume the server does not offer to this session
- * falls back to opening the Git source, so those verbs never promise something
- * that would be refused.
+ * the Git source sheet, which pulls straight into the diff when the session may
+ * edit the stack; a runtime failure goes to the stack, where the logs are. A
+ * Blueprint decision opens the application sheet, whose authority actions own
+ * permission and confirmation, and any other Direct reason opens that
+ * application's Git source sheet. A retry, resume or review the server or the
+ * session does not offer falls back to opening the Git source, so those verbs
+ * never promise something that would be refused.
  */
 export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPortfolioRow, control?: SourceControl): AttentionStep {
   const open = (label: string): AttentionStep => ({ label, run: () => openPortfolioApplication(row) });
@@ -333,7 +336,12 @@ export function attentionNextStep(reason: GitOpsAttentionReason, row: GitOpsPort
   }
   if (RUNTIME_FAILURE_REASONS.has(reason)) return { label: 'Open stack', run: () => openDirectStack(row) };
   if (UPDATE_REVIEW_REASONS.has(reason)) {
-    return { label: 'Review update', run: () => openGitSourceInPlace(row, 'review') };
+    if (control?.canReview()) {
+      return { label: 'Review update', run: () => openGitSourceInPlace(row, 'review') };
+    }
+    // The review pull is a write. Opening the sheet without the intent lets the
+    // operator read what is waiting instead of pulling into a refused request.
+    return { label: 'Open Git source', run: () => openGitSourceInPlace(row) };
   }
   const verb = SOURCE_FAILURE_VERB[reason];
   if (verb) {
