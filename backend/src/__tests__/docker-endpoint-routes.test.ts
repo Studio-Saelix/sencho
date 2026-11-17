@@ -177,6 +177,8 @@ describe('a refused lifecycle request', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('data_restore');
     expect(res.body.error).toContain('data restore is overwriting');
+    // Refused before anything moved, so a hub rolling a rollout back through this node records no partial restore.
+    expect(res.body.failureClass).toBe('pre_mutation');
     expect(fenced).toHaveBeenCalledWith('infra');
     expect(logged).not.toHaveBeenCalled();
     expect(mockDeployStack).not.toHaveBeenCalled();

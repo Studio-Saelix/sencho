@@ -1843,6 +1843,36 @@ describe('Fleet snapshot restore: remote node refuses the redeploy to protect it
         expect(row?.error).toBe(`The snapshot files were restored, but the stack was not redeployed. ${REMOTE_REFUSAL.error}`);
     });
 
+    it('says the files were restored when the node refuses the redeploy with a data restore\'s fence, on a single restore and a restore-all row', async () => {
+        const fence = { error: 'The stack\'s compose file is in /srv/data, which a data restore is overwriting.', code: 'data_restore', failureClass: 'pre_mutation' };
+        const stubFence = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => (
+            /\/deploy$/.test(url)
+                ? new Response(JSON.stringify(fence), { status: 409 })
+                : new Response('{}', { status: 200 })
+        )));
+        const snapId = await seedRemoteSnapshot('remote-fence-single', 'rfence');
+        const remoteId = DatabaseService.getInstance().getSnapshotFiles(snapId)[0].node_id;
+        stubFence();
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rfence', redeploy: true });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('data_restore');
+        expect(res.body.error).toBe(`The snapshot files were restored, but the stack was not redeployed. ${fence.error}`);
+
+        const allId = await seedRemoteSnapshot('remote-fence-all', 'rfenceall');
+        stubFence();
+        const all = await request(app)
+            .post(`/api/fleet/snapshots/${allId}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true });
+        const row = (all.body.results as Array<{ stackName: string; success: boolean; error?: string; code?: string }>)
+            .find(r => r.stackName === 'rfenceall');
+        expect(row).toMatchObject({ success: false, code: 'data_restore' });
+        expect(row?.error).toBe(`The snapshot files were restored, but the stack was not redeployed. ${fence.error}`);
+    });
+
     it('does not treat a remote 409 with a different code as a Docker endpoint refusal', async () => {
         const snapId = await seedRemoteSnapshot('remote-endpoint-other', 'rother');
         const remoteId = DatabaseService.getInstance().getSnapshotFiles(snapId)[0].node_id;

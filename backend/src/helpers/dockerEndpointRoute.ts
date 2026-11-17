@@ -29,9 +29,11 @@ export async function refuseIfDockerEndpoint(
     res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {
-    // A compose file a data restore is swapping: the answer is the fence's.
+    // A compose file a data restore is swapping: the answer is the fence's. It
+    // is a pre-check, so nothing has moved, and a hub restoring through this
+    // node (a rollout rollback) is told so.
     if (isDataRestoreFenceError(error)) {
-      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
       return true;
     }
     console.error('[DockerEndpointGuard] Check failed; refusing the request:', error);
