@@ -19,13 +19,14 @@ export function sanitizeForLog(value: unknown): string {
 
 /**
  * The closing parentheses at the end of a matched keyword value that are not
- * accounted for by a `(` inside it. A Doctor message wraps the quoted image in
+ * accounted for by a `(` inside it. A Doctor message wraps the image in
  * parentheses, so those are the sentence's punctuation; the rest are kept
  * redacted. Only `)` characters are ever returned, so everything else in the
- * value stays hidden. A secret that itself ends in `)` gives up that character;
- * that is the price of the message reading as a sentence, since the two cannot
- * be told apart. The scan is a backward walk plus one count, both linear, so a
- * long run of `)` costs no more than the rest of the pass.
+ * value stays hidden. A secret that itself ends in `)` gives up the unmatched
+ * closers at its end, however many there are; that is the price of the message
+ * reading as a sentence, since the two cannot be told apart. The scan is a
+ * backward walk plus one count, both linear, so a long run of `)` costs no more
+ * than the rest of the pass.
  */
 function trailingParentheses(value: string): string {
   let runStart = value.length;
@@ -106,11 +107,11 @@ export function redactSensitiveText(value: unknown): string {
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
     // key and its separator, so `"PASSWORD": "s3cret"` is caught like
     // `PASSWORD=s3cret`. A value ends at whitespace, a comma, a semicolon, or a
-    // quote. A closing parenthesis at the end of it is the sentence's
-    // punctuation when the value opened no parenthesis of its own; a Doctor
-    // message wraps the quoted image in parentheses, and eating that closer left
-    // the sentence reading as truncated. The helper returns only `)` characters,
-    // so a secret holding one mid-token is still redacted whole.
+    // quote. The closers left after subtracting the `(` count in the value are
+    // the sentence's punctuation; a Doctor message wraps the image in
+    // parentheses, and eating that closer left the sentence reading as
+    // truncated. The helper returns only `)` characters, so a secret holding one
+    // mid-token is still redacted whole.
     .replace(
       /((?:authorization|token|password|secret|api[_-]?key)["']?\s*[:=]\s*["']?)([^\s,;"']+)/gi,
       (_match, prefix: string, value: string) => `${prefix}[redacted]${trailingParentheses(value)}`,

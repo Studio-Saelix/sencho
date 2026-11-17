@@ -19,8 +19,8 @@ describe('redactSensitiveText', () => {
 
   // A Doctor message wraps a quoted value in parentheses, so a closer after a
   // keyword secret is the sentence's punctuation and must survive the pass. A
-  // secret that itself ends in `)` with no `(` of its own gives that character
-  // up: the two cannot be told apart, and the message reads as a sentence.
+  // secret that itself ends in `)` gives up those unmatched closers: the two
+  // cannot be told apart, and the message reads as a sentence.
   it.each([
     ['a token', 'token=SECRET12)', 'token=[redacted])'],
     ['a password', 'password=SECRET12)', 'password=[redacted])'],
@@ -38,7 +38,6 @@ describe('redactSensitiveText', () => {
 
   it.each([
     ['a mid-token closing parenthesis', 'token=ab)cd', 'token=[redacted]'],
-    ['a value ending in a closing parenthesis', 'password=SECRET12)', 'password=[redacted])'],
     ['a value whose own parentheses are balanced', 'token=ab(cd)', 'token=[redacted]'],
     ['nested message parentheses', '((token=SECRET12))', '((token=[redacted]))'],
     ['a parenthesized secret inside the message parentheses', 'token=a(b))', 'token=[redacted])'],
