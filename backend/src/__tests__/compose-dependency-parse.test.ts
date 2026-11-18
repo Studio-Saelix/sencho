@@ -87,6 +87,13 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 5353, protocol: 'udp' }]);
   });
 
+  it('folds an upper-case protocol to the lower case Docker reports, in short and long form', () => {
+    const short = parseComposeDependencies(svc('web', 'ports:\n  - "8080:80/TCP"'));
+    expect(short.services[0].ports).toEqual([{ hostIp: '', publishedPort: 8080, protocol: 'tcp' }]);
+    const long = parseComposeDependencies('services:\n  web:\n    ports:\n      - target: 53\n        published: 5353\n        protocol: UDP\n');
+    expect(long.services[0].ports).toEqual([{ hostIp: '', publishedPort: 5353, protocol: 'udp' }]);
+  });
+
   it('keeps a container-only port as a dynamic publication, and `expose` as none', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "80"'));
     expect(r.services[0].ports).toEqual([
@@ -230,6 +237,8 @@ describe('parseComposeDependencies - ports', () => {
     const lookup = (name: string) => vars[name];
     expect(parseComposeDependencies(yaml, { lookup }).services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 51820, protocol: 'udp' }]);
     expect(parseComposeDependencies(yaml, { lookup: name => (name === 'PROTO' ? '' : vars[name]) }).services[0].ports[0].protocol).toBe('tcp');
+    // An interpolated protocol folds after it resolves, exactly as a literal one does.
+    expect(parseComposeDependencies(yaml, { lookup: name => (name === 'PROTO' ? 'UDP' : vars[name]) }).services[0].ports[0].protocol).toBe('udp');
     // The short form expands the whole entry, so both forms agree.
     const short = 'services:\n  web:\n    ports:\n      - "${IP}:${PORT}:80/${PROTO}"\n';
     expect(parseComposeDependencies(short, { lookup }).services[0].ports).toEqual(parseComposeDependencies(yaml, { lookup }).services[0].ports);

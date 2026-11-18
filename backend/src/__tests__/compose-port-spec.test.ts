@@ -3,9 +3,29 @@
  * share. The 256-port cap is what keeps a hostile `1-65535` range from blowing
  * up a report, and a rule and the locator must agree on exactly which ports it
  * counts or a finding can point at a declaration it never reported.
+ *
+ * Also the protocol fold every port reader shares, so an authored `80/TCP`
+ * compares equal to the `tcp` Docker reports.
  */
 import { describe, expect, it } from 'vitest';
-import { claimsEnumeratedHostPort, enumeratedHostPorts } from '../helpers/composePortSpec';
+import { claimsEnumeratedHostPort, enumeratedHostPorts, normalizePortProtocol } from '../helpers/composePortSpec';
+
+describe('normalizePortProtocol', () => {
+  it('folds a stated protocol to the lower case Docker reports', () => {
+    expect(normalizePortProtocol('TCP')).toBe('tcp');
+    expect(normalizePortProtocol('Udp')).toBe('udp');
+    expect(normalizePortProtocol('sctp')).toBe('sctp');
+  });
+
+  it('keeps tcp when the entry names no protocol', () => {
+    expect(normalizePortProtocol(undefined)).toBe('tcp');
+    expect(normalizePortProtocol('')).toBe('tcp');
+  });
+
+  it('leaves an unresolved template as written instead of rewriting its variable name', () => {
+    expect(normalizePortProtocol('${PROTO}')).toBe('${PROTO}');
+  });
+});
 
 describe('bounded host-port enumeration', () => {
   it('caps a long range at 256 ports', () => {

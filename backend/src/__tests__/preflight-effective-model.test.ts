@@ -243,6 +243,11 @@ describe('parseEffectiveModel', () => {
     ]);
   });
 
+  it('folds a long-form protocol Compose rendered as written to the lower case Docker reports', () => {
+    const m = parseEffectiveModel({ services: { s: { ports: [{ target: 80, published: '8080', protocol: 'TCP' }] } } }, 'p');
+    expect(m.services[0].ports).toEqual([{ startPort: 8080, endPort: 8080, hostIp: '', protocol: 'tcp' }]);
+  });
+
   it.each<[string, unknown, { hostIp: string; protocol: string; target: number }]>([
     ['no published key', { target: 51820, protocol: 'udp' }, { hostIp: '', protocol: 'udp', target: 51820 }],
     ['no published key on an interface', { target: 51820, host_ip: '127.0.0.1', protocol: 'udp' }, { hostIp: '127.0.0.1', protocol: 'udp', target: 51820 }],

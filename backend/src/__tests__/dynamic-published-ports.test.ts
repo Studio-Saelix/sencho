@@ -695,12 +695,12 @@ describe('drift against a running service with an auto-assigned port', () => {
 describe('authored port forms beyond the audit matrix', () => {
   const ports = (entry: string) => parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`).services[0].ports;
 
-  it('reads an unbracketed IPv6 interface with an empty host port, and keeps the protocol case as written', () => {
+  it('reads an unbracketed IPv6 interface with an empty host port, and folds the protocol case', () => {
     expect(ports('"::1::51820/udp"')).toEqual([
       { hostIp: '::1', publishedPort: 0, protocol: 'udp', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
     ]);
     expect(ports('"51820/UDP"')).toEqual([
-      { hostIp: '', publishedPort: 0, protocol: 'UDP', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
+      { hostIp: '', publishedPort: 0, protocol: 'udp', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
     ]);
   });
 

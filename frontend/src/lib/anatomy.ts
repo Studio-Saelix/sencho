@@ -97,7 +97,12 @@ function parsePortMapping(raw: unknown): PortRow | null {
     const obj = raw as Record<string, unknown>;
     const host = obj.published !== undefined ? String(obj.published) : '';
     const container = obj.target !== undefined ? String(obj.target) : '';
-    const proto = obj.protocol ? String(obj.protocol) : 'tcp';
+    // Compose renders a long-form protocol as written, so fold it the way the
+    // short form above is folded before anything compares it with `tcp`. An
+    // unresolved `${VAR}` keeps its text, matching the backend reader, so its
+    // variable name is not rewritten.
+    const stated = obj.protocol ? String(obj.protocol) : '';
+    const proto = stated === '' ? 'tcp' : /\$(?:\{|\$|[A-Za-z_])/.test(stated) ? stated : stated.toLowerCase();
     if (host && container) return { host, container, proto, published: true };
   }
   return null;
