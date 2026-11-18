@@ -23,6 +23,7 @@ const selectedContainer: NetworkingTopologyContainerDetail = {
     { hostIp: '', startPort: 18080, endPort: 18080, protocol: 'tcp', allInterfaces: true, loopbackOnly: false },
     { hostIp: '', startPort: 18081, endPort: 18082, protocol: 'tcp', allInterfaces: true, loopbackOnly: false },
     { hostIp: '', startPort: 0, endPort: 0, protocol: 'tcp', dynamic: true, allInterfaces: true, loopbackOnly: false },
+    { hostIp: '::', startPort: 18087, endPort: 18087, protocol: 'tcp', allInterfaces: true, loopbackOnly: false },
   ],
   exposureIntent: null,
   findingIds: [],
@@ -56,7 +57,7 @@ describe('NetworkingTopologyPanel published ports', () => {
 
     const sheet = await screen.findByRole('dialog', { name: 'port-probe-web' });
     expect(within(sheet).getByText('Published ports')).toBeInTheDocument();
-    const line = '0.0.0.0:18080/tcp, 0.0.0.0:18081-18082/tcp, 0.0.0.0:auto/tcp';
+    const line = '0.0.0.0:18080/tcp, 0.0.0.0:18081-18082/tcp, 0.0.0.0:auto/tcp, [::]:18087/tcp';
     expect(within(sheet).getByText(line)).toBeInTheDocument();
     expect(within(sheet).queryByText(/undefined/)).toBeNull();
   });
