@@ -864,6 +864,29 @@ describe('buildStackDriftReport - boundaries', () => {
     vi.restoreAllMocks();
   });
 
+  it('reads a protocol Compose rendered in upper case as in sync with the lower-case binding Docker reports', async () => {
+    const snapshot: DependencySnapshot = {
+      containers: [container({
+        id: 'c1', service: 'web', stack: 'app', image: 'nginx:1.25',
+        ports: [{ ip: '', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }],
+      })],
+      networks: [],
+      volumes: [],
+    };
+    // Compose folds a short-form protocol but renders a long-form one as
+    // written, so an authored `protocol: TCP` reaches the reader in upper case.
+    stubDockerRender({
+      name: 'app',
+      services: { web: { image: 'nginx:1.25', ports: [{ target: 80, published: '8080', protocol: 'TCP' }] } },
+    });
+    stubFsAndSnapshot(snapshot);
+
+    const report = await buildStackDriftReport(0, 'app');
+    expect(report.findings).toEqual([]);
+    expect(report.status).toBe('in-sync');
+    vi.restoreAllMocks();
+  });
+
   it('threads the snapshot networks through into a network-undeclared finding', async () => {
     const snapshot: DependencySnapshot = {
       containers: [container({ id: 'c1', service: 'web', stack: 'app', image: 'nginx:1.25', networks: [{ name: 'app_rogue', id: 'r', ip: '' }] })],

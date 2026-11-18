@@ -1,7 +1,7 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
 import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
-import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec, type ContainerPortRange } from './composePortSpec';
+import { containerPortRange, isDynamicHostPort, isFixedHostPort, normalizePortProtocol, splitShortPortSpec, type ContainerPortRange } from './composePortSpec';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -14,6 +14,7 @@ export interface DeclaredPort {
   hostIp: string;
   /** The host port, or 0 when `dynamic`. */
   publishedPort: number;
+  /** Transport folded to lower case, `tcp` when none is written. */
   protocol: string;
   /** Docker assigns the host port at start, so no number is known. The entry
    *  still publishes the container; port-conflict and documented-URL consumers
@@ -428,7 +429,7 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const obj = entry as Record<string, unknown>;
     const publishedRaw = interpolateString(asString(obj.published), lookup);
     const hostIp = interpolateString(asString(obj.host_ip), lookup) ?? '';
-    const protocol = interpolateString(asString(obj.protocol), lookup) || 'tcp';
+    const protocol = normalizePortProtocol(interpolateString(asString(obj.protocol), lookup));
     const target = declaredContainerTarget(interpolateString(asString(obj.target), lookup));
     if (target === null) return null;
     if (isDynamicHostPort(publishedRaw)) {

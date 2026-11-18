@@ -56,8 +56,27 @@ export interface ShortPortSpec {
   hostPart: string;
   /** Container port text. */
   container: string;
-  /** Transport as written, `tcp` when none is. */
+  /** Transport folded to lower case, `tcp` when none is. */
   protocol: string;
+}
+
+/** A Compose `${VAR}`/`$VAR` template, still holding its variable name. */
+const PORT_TEMPLATE = /\$(?:\{|\$|[A-Za-z_])/;
+
+/**
+ * The transport a port publishes on, as Compose and Docker compare it: lower
+ * case, with `tcp` when the entry names none. Compose folds a short-form
+ * protocol but renders a long-form one as written, and Docker reports the
+ * lower-case form either way, so a reader that keeps the text as written
+ * compares `TCP` with `tcp` and reports drift on a port that matches.
+ *
+ * A protocol still written as a template keeps its text: folding it would
+ * rewrite the variable name rather than a value, and the caller reports it
+ * unresolved.
+ */
+export function normalizePortProtocol(value: string | undefined): string {
+  if (value !== undefined && PORT_TEMPLATE.test(value)) return value;
+  return value ? value.toLowerCase() : 'tcp';
 }
 
 /**
@@ -71,7 +90,7 @@ export interface ShortPortSpec {
 export function splitShortPortSpec(raw: string): ShortPortSpec | null {
   const slash = raw.indexOf('/');
   const spec = slash === -1 ? raw : raw.slice(0, slash);
-  const protocol = (slash === -1 ? '' : raw.slice(slash + 1)) || 'tcp';
+  const protocol = normalizePortProtocol(slash === -1 ? '' : raw.slice(slash + 1));
   let hostIp = '';
   let fields: string[];
   if (spec.startsWith('[')) {

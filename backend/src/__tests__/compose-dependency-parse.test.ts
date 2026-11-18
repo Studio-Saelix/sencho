@@ -87,6 +87,13 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 5353, protocol: 'udp' }]);
   });
 
+  it('folds an upper-case protocol to the lower case Docker reports, in short and long form', () => {
+    const short = parseComposeDependencies(svc('web', 'ports:\n  - "8080:80/TCP"'));
+    expect(short.services[0].ports).toEqual([{ hostIp: '', publishedPort: 8080, protocol: 'tcp' }]);
+    const long = parseComposeDependencies('services:\n  web:\n    ports:\n      - target: 53\n        published: 5353\n        protocol: UDP\n');
+    expect(long.services[0].ports).toEqual([{ hostIp: '', publishedPort: 5353, protocol: 'udp' }]);
+  });
+
   it('keeps a container-only port as a dynamic publication, and `expose` as none', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "80"'));
     expect(r.services[0].ports).toEqual([

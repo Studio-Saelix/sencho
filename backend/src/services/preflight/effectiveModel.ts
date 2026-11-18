@@ -12,7 +12,7 @@
  * by the caller, not here.
  */
 
-import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { containerPortRange, isDynamicHostPort, isFixedHostPort, normalizePortProtocol, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
@@ -26,6 +26,7 @@ export interface EffPortSpec {
   endPort: number;
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
+  /** Transport folded to lower case, `tcp` when none is written. */
   protocol: string;
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published and
@@ -202,7 +203,7 @@ function parsePortSpec(entry: unknown): EffPortSpec | null {
     const target = containerPortRange(str(o.target));
     if (!target) return null;
     const hostIp = str(o.host_ip) ?? '';
-    const protocol = str(o.protocol) ?? 'tcp';
+    const protocol = normalizePortProtocol(str(o.protocol));
     const publishedRaw = str(o.published);
     if (isDynamicHostPort(publishedRaw)) {
       return {
