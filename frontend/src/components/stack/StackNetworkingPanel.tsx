@@ -105,6 +105,20 @@ function tunnelPathsOf(service: NetworkFactService): ServiceTunnelExposure[] {
     .map(path => ({ connector: path.connector, provider: path.provider, scope: path.scope, path: path.path }));
 }
 
+/** Pairs every tunnel with a key built from the four facts that identify one
+ *  tunnel path (provider, connector, path, scope), so two paths that share a
+ *  connector and a path value stay apart. A payload that repeats the whole
+ *  identity still gets distinct keys from the occurrence. */
+function keyedTunnels(tunnels: ServiceTunnelExposure[]): Array<{ key: string; tunnel: ServiceTunnelExposure }> {
+  const seen = new Map<string, number>();
+  return tunnels.map(tunnel => {
+    const identity = `${tunnel.provider}:${tunnel.connector}:${tunnel.path}:${tunnel.scope}`;
+    const occurrence = seen.get(identity) ?? 0;
+    seen.set(identity, occurrence + 1);
+    return { key: `${identity}#${occurrence}`, tunnel };
+  });
+}
+
 /** Tunnel facts for one service: the connector it runs, or every tunnel that reaches it.
  *  A public edge reads as a warning; a private overlay stays neutral. */
 function TunnelBadges({ connector, tunnels }: { connector?: TunnelConnector; tunnels: ServiceTunnelExposure[] }) {
@@ -116,8 +130,8 @@ function TunnelBadges({ connector, tunnels }: { connector?: TunnelConnector; tun
           {tunnelProviderLabel(connector.provider)} connector · {tunnelScopeLabel(connector.scope)}
         </span>
       )}
-      {tunnels.map(tunnel => (
-        <span key={`${tunnel.connector}:${tunnel.path}`} className="flex flex-wrap items-center gap-2">
+      {keyedTunnels(tunnels).map(({ key, tunnel }) => (
+        <span key={key} className="flex flex-wrap items-center gap-2">
           <span className={cn(CHIP_CLASS, tunnel.scope === 'public-edge'
             ? 'border-warning/40 bg-warning/[0.08] text-warning'
             : 'border-muted bg-card/40 text-foreground/80')}
