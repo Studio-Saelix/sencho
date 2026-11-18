@@ -13,9 +13,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import { execFileSync, spawnSync } from 'child_process';
-import net from 'net';
 import path from 'path';
 import os from 'os';
+import { withUnixSocketAt } from './helpers/unixSocketFixture';
 
 const isWindows = process.platform === 'win32';
 const BACKEND_ROOT = path.resolve(__dirname, '..', '..');
@@ -577,18 +577,11 @@ describe.skipIf(isWindows)('FileSystemService: compose file linked into the shar
   it.skipIf(isWindows)('refuses a shared target that is a socket', async () => {
     await fs.rm(path.join(stackDir, 'compose.yaml'));
     const target = path.join(sharedDir, 'target.sock');
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(target, resolve);
-    });
-    try {
+    await withUnixSocketAt(target, async () => {
       await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
       const svc = FileSystemService.getInstance();
       await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    });
   });
 
   it.skipIf(isWindows)('refuses a shared target that is a fifo without waiting for a writer', async () => {
