@@ -80,6 +80,14 @@ describe('parseAnatomy', () => {
     expect(a.volumes.app).toEqual([{ host: './data', container: '/data' }]);
   });
 
+  it('folds a long-syntax protocol written in upper case, so its host port is still linkable', () => {
+    const a = parseAnatomy(
+      'services:\n  app:\n    image: x\n    ports:\n      - target: 80\n        published: 8080\n        protocol: TCP\n',
+    )!;
+    expect(a.ports.app).toEqual([{ host: '8080', container: '80', proto: 'tcp', published: true }]);
+    expect(primaryPublishedHostPort(a.ports)).toBe(8080);
+  });
+
   it('treats ${VAR:-default} as satisfied but ${VAR} as referenced', () => {
     const a = parseAnatomy('services:\n  app:\n    image: x\n    environment:\n      - A=${NEEDED}\n      - B=${HAS:-fallback}\n')!;
     expect(a.referencedVars).toContain('NEEDED');

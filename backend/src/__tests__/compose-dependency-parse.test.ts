@@ -237,6 +237,8 @@ describe('parseComposeDependencies - ports', () => {
     const lookup = (name: string) => vars[name];
     expect(parseComposeDependencies(yaml, { lookup }).services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 51820, protocol: 'udp' }]);
     expect(parseComposeDependencies(yaml, { lookup: name => (name === 'PROTO' ? '' : vars[name]) }).services[0].ports[0].protocol).toBe('tcp');
+    // An interpolated protocol folds after it resolves, exactly as a literal one does.
+    expect(parseComposeDependencies(yaml, { lookup: name => (name === 'PROTO' ? 'UDP' : vars[name]) }).services[0].ports[0].protocol).toBe('udp');
     // The short form expands the whole entry, so both forms agree.
     const short = 'services:\n  web:\n    ports:\n      - "${IP}:${PORT}:80/${PROTO}"\n';
     expect(parseComposeDependencies(short, { lookup }).services[0].ports).toEqual(parseComposeDependencies(yaml, { lookup }).services[0].ports);

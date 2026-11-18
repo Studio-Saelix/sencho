@@ -26,7 +26,7 @@ export interface EffPortSpec {
   endPort: number;
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
-  /** Transport folded to lower case, `tcp` when none is written. */
+  /** Transport folded to lower case, `tcp` when none is written; an unresolved template is kept. */
   protocol: string;
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published and

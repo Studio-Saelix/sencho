@@ -85,6 +85,16 @@ describe('parseEffectiveAnatomy', () => {
     ]);
   });
 
+  it('folds a long-form protocol Compose rendered as written', () => {
+    const rendered = {
+      services: {
+        svc: { ports: [{ target: 80, published: '8080', protocol: 'TCP' }] },
+      },
+    };
+    const anatomy = parseEffectiveAnatomy(rendered);
+    expect(anatomy.ports.svc).toEqual([{ host: '8080', container: '80', proto: 'tcp', published: true }]);
+  });
+
   it('audit F02: keeps both published-zero syntaxes as an automatic host allocation', () => {
     // `ports: ["0:80"]` and `ports: [{ target: 90, published: 0 }]` both render
     // as `published: "0"`; Docker assigns the host port at run time, and the

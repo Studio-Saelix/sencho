@@ -8,6 +8,7 @@ import { buildAuthoredProject, locateFinding } from '../services/composeSource';
 import { normalizeDoctorHit } from '../services/assurance/finding';
 import { getAssuranceRule } from '../services/assurance/ruleRegistry';
 import type { RuleHit } from '../services/preflight/types';
+import { parseEffectiveModel } from '../services/preflight/effectiveModel';
 import type { EffectiveModel } from '../services/preflight/effectiveModel';
 
 let tmpDir: string;
@@ -500,7 +501,7 @@ describe('Compose Doctor authored locations', () => {
     });
   });
 
-  it('does not treat a long-form protocol casing as the rule subject protocol', async () => {
+  it('treats a long-form protocol written in upper case as the same subject as short syntax', async () => {
     writeStack('doctor-port-conflict-protocol-case', {
       'compose.yaml': [
         'services:',
@@ -522,20 +523,21 @@ describe('Compose Doctor authored locations', () => {
       ].join('\n'),
     });
     const project = await buildAuthoredProject(nodeId, 'doctor-port-conflict-protocol-case');
-    // Compose preserves a long-form protocol's case while it lowercases short
-    // syntax, and the rule keys claims verbatim. The 8088/udp finding names b
-    // and c only, so a's 8088/UDP declaration must not become the link target.
-    const model = {
-      services: [
-        { name: 'a', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'UDP' }] },
-        { name: 'b', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
-        { name: 'c', ports: [{ startPort: 8088, endPort: 8088, hostIp: '', protocol: 'udp' }] },
-      ],
-    } as unknown as EffectiveModel;
+    // The rendered model folds both spellings to `udp`, so a's long-form
+    // declaration claims the same 8088/udp subject as b and c, and in
+    // effective-model order it is the source the finding links to.
+    const model = parseEffectiveModel({
+      name: 'doctor-port-conflict-protocol-case',
+      services: {
+        a: { ports: [{ target: 80, published: '8088', protocol: 'UDP' }] },
+        b: { ports: [{ target: 81, published: '8088', protocol: 'udp' }] },
+        c: { ports: [{ target: 82, published: '8088', protocol: 'udp' }] },
+      },
+    }, 'doctor-port-conflict-protocol-case');
     expect(locateFinding(project, hit('port-conflict-internal', {
       subject: { kind: 'port', key: '8088/udp' },
     }), model)).toMatchObject({
-      file: 'compose.yaml', line: 11, path: 'services.b.ports[0]',
+      file: 'compose.yaml', line: 5, path: 'services.a.ports[0]',
     });
   });
 

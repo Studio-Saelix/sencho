@@ -97,7 +97,9 @@ function parsePortMapping(raw: unknown): PortRow | null {
     const obj = raw as Record<string, unknown>;
     const host = obj.published !== undefined ? String(obj.published) : '';
     const container = obj.target !== undefined ? String(obj.target) : '';
-    const proto = obj.protocol ? String(obj.protocol) : 'tcp';
+    // Compose renders a long-form protocol as written, so fold it the way the
+    // short form above is folded before anything compares it with `tcp`.
+    const proto = obj.protocol ? String(obj.protocol).toLowerCase() : 'tcp';
     if (host && container) return { host, container, proto, published: true };
   }
   return null;

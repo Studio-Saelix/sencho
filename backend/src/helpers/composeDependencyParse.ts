@@ -14,7 +14,7 @@ export interface DeclaredPort {
   hostIp: string;
   /** The host port, or 0 when `dynamic`. */
   publishedPort: number;
-  /** Transport folded to lower case, `tcp` when none is written. */
+  /** Transport folded to lower case, `tcp` when none is written; an unresolved template is kept. */
   protocol: string;
   /** Docker assigns the host port at start, so no number is known. The entry
    *  still publishes the container; port-conflict and documented-URL consumers

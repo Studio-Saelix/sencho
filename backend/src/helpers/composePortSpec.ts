@@ -56,7 +56,7 @@ export interface ShortPortSpec {
   hostPart: string;
   /** Container port text. */
   container: string;
-  /** Transport folded to lower case, `tcp` when none is. */
+  /** Transport folded to lower case, `tcp` when none is; an unresolved template is kept. */
   protocol: string;
 }
 

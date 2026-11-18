@@ -25,6 +25,7 @@
 import { ComposeService } from './ComposeService';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
+import { normalizePortProtocol } from '../helpers/composePortSpec';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
@@ -100,7 +101,7 @@ function parsePort(entry: unknown): EffectiveAnatomyPort | null {
     const o = entry as Record<string, unknown>;
     const host = asString(o.published) ?? '';
     const container = asString(o.target) ?? '';
-    const proto = asString(o.protocol) ?? 'tcp';
+    const proto = normalizePortProtocol(asString(o.protocol));
     if (host === '' && container === '') return null;
     return { host, container, proto, published: host !== '' };
   }
