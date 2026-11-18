@@ -177,6 +177,26 @@ describe('image age', () => {
     warn.mockRestore();
   });
 
+  it('keeps a credential-free reference, tag and digest alike, verbatim when the inspect fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const docker: ImageInspector = {
+      getImage: (ref: string) => ({
+        inspect: async () => {
+          if (ref === 'app:2') return { Created: '2026-02-01T00:00:00Z' };
+          throw Object.assign(new Error('(HTTP code 500) unexpected - driver failed'), { statusCode: 500 });
+        },
+      }),
+    };
+    const digest = `repo/app@sha256:${'a'.repeat(64)}`;
+    expect(await classifyImageAge(docker, 'registry.example.com/app:1', ['app:2'])).toBe('unknown');
+    expect(await classifyImageAge(docker, digest, ['app:2'])).toBe('unknown');
+    const logged = warn.mock.calls
+      .filter(args => String(args[0]).includes('Could not inspect image'))
+      .map(args => args[1]);
+    expect(logged).toEqual(['registry.example.com/app:1', digest]);
+    warn.mockRestore();
+  });
+
   it('never logs a registry password when the image age cannot be read', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const image = 'user:p4ssw0rdXYZ@registry.example.com/app:latest';

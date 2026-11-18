@@ -15,10 +15,11 @@ async function builtAt(docker: ImageInspector, ref: string): Promise<number | nu
     // An image that is not in the local store is the ordinary reason, so only
     // anything else is worth a log line. Either way the answer is "unknown".
     if ((error as { statusCode?: number })?.statusCode !== 404) {
-      // A Compose `image` value can carry a registry credential, and Docker
-      // echoes the reference it was given back in its own error, so both are
-      // redacted. The image step reads the reference's grammar, so a password
-      // holding a `/`, a space, or a quote is removed too.
+      // A Compose `image` value can carry a registry credential, and Docker can
+      // echo the reference it was given back in its own error, so both are
+      // redacted. `redactImageForDisplay` reads the reference's grammar first,
+      // then the text pass, so a password holding a `/`, a space, or a quote is
+      // removed too.
       console.warn(
         '[Drift] Could not inspect image %s:',
         sanitizeForLog(redactImageForDisplay(ref)),
@@ -69,9 +70,9 @@ async function imageAgeOf(docker: () => ImageInspector, finding: StackDriftFindi
   try {
     return await classifyImageAge(docker(), finding.expected, finding.actual.split(', '));
   } catch (error) {
-    // The declared reference is the one the Compose file writes, so it is the
-    // one a registry credential sits in; format the error against it as the
-    // inspect warning does.
+    // Each inspect failure is caught per reference above, so this catch only
+    // sees the Docker client factory fail. The declared reference is passed
+    // anyway: it is the one a credential in a Compose `image` sits in.
     console.warn(
       '[Drift] Could not read image age for %s:',
       sanitizeForLog(finding.service),
