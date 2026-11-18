@@ -300,6 +300,15 @@ export function CloudBackupSection() {
         }
     }, []);
 
+    const loadUsage = useCallback(async () => {
+        try {
+            const res = await cloudFetch('/cloud-backup/usage');
+            if (res.ok) setUsage(await res.json());
+        } catch {
+            // Usage is informational; failures shouldn't surface as toasts.
+        }
+    }, []);
+
     // Called whenever the server confirms a destination (config load, picker
     // save, Custom S3 save, auto-upload save). A different destination drops
     // the inventory scoped to the previous one and any listing still in flight.
@@ -331,7 +340,7 @@ export function CloudBackupSection() {
             const res = await cloudFetch('/cloud-backup/config');
             if (!res.ok) throw new Error(`Failed to load config (${res.status})`);
             const data: ConfigResponse = await res.json();
-            confirmDestination(data.provider, customDestination(data.custom));
+            const destinationChanged = confirmDestination(data.provider, customDestination(data.custom));
             setProvider(data.provider);
             setEncryptArchives(data.encrypt_archives === true);
             setPassphraseSaved(data.archive_passphrase === '***');
@@ -342,11 +351,14 @@ export function CloudBackupSection() {
                 setPendingEnable(false);
                 setPassphraseDraft('');
             }
+            // A resync can land on the vault the section was showing before a
+            // write it could not confirm; read usage again with it.
+            if (destinationChanged && data.provider === 'sencho' && senchoProvisioned) void loadUsage();
         } catch {
             setLoadFailed(true);
             setProvider(confirmedRef.current.provider);
         }
-    }, [confirmDestination]);
+    }, [confirmDestination, loadUsage, senchoProvisioned]);
 
     const loadConfig = useCallback(async () => {
         try {
@@ -363,30 +375,24 @@ export function CloudBackupSection() {
             setEncryptArchives(data.encrypt_archives === true);
             setPassphraseSaved(data.archive_passphrase === '***');
             setPendingEnable(false);
+            // Usage belongs to a provisioned vault, so it is read with the
+            // config that says so rather than from an effect watching those
+            // two values settle.
+            if (data.provider === 'sencho' && data.sencho_provisioned) void loadUsage();
         } catch (err) {
             setLoadFailed(true);
             toast.error((err as Error)?.message || 'Failed to load cloud backup config.');
         } finally {
             setLoading(false);
         }
-    }, [confirmDestination]);
+    }, [confirmDestination, loadUsage]);
 
-    const loadUsage = useCallback(async () => {
-        try {
-            const res = await cloudFetch('/cloud-backup/usage');
-            if (res.ok) setUsage(await res.json());
-        } catch {
-            // Usage is informational; failures shouldn't surface as toasts.
-        }
-    }, []);
-
+    // The stored configuration is read once, when the section mounts.
+    // Awaiting the loader in an async body keeps its state writes after the
+    // request settles.
     useEffect(() => {
-        loadConfig();
+        void (async () => { await loadConfig(); })();
     }, [loadConfig]);
-
-    useEffect(() => {
-        if (confirmed.provider === 'sencho' && senchoProvisioned) loadUsage();
-    }, [confirmed.provider, senchoProvisioned, loadUsage]);
 
     useEffect(() => {
         if (!recoveryError) return;

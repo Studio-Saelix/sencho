@@ -144,6 +144,40 @@ describe('CloudBackupSection archive encryption', () => {
     });
 });
 
+describe('CloudBackupSection usage load', () => {
+    it('reads usage once on mount when the saved vault is provisioned', async () => {
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+
+    it('does not read usage when the saved vault is not provisioned', async () => {
+        configPayload = { ...configPayload, sencho_provisioned: false, sencho_provisioned_at: null };
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Activate Sencho Snapshot Vault')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
+    });
+
+    it('reads usage after Retry reaches a provisioned vault', async () => {
+        const base = apiFetch.getMockImplementation()!;
+        let failing = true;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && !options?.method && failing
+                ? json({ error: 'boom' }, 500)
+                : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Retry' }));
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
+
+        failing = false;
+        await user.click(screen.getByRole('button', { name: 'Retry' }));
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+});
+
 describe('CloudBackupSection managed vault discovery', () => {
     const FILLED_CUSTOM = {
         endpoint: 'https://s3.example.com', region: 'us-east-1', bucket: 'b', access_key: 'a', secret_key: '',
