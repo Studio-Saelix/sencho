@@ -275,6 +275,21 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** Console errors logged while `run` executes. React reports a duplicate key
+ *  this way, so a test can assert the list stayed empty of one. */
+async function collectConsoleErrors(run: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(' '));
+  });
+  try {
+    await run();
+  } finally {
+    spy.mockRestore();
+  }
+  return lines;
+}
+
 describe('StackNetworkingPanel: detected exposure', () => {
   it('shows auto (detected) and the answer when nothing is declared', async () => {
     mockApi(facts({ services: [service('api', { detected: detected() })] }), []);
@@ -395,6 +410,34 @@ describe('StackNetworkingPanel: detected exposure', () => {
     // The runtime caveat is the Answer's marker, not repeated on each service.
     expect(proof.textContent).not.toContain('runtime not checked');
     expect(screen.getByTestId('networking-answer')).toHaveTextContent('runtime not checked');
+  });
+
+  it('keeps two tunnel badges apart when they share a connector and a path', async () => {
+    const sharedPath = detected({
+      paths: [
+        { kind: 'tunnel', scope: 'public-edge', provider: 'cloudflared', connector: 'cf', path: 'shared-network', certain: false },
+        { kind: 'tunnel', scope: 'private-overlay', provider: 'tailscale', connector: 'cf', path: 'shared-network', certain: false },
+      ],
+      answer: 'public edge (unverified) + private overlay (unverified)',
+    });
+    mockApi(facts({ services: [service('api', { detected: sharedPath })] }), []);
+    const errors = await collectConsoleErrors(async () => {
+      render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+      expect(await screen.findByText('via Cloudflare Tunnel (cf) · public edge')).toBeInTheDocument();
+      expect(screen.getByText('via Tailscale (cf) · private overlay')).toBeInTheDocument();
+    });
+    expect(errors.filter(line => line.includes('Encountered two children with the same key'))).toEqual([]);
+  });
+
+  it('renders every badge when a payload repeats one tunnel verbatim', async () => {
+    const one = { kind: 'tunnel', scope: 'public-edge', provider: 'cloudflared', connector: 'cf', path: 'shared-network', certain: false };
+    const repeated = detected({ paths: [one, one], answer: 'public edge (unverified)' });
+    mockApi(facts({ services: [service('api', { detected: repeated })] }), []);
+    const errors = await collectConsoleErrors(async () => {
+      render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+      expect(await screen.findAllByText('via Cloudflare Tunnel (cf) · public edge')).toHaveLength(2);
+    });
+    expect(errors.filter(line => line.includes('Encountered two children with the same key'))).toEqual([]);
   });
 });
 
