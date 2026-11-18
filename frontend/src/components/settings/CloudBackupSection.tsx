@@ -387,9 +387,9 @@ export function CloudBackupSection() {
         }
     }, [confirmDestination, loadUsage]);
 
-    // The stored configuration is read once, when the section mounts.
-    // Awaiting the loader in an async body keeps its state writes after the
-    // request settles.
+    // The stored configuration is read once, when the section mounts. The read
+    // is awaited in an async body, so the effect body performs no state write
+    // of its own; the loader applies its values after the request settles.
     useEffect(() => {
         void (async () => { await loadConfig(); })();
     }, [loadConfig]);
@@ -412,7 +412,10 @@ export function CloudBackupSection() {
         try {
             const body = nextProvider === 'custom' ? { provider: nextProvider, custom: { ...custom, secret_key: '' } } : { provider: nextProvider };
             await putConfig(body, 'Failed to save provider');
-            confirmDestination(nextProvider, nextProvider === 'custom' ? customDestination(custom) : confirmedRef.current.custom);
+            const destinationChanged = confirmDestination(nextProvider, nextProvider === 'custom' ? customDestination(custom) : confirmedRef.current.custom);
+            // A switch to a provisioned vault reads its usage; the confirmed
+            // destination dropped the previous one.
+            if (destinationChanged && nextProvider === 'sencho' && senchoProvisioned) void loadUsage();
             toast.success('Cloud backup provider updated.');
         } catch (err) {
             setProvider(confirmedRef.current.provider);

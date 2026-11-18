@@ -158,6 +158,24 @@ describe('CloudBackupSection usage load', () => {
         expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
     });
 
+    it('reads usage when the picker switches to a provisioned vault', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        configPayload = { ...configPayload, provider: 'disabled' };
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') return json({});
+            if (path === '/cloud-backup/config') return json(configPayload);
+            if (path === '/cloud-backup/usage') return json({ used_bytes: 10, quota_bytes: 100, object_count: 1 });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            return json({ error: 'unexpected' }, 500);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('combobox'));
+        await user.click(await screen.findByText('Sencho Snapshot Vault (included)'));
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+
     it('reads usage after Retry reaches a provisioned vault', async () => {
         const base = apiFetch.getMockImplementation()!;
         let failing = true;
