@@ -148,6 +148,32 @@ export function isMissingTopologyNetwork(network: NetworkingTopologyNetwork): bo
   return network.runtimeState === 'missing' || network.id.startsWith('missing:');
 }
 
+/** The backend's all-interface sentinels. `''` declares no host address and is
+ *  shown in its IPv4 form; an explicit `0.0.0.0` is an IPv4 bind. `::` and
+ *  `[::]` are the IPv6 wildcard, which Docker can bind without any IPv4
+ *  listener, so the two families never collapse into one another. */
+const IPV4_ALL_INTERFACE_HOSTS = new Set(['', '0.0.0.0']);
+const IPV6_ALL_INTERFACE_HOSTS = new Set(['::', '[::]']);
+
+/** A host as it belongs in `host:port`: an IPv6 literal needs brackets, an
+ *  unspecified host and the IPv4 wildcard read as `0.0.0.0`, and the IPv6
+ *  wildcard reads as `[::]` so the line never claims an IPv4 bind. */
+function formatTopologyHost(hostIp: string): string {
+  if (IPV6_ALL_INTERFACE_HOSTS.has(hostIp)) return '[::]';
+  if (IPV4_ALL_INTERFACE_HOSTS.has(hostIp)) return '0.0.0.0';
+  if (hostIp.startsWith('[') || !hostIp.includes(':')) return hostIp;
+  return `[${hostIp}]`;
+}
+
+/** A published port line: `host:startPort/protocol` for one fixed port,
+ *  `host:startPort-endPort/protocol` for a fixed range, and
+ *  `host:auto/protocol` when Docker picks the host port at start. A payload
+ *  that omits `dynamic` still marks an auto-assigned port as 0/0. */
 export function formatTopologyPort(port: NetworkingTopologyContainer['publishedPorts'][number]): string {
-  return `${port.hostIp ?? '0.0.0.0'}:${port.published ?? port.target}/${port.protocol}`;
+  const host = formatTopologyHost(port.hostIp);
+  if (port.dynamic === true || (port.startPort === 0 && port.endPort === 0)) {
+    return `${host}:auto/${port.protocol}`;
+  }
+  const range = port.startPort === port.endPort ? `${port.startPort}` : `${port.startPort}-${port.endPort}`;
+  return `${host}:${range}/${port.protocol}`;
 }
