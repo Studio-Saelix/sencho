@@ -17,6 +17,27 @@ export function sanitizeForLog(value: unknown): string {
   return s.replace(CONTROL_CHARS_REGEX, '');
 }
 
+/**
+ * The closing parentheses at the end of a matched keyword value that are not
+ * accounted for by a `(` inside it. A Doctor message wraps the image in
+ * parentheses, so those are the sentence's punctuation; the rest are kept
+ * redacted. Only `)` characters are ever returned, so everything else in the
+ * value stays hidden. A secret that itself ends in `)` gives up the unmatched
+ * closers at its end, however many there are; that is the price of the message
+ * reading as a sentence, since the two cannot be told apart. The scan is a
+ * backward walk plus one count, both linear, so a long run of `)` costs no more
+ * than the rest of the pass.
+ */
+function trailingParentheses(value: string): string {
+  let runStart = value.length;
+  while (runStart > 0 && value[runStart - 1] === ')') runStart -= 1;
+  let opens = 0;
+  for (let i = 0; i < runStart; i += 1) {
+    if (value[i] === '(') opens += 1;
+  }
+  return ')'.repeat(Math.max(0, value.length - runStart - opens));
+}
+
 export function redactSensitiveText(value: unknown): string {
   const s = typeof value === 'string' ? value : String(value);
   return s
@@ -85,10 +106,15 @@ export function redactSensitiveText(value: unknown): string {
     )
     // Keyword-led secrets, tolerating a JSON/YAML quoting boundary between the
     // key and its separator, so `"PASSWORD": "s3cret"` is caught like
-    // `PASSWORD=s3cret`.
+    // `PASSWORD=s3cret`. A value ends at whitespace, a comma, a semicolon, or a
+    // quote. The closers left after subtracting the `(` count in the value are
+    // the sentence's punctuation; a Doctor message wraps the image in
+    // parentheses, and eating that closer left the sentence reading as
+    // truncated. The helper returns only `)` characters, so a secret holding one
+    // mid-token is still redacted whole.
     .replace(
-      /((?:authorization|token|password|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,;"']+/gi,
-      '$1[redacted]',
+      /((?:authorization|token|password|secret|api[_-]?key)["']?\s*[:=]\s*["']?)([^\s,;"']+)/gi,
+      (_match, prefix: string, value: string) => `${prefix}[redacted]${trailingParentheses(value)}`,
     )
     .replace(/\/home\/[^/\s'"]+/g, '/home/<user>')
     .replace(/\/Users\/[^/\s'"]+/g, '/Users/<user>')

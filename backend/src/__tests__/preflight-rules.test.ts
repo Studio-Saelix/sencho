@@ -7,6 +7,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { runRules, RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
+import { normalizeDoctorHit } from '../services/assurance/finding';
+import { getAssuranceRule } from '../services/assurance/ruleRegistry';
 import type { EffService, EffectiveModel } from '../services/preflight/effectiveModel';
 import type { PreflightContext, PreflightFinding } from '../services/preflight/types';
 
@@ -931,6 +933,34 @@ describe('exposure-intent rules', () => {
     expect(hits).toHaveLength(1);
     expect(hits[0].message).toContain(`(${expected})`);
     expect(hits[0].message).not.toContain('SECRET');
+  });
+  it.each([
+    ['a password keyword', 'postgres:16?password=SECRETPW12', 'postgres:16?password=[redacted]'],
+    ['a token keyword', 'postgres:16?token=SECRETTOK12', 'postgres:16?token=[redacted]'],
+    ['an api_key keyword', 'postgres:16?api_key=SECRETKEY12', 'postgres:16?api_key=[redacted]'],
+    ['a secret keyword', 'postgres:16?secret=SECRETSEC12', 'postgres:16?secret=[redacted]'],
+    ['a Bearer credential', 'postgres:16?x=Bearer SECRETBEAR12', 'postgres:16?x=Bearer [redacted]'],
+  ])('keeps the closing parenthesis after %s when the finding reaches the wire', (_variant, image, expected) => {
+    const m = model([svc({ name: 'db', image, ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    const [raw] = runRules(ctx({ model: m })).filter(f => f.ruleId === 'sensitive-service-broad-exposure');
+    const rule = getAssuranceRule(raw.ruleId);
+    if (!rule) throw new Error('missing registry entry for the sensitive exposure rule');
+    const finding = normalizeDoctorHit(1, 'proj', raw, rule);
+    expect(finding.message).toBe(
+      `Service "db" looks like a database or admin service (${expected}) and publishes 5432 on all interfaces. Broadly exposing it is a common source of compromise.`,
+    );
+    expect(finding.message).not.toContain('SECRET');
+  });
+  it.each([
+    ['a credential-free image', 'postgres:16'],
+    ['a digest-pinned image', `postgres:16@sha256:${'a'.repeat(64)}`],
+  ])('leaves the message text of %s unchanged when the finding reaches the wire', (_variant, image) => {
+    const m = model([svc({ name: 'db', image, ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    const [raw] = runRules(ctx({ model: m })).filter(f => f.ruleId === 'sensitive-service-broad-exposure');
+    const rule = getAssuranceRule(raw.ruleId);
+    if (!rule) throw new Error('missing registry entry for the sensitive exposure rule');
+    expect(normalizeDoctorHit(1, 'proj', raw, rule).message)
+      .toBe(`Service "db" looks like a database or admin service (${image}) and publishes 5432 on all interfaces. Broadly exposing it is a common source of compromise.`);
   });
   it('flags a sensitive image exposed on all interfaces', () => {
     const m = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
