@@ -116,8 +116,8 @@ describe('DockerEndpointProtectedDialog', () => {
   });
 
   it('falls back to the provider when an older node does not name the protected service', async () => {
-    // Nodes that predate the service field answer the refusal without it; the
-    // endpoint replacement is still the right offer for the provider itself.
+    // A node released before this fix answers a container refusal without the
+    // field; the endpoint replacement is still the right offer for the provider.
     option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
     const props = renderDialog({ service: null });
     expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1/)).toBeInTheDocument();

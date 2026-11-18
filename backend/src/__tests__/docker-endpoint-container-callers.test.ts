@@ -148,9 +148,10 @@ describe.each([500, 502, 503, 409])('the owner of the proxy\'s network when the 
     for (const action of ['stop', 'restart']) {
       const res = await request(app).post(`/api/containers/${VPN_ID}/${action}`);
       expect(res.status).toBe(409);
-      // The field is always in the body the stack and service routes answer,
-      // null when the guard could not resolve a service.
+      // The shared route helper always includes the field, null when the guard
+      // could not resolve a service.
       expect(res.body).toHaveProperty('service');
+      expect(res.body.service).toBeNull();
       expect(res.body).toMatchObject({ code: 'docker_endpoint_protected' });
     }
     expect(ops).toEqual([]);
@@ -158,6 +159,13 @@ describe.each([500, 502, 503, 409])('the owner of the proxy\'s network when the 
 });
 
 describe('the container route\'s refusal body', () => {
+  beforeEach(() => {
+    // The service name differs from the container name, so a regression that
+    // reported the name instead of the Compose label fails these tests.
+    specs.get(VPN_ID)!.Name = '/infra-vpn-1';
+    specs.get(VPN_ID)!.labels = { 'com.docker.compose.service': 'vpn' };
+  });
+
   it.each(['stop', 'restart'] as const)('%s names the service it protected, not the endpoint provider', async (action) => {
     // The guard resolves this owner from a clean inspect, so the refusal carries
     // its own service. The handoff reads it to decide whether the endpoint
@@ -166,6 +174,17 @@ describe('the container route\'s refusal body', () => {
 
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', service: 'vpn' });
+    expect(ops).toEqual([]);
+  });
+
+  it('names a labeled container that is not the endpoint provider', async () => {
+    specs.get(WEB_ID)!.Name = '/other-cache-1';
+    specs.get(WEB_ID)!.labels = { 'com.docker.compose.service': 'cache', 'io.sencho.infrastructure': 'true' };
+
+    const res = await request(appWithContainersRoute()).post(`/api/containers/${WEB_ID}/stop`);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', service: 'cache' });
     expect(ops).toEqual([]);
   });
 
