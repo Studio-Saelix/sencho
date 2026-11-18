@@ -143,19 +143,37 @@ describe.each([500, 502, 503, 409])('the owner of the proxy\'s network when the 
   });
 
   it('the container route answers 409 and does not stop or restart it', async () => {
-    const app = express();
-    app.use((req, _res, next) => {
-      req.nodeId = 1;
-      req.user = { username: 'admin', role: 'admin', userId: 1 } as typeof req.user;
-      next();
-    });
-    app.use('/api/containers', containersRouter);
+    const app = appWithContainersRoute();
 
     for (const action of ['stop', 'restart']) {
       const res = await request(app).post(`/api/containers/${VPN_ID}/${action}`);
       expect(res.status).toBe(409);
+      // The field is always in the body the stack and service routes answer,
+      // null when the guard could not resolve a service.
+      expect(res.body).toHaveProperty('service');
       expect(res.body).toMatchObject({ code: 'docker_endpoint_protected' });
     }
+    expect(ops).toEqual([]);
+  });
+});
+
+describe('the container route\'s refusal body', () => {
+  it.each(['stop', 'restart'] as const)('%s names the service it protected, not the endpoint provider', async (action) => {
+    // The guard resolves this owner from a clean inspect, so the refusal carries
+    // its own service. The handoff reads it to decide whether the endpoint
+    // replacement even applies.
+    const res = await request(appWithContainersRoute()).post(`/api/containers/${VPN_ID}/${action}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', service: 'vpn' });
+    expect(ops).toEqual([]);
+  });
+
+  it('names the endpoint provider when the provider itself is refused', async () => {
+    const res = await request(appWithContainersRoute()).post(`/api/containers/${PROXY_ID}/stop`);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', service: 'socket-proxy' });
     expect(ops).toEqual([]);
   });
 });

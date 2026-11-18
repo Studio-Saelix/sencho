@@ -115,6 +115,16 @@ describe('DockerEndpointProtectedDialog', () => {
     expect(props.onRecreate).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to the provider when an older node does not name the protected service', async () => {
+    // Nodes that predate the service field answer the refusal without it; the
+    // endpoint replacement is still the right offer for the provider itself.
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    const props = renderDialog({ service: null });
+    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/ }));
+    expect(props.onRecreate).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the guard\'s own message', () => {
     option({ state: 'none' });
     renderDialog({ message: 'Deploy refused: the proxy would be recreated.' });
