@@ -88,6 +88,15 @@ describe('parseAnatomy', () => {
     expect(primaryPublishedHostPort(a.ports)).toBe(8080);
   });
 
+  it('keeps an unresolved long-syntax protocol template as written', () => {
+    const a = parseAnatomy(
+      'services:\n  app:\n    image: x\n    ports:\n      - target: 51820\n        published: "51820"\n        protocol: "${WG_PROTO}"\n',
+    )!;
+    expect(a.ports.app).toEqual([
+      { host: '51820', container: '51820', proto: '${WG_PROTO}', published: true },
+    ]);
+  });
+
   it('treats ${VAR:-default} as satisfied but ${VAR} as referenced', () => {
     const a = parseAnatomy('services:\n  app:\n    image: x\n    environment:\n      - A=${NEEDED}\n      - B=${HAS:-fallback}\n')!;
     expect(a.referencedVars).toContain('NEEDED');
