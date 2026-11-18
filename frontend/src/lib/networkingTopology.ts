@@ -148,15 +148,16 @@ export function isMissingTopologyNetwork(network: NetworkingTopologyNetwork): bo
   return network.runtimeState === 'missing' || network.id.startsWith('missing:');
 }
 
-/** The backend's all-interface sentinels. An empty host and an explicit
- *  `0.0.0.0` are IPv4 binds; `::` and `[::]` are the IPv6 wildcard, which
- *  Docker can bind without any IPv4 listener, so the two families never
- *  collapse into one another. */
+/** The backend's all-interface sentinels. `''` declares no host address and is
+ *  shown in its IPv4 form; an explicit `0.0.0.0` is an IPv4 bind. `::` and
+ *  `[::]` are the IPv6 wildcard, which Docker can bind without any IPv4
+ *  listener, so the two families never collapse into one another. */
 const IPV4_ALL_INTERFACE_HOSTS = new Set(['', '0.0.0.0']);
 const IPV6_ALL_INTERFACE_HOSTS = new Set(['::', '[::]']);
 
-/** A host as it belongs in `host:port`: an IPv6 literal needs brackets, and an
- *  all-interface sentinel keeps the address family Docker actually bound. */
+/** A host as it belongs in `host:port`: an IPv6 literal needs brackets, an
+ *  unspecified host and the IPv4 wildcard read as `0.0.0.0`, and the IPv6
+ *  wildcard reads as `[::]` so the line never claims an IPv4 bind. */
 function formatTopologyHost(hostIp: string): string {
   if (IPV6_ALL_INTERFACE_HOSTS.has(hostIp)) return '[::]';
   if (IPV4_ALL_INTERFACE_HOSTS.has(hostIp)) return '0.0.0.0';

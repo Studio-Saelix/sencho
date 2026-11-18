@@ -53,7 +53,7 @@ describe('formatTopologyPort', () => {
     expect(formatTopologyPort(publishedPort({ startPort: 0, endPort: 0 }))).toBe('0.0.0.0:auto/tcp');
   });
 
-  it('renders the IPv4 all-interface sentinels as 0.0.0.0 and never leaks an undefined value', () => {
+  it('renders an unspecified host and the IPv4 wildcard as 0.0.0.0 and never leaks an undefined value', () => {
     const line = formatTopologyPort(publishedPort());
     expect(line).toBe('0.0.0.0:8080/tcp');
     expect(formatTopologyPort(publishedPort({ hostIp: '0.0.0.0' }))).toBe('0.0.0.0:8080/tcp');
