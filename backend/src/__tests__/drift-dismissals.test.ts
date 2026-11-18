@@ -146,6 +146,73 @@ describe('image age', () => {
     expect(await classifyImageAge(docker, 'app:1', ['app:1'])).toBe('unknown');
   });
 
+  // A Compose `image` value can carry a registry credential, and the daemon
+  // echoes the reference it was given in its error.
+  it('never logs the registry password in the reference or the error echoing it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const image = 'user:p4ssw0rdXYZ@registry.example.com/app:latest';
+    const docker: ImageInspector = {
+      getImage: (ref: string) => ({
+        inspect: async () => {
+          if (ref !== image) return { Created: '2026-02-01T00:00:00Z' };
+          throw new Error(`(HTTP code 500) unexpected - driver failed\ninspecting ${image}`);
+        },
+      }),
+    };
+    expect(await classifyImageAge(docker, image, ['app:2'])).toBe('unknown');
+    const line = warn.mock.calls.find(args => String(args[0]).includes('Could not inspect image'));
+    expect(line?.[1]).toBe('[redacted]@registry.example.com/app:latest');
+    expect(String(line?.[2])).not.toContain('p4ssw0rdXYZ');
+    expect(String(line?.[2])).toContain('[redacted]@registry.example.com/app:latest');
+    expect(String(line?.[2])).toContain('driver failed');
+    // Control characters are still stripped from the caught message.
+    expect(String(line?.[2])).not.toMatch(/[\r\n\t]/);
+    warn.mockRestore();
+  });
+
+  it('stays quiet when the image is simply not in the local store', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await classifyImageAge(built({ 'app:2': '2026-02-01T00:00:00Z' }), 'app:gone', ['app:2'])).toBe('unknown');
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('keeps a credential-free reference, tag and digest alike, verbatim when the inspect fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const docker: ImageInspector = {
+      getImage: (ref: string) => ({
+        inspect: async () => {
+          if (ref === 'app:2') return { Created: '2026-02-01T00:00:00Z' };
+          throw Object.assign(new Error('(HTTP code 500) unexpected - driver failed'), { statusCode: 500 });
+        },
+      }),
+    };
+    const digest = `repo/app@sha256:${'a'.repeat(64)}`;
+    expect(await classifyImageAge(docker, 'registry.example.com/app:1', ['app:2'])).toBe('unknown');
+    expect(await classifyImageAge(docker, digest, ['app:2'])).toBe('unknown');
+    const logged = warn.mock.calls
+      .filter(args => String(args[0]).includes('Could not inspect image'))
+      .map(args => args[1]);
+    expect(logged).toEqual(['registry.example.com/app:1', digest]);
+    warn.mockRestore();
+  });
+
+  it('never logs a registry password when the image age cannot be read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const image = 'user:p4ssw0rdXYZ@registry.example.com/app:latest';
+    const report: StackDriftReport = {
+      stack: 'web', status: 'drifted', hasComposeFile: true, hasContainers: true,
+      findings: [{ kind: 'image-mismatch', service: 'web', detail: 'x', expected: image, actual: 'registry.example.com/app:latest' }],
+    };
+    const annotated = await annotateImageAge(() => { throw new Error(`no Docker client while inspecting ${image}`); }, report);
+    expect(annotated.findings[0].imageAge).toBe('unknown');
+    const line = warn.mock.calls.find(args => String(args[0]).includes('Could not read image age'));
+    expect(line?.[1]).toBe('web');
+    expect(String(line?.[2])).not.toContain('p4ssw0rdXYZ');
+    expect(String(line?.[2])).toContain('[redacted]@registry.example.com/app:latest');
+    warn.mockRestore();
+  });
+
   it('annotates only image findings, and never touches Docker when there are none', async () => {
     const factory = vi.fn(() => built({}));
     const quiet: StackDriftReport = { stack: 'web', status: 'in-sync', hasComposeFile: true, hasContainers: true, findings: [] };
