@@ -1,6 +1,5 @@
 import type { DriftImageAge, StackDriftReport, StackDriftFinding } from './DriftDetectionService';
-import { sanitizeForLog } from '../utils/safeLog';
-import { getErrorMessage } from '../utils/errors';
+import { errorMessageForLog, redactImageForDisplay, sanitizeForLog } from '../utils/safeLog';
 
 /** The slice of Docker this needs: inspect one image by reference or id. */
 export interface ImageInspector {
@@ -16,7 +15,15 @@ async function builtAt(docker: ImageInspector, ref: string): Promise<number | nu
     // An image that is not in the local store is the ordinary reason, so only
     // anything else is worth a log line. Either way the answer is "unknown".
     if ((error as { statusCode?: number })?.statusCode !== 404) {
-      console.warn('[Drift] Could not inspect image %s:', sanitizeForLog(ref), sanitizeForLog(getErrorMessage(error, 'inspect failed')));
+      // A Compose `image` value can carry a registry credential, and Docker
+      // echoes the reference it was given back in its own error, so both are
+      // redacted. The image step reads the reference's grammar, so a password
+      // holding a `/`, a space, or a quote is removed too.
+      console.warn(
+        '[Drift] Could not inspect image %s:',
+        sanitizeForLog(redactImageForDisplay(ref)),
+        errorMessageForLog(error, { imageRef: ref }),
+      );
     }
     return null;
   }
@@ -62,7 +69,14 @@ async function imageAgeOf(docker: () => ImageInspector, finding: StackDriftFindi
   try {
     return await classifyImageAge(docker(), finding.expected, finding.actual.split(', '));
   } catch (error) {
-    console.warn('[Drift] Could not read image age for %s:', sanitizeForLog(finding.service), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    // The declared reference is the one the Compose file writes, so it is the
+    // one a registry credential sits in; format the error against it as the
+    // inspect warning does.
+    console.warn(
+      '[Drift] Could not read image age for %s:',
+      sanitizeForLog(finding.service),
+      errorMessageForLog(error, { imageRef: finding.expected }),
+    );
     return 'unknown';
   }
 }
