@@ -113,6 +113,15 @@ function probes(over: Partial<EndpointGuardProbes> = {}): EndpointGuardProbes {
   };
 }
 
+/**
+ * The `configHash` probe as production answers when `compose config --hash`
+ * fails or does not list a service: null for the named ones, the fixtures'
+ * current hash for the rest.
+ */
+function noHashFor(...services: string[]) {
+  return vi.fn(async (service: string) => (services.includes(service) ? null : 'hash-current'));
+}
+
 function run(mutation: EndpointMutation, p: EndpointGuardProbes = probes(), stackName = 'sencho') {
   return evaluateDockerEndpointGuard({ nodeId: 1, stackName, mutation, probes: p });
 }
@@ -2654,11 +2663,70 @@ describe('the Sencho clause in a refusal', () => {
   });
 });
 
+/**
+ * Six deploy scenarios that leave the protected service unchanged, each run
+ * under both answers production's hash probe can give: the hash Compose reports
+ * for that service, and none at all when `compose config --hash` fails or does
+ * not list it. An unreported hash cannot prove the service unchanged, so the
+ * deploy must be refused as unpredictable rather than read as unchanged. The
+ * rows mirror the scenarios above: the resolved provider, a provider found only
+ * by its infrastructure label, Sencho itself, a provider wired to an unchanged
+ * service, a build section behind the default pull policy, and a policy that
+ * never pulls.
+ */
+describe('an unchanged deploy, with and without the hash Compose reports', () => {
+  type Scenario = [name: string, service: string, arrange: () => void, over?: () => Partial<EndpointGuardProbes>];
+
+  const scenarios: Scenario[] = [
+    ['the resolved provider', 'socket-proxy', () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
+    }],
+    ['a provider found only by its infrastructure label', 'socket-proxy', () => {
+      mockListContainers.mockResolvedValue([container(PROXY_ID, 'socket-proxy', { labels: { [INFRASTRUCTURE_LABEL]: 'true' } }), webContainer]);
+    }],
+    ['Sencho itself', 'sencho', () => {
+      mockListContainers.mockResolvedValue([senchoContainer, webContainer]);
+    }],
+    ['the provider wired to a service it links to', 'socket-proxy', () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      mockListContainers.mockResolvedValue([proxyContainer, container('d'.repeat(64), 'dep'), webContainer]);
+    }, () => ({ renderConfig: vi.fn().mockResolvedValue('services:\n  socket-proxy:\n    links: [dep]\n  dep:\n    command: run\n') })],
+    ['the provider behind a build section with the default pull policy', 'socket-proxy', () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      mockListContainers.mockResolvedValue([{ ...proxyContainer, ImageID: 'sha256:same' }, webContainer]);
+    }, () => ({
+      renderConfig: vi.fn().mockResolvedValue('services:\n  socket-proxy:\n    image: proxy:latest\n    build: .\n'),
+      localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }),
+    })],
+    ['the provider whose pull policy never pulls', 'socket-proxy', () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      mockListContainers.mockResolvedValue([{ ...proxyContainer, ImageID: 'sha256:same' }, webContainer]);
+    }, () => ({
+      renderConfig: vi.fn().mockResolvedValue('services:\n  socket-proxy:\n    image: proxy:latest\n    pull_policy: missing\n'),
+      localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }),
+    })],
+  ];
+
+  it.each<Scenario>(scenarios)('lets the deploy of %s through when Compose reports the hash', async (_name, service, arrange, over) => {
+    arrange();
+    const p = probes(over?.() ?? {});
+
+    expect(await run({ kind: 'up' }, p)).toBeNull();
+    expect(p.configHash).toHaveBeenCalledWith(service);
+  });
+
+  it.each<Scenario>(scenarios)('refuses the deploy of %s when Compose reports no hash, instead of reading it as unchanged', async (_name, service, arrange, over) => {
+    arrange();
+
+    const refusal = await run({ kind: 'up' }, { ...probes(over?.() ?? {}), configHash: noHashFor(service) });
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service });
+    expect(refusal?.message).toContain('configuration hash');
+  });
+});
+
 describe('a deploy when Compose reports no config hash for a service', () => {
-  // The production probe answers null when `compose config --hash` fails or does
-  // not list the service. The default probe above always answers, so each case
-  // names the services that get no hash, and the rest keep matching what runs.
-  const noHashFor = (...services: string[]) => vi.fn(async (service: string) => (services.includes(service) ? null : 'hash-current'));
   const commandOnly = (...services: string[]) => `services:\n${services.map(name => `  ${name}:\n    command: run\n`).join('')}`;
   const withHash = (missing: string[], rendered = commandOnly('socket-proxy', 'web', 'sencho', 'vpn')) =>
     probes({ renderConfig: vi.fn().mockResolvedValue(rendered), configHash: noHashFor(...missing) });
