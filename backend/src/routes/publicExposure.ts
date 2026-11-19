@@ -24,7 +24,10 @@ const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
 const connectSchema = z.object({
   token: z.string()
     .transform((value) => value.trim())
-    .pipe(z.string().min(20).max(256).regex(/^[\x21-\x7e]+$/, 'The token must be printable characters with no spaces.')),
+    .pipe(z.string()
+      .min(20, 'This is too short to be a Cloudflare API token. Paste the whole token.')
+      .max(256, 'This is too long to be a Cloudflare API token.')
+      .regex(/^[\x21-\x7e]+$/, 'The token must be printable characters with no spaces.')),
   accountId: z.string().trim().toLowerCase().regex(CLOUDFLARE_ID, 'The account id is 32 hexadecimal characters.'),
 });
 

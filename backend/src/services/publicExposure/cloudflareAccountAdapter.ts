@@ -343,7 +343,7 @@ export class CloudflareAccountAdapter {
         if (accountError.kind === 'forbidden' || accountError.kind === 'not_found') {
           throw stop('account_not_accessible', `Account ${accountId} is not reachable with this token. Check the account ID.`);
         }
-        throw stop('token_invalid', 'Cloudflare rejects this token.');
+        throw stop('token_invalid', null);
       }
     }
     if (verified.status !== 'active') {

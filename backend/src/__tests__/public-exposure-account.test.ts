@@ -123,6 +123,7 @@ describe('connect outcomes', () => {
     const error = await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor));
     expect(error.code).toBe(code);
     expect(error.status).toBe(422);
+    expect(error.message).toBe('Cloudflare rejects this token. Check that it was copied whole.');
     expect(service.getView()).toEqual({ connected: false });
   });
 
