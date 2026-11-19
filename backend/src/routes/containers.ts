@@ -5,7 +5,7 @@ import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { requirePermission } from '../middleware/permissions';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -65,10 +65,7 @@ containersRouter.post('/:id/stop', async (req: Request, res: Response) => {
     invalidateNodeCaches(req.nodeId);
     res.json({ message: 'Container stopped' });
   } catch (error) {
-    if (isDockerEndpointProtectedError(error)) {
-      res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
-      return;
-    }
+    if (sendIfDockerEndpointProtected(res, error)) return;
     console.error('[Containers] Stop failed for %s:', sanitizeForLog(req.params.id as string), error);
     res.status(500).json({ error: 'Failed to stop container' });
   }
@@ -83,10 +80,7 @@ containersRouter.post('/:id/restart', async (req: Request, res: Response) => {
     invalidateNodeCaches(req.nodeId);
     res.json({ message: 'Container restarted' });
   } catch (error) {
-    if (isDockerEndpointProtectedError(error)) {
-      res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
-      return;
-    }
+    if (sendIfDockerEndpointProtected(res, error)) return;
     if (isDataRestoreFenceError(error)) {
       res.status(409).json({ error: error.message, code: error.code });
       return;
