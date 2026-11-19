@@ -68,6 +68,8 @@ beforeEach(async () => {
   fake = makeFakeCloudflare();
   installFakeCloudflare(fake);
   vi.spyOn(Math, 'random').mockReturnValue(0);
+  const { FleetSyncService } = await import('../services/FleetSyncService');
+  vi.spyOn(FleetSyncService, 'getControlIdentity').mockReturnValue('0123456789abcdef');
 });
 
 afterEach(() => {
@@ -84,11 +86,12 @@ describe('who may call the routes', () => {
     }
   });
 
-  it('refuses a full-admin API token and a node_proxy credential with SESSION_REQUIRED', async () => {
+  it('refuses a full-admin API token and node_proxy and pilot_tunnel credentials with SESSION_REQUIRED', async () => {
     const created = await call('post', '/api/api-tokens', adminToken(), { name: `pe-${Date.now()}`, scope: 'full-admin' });
     const apiToken = created.body.token as string;
     const machine = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-    for (const credential of [apiToken, machine]) {
+    const tunnel = jwt.sign({ scope: 'pilot_tunnel' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    for (const credential of [apiToken, machine, tunnel]) {
       for (const [method, path, body] of ADMIN_ROUTES) {
         const res = await call(method, path, credential, body);
         expect(res.status, `${method} ${path}`).toBe(403);
@@ -166,7 +169,8 @@ describe('route audit rows', () => {
   function summaries(): string[] {
     const db = DatabaseService.getInstance();
     db.flushAuditLogBuffer();
-    return (db.getDb().prepare(`SELECT summary FROM audit_log WHERE path LIKE '/api/public-exposure%' ORDER BY id`).all() as Array<{ summary: string }>)
+    // Route rows only; the service writes its own `public_exposure.*` rows on the same path.
+    return (db.getDb().prepare(`SELECT summary FROM audit_log WHERE path LIKE '/api/public-exposure%' AND summary NOT LIKE 'public_exposure.%' ORDER BY id`).all() as Array<{ summary: string }>)
       .map((r) => r.summary);
   }
 
@@ -179,13 +183,32 @@ describe('route audit rows', () => {
     expect(rows.some((r) => r === 'Connected Cloudflare account')).toBe(false);
   });
 
-  it('words a successful connect and an unreachable recheck', async () => {
+  it('words each successful account and zone action', async () => {
     await call('put', '/api/public-exposure/account', adminToken(), { token: FAKE_TOKEN, accountId: FAKE_ACCOUNT_ID });
-    fake.zones = 500;
+    await call('put', `/api/public-exposure/zones/${ZONE_A}`, adminToken(), { enabled: true, allowedSuffixes: [] });
+    await call('post', '/api/public-exposure/account/verify', adminToken());
     await call('post', '/api/public-exposure/account/dns-check', adminToken(), { zoneRef: ZONE_A });
-    const rows = summaries();
-    expect(rows).toContain('Connected Cloudflare account');
-    expect(rows).toContain('Cloudflare DNS write check refused (409)');
+    await call('delete', '/api/public-exposure/account', adminToken());
+    expect(summaries()).toEqual([
+      'Connected Cloudflare account',
+      `Updated public exposure zone: ${ZONE_A}`,
+      'Rechecked Cloudflare account',
+      'Checked Cloudflare DNS write',
+      'Disconnected Cloudflare account',
+    ]);
+  });
+
+  it('words refused zone, DNS check, recheck and disconnect requests as refusals', async () => {
+    await call('put', `/api/public-exposure/zones/${ZONE_A}`, adminToken(), { enabled: true, allowedSuffixes: [] });
+    await call('post', '/api/public-exposure/account/dns-check', adminToken(), { zoneRef: ZONE_A });
+    await call('post', '/api/public-exposure/account/verify', adminToken());
+    await call('delete', '/api/public-exposure/account', adminToken());
+    expect(summaries()).toEqual([
+      'Public exposure zone update refused (404)',
+      'Cloudflare DNS write check refused (404)',
+      'Cloudflare account recheck refused (404)',
+      'Cloudflare account disconnect refused (404)',
+    ]);
   });
 });
 

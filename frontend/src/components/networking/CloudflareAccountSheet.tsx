@@ -9,7 +9,7 @@ import { SheetSection, SystemSheet } from '@/components/ui/system-sheet';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import type { PublicExposureAccount } from '@/hooks/usePublicExposureAccount';
 import type { AccountVerb } from '@/lib/cloudflareAccountStatus';
-import { formatCheckDate } from '@/lib/cloudflareAccountStatus';
+import { cloudflareAccountStatus, formatCheckDate } from '@/lib/cloudflareAccountStatus';
 import type { PublicExposureZone } from '@/lib/publicExposureApi';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { suffixProblem } from '@/lib/exposureHostnames';
@@ -40,7 +40,8 @@ export function CloudflareAccountSheet({
 }: CloudflareAccountSheetProps) {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const view = account.view?.connected ? account.view : null;
-  const enabledCount = view ? view.zones.filter((z) => z.enabled).length : 0;
+  // The Answer on the Overview carries its own resolving verb; the toolbar does not repeat it there.
+  const answerVerb = account.view && tab === 'overview' ? cloudflareAccountStatus(account.view).verb?.kind : undefined;
 
   return (
     <>
@@ -49,10 +50,10 @@ export function CloudflareAccountSheet({
         onOpenChange={onOpenChange}
         crumb={['Networking', 'Public exposure', 'Cloudflare']}
         name={view?.accountName ?? 'Cloudflare account'}
-        meta={view ? `account ${view.accountId.slice(0, 8)} · ${enabledCount} ${enabledCount === 1 ? 'zone' : 'zones'} enabled` : 'not connected'}
+        meta={view ? `account ${view.accountId.slice(0, 8)} · Cloudflare Tunnel` : 'not connected'}
         secondaryActions={view ? [
-          { label: recheckWait > 0 ? `Recheck in ${recheckWait} s` : 'Recheck', icon: RefreshCw, onClick: () => onVerb({ kind: 'recheck' }), pending: account.pending === 'recheck', disabled: recheckWait > 0 || account.pending !== null },
-          { label: 'Replace token', onClick: () => { onModeChange('replace'); onTabChange('overview'); }, disabled: account.pending !== null },
+          ...(answerVerb === 'recheck' ? [] : [{ label: recheckWait > 0 ? `Recheck in ${recheckWait} s` : 'Recheck', icon: RefreshCw, onClick: () => onVerb({ kind: 'recheck' }), pending: account.pending === 'recheck', disabled: recheckWait > 0 || account.pending !== null }]),
+          ...(answerVerb === 'replace' ? [] : [{ label: 'Replace token', onClick: () => { onModeChange('replace'); onTabChange('overview'); }, disabled: account.pending !== null }]),
         ] : undefined}
         destructiveAction={view ? { label: 'Disconnect', onClick: () => setConfirmDisconnect(true), disabled: account.pending !== null } : undefined}
         tabs={view ? [{ id: 'overview', label: 'Overview' }, { id: 'zones', label: 'Zones', count: view.zones.length }] : undefined}
@@ -99,7 +100,7 @@ export function CloudflareAccountSheet({
         variant="destructive"
         kicker="Cloudflare · Disconnect"
         title="Disconnect the Cloudflare account"
-        description="Sencho removes the token and the zone choices from this control instance. Nothing is deleted in Cloudflare, and the token stays valid there until you revoke it."
+        description="Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending; nothing else is deleted there, and the token stays valid until you revoke it."
         confirmLabel="Disconnect"
         busyConfirmLabel="Disconnecting…"
         confirming={account.pending === 'disconnect'}
@@ -267,6 +268,7 @@ function zoneSummary(zone: PublicExposureZone): string {
     if (!zone.seenAtLastCheck) parts.push('not visible to this token');
   } else {
     parts.push('not enabled');
+    if (zone.cleanupPending) parts.push('check record left');
   }
   return parts.join(' · ');
 }

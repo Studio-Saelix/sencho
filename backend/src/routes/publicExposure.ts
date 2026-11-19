@@ -11,12 +11,12 @@ import { PublicExposureError } from '../services/publicExposure/types';
 /**
  * Public exposure account routes: the hub's one Cloudflare account, its
  * zones, and the permission checks. Hub-only, so a request naming a remote
- * node is refused instead of proxied. Every account and zone write is Admin
- * and signed-in-session only, because the account holds a provider
- * credential. The enabled-zone list is a global `node:read` read.
+ * node is refused instead of proxied. Every account route and every zone
+ * write is Admin and signed-in-session only, because the account holds a
+ * provider credential; only the enabled-zone list is a global `node:read` read.
  *
- * A Cloudflare 401 or 403 is reported as 422 (or 502/503), never as 401:
- * a local 401 signs the browser out.
+ * A Cloudflare 401 or 403 is reported as 422, and transport failures as 502
+ * or 503, never as 401: a local 401 signs the browser out.
  */
 
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;

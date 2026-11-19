@@ -1596,11 +1596,6 @@ export class DatabaseService {
     }
 
     /**
-     * Recovery has no live feature depending on it at boot, so a failed or
-     * newer recovery schema leaves recovery unavailable rather than stopping
-     * Sencho. The stores read the outcome and fail closed.
-     */
-    /**
      * Hub tables for public exposure: the connected provider account (one per
      * adapter, its token encrypted), the account's zones and which of them may
      * carry public hostnames, and the per-node endpoint table. The endpoint
@@ -1649,6 +1644,11 @@ export class DatabaseService {
         `);
     }
 
+    /**
+     * Recovery has no live feature depending on it at boot, so a failed or
+     * newer recovery schema leaves recovery unavailable rather than stopping
+     * Sencho. The stores read the outcome and fail closed.
+     */
     private migrateRecoverySchema(): void {
         try {
             this.recoverySchemaOutcome = applyRecoverySchema(this.db);

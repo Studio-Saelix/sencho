@@ -103,6 +103,13 @@ describe('Cloudflare token containment', () => {
       .send(`{"token":"${FAKE_TOKEN}","accountId":`);
     expect(malformed.status).toBe(400);
     bodies.push(malformed.text);
+    // A body whose parse message quotes the start of the token.
+    const unquoted = await request(app)
+      .put('/api/public-exposure/account')
+      .set('Authorization', auth)
+      .set('Content-Type', 'application/json')
+      .send(`{"token": ${FAKE_TOKEN}, "accountId": "x"}`);
+    expect(unquoted.status).toBe(400);
 
     // An unexpected throw inside the route.
     const { PublicExposureAccountService } = await import('../services/publicExposure/PublicExposureAccountService');
@@ -120,6 +127,7 @@ describe('Cloudflare token containment', () => {
     expect(bodies.join('\n')).not.toContain(FAKE_TOKEN);
     expect(JSON.stringify(audit)).not.toContain(FAKE_TOKEN);
     expect(logged.join('\n')).not.toContain(FAKE_TOKEN);
+    expect(logged.join('\n')).not.toContain(FAKE_TOKEN.slice(0, 8));
     expect(JSON.stringify(diagnostics)).not.toContain(FAKE_TOKEN);
     expect(raw).toHaveLength(1);
     expect(raw[0].credential_enc.startsWith('enc:')).toBe(true);

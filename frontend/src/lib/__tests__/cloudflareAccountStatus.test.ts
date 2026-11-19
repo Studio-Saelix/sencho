@@ -54,7 +54,7 @@ describe('cloudflareAccountStatus', () => {
     const cf = cloudflareAccountStatus(failed('rate_limited', { retryAfterSeconds: 30 }));
     expect(cf.answer.line).toContain('Cloudflare is limiting requests. Recheck after 30 s.');
     expect(cf.verb).toEqual({ kind: 'recheck', waitSeconds: 30 });
-    const own = cloudflareAccountStatus(failed('rate_limited', { detail: "Sencho's own request limit" }));
+    const own = cloudflareAccountStatus(failed('rate_limited', { limitedBy: 'sencho' }));
     expect(own.answer.line).toContain("Sencho's own Cloudflare request limit");
   });
 
@@ -72,6 +72,26 @@ describe('cloudflareAccountStatus', () => {
     expect(result.answer.status).toBe(status);
     expect(result.answer.line).toContain(text);
     expect(result.verb?.kind).toBe(verb);
+  });
+
+  it('says a zero-second wait instead of reading it as absent', () => {
+    expect(cloudflareAccountStatus(failed('rate_limited', { retryAfterSeconds: 0 })).answer.line).toContain('Recheck after 0 s.');
+  });
+
+  it('never reads an outcome it does not know as healthy', () => {
+    const status = cloudflareAccountStatus(failed('future_state' as CheckOutcome));
+    expect(status.answer.status).toBe('unexpected_response');
+    expect(status.answer.tone).toBe('warning');
+  });
+
+  it('shows a leftover check record on a disabled zone, with the DNS stage', () => {
+    const status = cloudflareAccountStatus(view({
+      zones: [zone({ dns: 'confirmed' }), zone({ zoneRef: 'd4'.repeat(16), name: 'example.net', enabled: false, cleanupPending: { recordName: 'r' } })],
+      zonesVisible: 2,
+    }));
+    expect(status.answer.status).toBe('cleanup_pending');
+    expect(status.answer.line).toContain('example.net');
+    expect(status.stages.find((s) => s.id === 'dns')?.word).toBe('cleanup pending');
   });
 
   it('reports success with the confirmed zone count and no verb', () => {

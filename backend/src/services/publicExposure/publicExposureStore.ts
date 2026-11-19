@@ -1,5 +1,5 @@
 import { DatabaseService } from '../DatabaseService';
-import type { AccountScopes, LastCheck, PendingScopeCheck, ScopeState, ZoneDnsState } from './types';
+import { CHECK_OUTCOMES, type AccountScopes, type CheckOutcome, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
 
 /**
  * SQL for the public exposure hub tables. Rows are parsed into typed records
@@ -82,12 +82,15 @@ function dnsState(value: unknown): ZoneDnsState {
 
 function parseLastCheck(text: string): LastCheck {
   const raw = asRecord(parseJson(text));
+  // An outcome this build does not know (a corrupted or newer row) reads as unexpected, never as ok.
+  const known = CHECK_OUTCOMES.includes(raw.outcome as CheckOutcome);
   const check: LastCheck = {
-    outcome: typeof raw.outcome === 'string' ? (raw.outcome as LastCheck['outcome']) : 'unexpected_response',
+    outcome: known ? (raw.outcome as CheckOutcome) : 'unexpected_response',
     at: typeof raw.at === 'number' ? raw.at : 0,
     detail: typeof raw.detail === 'string' ? raw.detail : null,
   };
   if (typeof raw.retryAfterSeconds === 'number') check.retryAfterSeconds = raw.retryAfterSeconds;
+  if (raw.limitedBy === 'sencho' || raw.limitedBy === 'cloudflare') check.limitedBy = raw.limitedBy;
   return check;
 }
 
@@ -96,7 +99,12 @@ function parsePending(text: string | null): PendingScopeCheck | null {
   if (raw === null) return null;
   const record = asRecord(raw);
   if (typeof record.name !== 'string' || typeof record.content !== 'string') return null;
-  return { name: record.name, content: record.content, recordId: typeof record.recordId === 'string' ? record.recordId : null };
+  return {
+    name: record.name,
+    content: record.content,
+    recordId: typeof record.recordId === 'string' ? record.recordId : null,
+    createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
+  };
 }
 
 function toAccount(row: AccountRow): AccountRecord {

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction, ErrorRequestHandler } from 'express';
 import { getErrorMessage } from '../utils/errors';
-import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
+import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 interface HttpError {
   type?: string;
@@ -19,10 +19,17 @@ interface HttpError {
 export const errorHandler: ErrorRequestHandler = (err: unknown, _req: Request, res: Response, next: NextFunction): void => {
   const e = (err ?? {}) as HttpError;
   const status = e.statusCode ?? e.status ?? 500;
-  // Log the message, type and status only. body-parser attaches the raw
-  // request body to a parse error, so logging the error object would print
-  // whatever secret a malformed request carried.
-  console.error('[Error]', errorMessageForLog(err), `type=${sanitizeForLog(e.type ?? 'unknown')}`, `status=${status}`);
+  // Never log the error object or, for a body that failed to parse, even its
+  // message: body-parser attaches the raw body to the error, and V8 quotes a
+  // slice of the input in a JSON parse message, so either could carry a
+  // secret the request held. Unexpected server errors keep a redacted stack.
+  const bodyParseFailure = e.type === 'entity.parse.failed' || (typeof err === 'object' && err !== null && 'body' in err);
+  const logged = bodyParseFailure
+    ? 'request body could not be parsed'
+    : status >= 500 && err instanceof Error && err.stack
+      ? sanitizeForLog(redactSensitiveText(err.stack))
+      : errorMessageForLog(err);
+  console.error('[Error]', logged, `type=${sanitizeForLog(e.type ?? 'unknown')}`, `status=${status}`);
   if (res.headersSent) {
     next(err);
     return;

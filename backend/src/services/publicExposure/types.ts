@@ -26,6 +26,14 @@ export type CheckOutcome =
   | 'rate_limited'
   | 'unexpected_response';
 
+/** Every outcome except `ok`: what a check that did not complete can mean. */
+export type FailedOutcome = Exclude<CheckOutcome, 'ok'>;
+
+export const CHECK_OUTCOMES: readonly CheckOutcome[] = [
+  'ok', 'token_invalid', 'token_inactive', 'token_location_refused', 'credential_unreadable',
+  'account_not_accessible', 'cloudflare_unreachable', 'rate_limited', 'unexpected_response',
+];
+
 export interface AccountScopes {
   zoneRead: ScopeState;
   tunnel: ScopeState;
@@ -36,6 +44,8 @@ export interface LastCheck {
   at: number;
   detail: string | null;
   retryAfterSeconds?: number;
+  /** Set with `rate_limited`: whether Cloudflare or Sencho's own request budget refused. */
+  limitedBy?: 'cloudflare' | 'sencho';
 }
 
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
@@ -43,6 +53,8 @@ export interface PendingScopeCheck {
   name: string;
   content: string;
   recordId: string | null;
+  /** When the intent was journaled. A create that may still land is not declared lost too early. */
+  createdAt: number;
 }
 
 export interface PublicExposureZoneView {
@@ -54,8 +66,8 @@ export interface PublicExposureZoneView {
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
   cleanupPending: { recordName: string } | null;
-  /** The TXT record the DNS write check creates and deletes, named in its preview. */
-  checkRecordName: string;
+  /** The TXT record the DNS write check creates and deletes, named in its preview. Null until this instance has an identity. */
+  checkRecordName: string | null;
 }
 
 export type PublicExposureAccountView =
@@ -86,6 +98,7 @@ export interface EnabledZoneView {
 /** Error codes the routes return. The frontend maps each one to its own state. */
 export type PublicExposureErrorCode =
   | 'INVALID_INPUT'
+  | 'CONTROL_IDENTITY_MISSING'
   | 'NOT_CONNECTED'
   | 'ACCOUNT_BUSY'
   | 'ACCOUNT_CHANGE_NEEDS_DISCONNECT'

@@ -29,8 +29,8 @@ export interface PublicExposureZone {
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
   cleanupPending: { recordName: string } | null;
-  /** The TXT record the DNS write check creates and deletes. */
-  checkRecordName: string;
+  /** The TXT record the DNS write check creates and deletes. Null until the control instance has an identity. */
+  checkRecordName: string | null;
 }
 
 export interface ConnectedAccountView {
@@ -39,7 +39,14 @@ export interface ConnectedAccountView {
   accountId: string;
   accountName: string | null;
   scopes: { zoneRead: ScopeState; tunnel: ScopeState };
-  lastCheck: { outcome: CheckOutcome; at: number; detail: string | null; retryAfterSeconds?: number };
+  lastCheck: {
+    outcome: CheckOutcome;
+    at: number;
+    detail: string | null;
+    retryAfterSeconds?: number;
+    /** Set with `rate_limited`: whether Cloudflare or Sencho's own request budget refused. */
+    limitedBy?: 'cloudflare' | 'sencho';
+  };
   verifiedAt: number | null;
   connectedBy: string;
   connectedAt: number;
@@ -78,6 +85,9 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
       res.status,
       typeof record.retryAfterSeconds === 'number' ? record.retryAfterSeconds : undefined,
     );
+  }
+  if (typeof body !== 'object' || body === null) {
+    throw new PublicExposureApiError('The control instance sent a response Sencho could not read.', null, res.status);
   }
   return body as T;
 }

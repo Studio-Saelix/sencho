@@ -533,4 +533,19 @@ describe('hubOnlyGuard', () => {
       .set('Authorization', authHeader);
     expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
   });
+
+  it.each([
+    ['put', '/api/public-exposure/account'],
+    ['post', '/api/public-exposure/account/verify'],
+    ['post', '/api/public-exposure/account/dns-check'],
+    ['delete', '/api/public-exposure/account'],
+    ['put', '/api/public-exposure/zones/x'],
+  ] as const)('rejects %s %s when the header names a remote node', async (method, endpoint) => {
+    const res = await request(app)[method](endpoint)
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId))
+      .send({ token: 'never-forwarded-token-0123456789', accountId: 'a'.repeat(32) });
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
 });

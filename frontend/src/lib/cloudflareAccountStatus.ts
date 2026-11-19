@@ -1,6 +1,6 @@
 import type { StatusPathStage } from '@/components/ui/status-path';
 import type { StatusTone } from '@/lib/statusTone';
-import type { ConnectedAccountView, PublicExposureAccountView, PublicExposureZone } from '@/lib/publicExposureApi';
+import type { CheckOutcome, ConnectedAccountView, PublicExposureAccountView, PublicExposureZone } from '@/lib/publicExposureApi';
 
 /**
  * Maps the hub's Cloudflare account view to Answer, path, proof. Pure, so
@@ -85,11 +85,10 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
       break;
     case 'rate_limited': {
       const wait = lastCheck.retryAfterSeconds;
-      const own = lastCheck.detail?.includes("Sencho's own request limit") === true;
-      const who = own ? "Sencho's own Cloudflare request limit was reached." : 'Cloudflare is limiting requests.';
+      const who = lastCheck.limitedBy === 'sencho' ? "Sencho's own Cloudflare request limit was reached." : 'Cloudflare is limiting requests.';
       problems.push({
         status: 'rate_limited', tone: 'warning', title: 'Rate limited',
-        line: wait ? `${who} Recheck after ${wait} s.` : `${who} Recheck in a moment.`,
+        line: wait !== undefined ? `${who} Recheck after ${wait} s.` : `${who} Recheck in a moment.`,
         verb: { kind: 'recheck', waitSeconds: wait }, stage: 'token',
       });
       break;
@@ -99,6 +98,9 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
       break;
     case 'ok':
       break;
+    default:
+      // An outcome this build does not know is shown as unreadable, never as healthy.
+      problems.push({ status: 'unexpected_response', tone: 'warning', title: 'Unexpected response', line: 'Cloudflare sent a response Sencho could not read.', detail: lastCheck.detail, verb: recheck, stage: 'token' });
   }
 
   if (view.scopes.tunnel === 'missing') {
@@ -111,7 +113,8 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
   for (const zone of enabled.filter((z) => z.dns === 'missing')) {
     problems.push({ status: 'dns_missing', tone: 'warning', title: 'DNS edit missing', line: `The token cannot edit DNS in ${zone.name}. Add DNS: Edit for this zone in Cloudflare.`, verb: recheck, stage: 'dns' });
   }
-  for (const zone of enabled.filter((z) => z.cleanupPending)) {
+  // A leftover check record is shown whether or not its zone is still enabled: it blocks disconnect either way.
+  for (const zone of view.zones.filter((z) => z.cleanupPending)) {
     problems.push({ status: 'cleanup_pending', tone: 'warning', title: 'Cleanup pending', line: `A permission-check record is left in ${zone.name}.`, detail: zone.cleanupPending?.recordName ?? null, verb: recheck, stage: 'dns' });
   }
   for (const zone of enabled.filter((z) => !z.seenAtLastCheck)) {
@@ -129,7 +132,7 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
   return problems;
 }
 
-const TOKEN_STAGE_WORD: Record<string, string> = {
+const TOKEN_STAGE_WORD: Partial<Record<CheckOutcome, string>> = {
   credential_unreadable: 'unreadable',
   token_invalid: 'rejected',
   token_inactive: 'inactive',
@@ -157,11 +160,11 @@ function stagesFor(view: ConnectedAccountView, problems: AccountProblem[], answe
   else { zonesWord = `${enabled.length} enabled`; zonesTone = 'success'; }
   stages.push({ id: 'zones', label: 'Zones', tone: zonesTone, word: zonesWord, line: lineFor('zones') });
 
-  if (enabled.length > 0) {
+  if (enabled.length > 0 || view.zones.some((z) => z.cleanupPending)) {
     let dnsWord: string;
     let dnsTone: StatusTone;
     if (enabled.some((z) => z.dns === 'missing')) { dnsWord = 'missing'; dnsTone = 'warning'; }
-    else if (enabled.some((z) => z.cleanupPending)) { dnsWord = 'cleanup pending'; dnsTone = 'warning'; }
+    else if (view.zones.some((z) => z.cleanupPending)) { dnsWord = 'cleanup pending'; dnsTone = 'warning'; }
     else if (enabled.every((z) => z.dns === 'confirmed')) {
       const oldest = Math.min(...enabled.map((z) => z.dnsCheckedAt ?? Date.now()));
       dnsWord = `confirmed ${formatCheckDate(oldest)}`;

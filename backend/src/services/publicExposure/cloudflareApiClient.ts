@@ -85,7 +85,7 @@ export interface CloudflareResponse<T> {
 }
 
 export interface CloudflareCallOptions {
-  /** The caller's operation signal. An abort is never retried. */
+  /** The caller's operation signal. An aborted signal ends the call; no retry wait outlives it. */
   signal?: AbortSignal;
   /** Epoch ms the caller's operation must finish by; no retry wait runs past it. */
   deadlineAt?: number;
@@ -182,6 +182,16 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** The body text, or a rejection as soon as the signal aborts (a stalled body never outlives its timer). */
+function readBody(response: Response, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new Error('aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    response.text().then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export class CloudflareApiClient {
   private readonly fetchImpl: () => typeof fetch;
   private readonly now: () => number;
@@ -192,7 +202,7 @@ export class CloudflareApiClient {
     // Resolved per call so a test that stubs the global fetch reaches the shared client.
     this.fetchImpl = () => deps.fetchImpl ?? globalThis.fetch;
     this.now = deps.now ?? Date.now;
-    this.random = deps.random ?? Math.random;
+    this.random = deps.random ?? (() => Math.random());
   }
 
   /** Forget the request budget. Tests only. */
@@ -249,7 +259,8 @@ export class CloudflareApiClient {
 
   /** Milliseconds to wait before the next attempt, or null when the error is final. */
   private retryWait(error: CloudflareApiError, req: CloudflareRequest, attempt: number): number | null {
-    if (attempt >= MAX_ATTEMPTS) return null;
+    // A cancelled or expired operation is final; retrying would only report a different error.
+    if (attempt >= MAX_ATTEMPTS || req.signal?.aborted) return null;
     const remaining = req.deadlineAt === undefined ? Number.POSITIVE_INFINITY : req.deadlineAt - this.now();
     let wait: number;
     if (error.kind === 'rate_limited') {
@@ -286,15 +297,25 @@ export class CloudflareApiClient {
 
   private async attempt<T>(token: string, req: CloudflareRequest): Promise<CloudflareResponse<T>> {
     if (req.signal?.aborted) {
-      throw new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.' });
+      // Nothing was sent, so a POST that stops here created nothing.
+      throw new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.', preSend: true });
     }
     this.takeBudget();
     const attemptController = new AbortController();
     const timer = setTimeout(() => attemptController.abort(), ATTEMPT_TIMEOUT_MS);
     const signal = req.signal ? AbortSignal.any([req.signal, attemptController.signal]) : attemptController.signal;
-    let response: Response;
     try {
-      response = await this.fetchImpl()(this.buildUrl(req.path, req.query), {
+      const response = await this.send(req, token, signal, attemptController.signal);
+      // The body read stays under the same attempt timer as the headers.
+      return await this.readResponse<T>(response, token, signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async send(req: CloudflareRequest, token: string, signal: AbortSignal, attemptSignal: AbortSignal): Promise<Response> {
+    try {
+      return await this.fetchImpl()(this.buildUrl(req.path, req.query), {
         method: req.method,
         redirect: 'error',
         headers: {
@@ -306,7 +327,7 @@ export class CloudflareApiClient {
         signal,
       });
     } catch (error: unknown) {
-      if (attemptController.signal.aborted || req.signal?.aborted) {
+      if (attemptSignal.aborted || req.signal?.aborted) {
         throw new CloudflareApiError({ kind: 'timeout', message: 'Cloudflare did not answer in time.' });
       }
       if (isRedirectRefusal(error)) {
@@ -318,21 +339,19 @@ export class CloudflareApiClient {
         message: `Could not reach api.cloudflare.com${code ? ` (${code})` : ''}.`,
         preSend: code !== undefined && PRE_SEND_ERROR_CODES.has(code),
       });
-    } finally {
-      clearTimeout(timer);
     }
-    return this.readResponse<T>(response, token);
   }
 
-  private async readResponse<T>(response: Response, token: string): Promise<CloudflareResponse<T>> {
+  private async readResponse<T>(response: Response, token: string, signal: AbortSignal): Promise<CloudflareResponse<T>> {
     const status = response.status;
     if (status >= 300 && status < 400) {
       throw new CloudflareApiError({ kind: 'invalid_response', status, message: 'Cloudflare answered with a redirect, which Sencho does not follow.' });
     }
     let text: string;
     try {
-      text = await response.text();
+      text = await readBody(response, signal);
     } catch {
+      if (signal.aborted) throw new CloudflareApiError({ kind: 'timeout', status, message: 'Cloudflare did not finish its answer in time.' });
       throw new CloudflareApiError({ kind: 'network', status, message: 'The Cloudflare response was cut off.' });
     }
     let envelope: CloudflareEnvelope | null = null;

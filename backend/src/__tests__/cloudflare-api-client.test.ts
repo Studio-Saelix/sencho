@@ -230,6 +230,25 @@ describe('CloudflareApiClient deadlines', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('times out a body that stalls after the headers', async () => {
+    vi.useFakeTimers();
+    const stalled = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
+    const { client, calls } = clientWith([stalled]);
+    const pending = caught(client.request(TOKEN, { method: 'POST', path: '/zones/z/dns_records', body: {} }));
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect((await pending).kind).toBe('timeout');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('marks a call stopped before sending as never sent', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { client, calls } = clientWith([() => ok({})]);
+    const error = await caught(client.request(TOKEN, { method: 'POST', path: '/zones/z/dns_records', body: {}, signal: controller.signal }));
+    expect(error.preSend).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
   it('stops at the caller abort and never retries it', async () => {
     const controller = new AbortController();
     const { client, calls } = clientWith([(url, init) => {

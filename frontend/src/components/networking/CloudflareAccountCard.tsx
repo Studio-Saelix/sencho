@@ -19,7 +19,7 @@ const KICKER = 'Public exposure · Control instance';
  * The hub's Cloudflare account on the Networking page. It belongs to the
  * control instance and serves every node, so it renders whichever node is
  * active, and even when that node cannot load Networking. Shown only to
- * Admins on a control instance with the experimental flag on; otherwise it
+ * Admins signed into this instance with the experimental flag on; otherwise it
  * renders nothing and makes no request.
  */
 export function CloudflareAccountCard({ className }: { className?: string }) {
@@ -28,7 +28,7 @@ export function CloudflareAccountCard({ className }: { className?: string }) {
   return <CloudflareAccountCardBody className={className} />;
 }
 
-/** Seconds until a rate-limited Recheck may run again, re-rendering when the wait ends. */
+/** Seconds until a rate-limited Recheck may run again, counting down once a second while it waits. */
 function useRecheckWait(account: PublicExposureAccount): number {
   const view = account.view;
   const until = view?.connected && view.lastCheck.outcome === 'rate_limited' && view.lastCheck.retryAfterSeconds
@@ -36,10 +36,19 @@ function useRecheckWait(account: PublicExposureAccount): number {
     : 0;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (until <= Date.now()) return;
-    const id = window.setTimeout(() => setNow(Date.now()), until - Date.now() + 50);
-    return () => window.clearTimeout(id);
-  }, [until, now]);
+    if (until <= 0) return;
+    // Start from the current clock (a card mounted long ago holds a stale one), then tick each second.
+    const tick = () => setNow(Date.now());
+    const first = window.setTimeout(tick, 0);
+    const id = window.setInterval(() => {
+      tick();
+      if (Date.now() >= until) window.clearInterval(id);
+    }, 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(id);
+    };
+  }, [until]);
   return until > now ? Math.ceil((until - now) / 1000) : 0;
 }
 
@@ -131,6 +140,7 @@ function CloudflareAccountCardBody({ className }: { className?: string }) {
         description="Sencho proves the token can edit DNS by creating one record and deleting it right away."
         confirmLabel="Check DNS write"
         busyConfirmLabel="Checking…"
+        confirmDisabled={!dnsCheckZone?.checkRecordName}
         confirming={account.pending === 'dns_check'}
         onConfirm={async () => {
           if (!dnsCheckZone) return;
@@ -141,7 +151,7 @@ function CloudflareAccountCardBody({ className }: { className?: string }) {
         {dnsCheckZone && (
           <dl data-testid="dns-check-preview" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-[11px]">
             <dt className="text-stat-subtitle">Record</dt>
-            <dd className="break-all text-stat-value">{dnsCheckZone.checkRecordName}</dd>
+            <dd className="break-all text-stat-value">{dnsCheckZone.checkRecordName ?? 'not named yet: this control instance has no identity'}</dd>
             <dt className="text-stat-subtitle">Type</dt>
             <dd className="text-stat-value">TXT · TTL 60</dd>
             <dt className="text-stat-subtitle">Lifetime</dt>

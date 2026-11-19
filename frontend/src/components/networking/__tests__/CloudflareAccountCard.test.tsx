@@ -21,6 +21,9 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: flags.isAdmin, can: () => flags.isAdmin }),
 }));
 
+const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: toastMock }));
+
 import { CloudflareAccountCard } from '../CloudflareAccountCard';
 
 const ACCOUNT = 'a1'.repeat(16);
@@ -50,6 +53,9 @@ function json(body: unknown, status = 200): Promise<Response> {
 
 beforeEach(() => {
   apiFetchMock.mockReset();
+  toastMock.success.mockReset();
+  toastMock.error.mockReset();
+  toastMock.warning.mockReset();
   flags.experimental = true;
   flags.isAdmin = true;
 });
@@ -167,15 +173,69 @@ describe('CloudflareAccountCard', () => {
     ));
   });
 
-  it('says what stays in Cloudflare before disconnecting', async () => {
-    apiFetchMock.mockImplementation(() => json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] })));
+  it('says what stays in Cloudflare before disconnecting, then disconnects on confirm', async () => {
+    apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => (
+      init?.method === 'DELETE' ? json({ connected: false }) : json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] }))
+    ));
     const user = userEvent.setup();
     render(<CloudflareAccountCard />);
     await screen.findByTestId('cloudflare-account-answer');
     await user.click(screen.getByRole('button', { name: 'Manage account' }));
     await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
-    expect(await screen.findByText(/Nothing is deleted in Cloudflare, and the token stays valid there until you revoke it/)).toBeInTheDocument();
+    expect(await screen.findByText(/nothing else is deleted there, and the token stays valid until you revoke it/)).toBeInTheDocument();
     expect(apiFetchMock).not.toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE', localOnly: true })));
+    expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'not_connected');
+  });
+
+  it('shows the server sentence when disconnect is refused', async () => {
+    apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => (
+      init?.method === 'DELETE'
+        ? json({ error: 'Nodes still use this Cloudflare account. Remove their Cloudflare Tunnel endpoints first.', code: 'ENDPOINTS_EXIST' }, 409)
+        : json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] }))
+    ));
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    await screen.findByTestId('cloudflare-account-answer');
+    await user.click(screen.getByRole('button', { name: 'Manage account' }));
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('Nodes still use this Cloudflare account. Remove their Cloudflare Tunnel endpoints first.'));
+    expect(toastMock.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces the token with the account id prefilled and the token empty, and does not repeat the verb in the toolbar', async () => {
+    let state = connected({ lastCheck: { outcome: 'token_invalid', at: T, detail: null } });
+    apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') state = connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] });
+      return json(state);
+    });
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    const answer = await screen.findByTestId('cloudflare-account-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Replace token' }));
+    expect(await screen.findByLabelText('Account ID')).toHaveValue(ACCOUNT);
+    expect(screen.getByLabelText('API token')).toHaveValue('');
+    expect(screen.getAllByRole('button', { name: 'Replace token' }).length).toBe(2);
+    await user.type(screen.getByLabelText('API token'), TOKEN);
+    await user.click(within(screen.getByTestId('cloudflare-token-form')).getByRole('button', { name: 'Replace token' }));
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'PUT', localOnly: true })));
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Cloudflare token replaced.'));
+  });
+
+  it('names the wait when Cloudflare limits a connect', async () => {
+    apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => (
+      init?.method === 'PUT' ? json({ error: 'Cloudflare is limiting requests. Try again shortly.', code: 'CLOUDFLARE_RATE_LIMITED', retryAfterSeconds: 40 }, 503) : json({ connected: false })
+    ));
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    const answer = await screen.findByTestId('cloudflare-account-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Connect account' }));
+    await user.type(await screen.findByLabelText('Account ID'), ACCOUNT);
+    await user.type(screen.getByLabelText('API token'), TOKEN);
+    await user.click(within(screen.getByTestId('cloudflare-token-form')).getByRole('button', { name: 'Connect account' }));
+    expect(await screen.findByTestId('cloudflare-token-error')).toHaveTextContent('Try again in 40 s.');
   });
 
   it('shows a load failure with Retry', async () => {

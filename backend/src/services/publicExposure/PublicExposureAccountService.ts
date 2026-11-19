@@ -2,15 +2,22 @@ import { CryptoService } from '../CryptoService';
 import { FleetSyncService } from '../FleetSyncService';
 import { errorMessageForLog } from '../../utils/safeLog';
 import { recordPublicExposureAudit, type PublicExposureAuditContext } from './audit';
-import { CloudflareAccountAdapter, checkRecordName, type AccountCheckResult, type ScopeCheckJournal } from './cloudflareAccountAdapter';
+import {
+  CloudflareAccountAdapter,
+  checkRecordName,
+  type AccountFacts,
+  type CheckFailure,
+  type CleanupCause,
+  type ScopeCheckJournal,
+} from './cloudflareAccountAdapter';
 import type { CloudflareCallOptions } from './cloudflareApiClient';
 import { validateAllowedSuffixes } from './exposureHostnames';
 import { publicExposureStore as store, type AccountRecord, type ZoneRecord } from './publicExposureStore';
 import {
   CLOUDFLARE_ADAPTER_ID,
   PublicExposureError,
-  type CheckOutcome,
   type EnabledZoneView,
+  type FailedOutcome,
   type LastCheck,
   type PublicExposureAccountView,
 } from './types';
@@ -18,26 +25,38 @@ import {
 /** A whole connect, recheck or DNS check finishes within this, below common reverse-proxy timeouts. */
 const OPERATION_TIMEOUT_MS = 45_000;
 
-const OUTCOME_ERRORS: Record<Exclude<CheckOutcome, 'ok'>, { code: PublicExposureError['code']; status: number; message: string }> = {
-  token_invalid: { code: 'TOKEN_INVALID', status: 422, message: 'Cloudflare rejects this token.' },
+const OUTCOME_ERRORS: Record<FailedOutcome, { code: PublicExposureError['code']; status: number; message: string }> = {
+  token_invalid: { code: 'TOKEN_INVALID', status: 422, message: 'Cloudflare rejects this token. Check that it was copied whole.' },
   token_inactive: { code: 'TOKEN_INACTIVE', status: 422, message: 'This token is disabled or expired in Cloudflare.' },
-  token_location_refused: { code: 'TOKEN_LOCATION_REFUSED', status: 422, message: "Cloudflare refuses this token from this control instance's address." },
-  account_not_accessible: { code: 'ACCOUNT_NOT_ACCESSIBLE', status: 422, message: 'This token cannot reach that Cloudflare account.' },
-  credential_unreadable: { code: 'CREDENTIAL_UNREADABLE', status: 422, message: 'The stored token cannot be read on this control instance.' },
-  cloudflare_unreachable: { code: 'CLOUDFLARE_UNREACHABLE', status: 502, message: 'Could not reach api.cloudflare.com.' },
+  token_location_refused: { code: 'TOKEN_LOCATION_REFUSED', status: 422, message: "Cloudflare refuses this token from this control instance's address. Allow its address on the token in Cloudflare." },
+  account_not_accessible: { code: 'ACCOUNT_NOT_ACCESSIBLE', status: 422, message: "This token cannot reach that Cloudflare account. Check the account ID and the token's account resources." },
+  credential_unreadable: { code: 'CREDENTIAL_UNREADABLE', status: 422, message: 'The stored token cannot be read on this control instance. Replace it.' },
+  cloudflare_unreachable: { code: 'CLOUDFLARE_UNREACHABLE', status: 502, message: 'Could not reach api.cloudflare.com. Nothing was changed.' },
   unexpected_response: { code: 'UNEXPECTED_RESPONSE', status: 502, message: 'Cloudflare sent a response Sencho could not read.' },
   rate_limited: { code: 'CLOUDFLARE_RATE_LIMITED', status: 503, message: 'Cloudflare is limiting requests. Try again shortly.' },
 };
 
-function outcomeError(outcome: Exclude<CheckOutcome, 'ok'>, detail: string | null, retryAfterSeconds?: number): PublicExposureError {
-  const mapped = OUTCOME_ERRORS[outcome];
-  const message = detail && detail !== mapped.message ? `${mapped.message} ${detail}` : mapped.message;
-  return new PublicExposureError(mapped.code, mapped.status, message, retryAfterSeconds);
+const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
+  unreachable: 'Could not reach api.cloudflare.com to delete it. Try again shortly.',
+  rate_limited: 'Cloudflare is limiting requests. Try again shortly.',
+  refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
+  too_recent: 'Its create may still be landing. Try again in a couple of minutes.',
+  unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
+};
+
+function outcomeError(failure: CheckFailure): PublicExposureError {
+  const mapped = OUTCOME_ERRORS[failure.outcome];
+  if (failure.outcome === 'rate_limited' && failure.limitedBy === 'sencho') {
+    return new PublicExposureError(mapped.code, mapped.status, "Sencho's own Cloudflare request limit was reached. Try again shortly.", failure.retryAfterSeconds);
+  }
+  const message = failure.detail ? `${mapped.message} ${failure.detail}` : mapped.message;
+  return new PublicExposureError(mapped.code, mapped.status, message, failure.retryAfterSeconds);
 }
 
-function lastCheckFrom(result: AccountCheckResult, at: number): LastCheck {
-  const check: LastCheck = { outcome: result.outcome, at, detail: result.detail };
-  if (result.retryAfterSeconds !== undefined) check.retryAfterSeconds = result.retryAfterSeconds;
+function failedCheck(failure: CheckFailure, at: number): LastCheck {
+  const check: LastCheck = { outcome: failure.outcome, at, detail: failure.detail };
+  if (failure.retryAfterSeconds !== undefined) check.retryAfterSeconds = failure.retryAfterSeconds;
+  if (failure.limitedBy) check.limitedBy = failure.limitedBy;
   return check;
 }
 
@@ -62,8 +81,8 @@ export class PublicExposureAccountService {
     const account = store.getAccount(CLOUDFLARE_ADAPTER_ID);
     if (!account) return { connected: false };
     let lastCheck = account.lastCheck;
-    if (this.readToken(account) === null) {
-      lastCheck = { outcome: 'credential_unreadable', at: Date.now(), detail: null };
+    if (this.readToken(account, { quiet: true }) === null) {
+      lastCheck = { outcome: 'credential_unreadable', at: account.updatedAt, detail: null };
     }
     const zones = store.listZones(account.id);
     const controlIdentity = FleetSyncService.getControlIdentity();
@@ -88,7 +107,7 @@ export class PublicExposureAccountService {
         dnsCheckedAt: zone.dnsCheckedAt,
         seenAtLastCheck: seen(zone),
         cleanupPending: zone.pending ? { recordName: zone.pending.name } : null,
-        checkRecordName: checkRecordName(controlIdentity, zone.name),
+        checkRecordName: controlIdentity ? checkRecordName(controlIdentity, zone.name) : null,
       })),
       nodeEndpointCount: store.countEndpoints(),
     };
@@ -115,15 +134,16 @@ export class PublicExposureAccountService {
       const enabled = existing ? store.listZones(existing.id).filter((z) => z.enabled).map((z) => ({ zoneRef: z.zoneRef, dns: 'unconfirmed' as const })) : [];
 
       const result = await this.adapter.checkAccount(token, accountId, enabled, options);
-      if (result.outcome !== 'ok' || !result.facts) throw outcomeError(result.outcome === 'ok' ? 'unexpected_response' : result.outcome, result.detail, result.retryAfterSeconds);
+      if (result.outcome !== 'ok') throw outcomeError(result);
       const facts = result.facts;
 
       const now = Date.now();
       const credentialEnc = CryptoService.getInstance().encrypt(token);
       const replaced = store.transaction(() => {
+        // Checked again inside the write: another writer may have changed the account during the probes.
         const current = store.getAccount(CLOUDFLARE_ADAPTER_ID);
         if (current && current.accountId !== accountId) throw this.accountChangeRefusal(current);
-        const lastCheck = lastCheckFrom(result, now);
+        const lastCheck: LastCheck = { outcome: 'ok', at: now, detail: null };
         const zonesListedAt = facts.zones ? now : current?.zonesListedAt ?? null;
         let rowId: number;
         if (current) {
@@ -137,12 +157,12 @@ export class PublicExposureAccountService {
             scopes: facts.scopes, lastCheck, verifiedAt: now, createdBy: actor.username, now,
           });
         }
-        this.applyZoneFacts(rowId, result, now);
+        this.applyZoneFacts(rowId, facts, now);
         return current !== null;
       });
 
       recordPublicExposureAudit(actor, replaced ? 'public_exposure.account.replaced' : 'public_exposure.account.connected', {
-        account: accountId, result: result.outcome, zone_read: facts.scopes.zoneRead, tunnel: facts.scopes.tunnel,
+        account: accountId, result: 'ok', zone_read: facts.scopes.zoneRead, tunnel: facts.scopes.tunnel,
       });
       return this.getView();
     });
@@ -162,23 +182,23 @@ export class PublicExposureAccountService {
 
       const zones = store.listZones(account.id);
       for (const zone of zones.filter((z) => z.pending)) {
-        const cleaned = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
-        if (!cleaned) console.warn(`[PublicExposure] Permission-check record cleanup in zone ${zone.name} did not finish; it stays pending.`);
+        const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+        if (!cleanup.cleaned) console.warn(`[PublicExposure] Permission-check record cleanup in zone ${zone.name} did not finish (${cleanup.cause}); it stays pending.`);
       }
 
       const enabled = zones.filter((z) => z.enabled).map((z) => ({ zoneRef: z.zoneRef, dns: z.dns }));
       const result = await this.adapter.checkAccount(token, account.accountId, enabled, options);
       const at = Date.now();
       store.transaction(() => {
-        if (result.outcome === 'ok' && result.facts) {
+        if (result.outcome === 'ok') {
           store.updateCheck(account.id, {
             accountId: account.accountId, accountName: result.facts.accountName,
             zonesListedAt: result.facts.zones ? at : account.zonesListedAt, scopes: result.facts.scopes,
-            lastCheck: lastCheckFrom(result, at), verifiedAt: at, now: at,
+            lastCheck: { outcome: 'ok', at, detail: null }, verifiedAt: at, now: at,
           });
-          this.applyZoneFacts(account.id, result, at);
+          this.applyZoneFacts(account.id, result.facts, at);
         } else {
-          store.updateLastCheck(account.id, lastCheckFrom(result, at), at);
+          store.updateLastCheck(account.id, failedCheck(result, at), at);
         }
       });
       recordPublicExposureAudit(actor, 'public_exposure.account.rechecked', { account: account.accountId, result: result.outcome });
@@ -194,22 +214,31 @@ export class PublicExposureAccountService {
       if (!zone) throw new PublicExposureError('ZONE_NOT_FOUND', 404, 'That zone is not in the connected account.');
       if (!zone.enabled) throw new PublicExposureError('ZONE_NOT_ENABLED', 409, 'Enable the zone before checking DNS write.');
       const token = this.readToken(account);
-      if (token === null) throw outcomeError('credential_unreadable', null);
+      if (token === null) throw outcomeError({ outcome: 'credential_unreadable', detail: null });
       const controlIdentity = FleetSyncService.getControlIdentity();
-      if (!controlIdentity) throw new PublicExposureError('UNEXPECTED_RESPONSE', 500, 'This control instance has no identity yet, so the check record cannot be named.');
+      if (!controlIdentity) {
+        throw new PublicExposureError('CONTROL_IDENTITY_MISSING', 409, 'This control instance has no identity yet, so the check record cannot be named. Restart Sencho and try again.');
+      }
 
       const result = await this.adapter.proveDnsWrite(token, zone, controlIdentity, this.journalFor(account.id, zone), options);
       const at = Date.now();
       if (result.kind === 'confirmed' || result.kind === 'missing') {
         store.setZoneDns(account.id, zone.zoneRef, result.kind === 'confirmed' ? 'confirmed' : 'missing', at);
       }
-      recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', {
-        account: account.accountId, zone: zone.name, result: result.kind === 'failed' ? result.outcome : result.kind,
-      });
+      const facts = { account: account.accountId, zone: zone.name };
       if (result.kind === 'conflict') {
-        throw new PublicExposureError('SCOPE_CHECK_CONFLICT', 409, `A ${result.recordType} record Sencho did not create already exists at ${result.recordName}. Sencho writes nothing there.`);
+        const error = new PublicExposureError('SCOPE_CHECK_CONFLICT', 409, `A ${result.recordType} record Sencho did not create already exists at ${result.recordName}. Sencho writes nothing there.`);
+        recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: 'conflict' }, error.status);
+        throw error;
       }
-      if (result.kind === 'failed') throw outcomeError(result.outcome === 'ok' ? 'unexpected_response' : result.outcome, result.detail, result.retryAfterSeconds);
+      if (result.kind === 'failed') {
+        const error = outcomeError(result);
+        recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: result.outcome }, error.status);
+        throw error;
+      }
+      recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', {
+        ...facts, result: result.kind, cause: result.kind === 'cleanup_pending' ? result.cause : null,
+      });
       return this.getView();
     });
   }
@@ -227,13 +256,19 @@ export class PublicExposureAccountService {
       if (pendingZones.length > 0) {
         const token = this.readToken(account);
         for (const zone of pendingZones) {
-          const cleaned = token !== null && await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
-          if (!cleaned) {
-            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${zone.pending?.name ?? ''} could not be deleted from Cloudflare. Delete it there, or fix the token and try again.`);
+          const record = zone.pending?.name ?? '';
+          if (token === null) {
+            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} is still in Cloudflare and the stored token cannot be read to delete it. Replace the token, or delete the record in Cloudflare.`);
+          }
+          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+          if (!cleanup.cleaned) {
+            console.warn(`[PublicExposure] Disconnect refused: check record cleanup in zone ${zone.name} did not finish (${cleanup.cause}).`);
+            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} could not be deleted from Cloudflare. ${CLEANUP_MESSAGE[cleanup.cause]}`);
           }
         }
       }
       store.transaction(() => {
+        // Checked again inside the write: an endpoint may have been created during the cleanup.
         if (store.countEndpoints() > 0) throw this.endpointsRefusal();
         store.deleteAccount(account.id);
       });
@@ -263,7 +298,9 @@ export class PublicExposureAccountService {
     return account;
   }
 
-  private readToken(account: AccountRecord): string | null {
+  /** The decrypted token, or null when the stored credential or the account it belongs to cannot be read. */
+  private readToken(account: AccountRecord, { quiet = false }: { quiet?: boolean } = {}): string | null {
+    if (!account.accountId) return null;
     const stored = store.getCredential(account.id);
     if (!stored) return null;
     const crypto = CryptoService.getInstance();
@@ -271,7 +308,7 @@ export class PublicExposureAccountService {
     try {
       return crypto.decrypt(stored);
     } catch (error: unknown) {
-      console.warn('[PublicExposure] The stored Cloudflare token cannot be decrypted:', errorMessageForLog(error));
+      if (!quiet) console.warn('[PublicExposure] The stored Cloudflare token cannot be decrypted; replace it:', errorMessageForLog(error));
       return null;
     }
   }
@@ -299,9 +336,7 @@ export class PublicExposureAccountService {
   }
 
   /** Apply probe results to zone rows. Reconciles the zone list only after a complete listing. */
-  private applyZoneFacts(accountRowId: number, result: AccountCheckResult, now: number): void {
-    const facts = result.facts;
-    if (!facts) return;
+  private applyZoneFacts(accountRowId: number, facts: AccountFacts, now: number): void {
     if (facts.zones) {
       const listed = new Set(facts.zones.map((z) => z.zoneRef));
       for (const zone of facts.zones) store.upsertListedZone(accountRowId, zone.zoneRef, zone.name, now);

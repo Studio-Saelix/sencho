@@ -83,12 +83,19 @@ export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Respo
     return refusal(fake.verifyUser);
   }
   if ((m = path.match(/^\/accounts\/([0-9a-f]+)\/tokens\/verify$/))) {
+    if (fake.verifyAccount === 'active' && m[1] !== FAKE_ACCOUNT_ID) return refusal(404);
     return fake.verifyAccount === 'active' ? ok({ id: 'tok', status: 'active' }) : refusal(fake.verifyAccount);
   }
   if (path === '/accounts') return Array.isArray(fake.accounts) ? paged(fake.accounts, url) : refusal(fake.accounts);
-  if (path === '/zones') return Array.isArray(fake.zones) ? paged(fake.zones, url) : refusal(fake.zones);
+  if (path === '/zones') {
+    if (!Array.isArray(fake.zones)) return refusal(fake.zones);
+    // Cloudflare filters by account: a mistyped account id lists no zones.
+    const accountFilter = url.searchParams.get('account.id');
+    const known = accountFilter === FAKE_ACCOUNT_ID || (Array.isArray(fake.accounts) && fake.accounts.some((a) => a.id === accountFilter));
+    return paged(accountFilter && !known ? [] : fake.zones, url);
+  }
   if ((m = path.match(/^\/accounts\/([0-9a-f]+)\/cfd_tunnel$/))) {
-    if (Array.isArray(fake.accounts) && !fake.accounts.some((a) => a.id === m![1])) return refusal(403);
+    if (m[1] !== FAKE_ACCOUNT_ID && (!Array.isArray(fake.accounts) || !fake.accounts.some((a) => a.id === m![1]))) return refusal(403);
     return fake.tunnel === 'ok' ? ok([], { page: 1, total_pages: 1 }) : refusal(fake.tunnel);
   }
   if ((m = path.match(/^\/zones\/([0-9a-f]+)\/dns_records$/))) {

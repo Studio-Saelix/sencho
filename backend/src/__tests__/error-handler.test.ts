@@ -42,6 +42,30 @@ describe('errorHandler', () => {
     expect(logged[0].join(' ')).toContain('status=400');
   });
 
+  it('never logs the parse message, which quotes a slice of the body', () => {
+    const logged: unknown[][] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args); });
+    let parseError: unknown;
+    try {
+      JSON.parse(`{"token": ${SECRET}}`);
+    } catch (error: unknown) {
+      parseError = error;
+    }
+    expect(String((parseError as Error).message)).toContain(SECRET.slice(0, 8));
+    const err = Object.assign(parseError as Error, { type: 'entity.parse.failed', status: 400, expose: true });
+    errorHandler(err, {} as Request, mockResponse().res, vi.fn() as unknown as NextFunction);
+    expect(logged[0].join(' ')).not.toContain(SECRET.slice(0, 8));
+    expect(logged[0].join(' ')).toContain('request body could not be parsed');
+  });
+
+  it('keeps a redacted stack for an unexpected 500', () => {
+    const logged: unknown[][] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args); });
+    errorHandler(new Error('boom in handler'), {} as Request, mockResponse().res, vi.fn() as unknown as NextFunction);
+    expect(logged[0].join(' ')).toContain('boom in handler');
+    expect(logged[0].join(' ')).toContain('error-handler.test');
+  });
+
   it('still hides the message of an unexpected 500', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { res, state } = mockResponse();

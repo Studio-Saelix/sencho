@@ -179,7 +179,7 @@ describe('connect outcomes', () => {
     for (let i = 0; i < 300; i += 1) await cloudflareApiClient.request(FAKE_TOKEN, { method: 'GET', path: '/user/tokens/verify' });
     const error = await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor));
     expect(error.code).toBe('CLOUDFLARE_RATE_LIMITED');
-    expect(error.message).toContain("Sencho's own request limit");
+    expect(error.message).toContain("Sencho's own Cloudflare request limit");
   });
 
   it('reports a response it cannot read as unexpected', async () => {
@@ -484,6 +484,259 @@ describe('audit rows', () => {
     ]) expect(actions).toContain(action);
     expect(JSON.stringify(rows)).not.toContain(FAKE_TOKEN);
     expect(JSON.stringify(rows)).not.toContain(FAKE_TOKEN.slice(0, 8));
+  });
+});
+
+describe('account classification', () => {
+  it('reports a mistyped id as not accessible when the account listing is refused', async () => {
+    fake.accounts = 403;
+    const error = await refusal(service.connect(FAKE_TOKEN, OTHER_ACCOUNT_ID, actor));
+    expect(error.code).toBe('ACCOUNT_NOT_ACCESSIBLE');
+    expect(service.getView()).toEqual({ connected: false });
+  });
+
+  it('reports a mistyped id with an account-owned token as not accessible, not as an invalid token', async () => {
+    fake.verifyUser = 401;
+    fake.verifyAccount = 'active';
+    expect((await refusal(service.connect(FAKE_TOKEN, OTHER_ACCOUNT_ID, actor))).code).toBe('ACCOUNT_NOT_ACCESSIBLE');
+  });
+
+  it('recognises a location refusal by its code alone and by its message alone', async () => {
+    const answers = [
+      { code: 9109, message: 'Unauthorized' },
+      { code: 1000, message: 'Cannot use the access token from location: 203.0.113.9' },
+    ];
+    for (const body of answers) {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [body], messages: [], result: null }), { status: 403 })));
+      expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('TOKEN_LOCATION_REFUSED');
+    }
+  });
+
+  it('does not treat an unrelated message that mentions a location as a location refusal', async () => {
+    fake.tunnel = 403;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/cfd_tunnel')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'Authentication error at this location' }], messages: [], result: null }), { status: 403 });
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).scopes.tunnel).toBe('missing');
+  });
+
+  it('does not probe DNS in an enabled zone that left the listing, and reports it as not visible', async () => {
+    await connectWithZoneA();
+    fake.zones = [{ id: ZONE_B, name: 'example.net' }];
+    fake.requests = [];
+    const view = await service.recheck(actor);
+    expect(zoneA(view).seenAtLastCheck).toBe(false);
+    expect(zoneA(view).dns).toBe('unconfirmed');
+    expect(fake.requests).not.toContain(`GET /zones/${ZONE_A}/dns_records`);
+  });
+});
+
+describe('recheck after a good check', () => {
+  it.each([
+    ['token_invalid', () => { fake.verifyUser = 401; fake.verifyAccount = 401; }],
+    ['token_location_refused', () => { fake.verifyUser = 'location'; }],
+    ['token_inactive', () => { fake.verifyUser = 'disabled'; }],
+  ] as const)('records %s and keeps the last facts', async (outcome, breakIt) => {
+    await connectWithZoneA();
+    const before = connected(service.getView());
+    breakIt();
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck.outcome).toBe(outcome);
+    expect(view.verifiedAt).toBe(before.verifiedAt);
+    expect(view.scopes).toEqual(before.scopes);
+    expect(view.zones).toEqual(before.zones);
+  });
+
+  it('records which side rate-limited a recheck', async () => {
+    await connectWithZoneA();
+    cloudflareApiClient.resetBudgetForTests();
+    for (let i = 0; i < 300; i += 1) await cloudflareApiClient.request(FAKE_TOKEN, { method: 'GET', path: '/user/tokens/verify' });
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck).toMatchObject({ outcome: 'rate_limited', limitedBy: 'sencho' });
+  });
+
+  it('reads an unknown stored outcome as unexpected, never as ok', async () => {
+    await connectWithZoneA();
+    db().prepare(`UPDATE exposure_accounts SET last_check_json = '{"outcome":"future_state","at":1}'`).run();
+    expect(connected(service.getView()).lastCheck.outcome).toBe('unexpected_response');
+  });
+});
+
+describe('replace refused', () => {
+  it('keeps the stored ciphertext and the zones when the new token is rejected', async () => {
+    await connectWithZoneA();
+    const before = db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string };
+    fake.verifyUser = 401;
+    fake.verifyAccount = 401;
+    expect((await refusal(service.connect(`${FAKE_TOKEN}-bad`, FAKE_ACCOUNT_ID, actor))).code).toBe('TOKEN_INVALID');
+    const after = db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string };
+    expect(after.credential_enc).toBe(before.credential_enc);
+    expect(zoneA(service.getView()).enabled).toBe(true);
+  });
+});
+
+describe('writes re-checked inside the transaction', () => {
+  it('refuses disconnect when an endpoint appears during the check record cleanup', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    fake.remove = 'ok';
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'DELETE') {
+        db().prepare(`INSERT INTO exposure_node_endpoints (node_id, account_id, provider_ref, name, state, created_by, created_at)
+          VALUES (1, 1, 'tunnel-late', 'sencho-x-1', 'provisioning', 'admin', 0)`).run();
+      }
+      return answer(fake, new URL(String(input)), init ?? {});
+    }));
+    expect((await refusal(service.disconnect(actor))).code).toBe('ENDPOINTS_EXIST');
+    expect(service.getView().connected).toBe(true);
+  });
+
+  it('refuses a connect when another account is stored while the probes run', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/cfd_tunnel') && (db().prepare('SELECT COUNT(*) AS n FROM exposure_accounts').get() as { n: number }).n === 0) {
+        db().prepare(`INSERT INTO exposure_accounts (adapter_id, credential_enc, config_json, scopes_json, last_check_json, created_by, created_at, updated_at)
+          VALUES ('cloudflare-tunnel', 'enc:x', ?, '{}', '{}', 'other', 0, 0)`).run(JSON.stringify({ accountId: OTHER_ACCOUNT_ID }));
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('ACCOUNT_CHANGE_NEEDS_DISCONNECT');
+    expect(connected(service.getView()).accountId).toBe(OTHER_ACCOUNT_ID);
+  });
+});
+
+describe('DNS check journal edges', () => {
+  it('writes nothing new while a leftover record cannot be cleaned up', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    fake.requests = [];
+    const view = await service.dnsCheck(ZONE_A, actor);
+    expect(zoneA(view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
+  });
+
+  it('clears the journal and reports the limit when the create is rate limited', async () => {
+    await connectWithZoneA();
+    fake.create = 403;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'POST') return new Response(JSON.stringify({ success: false, errors: [], messages: [], result: null }), { status: 429, headers: { 'retry-after': '60' } });
+      return answer(fake, new URL(String(input)), init ?? {});
+    }));
+    const error = await refusal(service.dnsCheck(ZONE_A, actor));
+    expect(error.code).toBe('CLOUDFLARE_RATE_LIMITED');
+    expect(zoneA(service.getView()).cleanupPending).toBeNull();
+  });
+
+  it('names missing DNS read when the record listing is refused', async () => {
+    await connectWithZoneA();
+    fake.dnsRead[ZONE_A] = 403;
+    expect(zoneA(await service.dnsCheck(ZONE_A, actor)).dns).toBe('missing');
+  });
+
+  it('reports a location refusal on the create as such, not as missing DNS Edit', async () => {
+    await connectWithZoneA();
+    fake.create = 'location';
+    expect((await refusal(service.dnsCheck(ZONE_A, actor))).code).toBe('TOKEN_LOCATION_REFUSED');
+    expect(zoneA(service.getView()).dns).toBe('unconfirmed');
+    expect(zoneA(service.getView()).cleanupPending).toBeNull();
+  });
+
+  it('keeps a create that is unnamed in its answer pending, then removes it by exact match', async () => {
+    await connectWithZoneA();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const res = answer(fake, new URL(String(input)), init ?? {});
+      if (init?.method === 'POST') return new Response(JSON.stringify({ success: true, errors: [], messages: [], result: {} }));
+      return res;
+    }));
+    expect(zoneA(await service.dnsCheck(ZONE_A, actor)).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    installFakeCloudflare(fake);
+    await service.recheck(actor);
+    expect(fake.records.get(ZONE_A)).toEqual([]);
+  });
+
+  it('does not declare a fresh create lost before it could land', async () => {
+    await connectWithZoneA();
+    db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?')
+      .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:00', recordId: null, createdAt: Date.now() }), ZONE_A);
+    await service.recheck(actor);
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('lets disconnect through when the zone holding the leftover record is gone from Cloudflare', async () => {
+    await connectWithZoneA();
+    db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?')
+      .run(JSON.stringify({ name: CHECK_NAME, content: 'x', recordId: null, createdAt: 0 }), ZONE_A);
+    fake.dnsRead[ZONE_A] = 404;
+    await service.disconnect(actor);
+    expect(service.getView()).toEqual({ connected: false });
+  });
+
+  it('names the cause when disconnect cannot clean up', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    fake.remove = 'down';
+    expect((await refusal(service.disconnect(actor))).message).toContain('Could not reach api.cloudflare.com');
+    fake.remove = 403;
+    expect((await refusal(service.disconnect(actor))).message).toContain('Cloudflare refused the delete');
+  });
+
+  it('keeps the record pending when the deadline cuts the check after the create', async () => {
+    await connectWithZoneA();
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const delay = init?.method === 'DELETE' ? 60_000 : 0;
+      const timer = setTimeout(() => resolve(answer(fake, new URL(String(input)), init ?? {})), delay);
+      init?.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('aborted', 'AbortError')); });
+    })));
+    const pending = service.dnsCheck(ZONE_A, actor);
+    await vi.advanceTimersByTimeAsync(46_000);
+    const view = await pending;
+    expect(zoneA(view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    const journal = db().prepare('SELECT scope_check_pending_json AS p FROM exposure_zones WHERE zone_ref = ?').get(ZONE_A) as { p: string };
+    expect(JSON.parse(journal.p).recordId).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('reports a missing control identity with its own code', async () => {
+    await connectWithZoneA();
+    vi.spyOn(FleetSyncService, 'getControlIdentity').mockReturnValue('');
+    expect((await refusal(service.dnsCheck(ZONE_A, actor))).code).toBe('CONTROL_IDENTITY_MISSING');
+    expect(zoneA(service.getView()).checkRecordName).toBeNull();
+  });
+});
+
+describe('service audit rows say what happened', () => {
+  function rows(): Array<{ summary: string; status_code: number }> {
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    return db().prepare(`SELECT summary, status_code FROM audit_log WHERE summary LIKE 'public_exposure.%' ORDER BY id`).all() as Array<{ summary: string; status_code: number }>;
+  }
+
+  beforeEach(() => {
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
+  });
+
+  it('records connect versus replace, recheck results and refused DNS checks with their status', async () => {
+    await connectWithZoneA();
+    await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor);
+    fake.verifyUser = 'down';
+    await service.recheck(actor);
+    fake.verifyUser = 'active';
+    fake.records.set(ZONE_A, [{ id: 'f'.repeat(32), type: 'CNAME', name: CHECK_NAME, content: 'x' }]);
+    await refusal(service.dnsCheck(ZONE_A, actor));
+    const all = rows();
+    expect(all[0].summary).toMatch(/^public_exposure\.account\.connected: account=/);
+    expect(all.some((r) => r.summary.startsWith('public_exposure.account.replaced:'))).toBe(true);
+    expect(all.find((r) => r.summary.startsWith('public_exposure.account.rechecked:'))?.summary).toContain('result=cloudflare_unreachable');
+    const conflict = all.find((r) => r.summary.startsWith('public_exposure.account.dns_checked:'));
+    expect(conflict).toMatchObject({ status_code: 409 });
+    expect(conflict?.summary).toContain('result=conflict');
   });
 });
 
