@@ -249,7 +249,7 @@ export class CloudflareApiClient {
 
   /** Milliseconds to wait before the next attempt, or null when the error is final. */
   private retryWait(error: CloudflareApiError, req: CloudflareRequest, attempt: number): number | null {
-    if (attempt >= MAX_ATTEMPTS || req.signal?.aborted) return null;
+    if (attempt >= MAX_ATTEMPTS) return null;
     const remaining = req.deadlineAt === undefined ? Number.POSITIVE_INFINITY : req.deadlineAt - this.now();
     let wait: number;
     if (error.kind === 'rate_limited') {

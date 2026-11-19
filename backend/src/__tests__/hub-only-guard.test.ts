@@ -497,4 +497,40 @@ describe('hubOnlyGuard', () => {
       .set('Authorization', authHeader);
     expect(delRes.status).toBe(200);
   });
+
+  it.each([
+    '/api/public-exposure',
+    '/api/public-exposure/account',
+    '/api/public-exposure/zones/x',
+  ])('rejects %s when the header names a remote node', async (endpoint) => {
+    const res = await request(app)
+      .get(endpoint)
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it.each([
+    '/api/public-exposure',
+    '/api/public-exposure/account',
+    '/api/public-exposure/zones/x',
+  ])('rejects %s when ?nodeId= names a remote node', async (endpoint) => {
+    const res = await request(app)
+      .get(`${endpoint}?nodeId=${remoteNodeId}`)
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it.each([
+    '/api/public-exposure',
+    '/api/public-exposure/account',
+    '/api/public-exposure/zones/x',
+  ])('lets %s through locally when no node is named', async (endpoint) => {
+    const res = await request(app)
+      .get(endpoint)
+      .set('Authorization', authHeader);
+    expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
+  });
 });
