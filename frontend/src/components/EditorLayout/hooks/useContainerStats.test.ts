@@ -152,8 +152,8 @@ describe('useContainerStats', () => {
     });
 
     type Props = { containers: ContainerInfo[]; nodeId: number };
-    const setup = (initial: ContainerInfo[]) => {
-      vi.useRealTimers();
+    const setup = (initial: ContainerInfo[], { fakeTimers = false } = {}) => {
+      if (!fakeTimers) vi.useRealTimers();
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const hook = renderHook(
         ({ containers, nodeId }: Props) => useContainerStats(containers, nodeId),
@@ -224,7 +224,24 @@ describe('useContainerStats', () => {
       expect(result.current.error).toMatch(/unavailable/);
 
       rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+      expect(result.current.error).toBeNull();
 
+      // Back on the first stack: its discarded failure must not return before
+      // the new socket reports anything.
+      rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+      expect(result.current.error).toBeNull();
+      warnSpy.mockRestore();
+    });
+
+    it('does not restore a failure for a container removed from the list and added back', () => {
+      const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+      act(() => { MockWS.instances[0].onerror?.(); });
+      expect(result.current.error).toMatch(/unavailable/);
+
+      rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+      expect(result.current.error).toBeNull();
+
+      rerender({ containers: [makeContainer('c1'), makeContainer('c2')], nodeId: 1 });
       expect(result.current.error).toBeNull();
       warnSpy.mockRestore();
     });
@@ -301,6 +318,141 @@ describe('useContainerStats', () => {
       act(() => { MockWS.instances[0].onmessage?.({ data: validSample }); });
       expect(result.current.error).toBeNull();
       warnSpy.mockRestore();
+    });
+
+    describe('frames that cannot yield usable readings', () => {
+      const frame = (over: Record<string, unknown> = {}) => ({
+        cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 1 },
+        precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: 1000 },
+        memory_stats: { usage: 1048576 },
+        networks: { eth0: { rx_bytes: 1024, tx_bytes: 512 } },
+        ...over,
+      });
+      const invalidFrames: Array<[string, string]> = [
+        ['empty CPU usage objects', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: {}, system_cpu_usage: 2000, online_cpus: 1 },
+          precpu_stats: { cpu_usage: {}, system_cpu_usage: 1000 },
+        }))],
+        ['a missing current CPU counter', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: {}, system_cpu_usage: 2000, online_cpus: 1 },
+        }))],
+        ['a nonnumeric CPU counter', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 'abc' }, system_cpu_usage: 2000, online_cpus: 1 },
+        }))],
+        ['a nonnumeric memory usage', JSON.stringify(frame({ memory_stats: { usage: 'lots' } }))],
+        ['an object as memory usage', JSON.stringify(frame({ memory_stats: { usage: {} } }))],
+        ['a nonnumeric system CPU counter', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 'x', online_cpus: 1 },
+        }))],
+        ['a nonnumeric online CPU count', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 'two' },
+        }))],
+        ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
+        // 1e999 parses to Infinity.
+        ['an infinite memory usage', JSON.stringify(frame()).replace('1048576', '1e999')],
+        // The combination the audit reproduced: positive system delta, empty CPU objects, truthy bad memory.
+        ['the audited combination', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: {}, system_cpu_usage: 2000 },
+          precpu_stats: { cpu_usage: {}, system_cpu_usage: 1000 },
+          memory_stats: { usage: 'lots' },
+        }))],
+      ];
+
+      it.each(invalidFrames)('keeps a real warning and publishes nothing for %s, then recovers on a valid sample', (_name, bad) => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        const ws = MockWS.instances[0];
+        act(() => { ws.onerror?.(); });
+
+        act(() => { ws.onmessage?.({ data: bad }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+        expect(result.current.error).toMatch(/unavailable/);
+        expect(result.current.stats['c1']).toBeUndefined();
+
+        act(() => { ws.onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it.each(invalidFrames)('does not raise a warning or publish a metric on its own for %s', (_name, bad) => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onmessage?.({ data: bad }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toBeNull();
+        expect(result.current.stats['c1']).toBeUndefined();
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+
+      it('keeps the warning when a replacement socket sends an unusable frame first', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+        act(() => { MockWS.instances[1].onmessage?.({ data: invalidFrames[3][1] }); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('still accepts a sample that leaves out the optional counters', () => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onerror?.(); });
+        const minimal = JSON.stringify({
+          cpu_stats: { cpu_usage: { total_usage: 200 } },
+          precpu_stats: { cpu_usage: { total_usage: 100 } },
+          memory_stats: { usage: 1048576 },
+        });
+        act(() => { MockWS.instances[0].onmessage?.({ data: minimal }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toBeNull();
+        expect(result.current.stats['c1']).toMatchObject({ cpu: '0.00%', ram: '1.00 MB' });
+        warnSpy.mockRestore();
+      });
+    });
+
+    describe('container state changes', () => {
+      it('does not revive a failure recorded while the container was stopped when it starts', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1', 'exited')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+        act(() => { MockWS.instances[0].onclose?.({ code: 1006 } as CloseEvent); });
+
+        rerender({ containers: [makeContainer('c1', 'running')], nodeId: 1 });
+        expect(result.current.error).toBeNull();
+
+        // A fresh failure after the start still raises the warning.
+        act(() => { MockWS.instances[1].onerror?.(); });
+        expect(result.current.error).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
+
+      it('does not carry a failure across running, stopped, running', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1', 'running')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        rerender({ containers: [makeContainer('c1', 'exited')], nodeId: 1 });
+        expect(result.current.error).toBeNull();
+
+        rerender({ containers: [makeContainer('c1', 'running')], nodeId: 1 });
+        expect(result.current.error).toBeNull();
+
+        act(() => { MockWS.instances[2].onclose?.({ code: 1006 } as CloseEvent); });
+        expect(result.current.error).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
+
+      it('keeps a running container failure through a refresh that changes only a sibling state', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2', 'running')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+
+        rerender({ containers: [makeContainer('c1'), makeContainer('c2', 'exited')], nodeId: 1 });
+        expect(result.current.error).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
     });
 
     it('still resets the warning on a node switch', () => {

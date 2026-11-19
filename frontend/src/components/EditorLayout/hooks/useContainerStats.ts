@@ -9,6 +9,64 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+interface StatsSample {
+  cpuPercent: number;
+  memBytes: number;
+  rx: number;
+  tx: number;
+}
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+// A counter Docker may leave out: absent reads as 0, anything else must be a finite number.
+const optionalCounter = (v: unknown): number | null =>
+  v == null ? 0 : isFiniteNumber(v) ? v : null;
+
+/**
+ * Turns one Docker stats frame into usable readings, or null when the frame
+ * cannot yield them (a counter missing, not a number, or not finite). The caller
+ * drops such a frame: it must neither publish a metric nor count as proof that
+ * the stream recovered. Counters Docker omits on some runtimes (system CPU time,
+ * online CPUs, per-interface byte counts) stay optional. A null network entry
+ * throws, which the caller reports as a parse failure.
+ */
+function readStatsSample(data: {
+  cpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown; online_cpus?: unknown };
+  precpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown };
+  memory_stats?: { usage?: unknown };
+  networks?: Record<string, { rx_bytes?: unknown; tx_bytes?: unknown }>;
+}): StatsSample | null {
+  if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return null;
+
+  const cpuTotal = data.cpu_stats.cpu_usage.total_usage;
+  const preCpuTotal = data.precpu_stats.cpu_usage.total_usage;
+  const memUsage = data.memory_stats.usage;
+  if (!isFiniteNumber(cpuTotal) || !isFiniteNumber(preCpuTotal) || !isFiniteNumber(memUsage)) return null;
+
+  const systemNow = optionalCounter(data.cpu_stats.system_cpu_usage);
+  const systemPrev = optionalCounter(data.precpu_stats.system_cpu_usage);
+  const onlineCpus = optionalCounter(data.cpu_stats.online_cpus);
+  if (systemNow === null || systemPrev === null || onlineCpus === null) return null;
+
+  let rx = 0;
+  let tx = 0;
+  if (data.networks) {
+    for (const net of Object.values(data.networks)) {
+      const rxBytes = optionalCounter(net.rx_bytes);
+      const txBytes = optionalCounter(net.tx_bytes);
+      if (rxBytes === null || txBytes === null) return null;
+      rx += rxBytes;
+      tx += txBytes;
+    }
+  }
+
+  const systemDelta = systemNow - systemPrev;
+  const cpuPercent = systemDelta > 0
+    ? ((cpuTotal - preCpuTotal) / systemDelta) * (onlineCpus || 1) * 100
+    : 0;
+  const sample = { cpuPercent, memBytes: memUsage, rx, tx };
+  return Object.values(sample).every(Number.isFinite) ? sample : null;
+}
+
 export interface ContainerStatsHookResult {
   stats: Record<string, ContainerStatsEntry>;
   error: string | null;
@@ -22,9 +80,9 @@ export function useContainerStats(
   activeNodeId: number | null | undefined,
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
-  // IDs of containers whose current stats stream has failed. A container leaves
-  // the set when it delivers a valid sample, when it drops out of the list, or
-  // when the active node changes.
+  // IDs of running containers whose current stats stream has failed. A container
+  // leaves the set when it delivers a valid sample, when it stops or drops out of
+  // the list, or when the active node changes.
   const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(NO_FAILURES);
 
   const pendingStatsRef = useRef<Record<string, {
@@ -56,12 +114,13 @@ export function useContainerStats(
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
-    // Opening another stack starts clean. Containers that stay in the list keep
-    // their flag until they stream again, so a refresh does not clear and
-    // re-raise the warning against a flaky daemon.
-    const liveIds = new Set((containers || []).flatMap(c => (c?.Id ? [c.Id] : [])));
+    // Opening another stack starts clean, and a container that stopped starts
+    // its next run clean too: a failure belongs to one running session. Running
+    // containers that stay in the list keep their flag until they stream again,
+    // so a refresh does not clear and re-raise the warning against a flaky daemon.
+    const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
     setFailedIds(prev => {
-      const kept = [...prev].filter(id => liveIds.has(id));
+      const kept = [...prev].filter(id => runningIds.has(id));
       return kept.length === prev.size ? prev : new Set(kept);
     });
 
@@ -69,7 +128,11 @@ export function useContainerStats(
       if (!container?.Id) return;
 
       const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
-        if (disposed) return;
+        // This effect run belongs to the container's state in the list it was
+        // given; a change of state reruns it. A container that is not running
+        // has no stream to lose, and its failure would otherwise be carried
+        // into its next run.
+        if (disposed || container.State !== 'running') return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
           console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
@@ -106,23 +169,13 @@ export function useContainerStats(
         ws.onmessage = (event) => {
           if (disposed) return;
           try {
-            const data = JSON.parse(event.data);
-            if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return;
+            const sample = readStatsSample(JSON.parse(event.data));
+            if (!sample) return;
 
-            const cpuDelta = data.cpu_stats.cpu_usage.total_usage - data.precpu_stats.cpu_usage.total_usage;
-            const systemDelta = (data.cpu_stats.system_cpu_usage || 0) - (data.precpu_stats.system_cpu_usage || 0);
-            const onlineCpus = data.cpu_stats.online_cpus || 1;
-            const cpuPercent = systemDelta > 0 ? ((cpuDelta / systemDelta) * onlineCpus * 100).toFixed(2) : '0.00';
-            const ramUsage = (data.memory_stats.usage / (1024 * 1024)).toFixed(2) + ' MB';
-
-            let currentRx = 0;
-            let currentTx = 0;
-            if (data.networks) {
-              Object.values(data.networks as Record<string, { rx_bytes?: number; tx_bytes?: number }>).forEach(net => {
-                currentRx += net.rx_bytes || 0;
-                currentTx += net.tx_bytes || 0;
-              });
-            }
+            const cpuPercent = sample.cpuPercent.toFixed(2);
+            const ramUsage = (sample.memBytes / (1024 * 1024)).toFixed(2) + ' MB';
+            const currentRx = sample.rx;
+            const currentTx = sample.tx;
 
             const prevRaw = rawBytesRef.current[container.Id];
             const rxRate = prevRaw ? Math.max(0, currentRx - prevRaw.lastRx) : 0;
@@ -136,7 +189,7 @@ export function useContainerStats(
               lastRx: currentRx,
               lastTx: currentTx,
               cpuNum: parseFloat(cpuPercent) || 0,
-              memNum: data.memory_stats.usage / (1024 * 1024),
+              memNum: sample.memBytes / (1024 * 1024),
               netInNum: rxRate,
               netOutNum: txRate,
             };
@@ -190,10 +243,9 @@ export function useContainerStats(
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A container that is not running sends no valid sample, so its flag could
-  // never clear. Only failures on running containers keep the warning up; a
-  // flag on a container that is not running stays stored and counts again once
-  // the container runs and has not yet streamed.
+  // The effect drops a container's flag once it is no longer running. This
+  // filter covers the render between a list update and that effect, so the chip
+  // never shows for a container that just stopped.
   const streamFailing = failedIds.size > 0
     && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
 
