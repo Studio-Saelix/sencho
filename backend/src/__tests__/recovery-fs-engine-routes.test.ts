@@ -3075,9 +3075,11 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const clear = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId });
     expect(clear.status).toBe(409);
     expect(clear.body.code).toBe('docker_endpoint_protected');
+    // The notification spy does see a failed restore: only the fence's answer is unnotified.
+    expect(alert.mock.calls.filter(([level]) => level === 'error').length).toBeGreaterThan(0);
   });
 
-  it('answers a render failure with the fence when an override or an applied Git deployment file, not the root file, is in the fenced directory', async () => {
+  it('answers a render failure with the fence when an override, an applied Git deployment file or a COMPOSE_FILE layer, not the root file, is in the fenced directory', async () => {
     const updatePolicy = await import('../services/updatePolicy');
     const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
     vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
@@ -3099,29 +3101,48 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const recovery = StackUpdateRecoveryService.getInstance();
     const db = DatabaseService.getInstance();
     const realGitSource = db.getGitSource.bind(db);
-    // `override`: Compose discovers compose.override.yml beside a clear root
-    // file. `spec`: an applied Git deployment names extra.yml with -f.
-    // `none`: the root file alone, the control.
-    for (const variant of ['override', 'docker-override', 'spec', 'none'] as const) {
+    // Each variant leaves the root file clear of the fence. `file` is linked
+    // into the fenced directory (and moved aside when dangling); `spec` is an
+    // applied Git deployment's -f list; `env` is the stack's .env.
+    const variants: Array<{ name: string; file: string | null; spec?: string[]; env?: string; expected: string }> = [
+      // Compose discovers an override beside the root file.
+      { name: 'override', file: 'compose.override.yml', expected: 'data_restore' },
+      { name: 'docker-override', file: 'docker-compose.override.yml', expected: 'data_restore' },
+      // An applied Git deployment names extra.yml with -f.
+      { name: 'spec', file: 'extra.yml', spec: ['compose.yaml', 'extra.yml'], expected: 'data_restore' },
+      // The stack's env selects extra.yml through COMPOSE_FILE.
+      { name: 'compose-file', file: 'extra.yml', env: 'COMPOSE_FILE=compose.yaml:extra.yml\n', expected: 'data_restore' },
+      { name: 'compose-file separator', file: 'extra.yml', env: 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=compose.yaml;;extra.yml\n', expected: 'data_restore' },
+      // -f turns off override discovery, and COMPOSE_FILE replaces it: Compose never reads that override.
+      { name: 'spec hides override', file: 'compose.override.yml', spec: ['compose.yaml'], expected: 'docker_endpoint_protected' },
+      { name: 'compose-file hides override', file: 'compose.override.yml', env: 'COMPOSE_FILE=compose.yaml\n', expected: 'docker_endpoint_protected' },
+      // An empty spec entry is refused by the spawn sink; it is not the stack directory.
+      { name: 'spec empty entry', file: null, spec: ['compose.yaml', ''], expected: 'docker_endpoint_protected' },
+      // A COMPOSE_FILE selection Compose would not accept cannot say which files it reads.
+      { name: 'unreadable selection', file: null, env: 'COMPOSE_DISABLE_ENV_FILE=maybe\n', expected: 'data_restore' },
+      // The root file alone: the control.
+      { name: 'none', file: null, expected: 'docker_endpoint_protected' },
+    ];
+    for (const variant of variants) {
       for (const dangling of [false, true]) {
-        if (variant === 'none' && dangling) continue;
-        const label = `${variant}${dangling ? ' dangling' : ''}`;
+        if (variant.file === null && dangling) continue;
+        const label = `${variant.name}${dangling ? ' dangling' : ''}`;
         resetStack();
         const data = dataDir('web');
         const dir = stackDir('web');
         fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:1\n');
-        const name = variant === 'spec' ? 'extra.yml' : variant === 'docker-override' ? 'docker-compose.override.yml' : 'compose.override.yml';
-        const target = path.join(data, name);
-        if (variant !== 'none') {
+        if (variant.env !== undefined) fs.writeFileSync(path.join(dir, '.env'), variant.env);
+        const target = variant.file === null ? null : path.join(data, variant.file);
+        if (variant.file !== null && target !== null) {
           fs.writeFileSync(target, 'services:\n  app:\n    environment:\n      A: "1"\n');
-          fs.symlinkSync(path.join('data', name), path.join(dir, name));
+          fs.symlinkSync(path.join('data', variant.file), path.join(dir, variant.file));
         }
-        const gitSource = vi.spyOn(db, 'getGitSource').mockImplementation((stack: string) => (variant === 'spec' && stack === 'web'
-          ? { applied_deploy_spec: { files: ['compose.yaml', 'extra.yml'] } } as never
+        const gitSource = vi.spyOn(db, 'getGitSource').mockImplementation((stack: string) => (variant.spec && stack === 'web'
+          ? { applied_deploy_spec: { files: variant.spec } } as never
           : realGitSource(stack)));
         fencedOverwriteOf(data);
-        if (dangling) fs.renameSync(target, `${target}.aside`);
-        const expected = variant === 'none' ? 'docker_endpoint_protected' : 'data_restore';
+        if (dangling && target !== null) fs.renameSync(target, `${target}.aside`);
+        const expected = variant.expected;
         // The root file alone is clear of the fence.
         await expect(FileSystemService.getInstance(nodeId).getStackContent('web'), label).resolves.toContain('nginx:1');
         for (const [kind, pending] of Object.entries({

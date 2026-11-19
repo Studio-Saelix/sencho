@@ -568,27 +568,28 @@ export class FileSystemService {
 
   /**
    * The fence's refusal when any root compose file of `stackDir` (or each of
-   * `files`, relative to it, when given), or a path a link on the way to it
-   * names, sits in a directory a data restore is
-   * overwriting; null otherwise. A check that fails while a fence is held
-   * proves nothing either way, so it is logged and answered as the fence's
-   * `unproven` refusal: a compose file Sencho could not check is not gone.
-   * That refusal names the first held fence, which need not be the one the
-   * stack touches, since the failed check could not say which.
-   * Asked after a step on the compose file failed; no filesystem work, and
-   * one store lookup, when nothing is fenced.
+   * `files`, resolved against it, when given), or a path a link on the way to
+   * it names, sits in a directory a data restore is overwriting; null
+   * otherwise. A check that fails while a fence is held (`files` throwing
+   * included) proves nothing either way, so it is logged and answered as the
+   * fence's `unproven` refusal: a compose file Sencho could not check is not
+   * gone. That refusal names the first held fence, which need not be the one
+   * the stack touches, since the failed check could not say which.
+   * Asked after a step on the compose file failed, and up front by
+   * refuseIfComposeFenced; no filesystem work, and one store lookup, when
+   * nothing is fenced (`files` is not called then).
    */
   private async composeFenceRefusal(
     stackDir: string,
-    files: () => readonly string[] = () => COMPOSE_ROOT_FILENAMES,
+    files: () => readonly string[] | Promise<readonly string[]> = () => COMPOSE_ROOT_FILENAMES,
   ): Promise<DataRestoreFenceError | null> {
     const { RestoreFenceStore } = await import('./recovery/restoreFence');
     const fenced = RestoreFenceStore.getInstance().liveFencedFsTargets();
     if (fenced.length === 0) return null;
     try {
       const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
-      for (const file of files()) {
-        await refuseIfFencedSource(path.join(stackDir, file));
+      for (const file of await files()) {
+        await refuseIfFencedSource(path.resolve(stackDir, file));
       }
     } catch (err) {
       if (isDataRestoreFenceError(err)) return err;
@@ -945,14 +946,16 @@ export class FileSystemService {
    * thrown here, and the update reports it from its own read. A fence recorded
    * after this check is still answered by that later read.
    *
-   * The other compose files Compose merges are asked too: an applied Git
-   * deploy spec's `-f` files, or, without one, the implicit overrides Compose
+   * The other compose files Compose reads are asked too: an applied Git
+   * deploy spec's `-f` files; without one, the files a `COMPOSE_FILE` the
+   * stack's env sets selects; otherwise the implicit overrides Compose
    * discovers beside the root file. A root file clear of the fence does not
-   * make the project clear when an override links into, or is missing from, a
-   * directory a restore is overwriting; Compose would read it, and a render
+   * make the project clear when one of those links into, or is missing from,
+   * a directory a restore is overwriting; Compose would read it, and a render
    * that failed on it is the fence's to answer. A check of those files that
-   * cannot run while a fence is held is answered as the fence's `unproven`
-   * refusal, as for the root file.
+   * cannot run while a fence is held (a `COMPOSE_FILE` selection that cannot
+   * be read, for one) is answered as the fence's `unproven` refusal, as for
+   * the root file. Files an `include:` or `extends:` pulls in are not asked.
    */
   async refuseIfComposeFenced(stackName: string): Promise<void> {
     try {
@@ -972,16 +975,34 @@ export class FileSystemService {
   }
 
   /**
-   * The compose files Compose merges besides the root file Sencho reads, as
-   * paths relative to the stack directory: an applied Git deploy spec's `-f`
-   * files (Compose then discovers no override), else the implicit overrides
-   * from COMPOSE_OVERRIDE_FILENAMES. A spec entry the spawn sink would refuse
-   * is left out; Compose never reads it.
+   * The compose files Compose reads for the stack beyond the root file Sencho
+   * reads, as paths resolved against the stack directory (the root file may
+   * be among them):
+   * - an applied Git deploy spec's `-f` files; Compose then reads neither
+   *   COMPOSE_FILE nor an override. An entry the spawn sink refuses (empty,
+   *   absolute, or escaping the stack) is left out; the sink refuses the
+   *   whole deploy for it, so Compose reads none of them.
+   * - else the entries of a COMPOSE_FILE the stack's env sets, split as
+   *   Compose splits them; it replaces override discovery. A selection that
+   *   cannot be read, or that Compose would not accept, throws: which files
+   *   Compose reads cannot be known.
+   * - else the implicit overrides (all four names; Compose reads the first it
+   *   finds, so asking each is the safe superset).
    */
-  private mergedComposeFilesBeyondRoot(stackName: string): readonly string[] {
+  private async mergedComposeFilesBeyondRoot(stackName: string): Promise<readonly string[]> {
     const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
     if (spec && Array.isArray(spec.files) && spec.files.length > 0) {
-      return spec.files.filter((file): file is string => typeof file === 'string' && isValidRelativeStackPath(file));
+      return spec.files.filter((file): file is string =>
+        typeof file === 'string' && file !== '' && isValidRelativeStackPath(file));
+    }
+    const { composeFileEnvVarSelection } = await import('../utils/authoredComposeArgs');
+    const selection = await composeFileEnvVarSelection(stackName, this.nodeId);
+    if (selection.kind === 'value') {
+      // Compose ignores empty entries.
+      return selection.value.split(selection.pathSeparator).filter((entry) => entry !== '');
+    }
+    if (selection.kind !== 'absent') {
+      throw new Error(`COMPOSE_FILE selection cannot be read: ${selection.reason}`);
     }
     return COMPOSE_OVERRIDE_FILENAMES;
   }
