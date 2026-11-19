@@ -1008,7 +1008,8 @@ export class FileSystemService {
       // A source the reader refuses for its own rules (a link outside the
       // compose root, a size limit) is one Compose may still read, so a
       // selection unread for that reason does not refuse a stack whose
-      // sources the fence does not hold; its overrides are asked instead.
+      // sources the fence does not hold; its overrides are asked instead,
+      // and the layers it would select are not known here.
       return ['.env', ...selection.loadedEnvFiles, ...COMPOSE_OVERRIDE_FILENAMES];
     }
     return COMPOSE_OVERRIDE_FILENAMES;
