@@ -165,11 +165,12 @@ describe('useContainerStats', () => {
     it('ignores the error and close events a cleanup close provokes on a connecting socket', () => {
       const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
       const oldWs = MockWS.instances[0];
-      // A browser fires these through the handlers it captured, even after the
-      // cleanup detached them from the socket object.
+      // Simulate a late error/close reaching the handlers captured before the
+      // cleanup detached them; the disposed guard must ignore them.
       const { onerror, onclose } = oldWs;
 
-      rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+      // Same container, new array: a leaked failure would flag a live container.
+      rerender({ containers: [makeContainer('c1')], nodeId: 1 });
       act(() => {
         onerror?.();
         onclose?.({ code: 1006 } as CloseEvent);
@@ -259,6 +260,24 @@ describe('useContainerStats', () => {
 
       act(() => { MockWS.instances[2].onmessage?.({ data: validSample }); });
       expect(result.current.error).toBeNull();
+      warnSpy.mockRestore();
+    });
+
+    it('raises the warning when a frame on a healthy stream cannot be processed', () => {
+      const { result, warnSpy } = setup([makeContainer('c1')]);
+      const badNetworks = JSON.stringify({
+        cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 1 },
+        precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: 1000 },
+        memory_stats: { usage: 1048576 },
+        networks: { eth0: null },
+      });
+      act(() => { MockWS.instances[0].onmessage?.({ data: badNetworks }); });
+
+      expect(result.current.error).toMatch(/unavailable/);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[useContainerStats] stats stream failure:',
+        expect.objectContaining({ kind: 'parse-error' }),
+      );
       warnSpy.mockRestore();
     });
 

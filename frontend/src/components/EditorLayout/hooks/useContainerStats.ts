@@ -190,8 +190,10 @@ export function useContainerStats(
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A stopped container sends no valid sample, so its flag could never clear.
-  // Only containers that should be streaming keep the warning up.
+  // A container that is not running sends no valid sample, so its flag could
+  // never clear. Only failures on running containers keep the warning up; a
+  // flag on a container that is not running stays stored and counts again once
+  // the container runs and has not yet streamed.
   const streamFailing = failedIds.size > 0
     && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
 
