@@ -23,11 +23,13 @@ const optionalCounter = (v: unknown): number | null =>
 
 /**
  * Turns one Docker stats frame into usable readings, or null when the frame
- * cannot yield them (a required counter missing, not a number, or not finite). The caller
- * drops such a frame: it must neither publish a metric nor count as proof that
- * the stream recovered. Counters Docker omits on some runtimes (system CPU time,
- * online CPUs, per-interface byte counts) stay optional. A null network entry
- * throws, which the caller reports as a parse failure.
+ * cannot yield them: a stats section is absent, a required counter (CPU totals,
+ * memory usage) is missing, zero, or not a finite number, or any counter that is
+ * present is not a finite number. The caller drops such a frame: it must neither
+ * publish a metric nor count as proof that the stream recovered. Counters Docker
+ * omits on some runtimes (system CPU time, online CPUs, per-interface byte
+ * counts) may be absent or null and read as 0. A null network entry throws,
+ * which the caller reports as a parse failure.
  */
 function readStatsSample(data: {
   cpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown; online_cpus?: unknown };
@@ -67,7 +69,8 @@ function readStatsSample(data: {
   const cpuPercent = systemDelta > 0
     ? ((cpuTotal - preCpuTotal) / systemDelta) * (onlineCpus || 1) * 100
     : 0;
-  // The derived values can still overflow to Infinity or NaN (sums of finite counters).
+  // cpuPercent, rx and tx are derived, so they can still overflow to Infinity or
+  // NaN although every input is finite.
   if (![cpuPercent, rx, tx].every(Number.isFinite)) return null;
   return { cpuPercent, memBytes: memUsage, rx, tx };
 }

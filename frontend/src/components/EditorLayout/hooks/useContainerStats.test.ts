@@ -280,7 +280,7 @@ describe('useContainerStats', () => {
       warnSpy.mockRestore();
     });
 
-    it('raises the warning when a frame on a healthy stream cannot be processed', () => {
+    it('raises a parse-error warning when the reader throws on a null network entry', () => {
       const { result, warnSpy } = setup([makeContainer('c1')]);
       const badNetworks = JSON.stringify({
         cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 1 },
@@ -357,6 +357,10 @@ describe('useContainerStats', () => {
         }))],
         ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
         ['a nonnumeric transmit byte count beside a valid receive count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: 'x' } } }))],
+        // Strings in a byte count also fail the final sum check, so only a boolean
+        // (0 + true is 1) exercises the per-counter guards themselves.
+        ['a boolean as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: true } } }))],
+        ['a boolean as the receive byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: true, tx_bytes: 1 } } }))],
         ['a numeric string as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: '512' } } }))],
         ['a numeric string as the receive byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: '1024', tx_bytes: 1 } } }))],
         ['a bad counter on a second network interface', JSON.stringify(frame({
@@ -392,15 +396,30 @@ describe('useContainerStats', () => {
         ['a numeric string as the online CPU count', JSON.stringify(frame({
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: '2' },
         }))],
+        // A frame with a whole stats section absent is dropped without being reported.
+        ['no current CPU stats', JSON.stringify(frame({ cpu_stats: undefined }))],
+        ['no previous CPU stats', JSON.stringify(frame({ precpu_stats: undefined }))],
+        ['no CPU usage object', JSON.stringify(frame({
+          cpu_stats: { system_cpu_usage: 2000, online_cpus: 1 },
+        }))],
+        ['no previous CPU usage object', JSON.stringify(frame({
+          precpu_stats: { system_cpu_usage: 1000 },
+        }))],
+        ['no memory stats', JSON.stringify(frame({ memory_stats: undefined }))],
+        ['no memory usage', JSON.stringify(frame({ memory_stats: {} }))],
+        // A container that is not running reports zero memory.
+        ['a memory usage of zero', JSON.stringify(frame({ memory_stats: { usage: 0 } }))],
         // 1e999 parses to Infinity.
         ['an infinite memory usage', JSON.stringify(frame()).replace('1048576', '1e999')],
-        // Positive system delta, empty CPU objects and a truthy nonnumeric memory value.
+        // Several defects in one frame are still dropped.
         ['empty CPU counters with nonnumeric memory', JSON.stringify(frame({
           cpu_stats: { cpu_usage: {}, system_cpu_usage: 2000 },
           precpu_stats: { cpu_usage: {}, system_cpu_usage: 1000 },
           memory_stats: { usage: 'lots' },
         }))],
       ];
+
+      const nonnumericMemoryFrame = JSON.stringify(frame({ memory_stats: { usage: 'lots' } }));
 
       it.each(invalidFrames)('keeps a real warning and publishes nothing for %s, then recovers on a valid sample', (_name, bad) => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
@@ -433,7 +452,7 @@ describe('useContainerStats', () => {
         act(() => { MockWS.instances[0].onerror?.(); });
         rerender({ containers: [makeContainer('c1')], nodeId: 1 });
 
-        act(() => { MockWS.instances[1].onmessage?.({ data: invalidFrames[3][1] }); });
+        act(() => { MockWS.instances[1].onmessage?.({ data: nonnumericMemoryFrame }); });
         expect(result.current.error).toMatch(/unavailable/);
 
         act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
