@@ -356,6 +356,42 @@ describe('useContainerStats', () => {
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 'two' },
         }))],
         ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
+        ['a nonnumeric transmit byte count beside a valid receive count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: 'x' } } }))],
+        ['a numeric string as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: '512' } } }))],
+        ['a numeric string as the receive byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: '1024', tx_bytes: 1 } } }))],
+        ['a bad counter on a second network interface', JSON.stringify(frame({
+          networks: { eth0: { rx_bytes: 1, tx_bytes: 1 }, eth1: { rx_bytes: 1, tx_bytes: 'x' } },
+        }))],
+        // A valid current CPU total beside a previous total that is null, nonnumeric or a numeric string.
+        ['a null previous CPU counter', JSON.stringify(frame({
+          precpu_stats: { cpu_usage: { total_usage: null }, system_cpu_usage: 1000 },
+        }))],
+        ['a nonnumeric previous CPU counter', JSON.stringify(frame({
+          precpu_stats: { cpu_usage: { total_usage: 'abc' }, system_cpu_usage: 1000 },
+        }))],
+        ['a numeric string as the previous CPU counter', JSON.stringify(frame({
+          precpu_stats: { cpu_usage: { total_usage: '100' }, system_cpu_usage: 1000 },
+        }))],
+        ['a numeric string as the CPU counter', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: '200' }, system_cpu_usage: 2000, online_cpus: 1 },
+        }))],
+        ['a numeric string as memory usage', JSON.stringify(frame({ memory_stats: { usage: '1048576' } }))],
+        ['a numeric string as the system CPU counter', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: '2000', online_cpus: 1 },
+        }))],
+        // 1e999 parses to Infinity; an infinite system delta would otherwise read as 0% CPU.
+        ['an infinite system CPU counter', JSON.stringify(frame()).replace('2000', '1e999')],
+        ['an infinite previous system CPU counter', JSON.stringify(frame()).replace('"system_cpu_usage":1000', '"system_cpu_usage":1e999')],
+        // Each interface is finite; only the sum overflows.
+        ['network receive totals that overflow across interfaces', JSON.stringify(frame({
+          networks: { a: { rx_bytes: 1e308, tx_bytes: 1 }, b: { rx_bytes: 1e308, tx_bytes: 1 } },
+        }))],
+        ['network transmit totals that overflow across interfaces', JSON.stringify(frame({
+          networks: { a: { rx_bytes: 1, tx_bytes: 1e308 }, b: { rx_bytes: 1, tx_bytes: 1e308 } },
+        }))],
+        ['a numeric string as the online CPU count', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: '2' },
+        }))],
         // 1e999 parses to Infinity.
         ['an infinite memory usage', JSON.stringify(frame()).replace('1048576', '1e999')],
         // Positive system delta, empty CPU objects and a truthy nonnumeric memory value.
@@ -405,6 +441,23 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
+      it('still accepts a sample that sends null for the optional counters', () => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onerror?.(); });
+        const nulls = JSON.stringify({
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: null, online_cpus: null },
+          precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: null },
+          memory_stats: { usage: 1048576 },
+          networks: { eth0: { rx_bytes: null, tx_bytes: null } },
+        });
+        act(() => { MockWS.instances[0].onmessage?.({ data: nulls }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toBeNull();
+        expect(result.current.stats['c1']).toMatchObject({ cpu: '0.00%', ram: '1.00 MB' });
+        warnSpy.mockRestore();
+      });
+
       it('still accepts a sample that leaves out the optional counters', () => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
         act(() => { MockWS.instances[0].onerror?.(); });
@@ -434,6 +487,20 @@ describe('useContainerStats', () => {
         // A fresh failure after the start still raises the warning.
         act(() => { MockWS.instances[1].onerror?.(); });
         expect(result.current.error).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
+
+      it('keeps the warning through a restart the list never shows as a stop, until the new stream delivers a sample', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1', 'running')]);
+        act(() => { MockWS.instances[0].onclose?.({ code: 1006 } as CloseEvent); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        // Restart: same ID, running before and after, so the refresh reopens the socket.
+        rerender({ containers: [makeContainer('c1', 'running')], nodeId: 1 });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
         warnSpy.mockRestore();
       });
 

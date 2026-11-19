@@ -40,6 +40,9 @@ function readStatsSample(data: {
   const cpuTotal = data.cpu_stats.cpu_usage.total_usage;
   const preCpuTotal = data.precpu_stats.cpu_usage.total_usage;
   const memUsage = data.memory_stats.usage;
+  // The CPU totals must be checked here: the subtraction below would coerce a
+  // numeric string or null. memUsage is also narrowed for the type; the final
+  // finiteness check rejects it too, so no test can tell the two guards apart.
   if (!isFiniteNumber(cpuTotal) || !isFiniteNumber(preCpuTotal) || !isFiniteNumber(memUsage)) return null;
 
   const systemNow = optionalCounter(data.cpu_stats.system_cpu_usage);
@@ -81,8 +84,8 @@ export function useContainerStats(
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
   // IDs of running containers whose current stats stream has failed. A container
-  // leaves the set when it delivers a valid sample, when it stops or drops out of
-  // the list, or when the active node changes.
+  // leaves the set when it delivers a valid sample, when a list shows it stopped
+  // or gone, or when the active node changes.
   const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(NO_FAILURES);
 
   const pendingStatsRef = useRef<Record<string, {
@@ -94,9 +97,10 @@ export function useContainerStats(
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
 
   // Clear every stream failure only on an actual node switch. The main effect
-  // drops only the containers that left the list or stopped running: clearing everything on each
-  // containers-array identity change (the dashboard's refresh cadence) would
-  // make the warning visibly flap against a persistently-flaky daemon.
+  // drops only the containers a new list shows as gone or not running: clearing
+  // everything on each containers-array identity change (the dashboard's
+  // refresh cadence) would make the warning visibly flap against a
+  // persistently-flaky daemon.
   useEffect(() => {
     setFailedIds(NO_FAILURES);
   }, [activeNodeId]);
@@ -114,10 +118,12 @@ export function useContainerStats(
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
-    // Opening another stack starts clean, and a container that stopped starts
-    // its next run clean too: a failure belongs to one running session. Running
-    // containers that stay in the list keep their flag until they stream again,
-    // so a refresh does not clear and re-raise the warning against a flaky daemon.
+    // Opening another stack starts clean, and a container this list shows as
+    // stopped or gone loses its flag, so its next run starts clean. A container
+    // that stays listed as running keeps its flag until a valid sample arrives,
+    // which also covers a restart (running to running, same ID): a refresh does
+    // not clear and re-raise the warning against a flaky daemon, and the new
+    // stream's first valid sample clears it.
     const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
     setFailedIds(prev => {
       const kept = [...prev].filter(id => runningIds.has(id));
@@ -129,9 +135,8 @@ export function useContainerStats(
 
       const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
         // This effect run belongs to the container's state in the list it was
-        // given; a change of state arrives as a new list and reruns it. A container that is not running
-        // has no stream to lose, and its failure would otherwise be carried
-        // into its next run.
+        // given. A container that list shows as not running has no stream to
+        // lose, and its failure would otherwise be carried into its next run.
         if (disposed || container.State !== 'running') return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
