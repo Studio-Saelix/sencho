@@ -144,6 +144,92 @@ describe('CloudBackupSection archive encryption', () => {
     });
 });
 
+describe('CloudBackupSection usage load', () => {
+    it('reads usage once on mount when the saved vault is provisioned', async () => {
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+
+    it('does not read usage when the saved vault is not provisioned', async () => {
+        configPayload = { ...configPayload, sencho_provisioned: false, sencho_provisioned_at: null };
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Activate Sencho Snapshot Vault')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
+    });
+
+    it('reads usage when the picker switches to a provisioned vault', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        configPayload = { ...configPayload, provider: 'disabled' };
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') return json({});
+            if (path === '/cloud-backup/config') return json(configPayload);
+            if (path === '/cloud-backup/usage') return json({ used_bytes: 10, quota_bytes: 100, object_count: 1 });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            return json({ error: 'unexpected' }, 500);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('combobox'));
+        await user.click(await screen.findByText('Sencho Snapshot Vault (included)'));
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+
+    it('reads usage when a resync lands on a provisioned vault after an unanswered switch', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        // The mount sees Disabled, so it must not read usage. The picker's write
+        // reaches the hub but its answer is lost; the stored destination the
+        // resync reads back is the vault.
+        let stored = false;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') {
+                stored = true;
+                throw new Error('network down');
+            }
+            if (path === '/cloud-backup/config') {
+                return json({ ...configPayload, provider: stored ? 'sencho' : 'disabled' });
+            }
+            if (path === '/cloud-backup/usage') return json({ used_bytes: 10, quota_bytes: 100, object_count: 1 });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            return json({ error: 'unexpected' }, 500);
+        });
+        render(<CloudBackupSection />);
+        // The combobox renders only after the mount load settles, so a usage
+        // read from that load would already be on record here.
+        await screen.findByRole('combobox');
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Sencho Snapshot Vault (included)'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        // The error toast is raised before the resync read settles, so wait for
+        // the stored destination rather than assuming the read already landed.
+        await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent('Sencho Snapshot Vault (included)'));
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+
+    it('reads usage after Retry reaches a provisioned vault', async () => {
+        const base = apiFetch.getMockImplementation()!;
+        let failing = true;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && !options?.method && failing
+                ? json({ error: 'boom' }, 500)
+                : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Retry' }));
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
+
+        failing = false;
+        await user.click(screen.getByRole('button', { name: 'Retry' }));
+        expect(await screen.findByText('Storage used')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
+    });
+});
+
 describe('CloudBackupSection managed vault discovery', () => {
     const FILLED_CUSTOM = {
         endpoint: 'https://s3.example.com', region: 'us-east-1', bucket: 'b', access_key: 'a', secret_key: '',

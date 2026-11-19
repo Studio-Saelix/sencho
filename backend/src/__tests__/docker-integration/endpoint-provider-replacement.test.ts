@@ -37,7 +37,10 @@ function dockerAvailable(): boolean {
 const hasDocker = dockerAvailable();
 const SOCKET_PATH = '/var/run/docker.sock';
 const SENCHO_IMAGE = 'busybox:1.36.1';
-const PROXY_IMAGE = 'linuxserver/socket-proxy:latest';
+// Pinned rather than `latest`: 3.4.8 (HAProxy 3.4.8) leaves a hijacked
+// `docker run` attach connection open after the container exits, so helper
+// containers that read a file with `docker run` hang until the test times out.
+const PROXY_IMAGE = 'linuxserver/socket-proxy:3.4.7';
 const OP_PREFIX = 'e2e' + process.pid;
 
 let rootDir: string;

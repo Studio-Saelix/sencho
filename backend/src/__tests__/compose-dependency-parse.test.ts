@@ -158,6 +158,9 @@ describe('parseComposeDependencies - ports', () => {
     '"[::1]:80"', '"abc:80"', '"web"', '""', '"65536:80"', '"80-65536:80"', '"8002-8000:80"', '" 80:80"',
     '"8080x"', '"80-"', '"80-90-100"', '"65536"', '"0"', '"0-80"',
     '"8080:8080x"', '"8080:0"', '"8080:0-80"',
+    // `$$` is an escaped literal, so the host side is not a template and not a
+    // number either: Compose refuses the entry once it substitutes.
+    '"$${APP_PORT}:80"',
     '{ target: "8080x", published: 0 }', '{ target: "80-", protocol: udp }', '{ target: 0 }',
     '{ target: "x", published: 8080 }', '{ target: "80-", published: 8080 }',
   ])('drops %s, which Compose refuses', (entry) => {
@@ -219,6 +222,64 @@ describe('parseComposeDependencies - ports', () => {
   it('still drops a fixed publication whose container port Compose refuses without a template', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "8080:8080x"\n  - { target: "80-", published: 8080 }'));
     expect(r.services[0].ports).toEqual([]);
+  });
+
+  it('keeps a publication whose host port is a template or left to Docker, with the shape that is known', () => {
+    // Compose substitutes the host side before it reads the fields, so a colon
+    // inside `${...}` separates nothing. The host number is the environment's
+    // to decide, so the publication keeps its interface and container target and
+    // no invented number, exactly as an auto-assigned one does, and it is marked
+    // so a consumer that must not claim reach leaves it out.
+    const autoHost = { hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true, targetStartPort: 80, targetEndPort: 80 };
+    const templatedHost = { ...autoHost, unresolvedHost: true as const };
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${APP_PORT:-8080}:80"')).services[0].ports).toEqual([templatedHost]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_PORT}:80"')).services[0].ports).toEqual([templatedHost]);
+    // A plain container-only port is the same publication without the marker.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "80"')).services[0].ports).toEqual([autoHost]);
+    // The interface and protocol written beside the template are kept.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "127.0.0.1:${APP_PORT:-8080}:80/udp"')).services[0].ports)
+      .toEqual([{ ...templatedHost, hostIp: '127.0.0.1', protocol: 'udp' }]);
+    // The long form records a templated `published` the same way, whether or not
+    // it has a default, and keeps a templated `host_ip` as written.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: 80, published: "${APP_PORT:-8080}" }')).services[0].ports).toEqual([templatedHost]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: 80, published: "${HOST_PORT}" }')).services[0].ports).toEqual([templatedHost]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: 80, published: "${HOST_PORT}", host_ip: "${HOST_IP}" }')).services[0].ports)
+      .toEqual([{ ...templatedHost, hostIp: '${HOST_IP}' }]);
+    // With the environment, the same entries resolve to the fixed number they name.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${APP_PORT:-8080}:80"'), { lookup: () => undefined }).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 8080, protocol: 'tcp' }]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: 80, published: "${APP_PORT:-8080}" }'), { lookup: () => undefined }).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 8080, protocol: 'tcp' }]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${APP_PORT:-8080}:80"'), { lookup: name => (name === 'APP_PORT' ? '9000' : undefined) }).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 9000, protocol: 'tcp' }]);
+    // A default Compose refuses once it resolves is not a publication.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${APP_PORT:-8080x}:80"'), { lookup: () => undefined }).services[0].ports).toEqual([]);
+  });
+
+  it('marks only a host side that is still a template after interpolation', () => {
+    const auto = (over: { hostIp?: string; target?: number } = {}) => ({
+      hostIp: over.hostIp ?? '',
+      publishedPort: 0,
+      protocol: 'tcp',
+      dynamic: true as const,
+      ...(over.target === undefined ? {} : { targetStartPort: over.target, targetEndPort: over.target }),
+    });
+    const short = (entry: string) => parseComposeDependencies(svc('web', `ports:\n  - "${entry}"`)).services[0].ports;
+    // An answered variable leaves a Docker-assigned publication, never the marker.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "127.0.0.1:${HOST_PORT}:80"'), { lookup: () => undefined }).services[0].ports)
+      .toEqual([auto({ hostIp: '127.0.0.1', target: 80 })]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${PORTS}"'), { lookup: name => (name === 'PORTS' ? '51820/udp' : undefined) }).services[0].ports)
+      .toEqual([{ ...auto({ target: 51820 }), protocol: 'udp' }]);
+    // Both sides unresolved: kept with no target, for drift to match by protocol
+    // and interface.
+    expect(short('${HOST_PORT}:${APP_PORT}')).toEqual([{ ...auto(), unresolvedHost: true }]);
+    // A long-form entry with no published number is Docker-assigned even when its
+    // target is a template.
+    expect(parseComposeDependencies('services:\n  web:\n    ports:\n      - { target: "${APP_PORT}" }\n').services[0].ports)
+      .toEqual([auto()]);
+    // An empty host side beside a template container port may resolve to a fixed
+    // publication ("8080:80"), so there is no shape to record.
+    expect(short(':${APP_PORT}')).toEqual([]);
   });
 
   it('takes the low end of a published range', () => {

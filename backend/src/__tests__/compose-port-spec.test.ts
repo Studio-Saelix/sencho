@@ -5,10 +5,12 @@
  * counts or a finding can point at a declaration it never reported.
  *
  * Also the protocol fold every port reader shares, so an authored `80/TCP`
- * compares equal to the `tcp` Docker reports.
+ * compares equal to the `tcp` Docker reports, and the short-form split, where a
+ * colon inside a `${...}` template is part of the template rather than a field
+ * separator.
  */
 import { describe, expect, it } from 'vitest';
-import { claimsEnumeratedHostPort, enumeratedHostPorts, normalizePortProtocol } from '../helpers/composePortSpec';
+import { claimsEnumeratedHostPort, enumeratedHostPorts, normalizePortProtocol, splitShortPortSpec } from '../helpers/composePortSpec';
 
 describe('normalizePortProtocol', () => {
   it('folds a stated protocol to the lower case Docker reports', () => {
@@ -54,5 +56,42 @@ describe('bounded host-port enumeration', () => {
   it('claims nothing for a dynamic publication', () => {
     expect(enumeratedHostPorts({ startPort: 0, endPort: 0, dynamic: true })).toEqual([]);
     expect(claimsEnumeratedHostPort({ startPort: 0, endPort: 0, dynamic: true }, 8080)).toBe(false);
+  });
+});
+
+describe('splitShortPortSpec', () => {
+  it('splits at the colons that separate the interface, host and container ports', () => {
+    expect(splitShortPortSpec('8080:80')).toEqual({ hostIp: '', hostPart: '8080', container: '80', protocol: 'tcp' });
+    expect(splitShortPortSpec('127.0.0.1:5353:53/udp')).toEqual({ hostIp: '127.0.0.1', hostPart: '5353', container: '53', protocol: 'udp' });
+    expect(splitShortPortSpec('::1:51820:51820/udp')).toEqual({ hostIp: '::1', hostPart: '51820', container: '51820', protocol: 'udp' });
+    expect(splitShortPortSpec('[::1]:51820:51820')).toEqual({ hostIp: '::1', hostPart: '51820', container: '51820', protocol: 'tcp' });
+  });
+
+  it('keeps a template whole, so the colon in its operator is not a field separator', () => {
+    // Compose substitutes the template before it reads the fields, so the `:`
+    // in `:-` and any colon in the default belong to the template.
+    expect(splitShortPortSpec('${APP_PORT:-8080}:80')).toEqual({
+      hostIp: '', hostPart: '${APP_PORT:-8080}', container: '80', protocol: 'tcp',
+    });
+    expect(splitShortPortSpec('${HOST_PORT}:80')).toEqual({ hostIp: '', hostPart: '${HOST_PORT}', container: '80', protocol: 'tcp' });
+    expect(splitShortPortSpec('127.0.0.1:${APP_PORT:-8080}:80/udp')).toEqual({
+      hostIp: '127.0.0.1', hostPart: '${APP_PORT:-8080}', container: '80', protocol: 'udp',
+    });
+    expect(splitShortPortSpec('[::1]:${APP_PORT:-8080}:80')).toEqual({
+      hostIp: '::1', hostPart: '${APP_PORT:-8080}', container: '80', protocol: 'tcp',
+    });
+  });
+
+  it('treats a template holding the whole entry as one field, including any slash in it', () => {
+    expect(splitShortPortSpec('${PORTS}')).toEqual({ hostIp: '', hostPart: '', container: '${PORTS}', protocol: 'tcp' });
+    expect(splitShortPortSpec('${ENTRY:-8080:80/tcp}')).toEqual({
+      hostIp: '', hostPart: '', container: '${ENTRY:-8080:80/tcp}', protocol: 'tcp',
+    });
+  });
+
+  it('keeps a template inside a default whole, up to its own closing brace', () => {
+    expect(splitShortPortSpec('${APP_PORT:-${FALLBACK_PORT:-8080}}:80')).toEqual({
+      hostIp: '', hostPart: '${APP_PORT:-${FALLBACK_PORT:-8080}}', container: '80', protocol: 'tcp',
+    });
   });
 });

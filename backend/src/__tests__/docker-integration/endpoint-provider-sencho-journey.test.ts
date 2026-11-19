@@ -33,7 +33,11 @@ function dockerAvailable(): boolean {
 }
 
 const hasDocker = dockerAvailable();
-const PROXY_IMAGE = 'linuxserver/socket-proxy:latest';
+// Pinned rather than `latest`: 3.4.8 (HAProxy 3.4.8) leaves a hijacked
+// `docker run` attach connection open after the container exits, so every
+// helper that reads a file with `docker run --entrypoint cat` hangs until
+// the test times out. Move the pin only after that regression is gone.
+const PROXY_IMAGE = 'linuxserver/socket-proxy:3.4.7';
 const BUSYBOX_IMAGE = 'busybox:1.36.1';
 const DIST_DIR = path.resolve(process.cwd(), 'dist');
 const IMAGE = `sencho-endpoint-journey:${process.pid}`;
@@ -89,6 +93,29 @@ function serviceId(project: string, dir: string, service: string): string {
   const id = compose(project, dir, ['ps', '-q', service]).trim();
   expect(id, `no container for ${service}`).not.toBe('');
   return id;
+}
+
+/**
+ * Pulls an image with a bounded wait and a named log line.
+ *
+ * A pull that stalls on the registry used to sit inside `execFileSync` with no
+ * output, so the CI job's 20-minute cap was the only thing that ended it. Every
+ * pull now names itself first and fails with the CLI's own error, so a registry
+ * problem reads as a pull failure instead of a silent timeout.
+ */
+function pullImage(image: string): void {
+  console.log(`[journey] docker pull ${image}`);
+  try {
+    execFileSync('docker', ['pull', '--quiet', image], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: 240_000,
+    });
+  } catch (error) {
+    const failed = error as { stderr?: string; stdout?: string; message?: string };
+    const detail = (failed.stderr || failed.stdout || failed.message || '').trim();
+    throw new Error(`docker pull ${image} failed${detail ? `: ${detail}` : ''}`);
+  }
 }
 
 /** Proves the recreated/restored proxy actually serves the Docker API on the project network. */
@@ -291,26 +318,34 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('actual Sencho Docke
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-endpoint-journey-'));
     // Prefer the release matching this checkout; fall back to latest so a
     // release PR whose new tag is not published yet still runs the journey.
+    // Both live on GHCR, which does not carry Docker Hub's per-IP anonymous
+    // pull limit, so the large runtime image no longer competes with every
+    // other anonymous pull sharing the runner's address.
     const version = (JSON.parse(fsSync.readFileSync(path.resolve(process.cwd(), '../package.json'), 'utf8')) as { version: string }).version;
-    const candidates = [`saelix/sencho:${version}`, 'saelix/sencho:latest'];
+    const candidates = [
+      `ghcr.io/studio-saelix/sencho:${version}`,
+      'ghcr.io/studio-saelix/sencho:latest',
+    ];
     baseImage = '';
+    const failures: string[] = [];
     for (const candidate of candidates) {
       try {
-        execFileSync('docker', ['pull', candidate], { stdio: 'ignore', timeout: 600_000 });
+        pullImage(candidate);
         baseImage = candidate;
         break;
-      } catch {
-        // Try the next candidate.
+      } catch (error) {
+        failures.push((error as Error).message);
       }
     }
-    if (!baseImage) throw new Error(`none of the Sencho base images could be pulled: ${candidates.join(', ')}`);
+    if (!baseImage) throw new Error(`none of the Sencho base images could be pulled:\n${failures.join('\n')}`);
     for (const image of [PROXY_IMAGE, BUSYBOX_IMAGE]) {
-      execFileSync('docker', ['pull', image], { stdio: 'ignore', timeout: 600_000 });
+      pullImage(image);
     }
     const context = path.join(rootDir, 'image');
     await fs.mkdir(context, { recursive: true });
     await fs.cp(DIST_DIR, path.join(context, 'dist'), { recursive: true });
     await fs.writeFile(path.join(context, 'Dockerfile'), `FROM ${baseImage}\nCOPY dist /app/dist\n`, 'utf8');
+    console.log(`[journey] docker build ${IMAGE}`);
     execFileSync('docker', ['build', '-q', '-t', IMAGE, context], { stdio: 'ignore', timeout: 600_000 });
   }, 900_000);
 

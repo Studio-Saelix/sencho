@@ -620,6 +620,41 @@ describe('networking summary', () => {
     expect(res.body.exposed.stacks).not.toContain(STACK);
   });
 
+  it('reports a short-form port template it cannot resolve as unreadable, not exposed', async () => {
+    // The publication stays in the authored model (see the drift and dependency
+    // readers), but this summary cannot establish its host number, so the stack
+    // is reported unreadable rather than as exposed or not exposed.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "${APP_PORT:?required}:80"\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('still counts a stack exposed for the port it could read beside one it could not', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n'
+      + '  api:\n    image: example/api:1\n    ports:\n      - "${APP_PORT:?required}:8080"\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).toContain(STACK);
+  });
+
+  it('reports a host template the environment answers with text Compose cannot resolve as unreadable', async () => {
+    // The variable is answered, so the detection check sees no unresolved
+    // template, but `$$FOO` is an escaped literal: the port reads `$FOO:80`,
+    // which Compose refuses. The stack must stay unreadable, never "not exposed".
+    fs.writeFileSync(path.join(stackDir, '.env'), 'APP_PORT=$$FOO\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "${APP_PORT}:80"\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
   it('reports an unresolved detection field as unreadable when the interpolation lookup is unavailable', async () => {
     fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
