@@ -12,6 +12,7 @@
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
+import { runWithUnixSocketBindAllowed } from './unixSocketBindGuard';
 
 export async function withUnixSocketAt(
   target: string,
@@ -22,10 +23,10 @@ export async function withUnixSocketAt(
   try {
     const alias = path.join(aliasRoot, 'dir');
     await fs.promises.symlink(path.dirname(target), alias);
-    await new Promise<void>((resolve, reject) => {
+    await runWithUnixSocketBindAllowed(() => new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(path.join(alias, path.basename(target)), resolve);
-    });
+    }));
     await run();
   } finally {
     // The server unlinks the address it was given, which resolves through the

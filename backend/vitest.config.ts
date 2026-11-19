@@ -9,7 +9,10 @@ export default defineConfig({
     // Build the baseline DB (schema + migrations + admin seed) once; each
     // test file's setupTestDb copies it instead of re-running migrations.
     globalSetup: ['./src/__tests__/helpers/vitestGlobalSetup.ts'],
-    setupFiles: ['./src/__tests__/helpers/allowLoopbackTargets.ts'],
+    setupFiles: [
+      './src/__tests__/helpers/allowLoopbackTargets.ts',
+      './src/__tests__/helpers/unixSocketBindGuardSetup.ts',
+    ],
     // Each test file gets its own worker so singletons are fresh between files.
     pool: 'forks',
     // Cap concurrency: each worker dynamic-imports the full Express stack

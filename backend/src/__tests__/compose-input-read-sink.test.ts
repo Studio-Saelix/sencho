@@ -6,10 +6,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'child_process';
 import { existsSync, promises as fsPromises } from 'fs';
-import net from 'net';
 import os from 'os';
 import path from 'path';
 import { readComposeInputWithinCap, resolvePhysicalDirectory } from '../helpers/composeInputReadSink';
+import { withUnixSocketAt } from './helpers/unixSocketFixture';
 
 let dir: string;
 
@@ -195,16 +195,9 @@ describe('readComposeInputWithinCap', () => {
 
   it('skips a unix socket, which Compose cannot open either', async () => {
     const socketPath = path.join(dir, 's.sock');
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socketPath, resolve);
-    });
-    try {
+    await withUnixSocketAt(socketPath, async () => {
       await expect(readComposeInputWithinCap(socketPath, 1024)).resolves.toEqual({ content: null, tooLarge: false });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    });
   });
 
   it('skips a broken symlink', async () => {

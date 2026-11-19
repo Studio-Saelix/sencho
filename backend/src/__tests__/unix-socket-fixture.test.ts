@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { withUnixSocketAt } from './helpers/unixSocketFixture';
@@ -30,5 +31,28 @@ describe('withUnixSocketAt', () => {
     } finally {
       await fs.promises.rm(base, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the Unix socket bind guard', () => {
+  it('refuses a direct bind, which is the shape a deep temp directory breaks', () => {
+    const server = net.createServer();
+    expect(() => server.listen(path.join(os.tmpdir(), 'sencho-direct.sock')))
+      .toThrow(/use withUnixSocketAt/);
+  });
+
+  it('refuses the options form of a direct bind too', () => {
+    const server = net.createServer();
+    expect(() => server.listen({ path: path.join(os.tmpdir(), 'sencho-options.sock') }))
+      .toThrow(/use withUnixSocketAt/);
+  });
+
+  it('leaves a TCP listen alone', async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });
