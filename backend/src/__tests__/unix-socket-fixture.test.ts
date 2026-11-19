@@ -55,4 +55,18 @@ describe('the Unix socket bind guard', () => {
     });
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
+
+  it('leaves a numeric-string TCP port alone, which Node reads as a port', async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      // Node reads a numeric string as a port; @types/node does not model it.
+      server.listen('0' as unknown as number, '127.0.0.1', resolve);
+    });
+    try {
+      expect(server.address()).toMatchObject({ family: 'IPv4' });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });

@@ -22,12 +22,19 @@ export function runWithUnixSocketBindAllowed<T>(action: () => T): T {
   }
 }
 
+// Node reads a string as a TCP port when `Number(value) >= 0` and as a socket
+// path otherwise, so the guard has to make the same split or it would refuse
+// `listen('0')` while allowing the path bind it exists to catch.
+function isUnixPath(value: unknown): value is string {
+  return typeof value === 'string' && !(Number(value) >= 0);
+}
+
 function unixPathArgument(args: readonly unknown[]): string | undefined {
   const first = args[0];
-  if (typeof first === 'string') return first;
+  if (isUnixPath(first)) return first;
   if (first !== null && typeof first === 'object' && 'path' in first) {
     const socketPath = (first as { path?: unknown }).path;
-    if (typeof socketPath === 'string') return socketPath;
+    if (isUnixPath(socketPath)) return socketPath;
   }
   return undefined;
 }
@@ -46,7 +53,7 @@ export function installUnixSocketBindGuard(): void {
     const socketPath = unixPathArgument(args);
     if (socketPath !== undefined && allowedBinds === 0) {
       throw new Error(
-        `test bound a Unix socket directly at ${socketPath}; use withUnixSocketAt so the address stays under the 108-byte limit`,
+        `test bound a Unix socket directly at ${socketPath}; use withUnixSocketAt so the bind goes through the short alias`,
       );
     }
     return originalListen.apply(this, args);
