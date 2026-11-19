@@ -483,6 +483,10 @@ export class StackUpdateOrchestrator {
     // Before the claim, the retag, or the gate: a refusal here leaves nothing behind.
     const restoreRefusal = await ComposeService.getInstance(nodeId)
       .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    // The endpoint check is not fenced file work, so a fence can be recorded
+    // while it renders: a compose file that did not render is asked again, as
+    // service update does, and the fence answers instead of the connection.
+    if (restoreRefusal?.renderFailed) await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     if (restoreRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, restoreRefusal.message, { serviceName, recoveryId });
     }

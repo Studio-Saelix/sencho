@@ -3016,6 +3016,139 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(consume).not.toHaveBeenCalled();
   });
 
+  it('answers a service restore with the fence, unnotified, when the fence is recorded while its own Docker connection check cannot render the file', async () => {
+    const { data } = (() => { resetStack(); return composeStackOf('single'); })();
+    const recoveryId = randomUUID();
+    const now = Date.now();
+    DatabaseService.getInstance().insertServiceUpdateRecovery({
+      id: recoveryId, node_id: nodeId, stack_name: 'web', service_name: 'app',
+      replicas_json: JSON.stringify([{ imageId: 'sha256:aaaa', repoDigest: null }]),
+      majority_image_id: 'sha256:aaaa', declared_image_ref: 'nginx:1', weak_floating_tag: 0,
+      health_gate_id: null, status: 'active', expires_at: now + 3_600_000, claim_expires_at: null,
+      created_at: now, created_by: 'test',
+    });
+    const unrendered = { reason: 'unresolved' as const, service: null, message: 'could not render', renderFailed: true as const };
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    let checks = 0;
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      // The route's check, before the lock, passes. The fence is recorded while
+      // restore's own check renders, after restore's upfront fence ask.
+      evaluateDockerEndpoint: async () => {
+        checks += 1;
+        if (checks === 1) return null;
+        fencedOverwriteOf(data);
+        return unrendered;
+      },
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const enforcement = await import('../services/PolicyEnforcement');
+    const gate = vi.spyOn(enforcement, 'enforcePolicyForImageRefs');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const orchestrator = StackUpdateOrchestrator.getInstance();
+    const restoreCall = vi.spyOn(orchestrator, 'restore');
+    const loadSpec = vi.spyOn(orchestrator as unknown as { loadServiceSpec: () => Promise<unknown> }, 'loadServiceSpec');
+    const { NotificationService } = await import('../services/NotificationService');
+    const alert = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert');
+    const res = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId });
+    expect(checks).toBe(2);
+    expect(restoreCall).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'data_restore', serviceName: 'app' });
+    expect(alert.mock.calls.filter(([level]) => level === 'error')).toEqual([]);
+    expect(loadSpec).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+    const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
+    expect(ServiceUpdateRecoveryService.getInstance().get(recoveryId)?.status).toBe('active');
+    // A file that renders keeps the connection's answer for the same race.
+    resetStack();
+    composeStackOf('single');
+    checks = 0;
+    const rendered = { reason: 'protected' as const, service: 'app', message: 'carries the Docker API' };
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      evaluateDockerEndpoint: async () => {
+        checks += 1;
+        return checks === 1 ? null : rendered;
+      },
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const clear = await request(app).post('/api/stacks/web/services/app/restore').set('Cookie', adminCookie).send({ recoveryId });
+    expect(clear.status).toBe(409);
+    expect(clear.body.code).toBe('docker_endpoint_protected');
+  });
+
+  it('answers a render failure with the fence when an override or an applied Git deployment file, not the root file, is in the fenced directory', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(resolveSenchoLabels({ services: { app: { image: 'nginx:1' }, db: { image: 'postgres:16' } } }), request));
+    const unrendered = { reason: 'unresolved' as const, service: null, message: 'could not render', renderFailed: true as const };
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering,
+      evaluateDockerEndpoint: async () => unrendered,
+      renderConfig: async () => ({
+        rendered: JSON.stringify({ name: 'web', services: { app: { image: 'nginx:1' }, db: { image: 'postgres:16' } }, networks: {}, volumes: {} }),
+        stderr: '', code: 0, timedOut: false,
+      }),
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const { restoreTargetToGeneration } = await import('../services/gitops/rolloutRecovery');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recovery = StackUpdateRecoveryService.getInstance();
+    const db = DatabaseService.getInstance();
+    const realGitSource = db.getGitSource.bind(db);
+    // `override`: Compose discovers compose.override.yml beside a clear root
+    // file. `spec`: an applied Git deployment names extra.yml with -f.
+    // `none`: the root file alone, the control.
+    for (const variant of ['override', 'docker-override', 'spec', 'none'] as const) {
+      for (const dangling of [false, true]) {
+        if (variant === 'none' && dangling) continue;
+        const label = `${variant}${dangling ? ' dangling' : ''}`;
+        resetStack();
+        const data = dataDir('web');
+        const dir = stackDir('web');
+        fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:1\n');
+        const name = variant === 'spec' ? 'extra.yml' : variant === 'docker-override' ? 'docker-compose.override.yml' : 'compose.override.yml';
+        const target = path.join(data, name);
+        if (variant !== 'none') {
+          fs.writeFileSync(target, 'services:\n  app:\n    environment:\n      A: "1"\n');
+          fs.symlinkSync(path.join('data', name), path.join(dir, name));
+        }
+        const gitSource = vi.spyOn(db, 'getGitSource').mockImplementation((stack: string) => (variant === 'spec' && stack === 'web'
+          ? { applied_deploy_spec: { files: ['compose.yaml', 'extra.yml'] } } as never
+          : realGitSource(stack)));
+        fencedOverwriteOf(data);
+        if (dangling) fs.renameSync(target, `${target}.aside`);
+        const expected = variant === 'none' ? 'docker_endpoint_protected' : 'data_restore';
+        // The root file alone is clear of the fence.
+        await expect(FileSystemService.getInstance(nodeId).getStackContent('web'), label).resolves.toContain('nginx:1');
+        for (const [kind, pending] of Object.entries({
+          update: request(app).post('/api/stacks/web/update').set('Cookie', adminCookie),
+          service: request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie),
+          rollback: request(app).post('/api/stacks/web/rollback').set('Cookie', adminCookie),
+        })) {
+          const res = await pending;
+          expect(res.status, `${label} ${kind}`).toBe(409);
+          expect(res.body.code, `${label} ${kind}`).toBe(expected);
+          if (kind === 'rollback' && expected === 'data_restore') expect(res.body.failureClass, label).toBe('pre_mutation');
+        }
+        const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
+        const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+        const local = await restoreTargetToGeneration({
+          app: { id: 'app-local' } as GitOpsApplicationRow,
+          stackName: 'web', nodeId, generationId: 'gen-local', actor: 'tester', role: 'admin', scopedActions: ['stack:deploy'],
+        });
+        expect(local, `${label} local rollback`).toMatchObject({ ok: false, code: expected, failureClass: 'pre_mutation' });
+        expect(compensate, label).not.toHaveBeenCalled();
+        current.mockRestore();
+        compensate.mockRestore();
+        gitSource.mockRestore();
+      }
+    }
+  });
+
   it('keeps the update policy answer for a compose file that is not fenced but cannot be rendered, and for a rendered file whose policy refuses while it is fenced', async () => {
     const updatePolicy = await import('../services/updatePolicy');
     const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
