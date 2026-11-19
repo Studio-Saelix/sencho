@@ -195,8 +195,12 @@ describe('CloudBackupSection usage load', () => {
             return json({ error: 'unexpected' }, 500);
         });
         render(<CloudBackupSection />);
+        // The combobox renders only after the mount load settles, so a usage
+        // read from that load would already be on record here.
+        await screen.findByRole('combobox');
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(0);
         const user = userEvent.setup();
-        await user.click(await screen.findByRole('combobox'));
+        await user.click(screen.getByRole('combobox'));
         await user.click(await screen.findByText('Sencho Snapshot Vault (included)'));
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
         expect(screen.getByRole('combobox')).toHaveTextContent('Sencho Snapshot Vault (included)');
