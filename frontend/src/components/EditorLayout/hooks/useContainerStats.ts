@@ -23,7 +23,8 @@ export function useContainerStats(
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
   // IDs of containers whose current stats stream has failed. A container leaves
-  // the set when it delivers a valid sample, or when it drops out of the list.
+  // the set when it delivers a valid sample, when it drops out of the list, or
+  // when the active node changes.
   const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(NO_FAILURES);
 
   const pendingStatsRef = useRef<Record<string, {
@@ -34,19 +35,20 @@ export function useContainerStats(
 
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
 
-  // Reset the error banner only on an actual node switch. Doing it inside the
-  // main effect would clear the banner on every containers-array identity
-  // change (which fires at the dashboard's refresh cadence) and cause the
-  // banner to visibly flap against a persistently-flaky daemon.
+  // Clear every stream failure only on an actual node switch. The main effect
+  // drops just the containers that left the list: clearing everything on each
+  // containers-array identity change (the dashboard's refresh cadence) would
+  // make the warning visibly flap against a persistently-flaky daemon.
   useEffect(() => {
     setFailedIds(NO_FAILURES);
   }, [activeNodeId]);
 
   useEffect(() => {
     const wsMap: Record<string, WebSocket> = {};
-    // Set by the cleanup before it closes the sockets. The browser still fires
-    // error/close events for a socket closed while connecting, and those are
-    // our own teardown, not a stream failure.
+    // Set by the cleanup before it closes the sockets, as a second line of
+    // defence next to the detached handlers: the browser fires error/close for a
+    // socket closed while connecting, and that is our own teardown, not a
+    // stream failure.
     let disposed = false;
     // Track which WSs have already emitted a console.warn for the lifetime of
     // this effect, so a flaky daemon does not spam the console at message rate.
@@ -107,8 +109,6 @@ export function useContainerStats(
             const data = JSON.parse(event.data);
             if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return;
 
-            clearFailure();
-
             const cpuDelta = data.cpu_stats.cpu_usage.total_usage - data.precpu_stats.cpu_usage.total_usage;
             const systemDelta = (data.cpu_stats.system_cpu_usage || 0) - (data.precpu_stats.system_cpu_usage || 0);
             const onlineCpus = data.cpu_stats.online_cpus || 1;
@@ -140,6 +140,7 @@ export function useContainerStats(
               netInNum: rxRate,
               netOutNum: txRate,
             };
+            clearFailure();
           } catch {
             recordFailure('parse-error');
           }
@@ -189,5 +190,10 @@ export function useContainerStats(
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { stats: containerStats, error: failedIds.size > 0 ? STATS_UNAVAILABLE_MESSAGE : null };
+  // A stopped container sends no valid sample, so its flag could never clear.
+  // Only containers that should be streaming keep the warning up.
+  const streamFailing = failedIds.size > 0
+    && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
+
+  return { stats: containerStats, error: streamFailing ? STATS_UNAVAILABLE_MESSAGE : null };
 }

@@ -16,8 +16,8 @@ class MockWS {
   static reset() { MockWS.instances = []; }
 }
 
-const makeContainer = (id: string): ContainerInfo =>
-  ({ Id: id, Names: [`/${id}`], State: 'running', Status: 'Up 1 minute', Image: 'img' } as ContainerInfo);
+const makeContainer = (id: string, state = 'running'): ContainerInfo =>
+  ({ Id: id, Names: [`/${id}`], State: state, Status: 'Up 1 minute', Image: 'img' } as ContainerInfo);
 
 beforeEach(() => {
   MockWS.reset();
@@ -27,6 +27,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.clearAllMocks();
@@ -125,6 +126,7 @@ describe('useContainerStats', () => {
       { initialProps: { containers: [makeContainer('c1')], nodeId: 1 } },
     );
     const oldWs = MockWS.instances[0];
+    const { onmessage } = oldWs;
     rerender({ containers: [makeContainer('c2')], nodeId: 1 });
 
     const sample = {
@@ -132,7 +134,7 @@ describe('useContainerStats', () => {
       precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: 1000 },
       memory_stats: { usage: 1048576 },
     };
-    act(() => { oldWs.onmessage?.({ data: JSON.stringify(sample) }); });
+    act(() => { onmessage?.({ data: JSON.stringify(sample) }); });
     act(() => { vi.advanceTimersByTime(1500); });
 
     expect(result.current.stats['c1']).toBeUndefined();
@@ -163,12 +165,14 @@ describe('useContainerStats', () => {
     it('ignores the error and close events a cleanup close provokes on a connecting socket', () => {
       const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
       const oldWs = MockWS.instances[0];
-      oldWs.readyState = 0;
+      // A browser fires these through the handlers it captured, even after the
+      // cleanup detached them from the socket object.
+      const { onerror, onclose } = oldWs;
 
       rerender({ containers: [makeContainer('c2')], nodeId: 1 });
       act(() => {
-        oldWs.onerror?.();
-        oldWs.onclose?.({ code: 1006 } as CloseEvent);
+        onerror?.();
+        onclose?.({ code: 1006 } as CloseEvent);
       });
 
       expect(result.current.error).toBeNull();
@@ -242,6 +246,41 @@ describe('useContainerStats', () => {
       act(() => { MockWS.instances[0].onmessage?.({ data: noMemorySample }); });
 
       expect(result.current.error).toMatch(/unavailable/);
+      warnSpy.mockRestore();
+    });
+
+    it('keeps the warning when a sibling is dropped from the list but another failing container stays', () => {
+      const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+      act(() => { MockWS.instances[0].onerror?.(); });
+      act(() => { MockWS.instances[1].onerror?.(); });
+
+      rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+      expect(result.current.error).toMatch(/unavailable/);
+
+      act(() => { MockWS.instances[2].onmessage?.({ data: validSample }); });
+      expect(result.current.error).toBeNull();
+      warnSpy.mockRestore();
+    });
+
+    it('does not clear the warning on a frame that cannot be parsed', () => {
+      const { result, warnSpy } = setup([makeContainer('c1')]);
+      act(() => { MockWS.instances[0].onerror?.(); });
+      act(() => { MockWS.instances[0].onmessage?.({ data: '{not json' }); });
+
+      expect(result.current.error).toMatch(/unavailable/);
+      warnSpy.mockRestore();
+    });
+
+    it('does not pin the warning on a stopped container that cannot stream', () => {
+      const { result, warnSpy } = setup([makeContainer('c1'), makeContainer('c2', 'exited')]);
+      act(() => { MockWS.instances[1].onerror?.(); });
+      expect(result.current.error).toBeNull();
+
+      act(() => { MockWS.instances[0].onerror?.(); });
+      expect(result.current.error).toMatch(/unavailable/);
+
+      act(() => { MockWS.instances[0].onmessage?.({ data: validSample }); });
+      expect(result.current.error).toBeNull();
       warnSpy.mockRestore();
     });
 
