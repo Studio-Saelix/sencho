@@ -40,9 +40,10 @@ function readStatsSample(data: {
   const cpuTotal = data.cpu_stats.cpu_usage.total_usage;
   const preCpuTotal = data.precpu_stats.cpu_usage.total_usage;
   const memUsage = data.memory_stats.usage;
-  // The CPU totals must be checked here: the subtraction below would coerce a
-  // numeric string or null. memUsage is also narrowed for the type; the final
-  // finiteness check rejects it too, so no test can tell the two guards apart.
+  // Checked here, not after the arithmetic: the subtraction below coerces a
+  // numeric string or null to a finite number, so the derived-value check at the
+  // end could not tell it from a real reading. memUsage is never derived, so
+  // this is its only guard.
   if (!isFiniteNumber(cpuTotal) || !isFiniteNumber(preCpuTotal) || !isFiniteNumber(memUsage)) return null;
 
   const systemNow = optionalCounter(data.cpu_stats.system_cpu_usage);
@@ -66,8 +67,9 @@ function readStatsSample(data: {
   const cpuPercent = systemDelta > 0
     ? ((cpuTotal - preCpuTotal) / systemDelta) * (onlineCpus || 1) * 100
     : 0;
-  const sample = { cpuPercent, memBytes: memUsage, rx, tx };
-  return Object.values(sample).every(Number.isFinite) ? sample : null;
+  // The derived values can still overflow to Infinity or NaN (sums of finite counters).
+  if (![cpuPercent, rx, tx].every(Number.isFinite)) return null;
+  return { cpuPercent, memBytes: memUsage, rx, tx };
 }
 
 export interface ContainerStatsHookResult {
