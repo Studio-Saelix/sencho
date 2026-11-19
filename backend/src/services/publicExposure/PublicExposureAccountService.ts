@@ -2,7 +2,7 @@ import { CryptoService } from '../CryptoService';
 import { FleetSyncService } from '../FleetSyncService';
 import { errorMessageForLog } from '../../utils/safeLog';
 import { recordPublicExposureAudit, type PublicExposureAuditContext } from './audit';
-import { CloudflareAccountAdapter, type AccountCheckResult, type ScopeCheckJournal } from './cloudflareAccountAdapter';
+import { CloudflareAccountAdapter, checkRecordName, type AccountCheckResult, type ScopeCheckJournal } from './cloudflareAccountAdapter';
 import type { CloudflareCallOptions } from './cloudflareApiClient';
 import { validateAllowedSuffixes } from './exposureHostnames';
 import { publicExposureStore as store, type AccountRecord, type ZoneRecord } from './publicExposureStore';
@@ -66,6 +66,7 @@ export class PublicExposureAccountService {
       lastCheck = { outcome: 'credential_unreadable', at: Date.now(), detail: null };
     }
     const zones = store.listZones(account.id);
+    const controlIdentity = FleetSyncService.getControlIdentity();
     const seen = (zone: ZoneRecord) => account.zonesListedAt !== null && zone.lastSeenAt === account.zonesListedAt;
     return {
       connected: true,
@@ -87,6 +88,7 @@ export class PublicExposureAccountService {
         dnsCheckedAt: zone.dnsCheckedAt,
         seenAtLastCheck: seen(zone),
         cleanupPending: zone.pending ? { recordName: zone.pending.name } : null,
+        checkRecordName: checkRecordName(controlIdentity, zone.name),
       })),
       nodeEndpointCount: store.countEndpoints(),
     };

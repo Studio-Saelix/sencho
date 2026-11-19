@@ -21,6 +21,11 @@ const MAX_PARALLEL_DNS_PROBES = 4;
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
 const CHECK_RECORD_COMMENT = 'Sencho permission check, deleted right away';
 
+/** The TXT name the DNS write check uses: the control identity keeps two hubs on one account apart. */
+export function checkRecordName(controlIdentity: string, zoneName: string): string {
+  return `_sencho-check-${controlIdentity}.${zoneName}`;
+}
+
 export interface ListedZone {
   zoneRef: string;
   name: string;
@@ -196,7 +201,7 @@ export class CloudflareAccountAdapter {
     journal: ScopeCheckJournal,
     options: CloudflareCallOptions,
   ): Promise<DnsWriteResult> {
-    const recordName = `_sencho-check-${controlIdentity}.${zone.name}`;
+    const recordName = checkRecordName(controlIdentity, zone.name);
     if (journal.current() && !(await this.resumeCleanup(token, zone.zoneRef, journal, options))) {
       return { kind: 'cleanup_pending', recordName: journal.current()?.name ?? recordName };
     }

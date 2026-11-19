@@ -30,6 +30,8 @@ import { NetworkingFindingActions, type NetworkingFindingControls } from './Netw
 import { NetworkingFindingText } from './NetworkingFindingText';
 import { AcknowledgeInDoctorDialog } from './AcknowledgeInDoctorDialog';
 import { NetworkingTopologyPanel } from './NetworkingTopologyPanel';
+import { CloudflareAccountCard } from './CloudflareAccountCard';
+import { useShowCloudflareAccountCard } from '@/hooks/usePublicExposureAccount';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
@@ -95,6 +97,7 @@ function destinationForAction(kind: NetworkingRecommendedAction['kind']): Sencho
 export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const { isAdmin, can } = useAuth();
   const { activeNode } = useNodes();
+  const showAccountCard = useShowCloudflareAccountCard();
   const isMobile = useIsMobile();
   const developerMode = useDeveloperMode(activeNode?.id);
   // Read the flag through a ref inside the load effect so flipping it does not
@@ -375,20 +378,29 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     isRestoring: (item: DismissedNetworkingFinding) => (item.dismissal === null ? clearingAck.has(item.finding.id) : isPending(item.dismissal.id)),
   }), [partition.dismissed, now, can, nodeId, canDismiss, clearAcknowledgement, restore, isPending, clearingAck]);
 
+  // The Cloudflare account belongs to the control instance, not this node, so
+  // it stays reachable when the active node cannot serve Networking.
+  const withAccountCard = (content: ReactNode) => (showAccountCard ? (
+    <div className="flex h-full flex-col overflow-auto p-4 md:p-6">
+      <CloudflareAccountCard className="mb-4 mt-0" />
+      {content}
+    </div>
+  ) : content);
+
   if (unsupported) {
-    return (
+    return withAccountCard(
       <LockCard
         icon={Unplug}
         title="Networking is not available on this node"
         body="Upgrade the node to use the Networking page."
-      />
+      />,
     );
   }
 
   // Nothing on this page was read, so nothing on it may be shown: an empty
   // network list would read as a clean node.
   if (loadFailure) {
-    return (
+    return withAccountCard(
       <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 min-h-[280px]">
         <div className="flex max-w-md flex-col items-center gap-4 rounded-xl border border-card-border bg-card px-10 py-8 text-center">
           <Unplug className="h-8 w-8 text-warning" strokeWidth={1.5} aria-hidden />
@@ -403,7 +415,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             Retry
           </Button>
         </div>
-      </div>
+      </div>,
     );
   }
 
@@ -633,6 +645,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   return (
     <div className="h-full overflow-auto p-4 md:p-6">
       {masthead}
+      {showAccountCard && <CloudflareAccountCard />}
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as NetworkingTab)}>
         {isMobile ? (

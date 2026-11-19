@@ -54,6 +54,8 @@ export interface PublicExposureZoneView {
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
   cleanupPending: { recordName: string } | null;
+  /** The TXT record the DNS write check creates and deletes, named in its preview. */
+  checkRecordName: string;
 }
 
 export type PublicExposureAccountView =
