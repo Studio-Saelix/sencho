@@ -357,10 +357,10 @@ describe('useContainerStats', () => {
         }))],
         ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
         ['a nonnumeric transmit byte count beside a valid receive count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: 'x' } } }))],
-        // A malformed string in a byte count is rejected by the per-counter type
-        // guard and, if that guard were removed, by the final finiteness check on the
-        // sums. A boolean (0 + true is 1) passes the sum check, so only these two
-        // fixtures fail when the numeric type guard on a byte count is removed.
+        // A malformed string in a byte count is rejected by the numeric check in
+        // optionalCounter and, if that check were removed, by the final finiteness
+        // check on the sums. A boolean (0 + true is 1) passes the sum check, so only
+        // the two boolean fixtures below fail when optionalCounter's check goes.
         ['a boolean as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: true } } }))],
         ['a boolean as the receive byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: true, tx_bytes: 1 } } }))],
         ['a numeric string as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: '512' } } }))],
@@ -482,21 +482,30 @@ describe('useContainerStats', () => {
       // Docker's first streaming frame carries an all-zero previous sample, and a
       // container that has used no CPU yet reports a zero total. Both are valid
       // readings: only the memory usage must be nonzero.
-      const zeroCpuFrames: Array<[string, Record<string, unknown>]> = [
+      // Each row carries the CPU reading the frame must publish: a delta of 200 over
+      // a system delta of 2000 on one CPU is 10%.
+      const zeroCpuFrames: Array<[string, Record<string, unknown>, string]> = [
         ['a zero previous CPU total and zero previous system CPU time', {
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
-        }],
+        }, '10.00%'],
         ['a zero current CPU total beside a zero previous total', {
           cpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 2000, online_cpus: 1 },
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 1000 },
-        }],
+        }, '0.00%'],
         ['a Docker first frame: zero previous sample and no network map', {
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
           networks: undefined,
-        }],
+        }, '10.00%'],
+        // The online CPU count is optional: absent or zero scales by one CPU.
+        ['a positive CPU delta with no online CPU count', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000 },
+        }, '10.00%'],
+        ['a positive CPU delta with an online CPU count of zero', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 0 },
+        }, '10.00%'],
       ];
 
-      it.each(zeroCpuFrames)('clears a real warning and publishes the readings for %s', (_name, over) => {
+      it.each(zeroCpuFrames)('clears a real warning and publishes the readings for %s', (_name, over, cpu) => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
         act(() => { MockWS.instances[0].onerror?.(); });
         expect(result.current.error).toMatch(/unavailable/);
@@ -505,8 +514,7 @@ describe('useContainerStats', () => {
         act(() => { vi.advanceTimersByTime(1500); });
 
         expect(result.current.error).toBeNull();
-        expect(result.current.stats['c1']).toMatchObject({ ram: '1.00 MB' });
-        expect(result.current.stats['c1'].cpu).toMatch(/^\d+(\.\d+)?%$/);
+        expect(result.current.stats['c1']).toMatchObject({ cpu, ram: '1.00 MB' });
         warnSpy.mockRestore();
       });
 

@@ -99,7 +99,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # resource exhaustion via an oversized header, present through v1.43.0). It
 # also carries the CVE-2025-15558 fix (Windows plugin search path LPE, fixed
 # since v29.2.0). Building from source with Go 1.27.4 additionally carries the
-# Go stdlib fixes named below, which the upstream static binary lacks.
+# Go stdlib fixes named below (CVE-2026-111943, -78667, -97031, -97054).
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for
 # TARGET. The fetch pulls only the v29.4.1 commit, minimising transfer size.
@@ -174,8 +174,8 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # (crypto/x509 intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service), CVE-2026-97031 (crypto/tls ECH denial of
 # service) and CVE-2026-97054 (HTTP/1 MaxBytesReader header race). The module
-# floors below cover the dependency findings; the CI Trivy scan (HIGH and
-# CRITICAL) is what checks the built image.
+# floors in this stage cover the dependency findings; the CI Trivy scan of the
+# pull request image (HIGH and CRITICAL) is what checks the built result.
 #
 # The v5.6.0 tag lifts almost every module floor this stage used to carry by
 # hand. Its own go.mod resolves otel/sdk v1.46.0 (CVE-2026-39883,
@@ -282,9 +282,10 @@ ARG APK_CACHE_BUST=unset
 # Upgrade all Alpine system packages and install runtime deps.
 # git is required at runtime: Git Sources clones through the native git
 # client. Docker CLI and Compose are copied from source-built stages below,
-# eliminating the curl dependency and the Go stdlib CVEs named at the builder
-# stages from the upstream static binaries. npm is removed because it is not needed at runtime;
-# removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
+# eliminating the curl dependency and, per the builder-stage notes, the Go
+# stdlib CVEs the 1.27.4 toolchain fixes. npm is removed because it is not
+# needed at runtime; removing it also eliminates CVE-2026-33671 (picomatch
+# ReDoS in npm).
 #
 # pcre2 arrives as a transitive dependency of git, so it is not present in the
 # base image and `apk upgrade` alone decides its version. The floor is here
