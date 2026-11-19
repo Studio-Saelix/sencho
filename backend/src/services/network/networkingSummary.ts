@@ -293,6 +293,12 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     unreadable = true;
   }
   if (lookup && unresolvedDetectionField(declared)) unreadable = true;
+  // A port whose host side stayed a template was not established in this run: the
+  // environment Compose runs in does not answer it here, or answers with text
+  // Compose does not resolve to a number. The stack's inputs were not fully read,
+  // so it is reported unreadable, and the exposed/publishing check below leaves
+  // such a port out rather than calling it exposed or absent.
+  if (declared.services.some(service => service.ports.some(port => port.unresolvedHost === true))) unreadable = true;
 
   const fsSvc = FileSystemService.getInstance(nodeId);
   for (const service of declared.services) {
@@ -420,10 +426,14 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     // declared `ports:`. This keeps the summary honest about host networking,
     // matching the Compose Doctor's host-network finding.
     // A service a tunnel connector reaches is exposed without a published port.
+    // A port whose host side is still a template is not counted: this run could
+    // not read the environment that decides it, so the stack is reported in the
+    // unreadable bucket rather than claimed exposed or not exposed.
     const publishes = (s: typeof declared.services[number]): boolean =>
-      s.ports.length > 0 || isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name);
+      s.ports.some(p => !p.unresolvedHost) || isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name);
     const publishesPort = declared.services.some(publishes);
-    if (declared.services.some(s => isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
+    if (declared.services.some(s => isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name)
+      || s.ports.some(p => !p.unresolvedHost && !isLoopback(p.hostIp)))) exposed.push(stack);
 
     if (publishesPort) {
       // Unknown only when a publishing service is effectively unclassified: a

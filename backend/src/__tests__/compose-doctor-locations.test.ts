@@ -268,6 +268,23 @@ describe('Compose Doctor authored locations', () => {
     expect(port).toMatchObject({ file: 'compose.override.yaml', line: 4, path: 'services.api.ports[0]' });
   });
 
+  it('declines to locate a port whose host side is a template, rather than name a number it never read', async () => {
+    const file = (entry: string): string => `services:\n  api:\n    image: nginx:1\n    ports:\n      - "${entry}"\n`;
+    writeStack('doctor-port-template', { 'compose.yaml': file('${APP_PORT:-8080}:80') });
+    writeStack('doctor-port-literal', { 'compose.yaml': file('8080:80') });
+    const portHit = () => hit('port-exposed-all-interfaces', {
+      service: 'api', sourcePath: 'api', subject: { kind: 'port', key: '8080/tcp' },
+    });
+    // The same file with a literal host number locates, so the template case is
+    // proven to be the reason no line is claimed.
+    const literal = await buildAuthoredProject(nodeId, 'doctor-port-literal');
+    expect(locateFinding(literal, portHit())).toMatchObject({ file: 'compose.yaml', line: 5 });
+    // Compose resolved the finding's 8080, but the authored item reads a
+    // template that another environment can resolve differently.
+    const templated = await buildAuthoredProject(nodeId, 'doctor-port-template');
+    expect(locateFinding(templated, portHit())).toBeUndefined();
+  });
+
   it('refuses a port declared identically in the base and the override', async () => {
     writeStack('doctor-port-duplicate', {
       'compose.yaml': 'services:\n  api:\n    image: nginx:1\n    ports:\n      - "8080:80"\n',

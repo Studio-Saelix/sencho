@@ -97,7 +97,10 @@ function stableModelString(model: DeclaredCompose): string | null {
             dependsOn: [...s.dependsOn].sort(),
             networks: [...s.networks].sort(),
             volumes: [...s.volumes].sort(),
-            // A port Docker assigns has no number, but adding one or widening its interface is a change.
+            // A publication with no fixed host number records `auto` instead of a
+            // number, but adding one or widening its interface is a change. A
+            // host side still written as a template and one Docker assigns are
+            // the same record here; the source hash covers a change between them.
             ports: s.ports.map(p => `${p.hostIp}:${p.dynamic ? 'auto' : p.publishedPort}/${p.protocol}`).sort(),
         }));
     const networks = Object.keys(model.networks).sort().map(k => ({ key: k, ...model.networks[k] }));
