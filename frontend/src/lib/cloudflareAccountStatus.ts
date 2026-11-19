@@ -110,7 +110,8 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
     problems.push({ status: 'zone_read_missing', tone: 'warning', title: 'Zone read missing', line: 'The token cannot list zones. Add Zone: Read to it in Cloudflare.', verb: recheck, stage: 'zones' });
   }
   const enabled = enabledZones(view);
-  for (const zone of enabled.filter((z) => z.dns === 'missing')) {
+  // A zone the token no longer sees is reported as not visible; its last DNS state is stale.
+  for (const zone of enabled.filter((z) => z.dns === 'missing' && z.seenAtLastCheck)) {
     problems.push({ status: 'dns_missing', tone: 'warning', title: 'DNS edit missing', line: `The token cannot edit DNS in ${zone.name}. Add DNS: Edit for this zone in Cloudflare.`, verb: recheck, stage: 'dns' });
   }
   // A leftover check record is shown whether or not its zone is still enabled: it blocks disconnect either way.
@@ -163,7 +164,7 @@ function stagesFor(view: ConnectedAccountView, problems: AccountProblem[], answe
   if (enabled.length > 0 || view.zones.some((z) => z.cleanupPending)) {
     let dnsWord: string;
     let dnsTone: StatusTone;
-    if (enabled.some((z) => z.dns === 'missing')) { dnsWord = 'missing'; dnsTone = 'warning'; }
+    if (enabled.some((z) => z.dns === 'missing' && z.seenAtLastCheck)) { dnsWord = 'missing'; dnsTone = 'warning'; }
     else if (view.zones.some((z) => z.cleanupPending)) { dnsWord = 'cleanup pending'; dnsTone = 'warning'; }
     else if (enabled.every((z) => z.dns === 'confirmed')) {
       const oldest = Math.min(...enabled.map((z) => z.dnsCheckedAt ?? Date.now()));

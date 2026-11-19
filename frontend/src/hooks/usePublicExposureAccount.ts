@@ -128,7 +128,7 @@ export function usePublicExposureAccount(): PublicExposureAccount {
       if (mounted.current) setView(next);
       const zone = next.connected ? next.zones.find((z) => z.zoneRef === zoneRef) : undefined;
       if (zone?.cleanupPending) {
-        toast.warning(`The check did not finish. A permission-check record may be left in ${zone.name}; Recheck deletes it.`);
+        toast.warning(`The check did not finish. A permission-check record may be left in ${zone.name}; a later Recheck deletes it.`);
       }
     } catch (error: unknown) {
       toast.error(publicExposureErrorMessage(error, 'Could not check DNS write.'));

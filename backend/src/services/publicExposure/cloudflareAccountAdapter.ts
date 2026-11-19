@@ -13,10 +13,12 @@ import type { AccountScopes, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDn
  * It maps Cloudflare's answers to Sencho's named states and stores nothing;
  * the account service persists what it returns.
  *
- * Two mappings here are assumptions until the real-account run settles them
- * (ADR §9, Q1): the location-refusal code and message, and that a token
+ * Several mappings here are assumptions until the real-account run settles
+ * them (ADR §9, Q1): the location-refusal code and message; that a token
  * whose account listing is refused can still be checked through the
- * account-scoped probes.
+ * account-scoped probes; that the account verify answers 404 for an account
+ * id the token does not belong to (a 403 there is read as a rejected token);
+ * and that a deleted zone answers 404.
  */
 
 /** Cloudflare error code for a token used from an address its IP filter does not allow (assumed; see Q1). */
@@ -136,6 +138,8 @@ function failureFrom(error: unknown): CheckFailure {
   if (error instanceof CheckStop) return error.failure;
   if (error instanceof CloudflareApiError) {
     if (isLocationRefusal(error)) return { outcome: 'token_location_refused', detail: error.message };
+    // A token refused after it verified (revoked mid-check) is a rejected token, not an unreadable answer.
+    if (error.kind === 'unauthorized') return { outcome: 'token_invalid', detail: null };
     const outcome = stopOutcomeFor(error) ?? 'unexpected_response';
     if (outcome === 'rate_limited') {
       const sencho = error.kind === 'budget_exhausted';
@@ -186,7 +190,7 @@ export class CloudflareAccountAdapter {
       // refused, and the account's zone listing is refused or empty (a mistyped
       // id lists no zones rather than refusing).
       if (!account.listed && tunnelRefused && (zones.refused || zones.list.length === 0)) {
-        throw stop('account_not_accessible', `This token cannot reach account ${accountId}.`);
+        throw stop('account_not_accessible', null);
       }
 
       // A zone missing from a complete listing is reported as not visible, not probed.
@@ -339,10 +343,8 @@ export class CloudflareAccountAdapter {
         if (!(accountError instanceof CloudflareApiError)) throw accountError;
         if (isLocationRefusal(accountError)) throw stop('token_location_refused', accountError.message);
         if (stopOutcomeFor(accountError) !== null) throw accountError;
-        // The account endpoint knows the token but not this account: the id is wrong, not the token.
-        if (accountError.kind === 'forbidden' || accountError.kind === 'not_found') {
-          throw stop('account_not_accessible', `Account ${accountId} is not reachable with this token. Check the account ID.`);
-        }
+        // The account endpoint answers 404 for an account the token does not belong to: the id is wrong, not the token.
+        if (accountError.kind === 'not_found') throw stop('account_not_accessible', null);
         throw stop('token_invalid', null);
       }
     }
@@ -362,7 +364,7 @@ export class CloudflareAccountAdapter {
       throw error;
     }
     const match = accounts.find((a) => a.id === accountId);
-    if (!match) throw stop('account_not_accessible', `Account ${accountId} is not visible to this token.`);
+    if (!match) throw stop('account_not_accessible', null);
     return { listed: true, name: typeof match.name === 'string' ? match.name : null };
   }
 

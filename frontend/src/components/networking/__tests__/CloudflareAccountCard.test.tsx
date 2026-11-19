@@ -135,6 +135,25 @@ describe('CloudflareAccountCard', () => {
     ));
   });
 
+  it('warns when the DNS check did not finish and a record may be left', async () => {
+    let state = connected();
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/public-exposure/account/dns-check') {
+        state = connected({ zones: [zone({ cleanupPending: { recordName: '_sencho-check-0123456789abcdef.example.com' } })] });
+        return Promise.resolve(new Response(JSON.stringify(state), { status: 202 }));
+      }
+      return json(state);
+    });
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    const answer = await screen.findByTestId('cloudflare-account-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Check DNS write' }));
+    await screen.findByTestId('dns-check-preview');
+    await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('may be left in example.com')));
+    expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'cleanup_pending');
+  });
+
   it('previews enabling a zone with what stack editors may claim, and disables in one click', async () => {
     let state = connected({ zones: [zone({ enabled: false })] });
     apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {

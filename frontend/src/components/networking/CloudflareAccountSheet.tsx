@@ -49,7 +49,7 @@ export function CloudflareAccountSheet({
         open={open}
         onOpenChange={onOpenChange}
         crumb={['Networking', 'Public exposure', 'Cloudflare']}
-        name={view?.accountName ?? 'Cloudflare account'}
+        name={view ? view.accountName ?? `Account ${view.accountId.slice(0, 8)}` : 'Connect an account'}
         meta={view ? `account ${view.accountId.slice(0, 8)} · Cloudflare Tunnel` : 'not connected'}
         secondaryActions={view ? [
           ...(answerVerb === 'recheck' ? [] : [{ label: recheckWait > 0 ? `Recheck in ${recheckWait} s` : 'Recheck', icon: RefreshCw, onClick: () => onVerb({ kind: 'recheck' }), pending: account.pending === 'recheck', disabled: recheckWait > 0 || account.pending !== null }]),

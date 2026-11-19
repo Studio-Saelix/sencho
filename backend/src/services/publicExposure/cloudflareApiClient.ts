@@ -164,15 +164,17 @@ function isRedirectRefusal(error: unknown): boolean {
   return typeof cause?.message === 'string' && /redirect/i.test(cause.message);
 }
 
+/** Wait between attempts. A cancellation here stops before the next attempt is sent, so it is marked pre-send. */
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  const cancelled = () => new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.', preSend: true });
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.' }));
+      reject(cancelled());
       return;
     }
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.' }));
+      reject(cancelled());
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);

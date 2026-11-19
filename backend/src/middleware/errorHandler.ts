@@ -23,7 +23,8 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req: Request, r
   // message: body-parser attaches the raw body to the error, and V8 quotes a
   // slice of the input in a JSON parse message, so either could carry a
   // secret the request held. Unexpected server errors keep a redacted stack.
-  const bodyParseFailure = e.type === 'entity.parse.failed' || (typeof err === 'object' && err !== null && 'body' in err);
+  // body-parser marks its errors with an `entity.*` type and attaches the raw body to them.
+  const bodyParseFailure = typeof e.type === 'string' && e.type.startsWith('entity.');
   const logged = bodyParseFailure
     ? 'request body could not be parsed'
     : status >= 500 && err instanceof Error && err.stack

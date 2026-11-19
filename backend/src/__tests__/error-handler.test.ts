@@ -58,6 +58,14 @@ describe('errorHandler', () => {
     expect(logged[0].join(' ')).toContain('request body could not be parsed');
   });
 
+  it('keeps the message of an unrelated error that happens to carry a body', () => {
+    const logged: unknown[][] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args); });
+    const err = Object.assign(new Error('upstream refused the call'), { status: 502, body: 'upstream page' });
+    errorHandler(err, {} as Request, mockResponse().res, vi.fn() as unknown as NextFunction);
+    expect(logged[0].join(' ')).toContain('upstream refused the call');
+  });
+
   it('keeps a redacted stack for an unexpected 500', () => {
     const logged: unknown[][] = [];
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args); });

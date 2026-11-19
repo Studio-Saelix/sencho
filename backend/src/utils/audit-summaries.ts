@@ -277,6 +277,9 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
   const normalized = apiPath.replace(/^\//, '');
   const overwrite = method === 'POST' ? overwriteRouteSummary(normalized, statusCode, body) : null;
   if (overwrite) return overwrite;
+  if (statusCode === 202 && method === 'POST' && normalized.startsWith('public-exposure/account/dns-check')) {
+    return 'Cloudflare DNS write check did not finish (202)';
+  }
   // Do not claim a successful action when the request was rejected, blocked,
   // or conflict-resolved. Per-user preference writes carry machine codes in
   // the response body, so the status code is the only honest signal here.

@@ -1,6 +1,6 @@
 import { CryptoService } from '../CryptoService';
 import { FleetSyncService } from '../FleetSyncService';
-import { errorMessageForLog } from '../../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { recordPublicExposureAudit, type PublicExposureAuditContext } from './audit';
 import {
   CloudflareAccountAdapter,
@@ -183,7 +183,7 @@ export class PublicExposureAccountService {
       const zones = store.listZones(account.id);
       for (const zone of zones.filter((z) => z.pending)) {
         const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
-        if (!cleanup.cleaned) console.warn(`[PublicExposure] Permission-check record cleanup in zone ${zone.name} did not finish (${cleanup.cause}); it stays pending.`);
+        if (!cleanup.cleaned) console.warn(`[PublicExposure] Permission-check record cleanup in zone ${sanitizeForLog(zone.name)} did not finish (${cleanup.cause}); it stays pending.`);
       }
 
       const enabled = zones.filter((z) => z.enabled).map((z) => ({ zoneRef: z.zoneRef, dns: z.dns }));
@@ -207,7 +207,7 @@ export class PublicExposureAccountService {
   }
 
   /** The previewed, self-cleaning TXT write that proves DNS Edit in one enabled zone. */
-  async dnsCheck(zoneRef: string, actor: PublicExposureAuditContext): Promise<PublicExposureAccountView> {
+  async dnsCheck(zoneRef: string, actor: PublicExposureAuditContext): Promise<{ view: PublicExposureAccountView; complete: boolean }> {
     return this.exclusive(async (options) => {
       const account = this.requireAccount();
       const zone = store.getZone(account.id, zoneRef);
@@ -236,10 +236,13 @@ export class PublicExposureAccountService {
         recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: result.outcome }, error.status);
         throw error;
       }
-      recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', {
-        ...facts, result: result.kind, cause: result.kind === 'cleanup_pending' ? result.cause : null,
-      });
-      return this.getView();
+      if (result.kind === 'cleanup_pending') {
+        // The check did not finish: answered 202 so neither the route row nor this one reads as a success.
+        recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: 'cleanup_pending', cause: result.cause }, 202);
+        return { view: this.getView(), complete: false };
+      }
+      recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: result.kind });
+      return { view: this.getView(), complete: true };
     });
   }
 
@@ -258,11 +261,19 @@ export class PublicExposureAccountService {
         for (const zone of pendingZones) {
           const record = zone.pending?.name ?? '';
           if (token === null) {
-            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} is still in Cloudflare and the stored token cannot be read to delete it. Replace the token, or delete the record in Cloudflare.`);
+            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} is still in Cloudflare and the stored token cannot be read to delete it. Replace the token, then disconnect.`);
           }
-          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+          const journal = this.journalFor(account.id, zone);
+          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);
+          // A zone the last complete listing no longer showed is gone from this account, and its record with it.
+          const zoneGone = account.zonesListedAt !== null && zone.lastSeenAt !== account.zonesListedAt;
+          if (!cleanup.cleaned && zoneGone && cleanup.cause !== 'unreachable' && cleanup.cause !== 'rate_limited') {
+            console.warn(`[PublicExposure] Dropping the check record journal for zone ${sanitizeForLog(zone.name)}: the zone is no longer in the account.`);
+            journal.write(null);
+            continue;
+          }
           if (!cleanup.cleaned) {
-            console.warn(`[PublicExposure] Disconnect refused: check record cleanup in zone ${zone.name} did not finish (${cleanup.cause}).`);
+            console.warn(`[PublicExposure] Disconnect refused: check record cleanup in zone ${sanitizeForLog(zone.name)} did not finish (${cleanup.cause}).`);
             throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} could not be deleted from Cloudflare. ${CLEANUP_MESSAGE[cleanup.cause]}`);
           }
         }

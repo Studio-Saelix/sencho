@@ -94,6 +94,12 @@ describe('cloudflareAccountStatus', () => {
     expect(status.stages.find((s) => s.id === 'dns')?.word).toBe('cleanup pending');
   });
 
+  it('reports an unseen zone as not visible rather than by its stale DNS state', () => {
+    const status = cloudflareAccountStatus(view({ zones: [zone({ dns: 'missing', seenAtLastCheck: false })] }));
+    expect(status.answer.status).toBe('zone_not_visible');
+    expect(status.stages.find((s) => s.id === 'dns')?.word).not.toBe('missing');
+  });
+
   it('reports success with the confirmed zone count and no verb', () => {
     const status = cloudflareAccountStatus(view());
     expect(status.answer).toMatchObject({ tone: 'success', status: 'connected', line: 'Connected to Example. DNS confirmed in 1 zone.' });

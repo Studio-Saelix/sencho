@@ -107,7 +107,9 @@ publicExposureRouter.post('/account/dns-check', async (req: Request, res: Respon
   const parsed = dnsCheckSchema.safeParse(req.body);
   if (!parsed.success) return invalidInput(res, parsed.error);
   try {
-    res.json(await PublicExposureAccountService.getInstance().dnsCheck(parsed.data.zoneRef, auditContext(req)));
+    const { view, complete } = await PublicExposureAccountService.getInstance().dnsCheck(parsed.data.zoneRef, auditContext(req));
+    // 202: the check did not finish and a check record may be left; the view names it.
+    res.status(complete ? 200 : 202).json(view);
   } catch (error: unknown) {
     sendError(res, error, 'check DNS write');
   }

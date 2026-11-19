@@ -240,6 +240,18 @@ describe('CloudflareApiClient deadlines', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('marks a POST cancelled during the wait before a retry as never sent', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const { client, calls } = clientWith([() => fail(429, 10000, 'slow down', { 'retry-after': '5' })]);
+    const pending = caught(client.request(TOKEN, { method: 'POST', path: '/zones/z/dns_records', body: {}, signal: controller.signal }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+    const error = await pending;
+    expect(error.preSend).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
   it('marks a call stopped before sending as never sent', async () => {
     const controller = new AbortController();
     controller.abort();

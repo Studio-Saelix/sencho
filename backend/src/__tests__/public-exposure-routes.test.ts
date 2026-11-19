@@ -198,6 +198,16 @@ describe('route audit rows', () => {
     ]);
   });
 
+  it('answers 202 and words an unfinished DNS check as such', async () => {
+    await call('put', '/api/public-exposure/account', adminToken(), { token: FAKE_TOKEN, accountId: FAKE_ACCOUNT_ID });
+    await call('put', `/api/public-exposure/zones/${ZONE_A}`, adminToken(), { enabled: true, allowedSuffixes: [] });
+    fake.remove = 500;
+    const res = await call('post', '/api/public-exposure/account/dns-check', adminToken(), { zoneRef: ZONE_A });
+    expect(res.status).toBe(202);
+    expect(res.body.zones.find((z: { zoneRef: string }) => z.zoneRef === ZONE_A).cleanupPending).not.toBeNull();
+    expect(summaries()).toContain('Cloudflare DNS write check did not finish (202)');
+  });
+
   it('words refused zone, DNS check, recheck and disconnect requests as refusals', async () => {
     await call('put', `/api/public-exposure/zones/${ZONE_A}`, adminToken(), { enabled: true, allowedSuffixes: [] });
     await call('post', '/api/public-exposure/account/dns-check', adminToken(), { zoneRef: ZONE_A });
