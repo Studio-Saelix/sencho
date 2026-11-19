@@ -97,7 +97,7 @@ describe('useContainerStats', () => {
   });
 
   // These two cases run with real timers so React's scheduler can commit the
-  // setError call triggered from inside the WebSocket onclose handler.
+  // failure state set from inside the WebSocket onclose handler.
   it('warns on abnormal WebSocket close (code 1006)', () => {
     vi.useRealTimers();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -344,14 +344,22 @@ describe('useContainerStats', () => {
         ['a nonnumeric system CPU counter', JSON.stringify(frame({
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 'x', online_cpus: 1 },
         }))],
+        ['a nonnumeric previous system CPU counter', JSON.stringify(frame({
+          precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: 'x' },
+        }))],
+        // Finite inputs whose result overflows to Infinity.
+        ['counters that overflow to an infinite CPU reading', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: 1e308 }, system_cpu_usage: 1e-300, online_cpus: 1 },
+          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
+        }))],
         ['a nonnumeric online CPU count', JSON.stringify(frame({
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 'two' },
         }))],
         ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
         // 1e999 parses to Infinity.
         ['an infinite memory usage', JSON.stringify(frame()).replace('1048576', '1e999')],
-        // The combination the audit reproduced: positive system delta, empty CPU objects, truthy bad memory.
-        ['the audited combination', JSON.stringify(frame({
+        // Positive system delta, empty CPU objects and a truthy nonnumeric memory value.
+        ['empty CPU counters with nonnumeric memory', JSON.stringify(frame({
           cpu_stats: { cpu_usage: {}, system_cpu_usage: 2000 },
           precpu_stats: { cpu_usage: {}, system_cpu_usage: 1000 },
           memory_stats: { usage: 'lots' },
@@ -415,7 +423,7 @@ describe('useContainerStats', () => {
     });
 
     describe('container state changes', () => {
-      it('does not revive a failure recorded while the container was stopped when it starts', () => {
+      it('records no failure for a stopped container, so a later start begins clean', () => {
         const { result, rerender, warnSpy } = setup([makeContainer('c1', 'exited')]);
         act(() => { MockWS.instances[0].onerror?.(); });
         act(() => { MockWS.instances[0].onclose?.({ code: 1006 } as CloseEvent); });

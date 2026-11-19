@@ -23,7 +23,7 @@ const optionalCounter = (v: unknown): number | null =>
 
 /**
  * Turns one Docker stats frame into usable readings, or null when the frame
- * cannot yield them (a counter missing, not a number, or not finite). The caller
+ * cannot yield them (a required counter missing, not a number, or not finite). The caller
  * drops such a frame: it must neither publish a metric nor count as proof that
  * the stream recovered. Counters Docker omits on some runtimes (system CPU time,
  * online CPUs, per-interface byte counts) stay optional. A null network entry
@@ -94,7 +94,7 @@ export function useContainerStats(
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
 
   // Clear every stream failure only on an actual node switch. The main effect
-  // drops just the containers that left the list: clearing everything on each
+  // drops only the containers that left the list or stopped running: clearing everything on each
   // containers-array identity change (the dashboard's refresh cadence) would
   // make the warning visibly flap against a persistently-flaky daemon.
   useEffect(() => {
@@ -129,7 +129,7 @@ export function useContainerStats(
 
       const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
         // This effect run belongs to the container's state in the list it was
-        // given; a change of state reruns it. A container that is not running
+        // given; a change of state arrives as a new list and reruns it. A container that is not running
         // has no stream to lose, and its failure would otherwise be carried
         // into its next run.
         if (disposed || container.State !== 'running') return;
