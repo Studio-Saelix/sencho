@@ -161,11 +161,19 @@ jobs:
 
       # --- Recovery helper image -------------------------------------------
       # The helper is built from the same commit, scanned, smoke tested, and
-      # pushed BY DIGEST ONLY before the main image. The main build bakes that
-      # digest in as `SENCHO_RECOVERY_HELPER_IMAGE`, so a Sencho image can only
-      # ever run the helper built beside it. No tag exists until the main image
-      # has passed its own gates: a release that fails a gate leaves no helper
-      # tag behind, and a tag could be repointed later where a digest cannot.
+      # pushed with its preview tags before the main image. The main build bakes
+      # the pushed digest in as `SENCHO_RECOVERY_HELPER_IMAGE`, so a Sencho
+      # image can only ever run the helper built beside it.
+      #
+      # Previews tag the helper in the build rather than copying the digest
+      # after the main image gates. A digest copy re-reads the whole manifest
+      # list once per tag, and those reads count against Docker Hub's pull
+      # quota; the copy is what kept failing preview builds with 429s. A
+      # preview helper tag can outlive a run whose main image failed a gate,
+      # but nothing consumes it: the Sencho image starts the helper by the baked
+      # digest, and the next preview run moves both tags. The release workflow
+      # keeps the digest-only ordering because a release helper tag must never
+      # outlive a blocked release.
       - name: Build recovery helper for scan (amd64, loaded)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -195,18 +203,35 @@ jobs:
           docker run --rm --network none --entrypoint /sencho-recovery-probe \
             localhost/sencho-recovery-helper:preview-scan / | grep -q '"ino"'
 
-      - name: Push recovery helper by digest
+      - name: Compute preview recovery helper tags
+        id: helper-tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          helper_tags=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            helper_tag=$(printf '%s' "$tag" \
+              | sed -e 's#^saelix/sencho:#saelix/sencho-recovery-helper:#')
+            [ "$helper_tag" != "$tag" ] || { echo "FAILED: unexpected tag $tag"; exit 1; }
+            helper_tags+=("$helper_tag")
+          done <<< "$TAGS"
+          [ "${#helper_tags[@]}" -gt 0 ] || { echo "FAILED: no helper tags"; exit 1; }
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${helper_tags[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push recovery helper with its preview tags
         id: helper
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: docker/recovery-helper
           platforms: linux/amd64,linux/arm64
-          # Digest only: `name-canonical` is what lets the tag step below refer to
-          # this exact manifest list after the main image has passed its gates.
-          outputs: >-
-            type=image,
-            name=saelix/sencho-recovery-helper,
-            push-by-digest=true,name-canonical=true,push=true
+          push: true
+          tags: ${{ steps.helper-tags.outputs.tags }}
           cache-from: type=gha,scope=recovery-helper
           cache-to: type=gha,scope=recovery-helper,mode=max
 
@@ -260,24 +285,6 @@ jobs:
             *@sha256:*) echo "pinned helper: $baked" ;;
             *) echo "FAILED: baked helper reference is not a digest: '$baked'"; exit 1 ;;
           esac
-
-      - name: Tag the preview recovery helper
-        # Preview publishes to Docker Hub only, so the helper stays on Docker Hub
-        # too and this workflow needs no GHCR credentials.
-        env:
-          HELPER_DIGEST: ${{ steps.helper.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          set -euo pipefail
-          [ -n "$HELPER_DIGEST" ] || { echo "FAILED: no helper digest"; exit 1; }
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            helper_tag=$(printf '%s' "$tag" \
-              | sed -e 's#^saelix/sencho:#saelix/sencho-recovery-helper:#')
-            [ "$helper_tag" != "$tag" ] || { echo "FAILED: unexpected tag $tag"; exit 1; }
-            docker buildx imagetools create -t "$helper_tag" \
-              "saelix/sencho-recovery-helper@${HELPER_DIGEST}"
-          done <<< "$TAGS"
 
       - name: Build and push preview image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
