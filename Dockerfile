@@ -98,8 +98,8 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-41178 (baggage header parsing dropped its raw-length cap, allowing
 # resource exhaustion via an oversized header, present through v1.43.0). It
 # also carries the CVE-2025-15558 fix (Windows plugin search path LPE, fixed
-# since v29.2.0). Building from source with Go 1.27.4 additionally eliminates
-# Go stdlib CVEs present in the upstream static binary.
+# since v29.2.0). Building from source with Go 1.27.4 additionally carries the
+# Go stdlib fixes named below, which the upstream static binary lacks.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for
 # TARGET. The fetch pulls only the v29.4.1 commit, minimising transfer size.
@@ -173,8 +173,9 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # satisfies. That toolchain also carries the stdlib fixes for CVE-2026-111943
 # (crypto/x509 intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service), CVE-2026-97031 (crypto/tls ECH denial of
-# service) and CVE-2026-97054 (HTTP/1 MaxBytesReader header race), so the
-# binary's SBOM carries no Go stdlib CVEs.
+# service) and CVE-2026-97054 (HTTP/1 MaxBytesReader header race). The module
+# floors below cover the dependency findings; the CI Trivy scan (HIGH and
+# CRITICAL) is what checks the built image.
 #
 # The v5.6.0 tag lifts almost every module floor this stage used to carry by
 # hand. Its own go.mod resolves otel/sdk v1.46.0 (CVE-2026-39883,
@@ -281,8 +282,8 @@ ARG APK_CACHE_BUST=unset
 # Upgrade all Alpine system packages and install runtime deps.
 # git is required at runtime: Git Sources clones through the native git
 # client. Docker CLI and Compose are copied from source-built stages below,
-# eliminating the curl dependency and all Go stdlib CVEs from the upstream
-# static binaries. npm is removed because it is not needed at runtime;
+# eliminating the curl dependency and the Go stdlib CVEs named at the builder
+# stages from the upstream static binaries. npm is removed because it is not needed at runtime;
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
 #
 # pcre2 arrives as a transitive dependency of git, so it is not present in the
@@ -304,8 +305,8 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.27.4, resolving all Go stdlib CVEs that
-# were present in the upstream static release binaries.
+# These binaries were compiled with Go 1.27.4, which carries the stdlib fixes
+# named at the two builder stages above.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 RUN chmod +x /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose

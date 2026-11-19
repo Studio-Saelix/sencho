@@ -357,8 +357,10 @@ describe('useContainerStats', () => {
         }))],
         ['a nonnumeric network byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 'x', tx_bytes: 1 } } }))],
         ['a nonnumeric transmit byte count beside a valid receive count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: 'x' } } }))],
-        // Strings in a byte count also fail the final sum check, so only a boolean
-        // (0 + true is 1) exercises the per-counter guards themselves.
+        // A malformed string in a byte count is rejected by the per-counter type
+        // guard and, if that guard were removed, by the final finiteness check on the
+        // sums. A boolean (0 + true is 1) passes the sum check, so only these two
+        // fixtures fail when the numeric type guard on a byte count is removed.
         ['a boolean as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: true } } }))],
         ['a boolean as the receive byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: true, tx_bytes: 1 } } }))],
         ['a numeric string as the transmit byte count', JSON.stringify(frame({ networks: { eth0: { rx_bytes: 1, tx_bytes: '512' } } }))],
@@ -474,6 +476,37 @@ describe('useContainerStats', () => {
 
         expect(result.current.error).toBeNull();
         expect(result.current.stats['c1']).toMatchObject({ cpu: '0.00%', ram: '1.00 MB' });
+        warnSpy.mockRestore();
+      });
+
+      // Docker's first streaming frame carries an all-zero previous sample, and a
+      // container that has used no CPU yet reports a zero total. Both are valid
+      // readings: only the memory usage must be nonzero.
+      const zeroCpuFrames: Array<[string, Record<string, unknown>]> = [
+        ['a zero previous CPU total and zero previous system CPU time', {
+          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
+        }],
+        ['a zero current CPU total beside a zero previous total', {
+          cpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 2000, online_cpus: 1 },
+          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 1000 },
+        }],
+        ['a Docker first frame: zero previous sample and no network map', {
+          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
+          networks: undefined,
+        }],
+      ];
+
+      it.each(zeroCpuFrames)('clears a real warning and publishes the readings for %s', (_name, over) => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onerror?.(); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify(frame(over)) }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toBeNull();
+        expect(result.current.stats['c1']).toMatchObject({ ram: '1.00 MB' });
+        expect(result.current.stats['c1'].cpu).toMatch(/^\d+(\.\d+)?%$/);
         warnSpy.mockRestore();
       });
 

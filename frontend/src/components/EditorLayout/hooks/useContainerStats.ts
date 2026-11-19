@@ -23,13 +23,16 @@ const optionalCounter = (v: unknown): number | null =>
 
 /**
  * Turns one Docker stats frame into usable readings, or null when the frame
- * cannot yield them: a stats section is absent, a required counter (CPU totals,
- * memory usage) is missing, zero, or not a finite number, or any counter that is
- * present is not a finite number. The caller drops such a frame: it must neither
- * publish a metric nor count as proof that the stream recovered. Counters Docker
- * omits on some runtimes (system CPU time, online CPUs, per-interface byte
- * counts) may be absent or null and read as 0. A null network entry throws,
- * which the caller reports as a parse failure.
+ * cannot yield them: a stats section is absent, a required counter (current and
+ * previous CPU totals, memory usage) is missing or not a finite number, memory
+ * usage is zero, or any counter that is present is not a finite number. The CPU
+ * totals may be zero (Docker's first streaming frame carries a zero previous
+ * total); memory usage may not, since a container that is not running reports
+ * zero. The caller drops a rejected frame: it must neither publish a metric nor
+ * count as proof that the stream recovered. Counters Docker omits on some
+ * runtimes (system CPU time, online CPUs, per-interface byte counts) may be
+ * absent or null and read as 0. A null network entry throws, which the caller
+ * reports as a parse failure.
  */
 function readStatsSample(data: {
   cpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown; online_cpus?: unknown };
@@ -37,6 +40,9 @@ function readStatsSample(data: {
   memory_stats?: { usage?: unknown };
   networks?: Record<string, { rx_bytes?: unknown; tx_bytes?: unknown }>;
 }): StatsSample | null {
+  // The truthiness test on memory usage is deliberate: zero (a container that is
+  // not running) is rejected here. The CPU totals are checked as numbers below,
+  // so a zero total passes.
   if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return null;
 
   const cpuTotal = data.cpu_stats.cpu_usage.total_usage;
@@ -45,7 +51,7 @@ function readStatsSample(data: {
   // Checked here, not after the arithmetic: the subtraction below coerces a
   // numeric string or null to a finite number, so the derived-value check at the
   // end could not tell it from a real reading. memUsage is never derived, so
-  // this is its only guard.
+  // this is its only type guard (its zero case is rejected above).
   if (!isFiniteNumber(cpuTotal) || !isFiniteNumber(preCpuTotal) || !isFiniteNumber(memUsage)) return null;
 
   const systemNow = optionalCounter(data.cpu_stats.system_cpu_usage);
