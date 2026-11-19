@@ -480,6 +480,8 @@ describe('restoreTargetToGeneration on a local node', () => {
     const recovery = StackUpdateRecoveryService.getInstance();
     vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-1', gitops_generation_id: 'gen-restore' } as never);
     const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const fenceCheck = vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced');
     const evaluate = vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue({
       reason: 'provider',
       service: 'socket-proxy',
@@ -497,12 +499,42 @@ describe('restoreTargetToGeneration on a local node', () => {
     });
 
     expect(evaluate).toHaveBeenCalledWith('bp-stack', { kind: 'update' });
+    // A rendered refusal is the guard's own answer: the fence is not asked.
+    expect(fenceCheck).not.toHaveBeenCalled();
     expect(outcome).toEqual({
       ok: false,
       code: 'docker_endpoint_protected',
       error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
       failureClass: 'pre_mutation',
     });
+    expect(compensate).not.toHaveBeenCalled();
+    expect(restoreFailureMutated(outcome as { code: string; failureClass?: 'pre_mutation' })).toBe(false);
+  });
+
+  it('answers a fence refusal raised by the endpoint check itself as nothing moved, before any restore', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const nodeId = DatabaseService.getInstance().getNodes().find(node => node.type === 'local')!.id;
+    const { app: seeded } = seedApplication({ nodeIds: [nodeId], stackName: 'bp-stack-3' });
+    const app = GitOpsStore.getInstance().getApplication(seeded.id)!;
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-3', gitops_generation_id: 'gen-restore' } as never);
+    const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+    const fence = new DataRestoreFenceError('/srv/data', 'unproven', 'directory');
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockRejectedValue(fence);
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack-3',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome).toEqual({ ok: false, code: 'data_restore', error: fence.message, failureClass: 'pre_mutation' });
     expect(compensate).not.toHaveBeenCalled();
     expect(restoreFailureMutated(outcome as { code: string; failureClass?: 'pre_mutation' })).toBe(false);
   });

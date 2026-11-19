@@ -18,6 +18,7 @@ import os from 'os';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import type { HelperRunSpec } from '../services/recovery/restic/helperRunner';
+import type { GitOpsApplicationRow } from '../services/gitops/types';
 
 const models = vi.hoisted(() => ({ byStack: {} as Record<string, Array<{ source: string; target: string; read_only?: boolean }>> }));
 
@@ -2931,6 +2932,10 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
     const orchestrator = StackUpdateOrchestrator.getInstance();
     const { applyAutomaticStackUpdate } = await import('../services/automaticStackUpdate');
+    const { restoreTargetToGeneration } = await import('../services/gitops/rolloutRecovery');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recovery = StackUpdateRecoveryService.getInstance();
+    expect(DatabaseService.getInstance().getNode(nodeId)?.type).toBe('local');
     for (const fenced of [true, false]) {
       for (const [shape, dangling] of LINK_SHAPES.flatMap((s) => [[s, false], [s, true]] as const)) {
         // The unfenced control needs a file that can be read: a dangling link is refused as missing.
@@ -2959,6 +2964,20 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         expect(rollback.body, `${label} rollback`).toMatchObject(fenced
           ? { code: 'data_restore', failureClass: 'pre_mutation' }
           : { code: 'docker_endpoint_protected' });
+        // The same rollback a hub runs on its own local node, without the HTTP
+        // hop: the same answer as the node route, and no restore attempted.
+        const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
+        const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+        const local = await restoreTargetToGeneration({
+          app: { id: 'app-local' } as GitOpsApplicationRow,
+          stackName: 'web', nodeId, generationId: 'gen-local', actor: 'tester', role: 'admin', scopedActions: ['stack:deploy'],
+        });
+        expect(local, `${label} local rollback`).toEqual(fenced
+          ? { ok: false, code: 'data_restore', error: rollback.body.error, failureClass: 'pre_mutation' }
+          : { ok: false, code: 'docker_endpoint_protected', error: 'could not render', failureClass: 'pre_mutation' });
+        expect(compensate, `${label} local rollback`).not.toHaveBeenCalled();
+        current.mockRestore();
+        compensate.mockRestore();
         if (dangling) continue;
         // The checks inside the operations, reached by a caller past the route's.
         const verify = vi.fn();

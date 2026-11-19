@@ -14,7 +14,7 @@
  * generation-selection contract, so both paths enforce identical evidence
  * rules.
  */
-import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointError';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, type DockerEndpointRefusal } from '../../helpers/dockerEndpointError';
 import axios from 'axios';
 import type { PermissionAction } from '../../middleware/permissions';
 import { DatabaseService } from '../DatabaseService';
@@ -23,6 +23,8 @@ import { LicenseService } from '../LicenseService';
 import { StackUpdateRecoveryService } from '../StackUpdateRecoveryService';
 import { StackOpLockService } from '../StackOpLockService';
 import { ComposeService } from '../ComposeService';
+import { FileSystemService } from '../FileSystemService';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../../helpers/dataRestoreFenceError';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { safeAxiosTransport } from '../../utils/outboundTarget';
 import { formatScopedStackActionsHeader } from '../../helpers/stackRouteAuth';
@@ -341,8 +343,27 @@ function restoreLocal(args: {
       try {
         // A restore pins every service to its recovery tag, which recreates the
         // container carrying this node's Docker API when the stack holds it.
-        const endpointRefusal = await ComposeService.getInstance(args.nodeId)
-          .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+        let endpointRefusal: DockerEndpointRefusal | null;
+        try {
+          endpointRefusal = await ComposeService.getInstance(args.nodeId)
+            .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+          // A compose file a data restore is swapping does not render: the
+          // fence answers, as it does on the node rollback route a hub reaches.
+          if (endpointRefusal?.renderFailed) {
+            await FileSystemService.getInstance(args.nodeId).refuseIfComposeFenced(args.stackName);
+          }
+        } catch (error) {
+          // The fence's refusal at this pre-check: nothing has moved yet.
+          if (isDataRestoreFenceError(error)) {
+            return {
+              ok: false as const,
+              code: DATA_RESTORE_FENCE_CODE,
+              error: error.message,
+              failureClass: 'pre_mutation' as const,
+            };
+          }
+          throw error;
+        }
         if (endpointRefusal) {
           return {
             ok: false as const,
