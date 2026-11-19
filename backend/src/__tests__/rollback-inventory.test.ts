@@ -4,9 +4,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import os from 'os';
-import net from 'net';
 import { execFileSync } from 'child_process';
 import { promises as fsPromises } from 'fs';
+import { withUnixSocketAt } from './helpers/unixSocketFixture';
 
 const mockGetGitSource = vi.fn();
 const mockReadManifest = vi.fn();
@@ -1453,12 +1453,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
       await write('compose.yaml', 'services:\n  web:\n    image: nginx\n');
       await fsPromises.mkdir(path.join(composeDir, 'shared'), { recursive: true });
       const target = path.join(composeDir, 'shared', 'target.sock');
-      const server = net.createServer();
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(target, resolve);
-      });
-      try {
+      await withUnixSocketAt(target, async () => {
         await fsPromises.rm(path.join(composeDir, STACK, 'compose.yaml'));
         await fsPromises.symlink(target, path.join(composeDir, STACK, 'compose.yaml'));
 
@@ -1468,9 +1463,7 @@ describe('resolveRollbackInventory: the layer set recovery pins', () => {
           'compose.yaml is a link to something that is not a regular file',
         );
         expect(inventory.invocation.composeLayers).toEqual([]);
-      } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-      }
+      });
     },
     3_000,
   );

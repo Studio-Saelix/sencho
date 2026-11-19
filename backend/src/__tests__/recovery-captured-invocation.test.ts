@@ -5,10 +5,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
-import net from 'net';
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { withUnixSocketAt } from './helpers/unixSocketFixture';
 
 // The alias guard (which resolves COMPOSE_ENV_FILES itself) and the recovery
 // pre-spawn check both refuse a process-selected env file that is a pipe, and
@@ -758,16 +758,7 @@ describe('captured invocation on recovery Compose args', () => {
       await run();
       return;
     }
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(target, resolve);
-    });
-    try {
-      await run();
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    await withUnixSocketAt(target, run);
   }
 
   async function captureSharedComposeLayer() {

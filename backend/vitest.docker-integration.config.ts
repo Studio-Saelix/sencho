@@ -6,6 +6,7 @@ export default defineConfig({
     include: ['src/__tests__/docker-integration/**/*.test.ts'],
     exclude: ['dist/**', 'node_modules/**'],
     globalSetup: ['./src/__tests__/helpers/vitestGlobalSetup.ts'],
+    setupFiles: ['./src/__tests__/helpers/unixSocketBindGuardSetup.ts'],
     pool: 'forks',
     maxWorkers: 1,
     minWorkers: 1,
