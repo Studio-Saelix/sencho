@@ -203,7 +203,9 @@ describe('CloudBackupSection usage load', () => {
         await user.click(screen.getByRole('combobox'));
         await user.click(await screen.findByText('Sencho Snapshot Vault (included)'));
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
-        expect(screen.getByRole('combobox')).toHaveTextContent('Sencho Snapshot Vault (included)');
+        // The error toast is raised before the resync read settles, so wait for
+        // the stored destination rather than assuming the read already landed.
+        await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent('Sencho Snapshot Vault (included)'));
         expect(await screen.findByText('Storage used')).toBeInTheDocument();
         expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/usage')).toHaveLength(1);
     });
