@@ -16,13 +16,21 @@ export interface DeclaredPort {
   publishedPort: number;
   /** Transport folded to lower case, `tcp` when none is written; an unresolved template is kept. */
   protocol: string;
-  /** Docker assigns the host port at start, so no number is known. The entry
-   *  still publishes the container; port-conflict and documented-URL consumers
-   *  skip it (see `fixedPorts` in composePortSpec). Drift matches it to the
-   *  runtime container port and interface by `targetStartPort`/`targetEndPort`
-   *  and `hostIp`, using whichever of those the entry resolved, and the ledger
-   *  hash records it as `auto`. */
+  /** The host number is not known to this reader: Docker assigns it at start,
+   *  or the authored host side is still a template the environment resolves.
+   *  The entry still publishes the container; port-conflict consumers skip it
+   *  (see `fixedPorts` in composePortSpec), and so do documented-port checks
+   *  (`enumeratedHostPorts`). Drift matches it to a runtime binding by interface
+   *  and protocol, and additionally by the container port when
+   *  `targetStartPort` is set: a container side still holding a template has no
+   *  target, so only interface and protocol apply. A `hostIp` that is itself a
+   *  template matches any interface. The ledger hash records it as `auto`. */
   dynamic?: true;
+  /** The host side is still a Compose template, so the deploy environment decides
+   *  the number it publishes. The entry is kept as a publication (`dynamic`); a
+   *  consumer that must not claim reach it cannot establish leaves it out, as the
+   *  node Networking summary does: that stack is already reported unreadable. */
+  unresolvedHost?: true;
   /** Container port range an auto-assigned publication targets, when known.
    *  Both readers set it on a dynamic port whose container side is a literal
    *  port, so drift can match the host number Docker picks to the runtime
@@ -399,10 +407,26 @@ function dynamicTarget(target: DeclaredContainerTarget): Pick<DeclaredPort, 'tar
     : { targetStartPort: target.start, targetEndPort: target.end };
 }
 
+/** A publication whose host number this reader cannot establish: Docker assigns
+ *  it at start, or the host side is still a template Compose substitutes from
+ *  the environment (`unresolvedHost`). The interface is recorded as written and
+ *  the container target when it is a literal port; no host number is invented. */
+function unresolvedHostPort(hostIp: string, protocol: string, target: DeclaredContainerTarget, unresolvedHost = false): DeclaredPort {
+  return {
+    hostIp,
+    publishedPort: 0,
+    protocol,
+    dynamic: true,
+    ...(unresolvedHost ? { unresolvedHost: true as const } : {}),
+    ...dynamicTarget(target),
+  };
+}
+
 /**
  * Parses a service `ports:` entry into a host-published port, or null. An entry
  * whose host port Docker assigns (container port only, an empty or `0` host
- * port, a long form with no `published`) is returned as `dynamic`.
+ * port, a long form with no `published`) is returned as `dynamic`, and so is one
+ * whose host side is still a template.
  */
 function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort | null {
   const raw = asString(entry);
@@ -413,15 +437,24 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const target = declaredContainerTarget(spec.container);
     if (target === null) return null;
     if (isDynamicHostPort(spec.hostPart)) {
-      // A whole entry that is still a template ("${PORTS}") writes no host
-      // side at all: it may resolve to a fixed or an auto-assigned
-      // publication, so there is no shape to record. Leave it out rather than
-      // invent one. An empty host part with a written interface or a known
-      // container port is an ordinary auto-assigned publication, and an
-      // unresolved interface is recorded as written.
+      // A whole entry that is still a template ("${PORTS}") writes no host side
+      // at all, and an empty one beside a template container port
+      // (":${APP_PORT}", which may resolve to "8080:80") is the same record:
+      // either may resolve to a fixed or an auto-assigned publication, so there
+      // is no shape to record. Leave it out rather than invent one. An empty
+      // host part with a written interface or a known container port is an
+      // ordinary auto-assigned publication, and an unresolved interface is
+      // recorded as written.
       if (target === 'unknown' && spec.hostPart === '' && spec.hostIp === '') return null;
-      return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };
+      return unresolvedHostPort(spec.hostIp, spec.protocol, target);
     }
+    // A host part still holding a template is unresolved, not invalid: Compose
+    // substitutes it before it reads the fields, so `${APP_PORT:-8080}` (whose
+    // default the deploy environment may override) and `${HOST_PORT}` both name
+    // a host number only that environment decides. Keep the publication so drift
+    // and the dependency map see it instead of reading the runtime port as
+    // undeclared.
+    if (holdsTemplate(spec.hostPart)) return unresolvedHostPort(spec.hostIp, spec.protocol, target, true);
     if (!isFixedHostPort(spec.hostPart)) return null;
     return { hostIp: spec.hostIp, publishedPort: parseInt(spec.hostPart.split('-')[0], 10), protocol: spec.protocol };
   }
@@ -432,9 +465,10 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const protocol = normalizePortProtocol(interpolateString(asString(obj.protocol), lookup));
     const target = declaredContainerTarget(interpolateString(asString(obj.target), lookup));
     if (target === null) return null;
-    if (isDynamicHostPort(publishedRaw)) {
-      return { hostIp, publishedPort: 0, protocol, dynamic: true, ...dynamicTarget(target) };
-    }
+    if (isDynamicHostPort(publishedRaw)) return unresolvedHostPort(hostIp, protocol, target);
+    // The same rule as the short form: a `published` template names a host
+    // number only the environment decides.
+    if (holdsTemplate(publishedRaw)) return unresolvedHostPort(hostIp, protocol, target, true);
     if (!isFixedHostPort(publishedRaw as string)) return null;
     return { hostIp, publishedPort: parseInt((publishedRaw as string).split('-')[0], 10), protocol };
   }

@@ -747,4 +747,88 @@ describe('authored port forms beyond the audit matrix', () => {
   it.each(['"0abc:80"', '"0x50:80"', '"127.0.0.1:80"', '"8080x:80"'])('drops %s, which Compose refuses', (entry) => {
     expect(ports(entry)).toEqual([]);
   });
+
+  it('keeps a host side that is a template, and the runtime binding it explains', () => {
+    // Compose substitutes the host side before it reads the fields, so a colon
+    // inside `${...}` is not a separator: `${APP_PORT:-8080}` and `${HOST_PORT}`
+    // both name a host number only the environment decides. The parse shape is
+    // pinned in compose-dependency-parse.test.ts; this follows the publication
+    // through drift.
+    const declared = parseComposeDependencies('services:\n  web:\n    ports:\n      - "${APP_PORT:-8080}:80"\n');
+    const container = (port?: DependencyContainer['ports'][number]): DependencyContainer => ({
+      id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports: port ? [port] : [],
+    });
+    const portFindings = (port?: DependencyContainer['ports'][number]) => assembleStackDrift({
+      stack: 'proj', declared, containers: [container(port)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    const running = { ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' };
+    expect(portFindings(running)).toEqual([]);
+    expect(portFindings({ ...running, privatePort: 81 })).toHaveLength(1);
+    expect(portFindings()).toMatchObject([{ expected: 'auto:80/tcp', actual: 'none' }]);
+
+    // A template interface matches any interface, loopback included, while a
+    // wrong container target still reads as drift.
+    const guarded = parseComposeDependencies('services:\n  web:\n    ports:\n      - "${BIND_IP}:${APP_PORT:-8080}:80"\n');
+    const guardedFindings = (port: DependencyContainer['ports'][number]) => assembleStackDrift({
+      stack: 'proj', declared: guarded, containers: [container(port)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(guardedFindings(running)).toEqual([]);
+    expect(guardedFindings({ ...running, ip: '127.0.0.1' })).toEqual([]);
+    expect(guardedFindings({ ...running, privatePort: 81 })).toHaveLength(1);
+  });
+
+  it('matches a publication whose host and container sides are both templates by protocol and interface', () => {
+    // Neither the number nor the target is known, so one binding of the declared
+    // protocol and interface explains it; any binding beyond that is undeclared.
+    const declared = parseComposeDependencies('services:\n  web:\n    ports:\n      - "${BIND_IP}:${HOST_PORT}:${APP_PORT}"\n');
+    expect(declared.services[0].ports).toEqual([{ hostIp: '${BIND_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true, unresolvedHost: true }]);
+    const container = (ports: DependencyContainer['ports']): DependencyContainer => ({
+      id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports,
+    });
+    const portFindings = (ports: DependencyContainer['ports']) => assembleStackDrift({
+      stack: 'proj', declared, containers: [container(ports)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    const one = { ip: '127.0.0.1', publishedPort: 9000, privatePort: 80, protocol: 'tcp' };
+    expect(portFindings([one])).toEqual([]);
+    expect(portFindings([one, { ...one, publishedPort: 9001, privatePort: 81 }])).toHaveLength(1);
+  });
+
+  it('gives a fixed declaration its binding before an unresolved one on the same container', () => {
+    const declared = parseComposeDependencies('services:\n  web:\n    ports:\n      - "8080:80"\n      - "${APP_PORT:-9000}:81"\n');
+    const container = (ports: DependencyContainer['ports']): DependencyContainer => ({
+      id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports,
+    });
+    const portFindings = (ports: DependencyContainer['ports']) => assembleStackDrift({
+      stack: 'proj', declared, containers: [container(ports)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(portFindings([
+      { ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' },
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 81, protocol: 'tcp' },
+    ])).toEqual([]);
+    // A binding that serves the unresolved declaration cannot stand in for the
+    // fixed one, so the fixed port still has to be there.
+    expect(portFindings([{ ip: '0.0.0.0', publishedPort: 32768, privatePort: 81, protocol: 'tcp' }])).toHaveLength(1);
+  });
+
+  it('does not read a template host port as a port-conflict claim', () => {
+    // Two services writing the same template claim no number of their own; the
+    // environment decides it. The same services with a fixed number do conflict,
+    // and the template publications are still kept, so a dropped model would
+    // pass neither assertion.
+    const parsed = parseComposeDependencies('services:\n  a:\n    image: x\n    ports:\n      - "${APP_PORT:-8080}:80"\n  b:\n    image: y\n    ports:\n      - "${APP_PORT:-8080}:80"\n');
+    expect(parsed.services.flatMap(s => s.ports).filter(p => p.unresolvedHost)).toHaveLength(2);
+    const graphOf = (entry: string) => assembleGraph({
+      nodeId: 1, nodeName: 'hub', stacks: ['alpha'],
+      snapshot: { containers: [], networks: [], volumes: [] },
+      declaredByStack: new Map([['alpha', parseComposeDependencies(
+        `services:\n  a:\n    image: x\n    ports:\n      - "${entry}"\n  b:\n    image: y\n    ports:\n      - "${entry}"\n`,
+      )]]),
+      parseErrors: [],
+    });
+    expect(graphOf('${APP_PORT:-8080}:80').flags.filter(f => f.kind === 'port-conflict')).toEqual([]);
+    expect(graphOf('8080:80').flags.filter(f => f.kind === 'port-conflict')).toHaveLength(1);
+  });
 });

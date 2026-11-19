@@ -118,6 +118,15 @@ describe('computeStackHashes', () => {
     }
   });
 
+  it('records a host-side template as an auto port, like a container-only one', () => {
+    // Neither has a host number this reader can know, so the model hash cannot
+    // tell them apart; a change from one to the other moves only the source hash.
+    const hash = (entry: string): string | null => computeStackHashes(
+      `services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "${entry}"\n`,
+    ).renderedHash;
+    expect(hash('${APP_PORT:-8080}:80')).toBe(hash('80'));
+  });
+
   it('returns a null rendered hash when the model cannot be parsed', () => {
     // No services => the local parser reports a parse error and cannot model it.
     const h = computeStackHashes('not_a_compose_key: true\n');
@@ -214,10 +223,11 @@ describe('DriftLedgerService.computeTemporal', () => {
 });
 
 /**
- * The parsed-model hash now records an auto-assigned host port and an IPv6
- * interface, which the earlier authored parser dropped. The chosen upgrade
- * behaviour is a deliberate one-time change: an unchanged file reads as
- * changed once, and the next deploy (or a fresh acknowledgement) re-anchors it.
+ * The parsed-model hash now records an auto-assigned host port, an IPv6
+ * interface, and a port whose host side is a template, which the earlier
+ * authored parser dropped. The chosen upgrade behaviour is a deliberate
+ * one-time change: an unchanged file reads as changed once, and the next deploy
+ * (or a fresh acknowledgement) re-anchors it.
  */
 describe('rendered-hash upgrade behaviour for ports the earlier parser dropped', () => {
   beforeEach(() => clearLedger('tempstack'));
@@ -227,6 +237,7 @@ describe('rendered-hash upgrade behaviour for ports the earlier parser dropped',
   const CASES: Array<[string, string]> = [
     ['an auto-assigned port', file(['51820/udp'])],
     ['a short IPv6 fixed port', file(['[::1]:8080:80'])],
+    ['a host-side port template', file(['${APP_PORT:-8080}:80'])],
   ];
 
   it.each(CASES)('reads an earlier baseline as changed once, then stable, for %s', (_label, content) => {

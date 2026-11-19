@@ -52,7 +52,8 @@ export function claimsEnumeratedHostPort(
 export interface ShortPortSpec {
   /** Host interface with any IPv6 brackets removed; '' when none is written. */
   hostIp: string;
-  /** Host port text (`80`, `8000-8010`, `0`); '' when none is written. */
+  /** Host port text (`80`, `8000-8010`, `0`), or the `${...}` template when the
+   *  host side is one; '' when none is written. */
   hostPart: string;
   /** Container port text. */
   container: string;
@@ -80,27 +81,55 @@ export function normalizePortProtocol(value: string | undefined): string {
 }
 
 /**
+ * Splits `text` on the separators outside any `${...}` template. Compose
+ * substitutes a template before it reads a port entry's fields, so a separator
+ * inside one separates nothing: `${APP_PORT:-8080}:80` writes two fields, not
+ * three, and a default holding a port pair (`${ENTRY:-8080:80}`) stays one
+ * template whose value decides the shape. A template left in a field is never
+ * read as a numeric part; the caller records what the entry still establishes.
+ */
+function splitOutsideTemplates(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '$' && text[index + 1] === '{') {
+      depth += 1;
+      index += 1;
+    } else if (depth > 0) {
+      if (char === '}') depth -= 1;
+    } else if (char === separator) {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/**
  * Splits a short-syntax entry `[[IP:]HOST:]CONTAINER[/PROTOCOL]`. Compose reads
  * the last two colon-separated fields as host and container port and treats
  * whatever precedes them as the IP, so an IPv6 address works with or without
- * brackets. Returns null only for a malformed bracketed address; any other
- * shape is returned as written and the caller judges its host and container
- * parts.
+ * brackets. A colon or slash inside a `${...}` template belongs to the template,
+ * not to the entry's fields (see splitOutsideTemplates). Returns null only for a
+ * malformed bracketed address; any other shape is returned as written and the
+ * caller judges its host and container parts.
  */
 export function splitShortPortSpec(raw: string): ShortPortSpec | null {
-  const slash = raw.indexOf('/');
-  const spec = slash === -1 ? raw : raw.slice(0, slash);
-  const protocol = normalizePortProtocol(slash === -1 ? '' : raw.slice(slash + 1));
+  const [spec, ...protocolParts] = splitOutsideTemplates(raw, '/');
+  const protocol = normalizePortProtocol(protocolParts.join('/'));
   let hostIp = '';
   let fields: string[];
   if (spec.startsWith('[')) {
     const close = spec.indexOf(']');
     if (close === -1 || spec[close + 1] !== ':') return null;
     hostIp = spec.slice(1, close);
-    fields = spec.slice(close + 2).split(':');
+    fields = splitOutsideTemplates(spec.slice(close + 2), ':');
     if (fields.length !== 2) return null;
   } else {
-    fields = spec.split(':');
+    fields = splitOutsideTemplates(spec, ':');
     if (fields.length >= 3) {
       hostIp = fields.slice(0, -2).join(':');
       fields = fields.slice(-2);
