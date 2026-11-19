@@ -14,12 +14,17 @@ export interface ContainerStatsHookResult {
   error: string | null;
 }
 
+const STATS_UNAVAILABLE_MESSAGE = 'Container stats unavailable. The node may be unreachable.';
+const NO_FAILURES: ReadonlySet<string> = new Set();
+
 export function useContainerStats(
   containers: ContainerInfo[],
   activeNodeId: number | null | undefined,
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
-  const [error, setError] = useState<string | null>(null);
+  // IDs of containers whose current stats stream has failed. A container leaves
+  // the set when it delivers a valid sample, or when it drops out of the list.
+  const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(NO_FAILURES);
 
   const pendingStatsRef = useRef<Record<string, {
     cpu: string; ram: string; net: string;
@@ -34,26 +39,49 @@ export function useContainerStats(
   // change (which fires at the dashboard's refresh cadence) and cause the
   // banner to visibly flap against a persistently-flaky daemon.
   useEffect(() => {
-    setError(null);
+    setFailedIds(NO_FAILURES);
   }, [activeNodeId]);
 
   useEffect(() => {
     const wsMap: Record<string, WebSocket> = {};
+    // Set by the cleanup before it closes the sockets. The browser still fires
+    // error/close events for a socket closed while connecting, and those are
+    // our own teardown, not a stream failure.
+    let disposed = false;
     // Track which WSs have already emitted a console.warn for the lifetime of
     // this effect, so a flaky daemon does not spam the console at message rate.
     const warnedOnce = new Set<string>();
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
+    // Opening another stack starts clean. Containers that stay in the list keep
+    // their flag until they stream again, so a refresh does not clear and
+    // re-raise the warning against a flaky daemon.
+    const liveIds = new Set((containers || []).flatMap(c => (c?.Id ? [c.Id] : [])));
+    setFailedIds(prev => {
+      const kept = [...prev].filter(id => liveIds.has(id));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+
     (containers || []).forEach(container => {
       if (!container?.Id) return;
 
       const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
+        if (disposed) return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
           console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
         }
-        setError('Container stats unavailable. The node may be unreachable.');
+        setFailedIds(prev => (prev.has(container.Id) ? prev : new Set(prev).add(container.Id)));
+      };
+
+      const clearFailure = () => {
+        setFailedIds(prev => {
+          if (!prev.has(container.Id)) return prev;
+          const next = new Set(prev);
+          next.delete(container.Id);
+          return next;
+        });
       };
 
       try {
@@ -74,9 +102,12 @@ export function useContainerStats(
         };
 
         ws.onmessage = (event) => {
+          if (disposed) return;
           try {
             const data = JSON.parse(event.data);
             if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return;
+
+            clearFailure();
 
             const cpuDelta = data.cpu_stats.cpu_usage.total_usage - data.precpu_stats.cpu_usage.total_usage;
             const systemDelta = (data.cpu_stats.system_cpu_usage || 0) - (data.precpu_stats.system_cpu_usage || 0);
@@ -145,11 +176,18 @@ export function useContainerStats(
     }, 1500);
 
     return () => {
+      disposed = true;
       clearInterval(flushInterval);
       pendingStatsRef.current = {};
-      Object.values(wsMap).forEach(ws => { try { ws.close(1000); } catch { /* ignore */ } });
+      Object.values(wsMap).forEach(ws => {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try { ws.close(1000); } catch { /* ignore */ }
+      });
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { stats: containerStats, error };
+  return { stats: containerStats, error: failedIds.size > 0 ? STATS_UNAVAILABLE_MESSAGE : null };
 }
