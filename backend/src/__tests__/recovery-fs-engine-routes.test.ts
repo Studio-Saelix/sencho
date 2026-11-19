@@ -3104,7 +3104,10 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     // Each variant leaves the root file clear of the fence. `file` is linked
     // into the fenced directory (and moved aside when dangling); `spec` is an
     // applied Git deployment's -f list; `env` is the stack's .env.
-    const variants: Array<{ name: string; file: string | null; spec?: string[]; env?: string; expected: string }> = [
+    const variants: Array<{
+      name: string; file: string | null; content?: string; spec?: string[]; env?: string; envOutside?: string;
+      expected: string; expectedDangling?: string;
+    }> = [
       // Compose discovers an override beside the root file.
       { name: 'override', file: 'compose.override.yml', expected: 'data_restore' },
       { name: 'docker-override', file: 'docker-compose.override.yml', expected: 'data_restore' },
@@ -3118,8 +3121,12 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       { name: 'compose-file hides override', file: 'compose.override.yml', env: 'COMPOSE_FILE=compose.yaml\n', expected: 'docker_endpoint_protected' },
       // An empty spec entry is refused by the spawn sink; it is not the stack directory.
       { name: 'spec empty entry', file: null, spec: ['compose.yaml', ''], expected: 'docker_endpoint_protected' },
-      // A COMPOSE_FILE selection Compose would not accept cannot say which files it reads.
-      { name: 'unreadable selection', file: null, env: 'COMPOSE_DISABLE_ENV_FILE=maybe\n', expected: 'data_restore' },
+      // A selection the env reader cannot read, from sources the fence does
+      // not hold, is not the fence's to answer: the connection's stays.
+      { name: 'unreadable selection', file: null, env: 'COMPOSE_DISABLE_ENV_FILE=maybe\n', expected: 'docker_endpoint_protected' },
+      { name: 'env linked outside the compose root', file: null, envOutside: 'COMPOSE_FILE=compose.yaml\n', expected: 'docker_endpoint_protected' },
+      // A stack .env linked into the fenced directory: the selection's own source is mid-restore when it dangles.
+      { name: 'env in fence', file: '.env', content: 'A=1\n', expected: 'docker_endpoint_protected', expectedDangling: 'data_restore' },
       // The root file alone: the control.
       { name: 'none', file: null, expected: 'docker_endpoint_protected' },
     ];
@@ -3132,9 +3139,14 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         const dir = stackDir('web');
         fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:1\n');
         if (variant.env !== undefined) fs.writeFileSync(path.join(dir, '.env'), variant.env);
+        if (variant.envOutside !== undefined) {
+          const outside = path.join(shared, `env-outside-${randomUUID()}`);
+          fs.writeFileSync(outside, variant.envOutside);
+          fs.symlinkSync(outside, path.join(dir, '.env'));
+        }
         const target = variant.file === null ? null : path.join(data, variant.file);
         if (variant.file !== null && target !== null) {
-          fs.writeFileSync(target, 'services:\n  app:\n    environment:\n      A: "1"\n');
+          fs.writeFileSync(target, variant.content ?? 'services:\n  app:\n    environment:\n      A: "1"\n');
           fs.symlinkSync(path.join('data', variant.file), path.join(dir, variant.file));
         }
         const gitSource = vi.spyOn(db, 'getGitSource').mockImplementation((stack: string) => (variant.spec && stack === 'web'
@@ -3142,7 +3154,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
           : realGitSource(stack)));
         fencedOverwriteOf(data);
         if (dangling && target !== null) fs.renameSync(target, `${target}.aside`);
-        const expected = variant.expected;
+        const expected = dangling && variant.expectedDangling ? variant.expectedDangling : variant.expected;
         // The root file alone is clear of the fence.
         await expect(FileSystemService.getInstance(nodeId).getStackContent('web'), label).resolves.toContain('nginx:1');
         for (const [kind, pending] of Object.entries({

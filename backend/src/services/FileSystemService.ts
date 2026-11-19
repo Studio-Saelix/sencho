@@ -953,9 +953,10 @@ export class FileSystemService {
    * make the project clear when one of those links into, or is missing from,
    * a directory a restore is overwriting; Compose would read it, and a render
    * that failed on it is the fence's to answer. A check of those files that
-   * cannot run while a fence is held (a `COMPOSE_FILE` selection that cannot
-   * be read, for one) is answered as the fence's `unproven` refusal, as for
-   * the root file. Files an `include:` or `extends:` pulls in are not asked.
+   * cannot run while a fence is held is answered as the fence's `unproven`
+   * refusal, as for the root file. A `COMPOSE_FILE` selection whose env
+   * sources cannot be read refuses only when the fence holds one of those
+   * sources. Files an `include:` or `extends:` pulls in are not asked.
    */
   async refuseIfComposeFenced(stackName: string): Promise<void> {
     try {
@@ -983,9 +984,10 @@ export class FileSystemService {
    *   absolute, or escaping the stack) is left out; the sink refuses the
    *   whole deploy for it, so Compose reads none of them.
    * - else the entries of a COMPOSE_FILE the stack's env sets, split as
-   *   Compose splits them; it replaces override discovery. A selection that
-   *   cannot be read, or that Compose would not accept, throws: which files
-   *   Compose reads cannot be known.
+   *   Compose splits them; it replaces override discovery. When the env
+   *   sources that selection comes from cannot be read here, those sources
+   *   (and the stack `.env`) are asked with the overrides: a source a restore
+   *   holds refuses, and otherwise the selection is not the fence's to answer.
    * - else the implicit overrides (all four names; Compose reads the first it
    *   finds, so asking each is the safe superset).
    */
@@ -1002,7 +1004,12 @@ export class FileSystemService {
       return selection.value.split(selection.pathSeparator).filter((entry) => entry !== '');
     }
     if (selection.kind !== 'absent') {
-      throw new Error(`COMPOSE_FILE selection cannot be read: ${selection.reason}`);
+      // An env source a restore holds may be why: asking them refuses then.
+      // A source the reader refuses for its own rules (a link outside the
+      // compose root, a size limit) is one Compose may still read, so a
+      // selection unread for that reason does not refuse a stack whose
+      // sources the fence does not hold; its overrides are asked instead.
+      return ['.env', ...selection.loadedEnvFiles, ...COMPOSE_OVERRIDE_FILENAMES];
     }
     return COMPOSE_OVERRIDE_FILENAMES;
   }
