@@ -2063,18 +2063,21 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
     if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
-    // Hardened peers are digest-pinned (updateBlocked) but must still reach
-    // /api/system/update so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
-    if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
-      res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
-      return;
-    }
-
+    // `meta.updateBlocked` is the remote's cached pin classification, which can
+    // be older than an edit the operator just made to that node's compose file.
+    // The remote re-reads the file before it accepts an update, so the request
+    // goes through and a block comes back as that node's own `update_blocked`
+    // answer. Hardened peers are digest-pinned and rely on the same pass-through
+    // so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
     const resolvedTarget = await resolveUpdateTarget(requestedTarget);
     const response = await postSystemUpdate(target, resolvedTarget, replaceEndpointProvider);
 
     if (!response.ok) {
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+      if (failure.code === 'update_blocked' && meta.imageChannel !== 'hardened') {
+        res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
+        return;
+      }
       updateTracker.set(nodeId, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
       res.status(502).json(failure);
       return;
@@ -2306,9 +2309,6 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (!meta.capabilities.includes('self-update')) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
-        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
-      }
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
@@ -2318,6 +2318,11 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
         return { nodeId: node.id, name: node.name, kind: 'updating' as const };
       }
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+      // A node whose pin blocks the update is skipped, as its cached flag used to
+      // decide here; the node's own fresh read is the authority, not that flag.
+      if (failure.code === 'update_blocked' && meta.imageChannel !== 'hardened') {
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
+      }
       updateTracker.set(node.id, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
       return { nodeId: node.id, name: node.name, kind: 'failed' as const, ...failure };
     }));

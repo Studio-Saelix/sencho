@@ -387,6 +387,70 @@ describe('POST /api/fleet/nodes/:id/update hardened digest pin', () => {
   });
 });
 
+/** Answers GitHub's release lookup, and every other fetch (the remote's update route) with `remote`. */
+function mockRemoteUpdateAnswer(remote: () => Response): { calls: () => number } {
+  let calls = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    try {
+      if (new URL(String(input)).hostname === 'api.github.com') {
+        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+      }
+    } catch {
+      // Non-URL fetch inputs fall through to the remote-update mock.
+    }
+    if (String(input).endsWith('/api/system/update')) calls++;
+    return remote();
+  });
+  return { calls: () => calls };
+}
+
+const blockedAnswer = () => new Response(JSON.stringify({ error: 'blocked', code: 'update_blocked' }), { status: 409 });
+const acceptedAnswer = () => new Response(JSON.stringify({ message: 'ok' }), { status: 202 });
+
+describe('a remote whose cached pin classification says the update is blocked', () => {
+  const staleBlocked = () => mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'community' }));
+
+  it('updates once the node itself accepts, because its own fresh read decides', async () => {
+    mockTarget();
+    staleBlocked();
+    const remote = mockRemoteUpdateAnswer(acceptedAnswer);
+
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+
+    expect(res.status).toBe(202);
+    expect(remote.calls()).toBe(1);
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status).toBe('updating');
+  });
+
+  it('answers 409 update_blocked when the node itself still refuses, without recording a failure', async () => {
+    mockTarget();
+    staleBlocked();
+    mockRemoteUpdateAnswer(blockedAnswer);
+
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('update_blocked');
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)).toBeUndefined();
+  });
+
+  it('is updated by update-all when the node accepts, and skipped when it still refuses', async () => {
+    mockTarget();
+    staleBlocked();
+    mockRemoteUpdateAnswer(acceptedAnswer);
+    const accepted = await request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
+    expect(accepted.body).toEqual({ updating: ['proxy-hardening-test'], skipped: [], failed: [] });
+
+    FleetUpdateTrackerService.getInstance().delete(proxyNodeId);
+    vi.restoreAllMocks();
+    mockTarget();
+    staleBlocked();
+    mockRemoteUpdateAnswer(blockedAnswer);
+    const refused = await request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
+    expect(refused.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
+  });
+});
+
 describe('POST /api/fleet/update-all typed failures', () => {
   it('reports remote rejections as failed instead of skipped', async () => {
     mockTarget();

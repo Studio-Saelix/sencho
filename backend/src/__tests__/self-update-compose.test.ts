@@ -287,6 +287,12 @@ describe('mapHostPathToContainerPath', () => {
     expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho', destination: 'relative' }])).toBeNull();
   });
 
+  it('maps through a mount of the host root', () => {
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/', destination: '/host' }])).toEqual({
+      containerPath: '/host/opt/sencho/compose.yaml', mountDestination: '/host',
+    });
+  });
+
   it('returns null with no mounts or no matching mount', () => {
     expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [])).toBeNull();
     expect(mapHostPathToContainerPath('/srv/x/compose.yaml', [same])).toBeNull();

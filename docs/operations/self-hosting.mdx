@@ -80,7 +80,7 @@ The second option matters because Sencho talks to Docker through two paths, and 
 
 The last row is the exception to everything above. See [Self-update behind a proxy](#self-update-behind-a-proxy).
 
-Sencho reads its own Compose file to see how its image is pinned. When a folder Sencho has mounted holds the file, it reads it directly and starts no container. Otherwise it starts a short-lived helper labelled `io.sencho.helper=compose-read` at startup, when you click **Recheck** in **Node updates**, and before an update or reapply. Routine monitoring never starts one, so tools that watch Docker events get no recurring Sencho containers to react to. If you edit the file without redeploying, **Recheck** picks up the change.
+Sencho reads its own Compose file to see how its image is pinned. When a folder Sencho has mounted holds the file, it reads it directly and starts no container. Otherwise it starts a short-lived helper labelled `io.sencho.helper=compose-read`, and only when something asks for a current answer: at startup, on **Recheck** in **Node updates**, when you open **Settings → Admiral Account**, and before an update, reapply, or image channel switch. Routine monitoring never starts one, so tools that watch Docker events get no recurring Sencho containers to react to. If the startup read fails, Sencho retries at most once an hour. If you edit the file without redeploying, **Recheck** picks up the change.
 
 A Compose `hostname:` override on the Sencho service is supported. Sencho identifies its own container from the process cgroup when the hostname does not match the container ID, so self-protection and Reapply keep working with a custom hostname.
 
