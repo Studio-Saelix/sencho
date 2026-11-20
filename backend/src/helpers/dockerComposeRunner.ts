@@ -1,10 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
-import { holdUntilExit, prepareComposeAdmission, type FsWorkLeaseLike } from './composeArgvFence';
 
-export async function runDockerCompose(
+export function runDockerCompose(
   args: string[],
   cwd: string,
   timeoutMs: number,
@@ -27,35 +26,7 @@ export async function runDockerCompose(
       }
     }
   }
-  // A validation render opens the candidate's files; a data restore's
-  // directory fence refuses it or waits for it (see prepareComposeAdmission).
-  let lease: FsWorkLeaseLike;
-  try {
-    lease = (await prepareComposeAdmission({ cwd: resolvedCwd, args })).admit();
-  } catch (err) {
-    // The runner answers with an exit result, never a rejection: a refused
-    // validation is a failed one, worded by the fence.
-    return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
-  }
-  // The admission awaited, and CodeQL does not carry the barrier above across
-  // that await, so the same guards are repeated here, in the same synchronous
-  // step as the admission and the spawn; a spawn that throws releases the lease.
-  const spawnCwd = path.resolve(resolvedCwd);
-  if (!spawnCwd.startsWith(managedBase + path.sep)) {
-    if (!spawnCwd.startsWith(secretsBase + path.sep)) {
-      if (!spawnCwd.startsWith(tmpBase + path.sep)) {
-        lease.release();
-        return { code: -1, stdout: '', stderr: 'Invalid working directory' };
-      }
-    }
-  }
-  let child: ChildProcessWithoutNullStreams | undefined;
-  try {
-    child = spawn('docker', args, { cwd: spawnCwd });
-  } finally {
-    if (!child) lease.release();
-  }
-  holdUntilExit(child, lease);
+  const child = spawn('docker', args, { cwd: resolvedCwd });
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
