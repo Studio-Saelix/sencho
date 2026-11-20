@@ -3104,9 +3104,13 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     // Each variant leaves the root file clear of the fence. `file` is linked
     // into the fenced directory (and moved aside when dangling); `spec` is an
     // applied Git deployment's -f list; `env` is the stack's .env.
+    // `expectedRecovery` is the local rollback's answer where it differs: its
+    // recovery up names the root file and override with -f, which turns
+    // COMPOSE_FILE off, so it opens the override that selection hides and not
+    // the layer it adds.
     const variants: Array<{
       name: string; file: string | null; content?: string; spec?: string[]; env?: string; envOutside?: string;
-      expected: string; expectedDangling?: string;
+      expected: string; expectedDangling?: string; expectedRecovery?: string;
     }> = [
       // Compose discovers an override beside the root file.
       { name: 'override', file: 'compose.override.yml', expected: 'data_restore' },
@@ -3114,11 +3118,11 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
       // An applied Git deployment names extra.yml with -f.
       { name: 'spec', file: 'extra.yml', spec: ['compose.yaml', 'extra.yml'], expected: 'data_restore' },
       // The stack's env selects extra.yml through COMPOSE_FILE.
-      { name: 'compose-file', file: 'extra.yml', env: 'COMPOSE_FILE=compose.yaml:extra.yml\n', expected: 'data_restore' },
-      { name: 'compose-file separator', file: 'extra.yml', env: 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=compose.yaml;;extra.yml\n', expected: 'data_restore' },
+      { name: 'compose-file', file: 'extra.yml', env: 'COMPOSE_FILE=compose.yaml:extra.yml\n', expected: 'data_restore', expectedRecovery: 'docker_endpoint_protected' },
+      { name: 'compose-file separator', file: 'extra.yml', env: 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=compose.yaml;;extra.yml\n', expected: 'data_restore', expectedRecovery: 'docker_endpoint_protected' },
       // -f turns off override discovery, and COMPOSE_FILE replaces it: Compose never reads that override.
       { name: 'spec hides override', file: 'compose.override.yml', spec: ['compose.yaml'], expected: 'docker_endpoint_protected' },
-      { name: 'compose-file hides override', file: 'compose.override.yml', env: 'COMPOSE_FILE=compose.yaml\n', expected: 'docker_endpoint_protected' },
+      { name: 'compose-file hides override', file: 'compose.override.yml', env: 'COMPOSE_FILE=compose.yaml\n', expected: 'docker_endpoint_protected', expectedRecovery: 'data_restore' },
       // An empty spec entry is refused by the spawn sink; it is not the stack directory.
       { name: 'spec empty entry', file: null, spec: ['compose.yaml', ''], expected: 'docker_endpoint_protected' },
       // A selection the env reader cannot read, from sources the fence does
@@ -3155,8 +3159,12 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         fencedOverwriteOf(data);
         if (dangling && target !== null) fs.renameSync(target, `${target}.aside`);
         const expected = dangling && variant.expectedDangling ? variant.expectedDangling : variant.expected;
+        // A refusal is not a failed read: no env read error is logged for it.
+        const errors = vi.spyOn(console, 'error');
         // The root file alone is clear of the fence.
         await expect(FileSystemService.getInstance(nodeId).getStackContent('web'), label).resolves.toContain('nginx:1');
+        // No recovery generation: the rollback restores the backup and deploys it, with no -f of its own.
+        const noGeneration = vi.spyOn(recovery, 'getCurrent').mockReturnValue(null as never);
         for (const [kind, pending] of Object.entries({
           update: request(app).post('/api/stacks/web/update').set('Cookie', adminCookie),
           service: request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie),
@@ -3167,18 +3175,145 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
           expect(res.body.code, `${label} ${kind}`).toBe(expected);
           if (kind === 'rollback' && expected === 'data_restore') expect(res.body.failureClass, label).toBe('pre_mutation');
         }
+        noGeneration.mockRestore();
         const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
         const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+        const expectedLocal = dangling && variant.expectedDangling ? variant.expectedDangling : variant.expectedRecovery ?? expected;
+        // The node's rollback route restores the recovery generation the same way.
+        const routed = await request(app).post('/api/stacks/web/rollback').set('Cookie', adminCookie);
+        expect(routed.status, `${label} generation rollback`).toBe(409);
+        expect(routed.body.code, `${label} generation rollback`).toBe(expectedLocal);
         const local = await restoreTargetToGeneration({
           app: { id: 'app-local' } as GitOpsApplicationRow,
           stackName: 'web', nodeId, generationId: 'gen-local', actor: 'tester', role: 'admin', scopedActions: ['stack:deploy'],
         });
-        expect(local, `${label} local rollback`).toMatchObject({ ok: false, code: expected, failureClass: 'pre_mutation' });
+        expect(local, `${label} local rollback`).toMatchObject({ ok: false, code: expectedLocal, failureClass: 'pre_mutation' });
         expect(compensate, label).not.toHaveBeenCalled();
+        expect(errors.mock.calls.filter(([first]) => String(first).includes('Error reading env file')), label).toEqual([]);
+        errors.mockRestore();
         current.mockRestore();
         compensate.mockRestore();
         gitSource.mockRestore();
       }
+    }
+  });
+
+  it('asks the root file and override a recovery, Mesh or Pilot up names with -f, though COMPOSE_FILE names only a clear file and the connection check renders', async () => {
+    const updatePolicy = await import('../helpers/senchoLabels');
+    const policy = await import('../services/updatePolicy');
+    vi.spyOn(policy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      policy.evaluateUpdatePolicy(updatePolicy.resolveSenchoLabels({ services: { app: { image: 'nginx:1' } } }), request));
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => null,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const execute = vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute');
+    const { restoreTargetToGeneration } = await import('../services/gitops/rolloutRecovery');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recovery = StackUpdateRecoveryService.getInstance();
+    const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+    const db = DatabaseService.getInstance();
+    resetStack();
+    const data = dataDir('web');
+    const dir = stackDir('web');
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:1\n');
+    fs.writeFileSync(path.join(dir, '.env'), 'COMPOSE_FILE=compose.yaml\n');
+    fs.writeFileSync(path.join(data, 'compose.override.yml'), 'services:\n  app:\n    environment:\n      A: "1"\n');
+    fs.symlinkSync(path.join('data', 'compose.override.yml'), path.join(dir, 'compose.override.yml'));
+    fencedOverwriteOf(data);
+
+    // A recovery up pins the root and the override: the local rollback and the
+    // node's rollback route refuse it before anything is restored.
+    const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
+    const local = await restoreTargetToGeneration({
+      app: { id: 'app-local' } as GitOpsApplicationRow,
+      stackName: 'web', nodeId, generationId: 'gen-local', actor: 'tester', role: 'admin', scopedActions: ['stack:deploy'],
+    });
+    expect(local).toMatchObject({ ok: false, code: 'data_restore', failureClass: 'pre_mutation' });
+    const routed = await request(app).post('/api/stacks/web/rollback').set('Cookie', adminCookie);
+    expect(routed.status).toBe(409);
+    expect(routed.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+    expect(compensate).not.toHaveBeenCalled();
+    current.mockRestore();
+
+    // A Mesh row puts the override layer on every update, which pins the same files.
+    const meshRow = vi.spyOn(db, 'isMeshStackEnabled').mockImplementation((_node, stack) => stack === 'web');
+    for (const route of ['/api/stacks/web/update', '/api/stacks/web/services/app/update']) {
+      const res = await request(app).post(route).set('Cookie', adminCookie);
+      expect(res.status, `mesh ${route}`).toBe(409);
+      expect(res.body.code, `mesh ${route}`).toBe('data_restore');
+    }
+    meshRow.mockRestore();
+
+    // A Pilot node has no Mesh row; the override central pushed does the same.
+    const overrides = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(nodeId));
+    fs.mkdirSync(overrides, { recursive: true });
+    fs.writeFileSync(path.join(overrides, 'web.override.yml'), 'services: {}\n');
+    const mode = process.env.SENCHO_MODE;
+    process.env.SENCHO_MODE = 'pilot';
+    try {
+      const res = await request(app).post('/api/stacks/web/update').set('Cookie', adminCookie);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('data_restore');
+    } finally {
+      if (mode === undefined) delete process.env.SENCHO_MODE;
+      else process.env.SENCHO_MODE = mode;
+      fs.rmSync(path.join(overrides, 'web.override.yml'), { force: true });
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('asks only the files an applied Git deployment or a COMPOSE_FILE names, so a root file it leaves out is not a refusal', async () => {
+    const updatePolicy = await import('../services/updatePolicy');
+    const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
+    vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
+      updatePolicy.evaluateUpdatePolicy(resolveSenchoLabels({ services: { app: { image: 'nginx:1' } } }), request));
+    const unrendered = { reason: 'unresolved' as const, service: null, message: 'could not render', renderFailed: true as const };
+    const { ComposeService } = await import('../services/ComposeService');
+    const rendering = ComposeService.getInstance();
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      ...rendering, evaluateDockerEndpoint: async () => unrendered,
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    const { restoreTargetToGeneration } = await import('../services/gitops/rolloutRecovery');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recovery = StackUpdateRecoveryService.getInstance();
+    const db = DatabaseService.getInstance();
+    const realGitSource = db.getGitSource.bind(db);
+    const variants: Array<{ name: string; spec?: string[]; env?: string; update: string; recoveryUp: string }> = [
+      { name: 'spec without the root', spec: ['deploy/web.yml'], update: 'docker_endpoint_protected', recoveryUp: 'docker_endpoint_protected' },
+      { name: 'spec with the root', spec: ['compose.yaml', 'deploy/web.yml'], update: 'data_restore', recoveryUp: 'data_restore' },
+      // A recovery up names the root itself, which turns COMPOSE_FILE off.
+      { name: 'compose-file without the root', env: 'COMPOSE_FILE=deploy/web.yml\n', update: 'docker_endpoint_protected', recoveryUp: 'data_restore' },
+      { name: 'root alone', update: 'data_restore', recoveryUp: 'data_restore' },
+    ];
+    for (const variant of variants) {
+      resetStack();
+      const data = dataDir('web');
+      const dir = stackDir('web');
+      // The root file is a readable link into the fenced directory; deploy/web.yml is clear.
+      fs.writeFileSync(path.join(data, 'compose.yaml'), 'services:\n  app:\n    image: nginx:1\n');
+      fs.rmSync(path.join(dir, 'compose.yaml'), { force: true });
+      fs.symlinkSync(path.join('data', 'compose.yaml'), path.join(dir, 'compose.yaml'));
+      fs.mkdirSync(path.join(dir, 'deploy'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'deploy', 'web.yml'), 'services:\n  app:\n    image: nginx:1\n');
+      if (variant.env !== undefined) fs.writeFileSync(path.join(dir, '.env'), variant.env);
+      const gitSource = vi.spyOn(db, 'getGitSource').mockImplementation((stack: string) => (variant.spec && stack === 'web'
+        ? { applied_deploy_spec: { files: variant.spec } } as never
+        : realGitSource(stack)));
+      fencedOverwriteOf(data);
+      const res = await request(app).post('/api/stacks/web/update').set('Cookie', adminCookie);
+      expect(res.status, variant.name).toBe(409);
+      expect(res.body.code, variant.name).toBe(variant.update);
+      const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
+      const local = await restoreTargetToGeneration({
+        app: { id: 'app-local' } as GitOpsApplicationRow,
+        stackName: 'web', nodeId, generationId: 'gen-local', actor: 'tester', role: 'admin', scopedActions: ['stack:deploy'],
+      });
+      expect(local, `${variant.name} local rollback`).toMatchObject({ ok: false, code: variant.recoveryUp, failureClass: 'pre_mutation' });
+      current.mockRestore();
+      gitSource.mockRestore();
     }
   });
 

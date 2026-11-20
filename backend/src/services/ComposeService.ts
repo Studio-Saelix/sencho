@@ -58,6 +58,8 @@ import {
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
 import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
+import { refuseIfComposeArgvFenced } from '../helpers/composeArgvFence';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
@@ -169,6 +171,14 @@ function isNonFatalCompensationError(error: unknown): boolean {
   return code === 'HELD_IMAGE_MISSING' || code === 'RECOVERY_PROBE_FAILED';
 }
 
+/**
+ * An action that creates or starts containers from the compose files, so its
+ * argv is asked against a data restore's fence before the spawn.
+ */
+function opensComposeFilesToStart(action: readonly string[]): boolean {
+  return action.includes('up') || action.includes('create');
+}
+
 async function compensateOrSwallow(
   compensate: () => Promise<boolean>,
   onRefused?: (message: string) => void,
@@ -176,10 +186,11 @@ async function compensateOrSwallow(
   try {
     return await compensate();
   } catch (compError) {
-    // The Docker endpoint guard refused the recovery up before it ran: the
-    // failed operation's own error is what the caller must see, with the reason
-    // the rollback did not happen.
-    if (compError instanceof DockerEndpointProtectedError) {
+    // The Docker endpoint guard, or a data restore's fence on a compose file
+    // the recovery up names, refused that up before it ran: the failed
+    // operation's own error is what the caller must see, with the reason the
+    // rollback did not happen.
+    if (compError instanceof DockerEndpointProtectedError || isDataRestoreFenceError(compError)) {
       onRefused?.(compError.message);
       return false;
     }
@@ -607,6 +618,9 @@ export class ComposeService {
       refuseIfUnreadable || action.includes('up') || action.includes('create'),
     );
     args.push(...action);
+    if (opensComposeFilesToStart(action)) {
+      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
+    }
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
     // the files, env selection, and project directory in the argv the CLI is
@@ -769,6 +783,8 @@ export class ComposeService {
       const args = await this.authoredComposeArgs(stackName, [], stackDirOverride, true);
       await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
+      // The pin names the root file and override itself, after the caller's ask.
+      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
       return { args, overlayDir };
     } catch (err) {
       await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
@@ -2286,6 +2302,11 @@ export class ComposeService {
       action.includes('up') || action.includes('create'),
     );
     out.push(...action);
+    if (opensComposeFilesToStart(action)) {
+      // The recovery layer pins the root file and override (or the captured
+      // file set) after the caller's own ask, so the argv itself is asked.
+      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), out);
+    }
     // A captured recovery invocation builds its file set without the authored
     // prefix, so the check has to run here as well: a restored generation can
     // name a compose layer that was never validated by this guard. Its captured

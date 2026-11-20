@@ -345,12 +345,18 @@ function restoreLocal(args: {
         // container carrying this node's Docker API when the stack holds it.
         let endpointRefusal: DockerEndpointRefusal | null;
         try {
+          // The restore's up names the root file and its override itself (the
+          // recovery layer is appended last), so those are asked whether or
+          // not the connection check below can render.
+          await FileSystemService.getInstance(args.nodeId)
+            .refuseIfComposeFenced(args.stackName, { pinsComposeFiles: true });
           endpointRefusal = await ComposeService.getInstance(args.nodeId)
             .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
           // A compose file a data restore is swapping does not render: the
           // fence answers, as it does on the node rollback route a hub reaches.
           if (endpointRefusal?.renderFailed) {
-            await FileSystemService.getInstance(args.nodeId).refuseIfComposeFenced(args.stackName);
+            await FileSystemService.getInstance(args.nodeId)
+              .refuseIfComposeFenced(args.stackName, { pinsComposeFiles: true });
           }
         } catch (error) {
           // The fence's refusal at this pre-check: nothing has moved yet.

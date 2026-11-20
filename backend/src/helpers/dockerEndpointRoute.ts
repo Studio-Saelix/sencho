@@ -20,12 +20,14 @@ export async function refuseIfDockerEndpoint(
   res: Response,
   stackName: string,
   mutation: EndpointMutation,
+  fence: { pinsComposeFiles?: boolean } = {},
 ): Promise<boolean> {
   try {
     const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, mutation);
     if (!refusal) return false;
-    // A compose file a data restore is swapping does not render: the fence answers.
-    if (refusal?.renderFailed) await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
+    // A compose file a data restore is swapping does not render: the fence
+    // answers, for the files the caller's command opens (`fence`).
+    if (refusal?.renderFailed) await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName, fence);
     res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {

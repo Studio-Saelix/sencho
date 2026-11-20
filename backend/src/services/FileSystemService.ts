@@ -938,32 +938,29 @@ export class FileSystemService {
   }
 
   /**
-   * Throw the fence's refusal when the stack's compose file sits in, or links
-   * into, a directory a data restore is overwriting: the read getStackContent
-   * makes, asked up front by an update that would otherwise write gate evidence
-   * or spend a checked observation before its own read is refused. Any other
-   * read failure is not this check's to answer: it is neither logged nor
-   * thrown here, and the update reports it from its own read. A fence recorded
-   * after this check is still answered by that later read.
+   * Throw the fence's refusal when a compose file the stack's next Compose
+   * command opens sits in, or links into, a directory a data restore is
+   * overwriting: asked up front by an update or a rollback that would
+   * otherwise write gate evidence, restore files, or spend a checked
+   * observation before its own read is refused. Any other read failure is not
+   * this check's to answer: it is neither logged nor thrown here, and the
+   * caller reports it from its own read. A fence recorded after this check is
+   * still answered by that later read, and by the assembled argv
+   * (`refuseIfComposeArgvFenced` in helpers/composeArgvFence).
    *
-   * The other compose files Compose reads are asked too: an applied Git
-   * deploy spec's `-f` files; without one, the files a `COMPOSE_FILE` the
-   * stack's env sets selects; otherwise the implicit overrides Compose
-   * discovers beside the root file. A root file clear of the fence does not
-   * make the project clear when one of those links into, or is missing from,
-   * a directory a restore is overwriting; Compose would read it, and a render
-   * that failed on it is the fence's to answer. A check of those files that
-   * cannot run while a fence is held is answered as the fence's `unproven`
-   * refusal, as for the root file. A `COMPOSE_FILE` selection whose env
-   * sources cannot be read refuses only when the fence holds one of those
-   * sources. Files an `include:` or `extends:` pulls in are not asked.
+   * The files asked are the ones that command opens (`composeFilesForCommand`).
+   * A root file clear of the fence does not make the project clear when
+   * another of those files links into, or is missing from, a directory a
+   * restore is overwriting, and a root file the command does not open is not a
+   * refusal. A check of those files that cannot run while a fence is held is
+   * answered as the fence's `unproven` refusal, as for the root file. Files an
+   * `include:` or `extends:` pulls in are not asked.
+   *
+   * `pinsComposeFiles` is set by a caller whose command names the discovered
+   * files with `-f` whatever the stack's Mesh state: a recovery up, which
+   * layers the recovery override last.
    */
-  async refuseIfComposeFenced(stackName: string): Promise<void> {
-    try {
-      await this.readStackContentUnderFences(stackName);
-    } catch (error) {
-      if (isDataRestoreFenceError(error)) throw error;
-    }
+  async refuseIfComposeFenced(stackName: string, options: { pinsComposeFiles?: boolean } = {}): Promise<void> {
     let stackDir: string;
     try {
       stackDir = this.resolveStackDir(stackName);
@@ -971,48 +968,78 @@ export class FileSystemService {
       // An invalid name has no compose files to ask about; the caller's own read reports it.
       return;
     }
-    const refusal = await this.composeFenceRefusal(stackDir, () => this.mergedComposeFilesBeyondRoot(stackName));
+    let readsRoot = true;
+    const refusal = await this.composeFenceRefusal(stackDir, async () => {
+      const files = await this.composeFilesForCommand(stackName, options.pinsComposeFiles === true);
+      readsRoot = files.readsRoot;
+      return files.others;
+    });
     if (refusal) throw refusal;
+    if (!readsRoot) return;
+    try {
+      await this.readStackContentUnderFences(stackName);
+    } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
+    }
   }
 
   /**
-   * The compose files Compose reads for the stack beyond the root file Sencho
-   * reads, as paths resolved against the stack directory (the root file may
-   * be among them):
+   * The compose files a mutating Compose command for the stack opens, as paths
+   * resolved against the stack directory, and whether the root file Sencho
+   * reads (getStackContent) is one of them. This is the selection the argv
+   * builders in ComposeService make, so it has to follow them:
    * - an applied Git deploy spec's `-f` files; Compose then reads neither
-   *   COMPOSE_FILE nor an override. An entry the spawn sink refuses (empty,
-   *   absolute, or escaping the stack) is left out; the sink refuses the
-   *   whole deploy for it, so Compose reads none of them.
+   *   COMPOSE_FILE nor an override, nor the discovered root unless the spec
+   *   names it. An entry the spawn sink refuses (empty, absolute, or escaping
+   *   the stack) is left out; the sink refuses the whole deploy for it, so
+   *   Compose reads none of them.
+   * - else, when the command names its files itself (a recovery up, or a Mesh
+   *   or Pilot override layer: `authoredComposePrefix` and
+   *   `ensureExplicitComposeFiles`), the root file and the implicit override
+   *   it adds. Any `-f` turns COMPOSE_FILE off, so that selection is not this
+   *   command's.
    * - else the entries of a COMPOSE_FILE the stack's env sets, split as
-   *   Compose splits them; it replaces override discovery. When the env
-   *   sources that selection comes from cannot be read here, those sources
-   *   (and the stack `.env`) are asked with the overrides: a source a restore
-   *   holds refuses, and otherwise the selection is not the fence's to answer.
-   * - else the implicit overrides (all four names; Compose reads the first it
-   *   finds, so asking each is the safe superset).
+   *   Compose splits them; it replaces the root file and override discovery.
+   * - else the root file and the implicit overrides.
+   * Without a spec, when the env sources a COMPOSE_FILE selection comes from
+   * cannot be read here, those sources (and the stack `.env`) are asked too:
+   * a source a restore holds refuses, and otherwise the selection is not the
+   * fence's to answer.
+   * Every override name is asked: Compose and `getOverrideFilename` take the
+   * first one present, so asking each is the safe superset.
    */
-  private async mergedComposeFilesBeyondRoot(stackName: string): Promise<readonly string[]> {
+  private async composeFilesForCommand(
+    stackName: string,
+    pinsComposeFiles: boolean,
+  ): Promise<{ readsRoot: boolean; others: readonly string[] }> {
     const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
     if (spec && Array.isArray(spec.files) && spec.files.length > 0) {
-      return spec.files.filter((file): file is string =>
-        typeof file === 'string' && file !== '' && isValidRelativeStackPath(file));
+      return {
+        readsRoot: false,
+        others: spec.files.filter((file): file is string =>
+          typeof file === 'string' && file !== '' && isValidRelativeStackPath(file)),
+      };
     }
     const { composeFileEnvVarSelection } = await import('../utils/authoredComposeArgs');
     const selection = await composeFileEnvVarSelection(stackName, this.nodeId);
-    if (selection.kind === 'value') {
+    // An env source a restore holds may be why a selection is unread: asking
+    // them refuses then. A source the reader refuses for its own rules (a link
+    // outside the compose root, a size limit) is one Compose may still read,
+    // so a selection unread for that reason does not refuse a stack whose
+    // sources the fence does not hold. Compose reads those sources for
+    // interpolation whichever files the command names.
+    const unreadSources = selection.kind === 'value' || selection.kind === 'absent'
+      ? []
+      : ['.env', ...selection.loadedEnvFiles];
+    const { MeshService } = await import('./MeshService');
+    const pinned = pinsComposeFiles || await MeshService.getInstance().stackOverrideApplies(this.nodeId, stackName);
+    if (!pinned && selection.kind === 'value') {
       // Compose ignores empty entries.
-      return selection.value.split(selection.pathSeparator).filter((entry) => entry !== '');
+      return { readsRoot: false, others: selection.value.split(selection.pathSeparator).filter((entry) => entry !== '') };
     }
-    if (selection.kind !== 'absent') {
-      // An env source a restore holds may be why: asking them refuses then.
-      // A source the reader refuses for its own rules (a link outside the
-      // compose root, a size limit) is one Compose may still read, so a
-      // selection unread for that reason does not refuse a stack whose
-      // sources the fence does not hold; its overrides are asked instead,
-      // and the layers it would select are not known here.
-      return ['.env', ...selection.loadedEnvFiles, ...COMPOSE_OVERRIDE_FILENAMES];
-    }
-    return COMPOSE_OVERRIDE_FILENAMES;
+    // An unread selection's layers are not known here, so the root file and
+    // the overrides are what is asked for it.
+    return { readsRoot: true, others: [...unreadSources, ...COMPOSE_OVERRIDE_FILENAMES] };
   }
 
   /**

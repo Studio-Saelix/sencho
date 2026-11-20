@@ -3545,7 +3545,26 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // restore" from an anonymous failure it has to fail closed on.
   if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
-  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
+  // A compose file the rollback's up opens sits in, or links into, a directory
+  // a data restore is overwriting: refused before anything is restored, whether
+  // or not the connection check below can render. A recovery generation's up
+  // names the root file and its override itself (the recovery layer is
+  // appended last), so those are its files, not a COMPOSE_FILE selection.
+  let recoveryUp = false;
+  try {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    recoveryUp = StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName) !== null;
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName, { pinsComposeFiles: recoveryUp });
+  } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return;
+    }
+    console.error('[Stacks] Rollback pre-check failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    res.status(500).json({ error: getErrorMessage(error, 'Rollback failed.'), failureClass: 'pre_mutation' });
+    return;
+  }
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' }, { pinsComposeFiles: recoveryUp })) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
@@ -3627,6 +3646,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       } catch (compError: unknown) {
         const compCode = (compError as { code?: string }).code;
         const compFailureClass = restoreFailureClassOf(compError);
+        if (isDataRestoreFenceError(compError)) {
+          // A compose file the recovery up names went under a data restore's
+          // fence after the pre-check: refused before that up ran, and the
+          // service says whether the restored files were put back.
+          res.status(409).json({ error: compError.message, code: DATA_RESTORE_FENCE_CODE, ...compFailureClass });
+          return;
+        }
         if (compCode === 'ROLLBACK_PROHIBITED') {
           // A policy refusal carries the decision the block dialog renders; an
           // integrity or held-image refusal does not, and stays a plain 409.
@@ -3749,6 +3775,23 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
         });
       }
+      return;
+    }
+    if (isDataRestoreFenceError(error)) {
+      // A compose file the deploy names went under a data restore's fence
+      // after the pre-check: refused before compose ran, so the restored files
+      // are put back, and the answer says whether they could be.
+      let failureClass: 'pre_mutation' | 'post_mutation' = 'pre_mutation';
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a fenced rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+          failureClass = 'post_mutation';
+        }
+      }
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass });
       return;
     }
     if (isDockerEndpointProtectedError(error)) {
