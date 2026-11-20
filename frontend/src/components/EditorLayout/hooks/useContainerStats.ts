@@ -87,17 +87,26 @@ export interface ContainerStatsHookResult {
 }
 
 const STATS_UNAVAILABLE_MESSAGE = 'Container stats unavailable. The node may be unreachable.';
-const NO_FAILURES: ReadonlySet<string> = new Set();
+
+// Stream failures belong to one node: the failed IDs are stored with the node
+// they were raised on, so a read for another node sees none even in the render
+// before any effect has pruned them.
+interface StreamFailures {
+  nodeId: number | null | undefined;
+  ids: ReadonlySet<string>;
+}
+const NO_IDS: ReadonlySet<string> = new Set();
 
 export function useContainerStats(
   containers: ContainerInfo[],
   activeNodeId: number | null | undefined,
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
-  // IDs of running containers whose current stats stream has failed. A container
-  // leaves the set when it delivers a valid sample, when a list shows it stopped
-  // or gone, or when the active node changes.
-  const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(NO_FAILURES);
+  // IDs of running containers whose current stats stream has failed, tagged with
+  // the node they belong to. A container leaves the set when it delivers a valid
+  // sample, when a list shows it stopped or gone, or when the active node changes.
+  const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
+  const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
 
   const pendingStatsRef = useRef<Record<string, {
     cpu: string; ram: string; net: string;
@@ -106,15 +115,6 @@ export function useContainerStats(
   }>>({});
 
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
-
-  // Clear every stream failure only on an actual node switch. The main effect
-  // drops only the containers a new list shows as gone or not running: clearing
-  // everything on each containers-array identity change (the dashboard's
-  // refresh cadence) would make the warning visibly flap against a
-  // persistently-flaky daemon.
-  useEffect(() => {
-    setFailedIds(NO_FAILURES);
-  }, [activeNodeId]);
 
   useEffect(() => {
     const wsMap: Record<string, WebSocket> = {};
@@ -129,16 +129,19 @@ export function useContainerStats(
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
-    // Opening another stack starts clean, and a container this list shows as
-    // stopped or gone loses its flag, so its next run starts clean. A container
-    // that stays listed as running keeps its flag until a valid sample arrives,
-    // which also covers a restart (running to running, same ID): a refresh does
-    // not clear and re-raise the warning against a flaky daemon, and the new
-    // stream's first valid sample clears it.
+    // A node switch drops every failure. Opening another stack starts clean, and
+    // a container this list shows as stopped or gone loses its flag, so its next
+    // run starts clean. A container that stays listed as running keeps its flag
+    // until a valid sample arrives, which also covers a restart (running to
+    // running, same ID): the new stream's first valid sample clears it.
     const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
-    setFailedIds(prev => {
-      const kept = [...prev].filter(id => runningIds.has(id));
-      return kept.length === prev.size ? prev : new Set(kept);
+    // Clearing everything on each containers-array identity change (the
+    // dashboard's refresh cadence) would make the warning visibly flap against a
+    // persistently-flaky daemon, so a refresh drops only what the list contradicts.
+    setFailures(prev => {
+      if (prev.nodeId !== activeNodeId) return { nodeId: activeNodeId, ids: NO_IDS };
+      const kept = [...prev.ids].filter(id => runningIds.has(id));
+      return kept.length === prev.ids.size ? prev : { nodeId: activeNodeId, ids: new Set(kept) };
     });
 
     (containers || []).forEach(container => {
@@ -153,15 +156,19 @@ export function useContainerStats(
           warnedOnce.add(container.Id);
           console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
         }
-        setFailedIds(prev => (prev.has(container.Id) ? prev : new Set(prev).add(container.Id)));
+        setFailures(prev => {
+          if (prev.nodeId === activeNodeId && prev.ids.has(container.Id)) return prev;
+          const ids = new Set(prev.nodeId === activeNodeId ? prev.ids : NO_IDS);
+          return { nodeId: activeNodeId, ids: ids.add(container.Id) };
+        });
       };
 
       const clearFailure = () => {
-        setFailedIds(prev => {
-          if (!prev.has(container.Id)) return prev;
-          const next = new Set(prev);
-          next.delete(container.Id);
-          return next;
+        setFailures(prev => {
+          if (prev.nodeId !== activeNodeId || !prev.ids.has(container.Id)) return prev;
+          const ids = new Set(prev.ids);
+          ids.delete(container.Id);
+          return { nodeId: activeNodeId, ids };
         });
       };
 
@@ -259,9 +266,10 @@ export function useContainerStats(
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The effect drops a container's flag once it is no longer running. This
-  // filter covers the render between a list update and that effect, so the chip
-  // never shows for a container that just stopped.
+  // The effect drops a container's flag once it is no longer running or the node
+  // changes. The node tag above and this filter cover the render between a list
+  // or node update and that effect, so the chip never shows for a container that
+  // just stopped or for another node's failure.
   const streamFailing = failedIds.size > 0
     && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
 

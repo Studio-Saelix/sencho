@@ -483,7 +483,9 @@ describe('useContainerStats', () => {
       // container that has used no CPU yet reports a zero total. Both are valid
       // readings: only the memory usage must be nonzero.
       // Each row carries the CPU reading the frame must publish: a delta of 200 over
-      // a system delta of 2000 on one CPU is 10%.
+      // a system delta of 2000 is 10% on one CPU and 40% on four. Docker omits a zero
+      // system time on the wire, so its first frame has no previous system time at
+      // all: the delta is then the whole current system time.
       const zeroCpuFrames: Array<[string, Record<string, unknown>, string]> = [
         ['a zero previous CPU total and zero previous system CPU time', {
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
@@ -492,16 +494,31 @@ describe('useContainerStats', () => {
           cpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 2000, online_cpus: 1 },
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 1000 },
         }, '0.00%'],
-        ['a Docker first frame: zero previous sample and no network map', {
-          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
+        ['a Docker first frame: no previous system CPU time, four online CPUs and no network map', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 4 },
+          precpu_stats: { cpu_usage: { total_usage: 0 } },
           networks: undefined,
-        }, '10.00%'],
+        }, '40.00%'],
+        ['a null previous system CPU time on four online CPUs', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 4 },
+          precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: null },
+        }, '40.00%'],
+        ['a positive CPU delta on four online CPUs', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 4 },
+        }, '40.00%'],
+        // No usable system delta: the reading stays 0 instead of dividing by it.
+        ['no current system CPU time beside a previous one', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, online_cpus: 4 },
+        }, '0.00%'],
         // The online CPU count is optional: absent or zero scales by one CPU.
         ['a positive CPU delta with no online CPU count', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000 },
         }, '10.00%'],
         ['a positive CPU delta with an online CPU count of zero', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 0 },
+        }, '10.00%'],
+        ['a positive CPU delta with a null online CPU count', {
+          cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: null },
         }, '10.00%'],
       ];
 
@@ -536,6 +553,85 @@ describe('useContainerStats', () => {
     });
 
     describe('container state changes', () => {
+      // The effect that drops a stopped container's flag runs after the commit, so
+      // only the render filter keeps the chip out of that first commit. Record every
+      // render's error: renders[0] after the rerender is the first commit, before
+      // any effect has pruned the flag.
+      const setupRecording = (initial: ContainerInfo[]) => {
+        vi.useRealTimers();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const errors: Array<string | null> = [];
+        const hook = renderHook(
+          ({ containers, nodeId }: Props) => {
+            const r = useContainerStats(containers, nodeId);
+            errors.push(r.error);
+            return r;
+          },
+          { initialProps: { containers: initial, nodeId: 1 } as Props },
+        );
+        return { ...hook, errors, warnSpy };
+      };
+
+      it.each(['created', 'restarting', 'removing', 'paused', 'exited', 'dead'])(
+        'shows no chip on the first render after a failed running container is listed as %s',
+        (state) => {
+          const { result, rerender, errors, warnSpy } = setupRecording([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onerror?.(); });
+          expect(result.current.error).toMatch(/unavailable/);
+
+          errors.length = 0;
+          rerender({ containers: [makeContainer('c1', state), makeContainer('c2')], nodeId: 1 });
+
+          expect(errors[0]).toBeNull();
+          expect(result.current.error).toBeNull();
+          warnSpy.mockRestore();
+        },
+      );
+
+      it('shows no chip on the first render after a failed container is removed from the list', () => {
+        const { rerender, errors, warnSpy } = setupRecording([makeContainer('c1'), makeContainer('c2')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+
+        errors.length = 0;
+        rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+
+        expect(errors[0]).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('shows no chip on the first render after switching to a different stack', () => {
+        const { rerender, errors, warnSpy } = setupRecording([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+
+        errors.length = 0;
+        rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+
+        expect(errors[0]).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('shows no chip on the first render after the active node changes', () => {
+        const { rerender, errors, warnSpy } = setupRecording([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+
+        errors.length = 0;
+        rerender({ containers: [makeContainer('c1')], nodeId: 2 });
+
+        expect(errors[0]).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('keeps the chip on the first render after a refresh that lists the failed container as running', () => {
+        const { rerender, errors, warnSpy } = setupRecording([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+
+        errors.length = 0;
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+        expect(errors[0]).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
+
       it('records no failure for a stopped container, so a later start begins clean', () => {
         const { result, rerender, warnSpy } = setup([makeContainer('c1', 'exited')]);
         act(() => { MockWS.instances[0].onerror?.(); });
