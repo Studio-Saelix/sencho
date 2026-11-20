@@ -1,4 +1,3 @@
-import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import axios, { AxiosError } from 'axios';
@@ -28,6 +27,7 @@ import {
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
