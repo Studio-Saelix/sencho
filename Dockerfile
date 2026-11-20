@@ -90,7 +90,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
         npm ci --omit=dev; \
     fi
 
-# Stage 4a: Build Docker CLI from source against Go 1.27.3
+# Stage 4a: Build Docker CLI from source against Go 1.27.4
 #
 # CLI v29.4.1 ships otel/sdk v1.43.0, resolving CVE-2026-39883 (BSD kenv) and
 # CVE-2026-39882 (OTLP response OOM). Building against grpc v1.83.2 below
@@ -98,7 +98,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-41178 (baggage header parsing dropped its raw-length cap, allowing
 # resource exhaustion via an oversized header, present through v1.43.0). It
 # also carries the CVE-2025-15558 fix (Windows plugin search path LPE, fixed
-# since v29.2.0). Building from source with Go 1.27.3 additionally eliminates
+# since v29.2.0). Building from source with Go 1.27.4 additionally eliminates
 # Go stdlib CVEs present in the upstream static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for
@@ -129,11 +129,11 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # than building fully offline.
 # Base image pinned by digest so the Go toolchain that compiles the static
 # Docker CLI binary cannot change without an explicit Dependabot bump. The
-# 1.27.3 toolchain carries the stdlib fixes for CVE-2026-111943 (crypto/x509
+# 1.27.4 toolchain carries the stdlib fixes for CVE-2026-111943 (crypto/x509
 # intermediate-certificate verification), CVE-2026-78667 (net/http
-# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial
-# of service).
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS cli-builder
+# Range-header denial of service), CVE-2026-97031 (crypto/tls ECH denial
+# of service) and CVE-2026-97054 (Go stdlib, fixed in 1.27.4).
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS cli-builder
 
 ARG TARGETARCH
 
@@ -163,13 +163,13 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
       -mod=mod \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
-        -X github.com/docker/cli/cli/version.GitCommit=source-go1.27.3" \
+        -X github.com/docker/cli/cli/version.GitCommit=source-go1.27.4" \
       -o /build/docker \
       ./cmd/docker
 
-# Stage 4b: Build Docker Compose from source against Go 1.27.3
+# Stage 4b: Build Docker Compose from source against Go 1.27.4
 #
-# Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.3 toolchain
+# Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.4 toolchain
 # satisfies. That toolchain also carries the stdlib fixes for CVE-2026-111943
 # (crypto/x509 intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial of
@@ -182,7 +182,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # v0.3.3 (CVE-2026-17106), moby/buildkit v0.33.1 (CVE-2026-61711), and
 # containerd/containerd/v2 v2.4.1 (CVE-2026-46680, the CVE-2026-53488 / 53489 /
 # 53492 cluster, CVE-2026-95837, CVE-2026-95838), so the go get step below no
-# longer pins any of them.
+# longer pins any of them except containerd, whose floor is raised below.
 #
 # Six VEX statements written for earlier Compose tags no longer describe what
 # this stage builds. Five cover daemon-side advisories against
@@ -195,18 +195,20 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # statement now records the fix (status: fixed) instead of a not_affected
 # triage.
 #
-# Three floors remain, because v5.6.0 still resolves earlier versions of them:
+# Four floors remain, because v5.6.0 still resolves earlier versions of them:
 # golang.org/x/net v0.62.0, from v0.58.0, for CVE-2026-46600 (dnsmessage denial
 # of service), CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service) and
 # CVE-2026-78661 (x/net/html denial of service on crafted input);
 # golang.org/x/text v0.43.0, from v0.41.0, for CVE-2026-56852 (norm.Iter
 # infinite loop on crafted input); and golang.org/x/crypto v0.58.0, from
 # v0.56.0, for CVE-2026-56854 (SSH host-key verification bypass). x/net v0.62.0
-# requires exactly those x/text and x/crypto minimums, which is why the three
-# move together.
+# requires exactly those x/text and x/crypto minimums, which is why those three
+# move together. github.com/containerd/containerd/v2 v2.4.2, from v2.4.1, is for
+# CVE-2026-95839 (image-triggered daemon crash via a malformed digest in a
+# subject-annotated descriptor).
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS compose-builder
 
 ARG TARGETARCH
 
@@ -225,15 +227,17 @@ WORKDIR /src/docker-compose
 
 RUN mkdir -p /build
 
-# Carry three floors above what v5.6.0 resolves: golang.org/x/net v0.62.0
+# Carry four floors above what v5.6.0 resolves: golang.org/x/net v0.62.0
 # (CVE-2026-46600, CVE-2026-78669, CVE-2026-78661), golang.org/x/text v0.43.0
-# (CVE-2026-56852), and golang.org/x/crypto v0.58.0 (CVE-2026-56854). x/net
+# (CVE-2026-56852), golang.org/x/crypto v0.58.0 (CVE-2026-56854), and
+# github.com/containerd/containerd/v2 v2.4.2 (CVE-2026-95839). x/net
 # v0.62.0's own go.mod requires those exact x/text and x/crypto minimums.
 # Every other floor this stage used to carry is now resolved by the tag itself.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get golang.org/x/text@v0.43.0 \
            golang.org/x/net@v0.62.0 \
-           golang.org/x/crypto@v0.58.0 && \
+           golang.org/x/crypto@v0.58.0 \
+           github.com/containerd/containerd/v2@v2.4.2 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's
@@ -303,7 +307,7 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.27.3, resolving all Go stdlib CVEs that
+# These binaries were compiled with Go 1.27.4, resolving all Go stdlib CVEs that
 # were present in the upstream static release binaries.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
