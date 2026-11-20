@@ -39,9 +39,9 @@ const CHECK_RECORD_COMMENT = 'Sencho permission check, deleted right away';
  * A journal whose age is unknown (no readable timestamp, or one more than this
  * window in the future) is, when nothing sits at its name, stamped with the
  * time it was first examined. That stamp starts the same window, so one empty
- * listing never settles it. A timestamp ahead of now by less than the window
- * (clock skew) is a known age: the journal stays pending until now catches up
- * and the window has then passed.
+ * listing never settles it. A timestamp ahead of now by no more than the window
+ * (clock skew) is a known age: the journal stays pending until now has passed
+ * that timestamp by the window.
  */
 const LATE_CREATE_WINDOW_MS = 2 * 60_000;
 

@@ -1525,7 +1525,7 @@ describe('a listing whose paging details contradict each other is never a comple
   });
 });
 
-describe('a listing that changes what it declared between pages is never a complete listing', () => {
+describe('a listing that contradicts what it declared, on one page or between pages, is never a complete listing', () => {
   interface Page { items: unknown[]; info: Record<string, number> | null }
   /** Answer a listing from a script, one scripted page per request; a page past the script is empty with no paging block. */
   function overridePaged(matches: (url: URL, method: string) => boolean, pages: Page[]): void {
@@ -1540,15 +1540,15 @@ describe('a listing that changes what it declared between pages is never a compl
     }));
   }
 
-  /** The listing the provider is really serving is `items`; each script tells it with a later page that contradicts an earlier one. Item three is the one a truncated listing omits. */
+  /** The listing the provider is really serving is `items`; each script contradicts itself or an earlier page. Item three is the one a truncated listing omits. */
   const SCRIPTS: Array<[string, (items: unknown[]) => Page[]]> = [
     ['a total that shrinks on page two while its total_count disappears', (i) => [
       { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
       { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 2 } },
     ]],
-    ['a total_count that shrinks on page two', (i) => [
+    ['a coherent shrink on page two, where total_pages and total_count fall together', (i) => [
       { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
-      { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 3, total_count: 2 } },
+      { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 2, total_count: 2 } },
     ]],
     ['paging details that vanish on page two', (i) => [
       { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
@@ -1631,7 +1631,10 @@ describe('a listing that changes what it declared between pages is never a compl
       await connectWithZoneA();
       setJournal(JSON.stringify(OLD_JOURNAL));
       overridePaged(recordsAtCheckName, script(RECORDS));
-      expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+      const refused = await refusal(service.disconnect(actor));
+      expect(refused.code).toBe('CLEANUP_PENDING');
+      expect(refused.message).toContain('could not read');
+      expect(refused.message).not.toContain('Other records already sit');
       expect(JSON.parse(journal(ZONE_A) as string)).toMatchObject(OLD_JOURNAL);
       expect(service.getView().connected).toBe(true);
     });
@@ -1647,7 +1650,7 @@ describe('a listing that changes what it declared between pages is never a compl
       expect(fake.requests.filter((r) => r.startsWith('POST') || r.startsWith('DELETE'))).toEqual([]);
     });
 
-    it('keeps a journal column that cannot be read through recheck and disconnect', async () => {
+    it('keeps a journal column that cannot be read through recheck, disconnect and a DNS check', async () => {
       await connectWithZoneA();
       setJournal('{');
       overridePaged(recordsAtCheckName, script(RECORDS));
@@ -1655,6 +1658,10 @@ describe('a listing that changes what it declared between pages is never a compl
       expect(journal(ZONE_A)).toBe('{');
       expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
       expect(journal(ZONE_A)).toBe('{');
+      fake.requests = [];
+      expect((await service.dnsCheck(ZONE_A, actor)).complete).toBe(false);
+      expect(journal(ZONE_A)).toBe('{');
+      expect(fake.requests.filter((r) => r.startsWith('POST') || r.startsWith('DELETE'))).toEqual([]);
     });
 
     it('sends no create from the preflight listing of a DNS check with no journal', async () => {
@@ -1664,6 +1671,27 @@ describe('a listing that changes what it declared between pages is never a compl
       await expect(service.dnsCheck(ZONE_A, actor)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
       expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
     });
+  });
+
+  const HONEST = (items: unknown[]): Page[] => [
+    { items: [items[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+    { items: [items[1]], info: null },
+    { items: [items[2]], info: { page: 3, total_pages: 3 } },
+  ];
+
+  it('still finds its account on page three of an honest listing whose later pages drop details', async () => {
+    overridePaged(accountsList, HONEST(ACCOUNTS));
+    expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).accountName).toBe('Example Account');
+  });
+
+  it('still cleans up a check record it finds on page three of an honest listing', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    overridePaged(recordsAtCheckName, HONEST(RECORDS));
+    fake.requests = [];
+    await service.recheck(actor);
+    expect(fake.requests).toContain(`DELETE /zones/${ZONE_A}/dns_records/${OURS.id}`);
+    expect(journal(ZONE_A)).toBeNull();
   });
 
   it('still reads an honest listing whose later pages drop details the first page gave', async () => {

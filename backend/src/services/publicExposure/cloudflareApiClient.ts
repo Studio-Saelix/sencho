@@ -7,9 +7,11 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * It owns the transport rules Cloudflare's API needs: the response envelope
  * (`success`, `errors`, `messages`, `result_info`), read only when each field is
  * a list or an object as documented and `result_info` holds whole counts (the text
- * inside an informational `errors` or `messages` entry is read when it is a string
- * and dropped otherwise), complete pagination that holds every page to the totals,
- * page size and page bounds the listing declared before it, with a page cap, bounded retries with full jitter that honour `Retry-After`,
+ * of a `messages` entry is kept when it is a string, or an object with a string
+ * `message`; `errors` on a success is checked for shape and its text is not read),
+ * complete pagination that holds every page to the total_pages, total_count and
+ * per_page the listing declared before it, with a page cap, bounded retries with
+ * full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
  * whole operation, refused redirects, and a process-wide request budget.
  *
@@ -227,7 +229,7 @@ function contradictoryPaging(): CloudflareApiError {
   return new CloudflareApiError({ kind: 'invalid_response', message: "Cloudflare's paging details do not match the listing it returned; Sencho did not use it." });
 }
 
-/** What a listing has declared about its own size so far. A later page can repeat a declaration but never change or drop it. */
+/** What a listing has declared about its own size so far. A later page can repeat a declaration or leave it out, but never change it: the first declaration stays the bound for every later page. */
 interface ListingBounds {
   totalPages?: number;
   totalCount?: number;
@@ -236,7 +238,7 @@ interface ListingBounds {
 
 /**
  * Check one page against its own paging block and against everything the pages before it declared.
- * A listing that moves its totals, its page size or its page bounds midway is not trusted: any page
+ * A listing that changes its total_pages, total_count or per_page midway is not trusted: a page
  * that omits a declaration still answers to the earlier one, so no later page can make an incomplete
  * listing look whole.
  */
@@ -326,7 +328,8 @@ export class CloudflareApiClient {
       items.push(...(response.result as T[]));
       if (bounds.totalPages !== undefined) {
         if (page >= bounds.totalPages) return completeListing(items, bounds);
-        if (response.result.length === 0) throw contradictoryPaging();
+        // A page before the last holds a full page: at least the declared page size, and never nothing.
+        if (response.result.length < Math.max(1, bounds.perPage ?? 1)) throw contradictoryPaging();
       } else if (response.result.length < Math.min(perPage, bounds.perPage ?? perPage)) {
         return completeListing(items, bounds);
       } else {
@@ -466,7 +469,7 @@ export class CloudflareApiClient {
       });
     }
     const unreadable = () => new CloudflareApiError({ kind: 'invalid_response', status, message: 'A field in its answer had an unexpected shape.' });
-    // A success is read only when each envelope field is a list or object as documented, so nothing below can throw on it.
+    // A success is read only when `errors`, `messages` and `result_info` have their documented shape (lists, or an object with whole counts), so nothing below can throw on them.
     const { errors, messages: rawMessages } = envelope;
     // A null `errors`, `messages` or `result_info` reads as absent; any other shape than a list (or an object) does not.
     if (errors != null && (!Array.isArray(errors) || !errors.every(isPlainObject))) throw unreadable();

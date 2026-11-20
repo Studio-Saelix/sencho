@@ -2,7 +2,7 @@
  * The shared Cloudflare API client: envelope parsing, complete pagination,
  * bounded retries that honour Retry-After, permanent 4xx, ambiguous POSTs,
  * deadlines, refused redirects, the request budget, envelope fields that are
- * not a list or object as documented, and paging details that contradict each
+ * not in their documented shape, and paging details that contradict each
  * other, on one page or between pages.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -494,7 +494,7 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
       { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 2 } },
       { items: [2], info: { page: 2, per_page: 1, total_pages: 3, total_count: 2 } },
     ]],
-    ['a page two that sits past the pages page one declared', [
+    ['a page two that declares fewer pages than its own page number', [
       { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
       { items: [2], info: { page: 2, per_page: 1, total_pages: 1 } },
     ]],
@@ -504,6 +504,30 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
     ]],
     ['a page of results larger than the page size declared', [
       { items: [1, 2, 3], info: { page: 1, per_page: 1, total_pages: 1 } },
+    ]],
+    ['a total_pages that changes on its own, with no total_count ever declared', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3 } },
+      { items: [2], info: { page: 2, total_pages: 2 } },
+    ]],
+    ['a coherent shrink, where total_pages and total_count fall together', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 2, total_count: 2 } },
+    ]],
+    ['a total_count that changes while total_pages still follows from it', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
+      { items: [3], info: { page: 2, per_page: 2, total_pages: 2, total_count: 3 } },
+    ]],
+    ['a total_count that first appears on page two and is not met', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 2 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 2, total_count: 3 } },
+    ]],
+    ['a page before the last that is shorter than the page size declared', [
+      { items: [1, 2, 3], info: { page: 1, per_page: 50, total_pages: 2 } },
+      { items: [4, 5, 6], info: { page: 2, per_page: 50, total_pages: 2 } },
+    ]],
+    ['a later page that drops its total_count and ends short of the declared page size', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3, total_count: 5 } },
+      { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
     ]],
     ['a page of results larger than the page size an earlier page declared', [
       { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 3 } },
@@ -515,19 +539,20 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
   });
 
   it.each<[string, Script]>([
-    ['paging details that vanish on the last page', [
+    ['paging details that vanish on a page before the last', [
       { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
       { items: [2], info: null },
-    ]],
-    ['a later page that drops its total_count and ends short', [
-      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3, total_count: 5 } },
-      { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
     ]],
   ])('does not let %s end a listing early', async (_label, pages) => {
     const { client, calls } = scripted(pages);
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
-    // The earlier total_pages still asks for page three; the empty page it gets is the contradiction.
+    // The earlier total_pages still asks for page three; the empty page it gets leaves the items short of the declared total_count.
     expect(calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('refuses a page larger than the size asked for when no page declared a per_page', async () => {
+    const { client } = scripted([{ items: [1, 2, 3], info: { page: 1, total_pages: 1 } }]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
   });
 
   it('keeps an earlier total as the bound when a later page repeats nothing, and accepts the listing that meets it', async () => {
