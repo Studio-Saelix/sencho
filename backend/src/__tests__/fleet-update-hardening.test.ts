@@ -482,6 +482,39 @@ describe('forced-recheck throttle', () => {
     expect(invalidateSpy).not.toHaveBeenCalledWith('latest-version');
     expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)).toBeUndefined();
   });
+
+  it('re-reads the local Compose image pin once per cooldown window', async () => {
+    const { _resetForcedRecheckThrottleForTests } = await import('../routes/fleet');
+    _resetForcedRecheckThrottleForTests();
+    mockCompareTargetFetch();
+    const pinSpy = vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockResolvedValue(null);
+
+    const first = await request(app).delete('/api/fleet/update-status?recheck=true').set('Authorization', adminAuth);
+    expect(first.body.rechecked).toBe(true);
+    expect(pinSpy).toHaveBeenCalledTimes(1);
+    expect(pinSpy).toHaveBeenCalledWith({ fresh: true });
+
+    const second = await request(app).delete('/api/fleet/update-status?recheck=true').set('Authorization', adminAuth);
+    expect(second.body.rechecked).toBe(false);
+    expect(pinSpy).toHaveBeenCalledTimes(1);
+
+    const plain = await request(app).delete('/api/fleet/update-status').set('Authorization', adminAuth);
+    expect(plain.status).toBe(200);
+    expect(pinSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still answers 200 rechecked when the pin read fails', async () => {
+    const { _resetForcedRecheckThrottleForTests } = await import('../routes/fleet');
+    _resetForcedRecheckThrottleForTests();
+    mockCompareTargetFetch();
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = await request(app).delete('/api/fleet/update-status?recheck=true').set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ rechecked: true });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Compose image pin'), expect.stringContaining('pin read failed'));
+  });
 });
 
 describe('GET /api/fleet/update-status/release-notes', () => {

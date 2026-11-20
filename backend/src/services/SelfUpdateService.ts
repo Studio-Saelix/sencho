@@ -32,6 +32,7 @@ import {
   buildTargetImageRef,
   isRepinBlocked,
   isValidImageRef,
+  mapHostPathToContainerPath,
   patchComposeServiceImage,
   resolveServiceImageFromContents,
   type ImagePinKind,
@@ -58,10 +59,16 @@ const UPDATE_ERROR_FILE = '/app/data/.sencho-update-error';
 // error file because the main process cannot reach the compose working dir.
 const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
 
-// Cap how long a cached pin classification is served to status/meta callers.
-// Update DECISIONS always read fresh (fresh: true), so this only bounds how
-// stale a displayed pin kind can be after a live compose edit.
+// How long a cached pin classification is served before a routine caller
+// re-reads it. Only a config file Sencho can open through its own bind mounts is
+// re-read (directly, no container). When a file needs the helper container, the
+// cached classification is served until a fresh read (an update decision, the
+// Fleet Recheck, or a restart) replaces it, so routine monitoring never starts a
+// container. Update DECISIONS always read fresh (fresh: true).
 const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Largest compose file Sencho reads when classifying its own image pin. */
+const COMPOSE_READ_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Ceiling for pulling the Sencho image before an endpoint replacement stages. */
 export const SELF_UPDATE_PULL_TIMEOUT_MS = 5 * 60_000;
@@ -126,15 +133,18 @@ export function shQuote(value: string): string {
 
 /**
  * Build the argv for a one-shot helper that reads a single compose config file
- * from the host. The main process cannot open the compose working dir, so it
- * mounts it read-only into a throwaway container and cats the file out. Pure and
- * exported for unit testing. The path is a discrete argv element handed to
- * execFile (no shell), so a path with shell metacharacters stays inert.
+ * from the host. It is used only when none of Sencho's own bind mounts covers
+ * the file, so the helper mounts the working dir read-only into a throwaway
+ * container and cats the file out. The label names its purpose in `docker
+ * events`. Pure and exported for unit testing. The path is a discrete argv
+ * element handed to execFile (no shell), so a path with shell metacharacters
+ * stays inert.
  */
 export function buildComposeReadArgs(workingDir: string, imageName: string, configFilePath: string): string[] {
   return [
     'run', '--rm',
     '--user', 'root',
+    '--label', 'io.sencho.helper=compose-read',
     '--entrypoint', 'cat',
     '-v', `${workingDir}:${workingDir}:ro`,
     '-w', workingDir,
@@ -419,7 +429,12 @@ class SelfUpdateService {
   /** Stashed when the helper exits before any onceHelperExit listener is registered. */
   private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
-  private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
+  private pinCache: {
+    info: ResolvedComposeImage | null;
+    at: number;
+    /** True when at least one config file could only be read through the helper. */
+    needsHelper: boolean;
+  } | null = null;
   /** Bounded reason the last detection refused, null while available. */
   private unavailableCode: SelfUpdateUnavailableCode = 'detecting';
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -704,10 +719,11 @@ class SelfUpdateService {
   }
 
   /**
-   * Classify how this instance's compose image is pinned. Serves a short-lived
-   * cache to frequent status/meta callers; pass `{ fresh: true }` for update
-   * decisions so a live compose edit is always reflected. Returns null when
-   * self-update is unavailable or the compose file could not be read.
+   * Classify how this instance's compose image is pinned. Frequent status/meta
+   * callers are served from a cache that never starts a container; pass
+   * `{ fresh: true }` for update decisions so a live compose edit is always
+   * reflected. Returns null when self-update is unavailable or the compose file
+   * could not be read.
    */
   async getPinInfo(opts?: { fresh?: boolean; cacheOnly?: boolean }): Promise<PinInfo | null> {
     const resolved = await this.resolveComposeImage(opts?.fresh ?? false, opts?.cacheOnly ?? false);
@@ -747,36 +763,83 @@ class SelfUpdateService {
     return { ok: true };
   }
 
-  /** Resolve the compose-declared service image fresh from the host, or from a
-   *  short-lived cache. Reads each config file via a throwaway cat container. */
+  /**
+   * Resolve the compose-declared service image. A fresh read always reads the
+   * current files (directly when a mount covers them, otherwise through the
+   * helper) and refreshes the cache. A routine read never starts a container:
+   * it serves the cache, and re-reads directly once it is older than the TTL
+   * when every file is directly readable. With no cache yet it returns null.
+   */
   private async resolveComposeImage(fresh: boolean, cacheOnly = false): Promise<ResolvedComposeImage | null> {
     if (!this.composeContext) return null;
-    const now = Date.now();
-    if (!fresh && this.pinCache && now - this.pinCache.at < PIN_CACHE_TTL_MS) {
-      return this.pinCache.info;
-    }
-    if (cacheOnly) return null;
-    const { workingDir, configFiles, serviceName, imageName } = this.composeContext;
-    const env = this.buildEnv();
-    const debug = isDebugEnabled();
+    if (fresh) return (await this.readComposeImage(true))?.info ?? null;
+    const cache = this.pinCache;
+    if (!cache) return null;
+    const expired = Date.now() - cache.at >= PIN_CACHE_TTL_MS;
+    if (cacheOnly || !expired || cache.needsHelper) return cache.info;
+    return (await this.readComposeImage(false))?.info ?? cache.info;
+  }
+
+  /**
+   * Read every config file and classify the image. Returns null (cache
+   * untouched) when a routine read could not read a file directly, so a
+   * transient failure keeps the last known classification.
+   */
+  private async readComposeImage(allowHelper: boolean): Promise<{ info: ResolvedComposeImage | null } | null> {
+    const ctx = this.composeContext;
+    if (!ctx) return { info: null };
+    const startedAt = Date.now();
     const files: { filePath: string; content: string }[] = [];
-    for (const raw of configFiles.split(',')) {
+    let needsHelper = false;
+    for (const raw of ctx.configFiles.split(',')) {
       const filePath = raw.trim();
       if (!filePath) continue;
-      try {
-        const { stdout } = await execFileAsync('docker', buildComposeReadArgs(workingDir, imageName, filePath), {
-          env,
-          timeout: 30_000,
-          maxBuffer: 10 * 1024 * 1024,
-        });
-        files.push({ filePath, content: stdout });
-      } catch (error) {
-        if (debug) console.debug('[SelfUpdate:debug] Could not read compose file', filePath, (error as Error).message);
+      let content = await this.readConfigFileDirect(filePath, ctx.hostBindMounts);
+      if (content === null) {
+        if (!allowHelper) return null;
+        needsHelper = true;
+        content = await this.readConfigFileViaHelper(filePath, ctx);
       }
+      if (content !== null) files.push({ filePath, content });
     }
-    const info = resolveServiceImageFromContents(files, serviceName);
-    this.pinCache = { info, at: now };
-    return info;
+    const info = resolveServiceImageFromContents(files, ctx.serviceName);
+    this.pinCache = { info, at: startedAt, needsHelper };
+    return { info };
+  }
+
+  /** Read a config file through one of Sencho's own bind mounts, or null when
+   *  none covers it, its real path leaves the mount, or it is not a plain file. */
+  private async readConfigFileDirect(filePath: string, mounts: ReadonlyArray<HostMount>): Promise<string | null> {
+    const mapped = mapHostPathToContainerPath(filePath, mounts);
+    if (!mapped) return null;
+    try {
+      const [real, root] = await Promise.all([
+        fs.promises.realpath(mapped.containerPath),
+        fs.promises.realpath(mapped.mountDestination),
+      ]);
+      if (real !== root && !real.startsWith(root === '/' ? '/' : `${root}/`)) return null;
+      const stat = await fs.promises.stat(real);
+      if (!stat.isFile() || stat.size > COMPOSE_READ_MAX_BYTES) return null;
+      return await fs.promises.readFile(real, 'utf8');
+    } catch (error) {
+      if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Direct compose read failed', filePath, (error as Error).message);
+      return null;
+    }
+  }
+
+  /** Read a config file from the host through a throwaway cat container. */
+  private async readConfigFileViaHelper(filePath: string, ctx: ComposeContext): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync('docker', buildComposeReadArgs(ctx.workingDir, ctx.imageName, filePath), {
+        env: this.buildEnv(),
+        timeout: 30_000,
+        maxBuffer: COMPOSE_READ_MAX_BYTES,
+      });
+      return stdout;
+    } catch (error) {
+      if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Could not read compose file', filePath, (error as Error).message);
+      return null;
+    }
   }
 
   private buildEnv(): NodeJS.ProcessEnv {

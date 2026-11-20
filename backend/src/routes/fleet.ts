@@ -2374,6 +2374,20 @@ fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: R
   }
 });
 
+/**
+ * Re-read this node's own Compose image pin as part of a Recheck, so an install
+ * whose Compose file only the helper container can read still picks up a live
+ * edit. Bounded by the same cooldown as the version refresh; a failed read is
+ * logged and never fails the Recheck.
+ */
+async function refreshLocalImagePin(): Promise<void> {
+  try {
+    await SelfUpdateService.getInstance().getPinInfo({ fresh: true });
+  } catch (error) {
+    console.warn('[Fleet] Could not refresh the Compose image pin during recheck:', errorMessageForLog(error));
+  }
+}
+
 fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   // Optionally pre-fetch a fresh latest version so the next GET compares against
@@ -2385,6 +2399,7 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
     if (now - lastForcedRecheckAt >= FORCED_RECHECK_COOLDOWN_MS) {
       lastForcedRecheckAt = now;
       await getLatestVersion(true);
+      await refreshLocalImagePin();
       rechecked = true;
     }
   }

@@ -75,9 +75,12 @@ The second option matters because Sencho talks to Docker through two paths, and 
 | Inventory, stats, events, lifecycle, prune, interactive shell, mesh network operations | Dockerode SDK over the default Docker endpoint | Yes |
 | Stack deploy, update, down, pull, compose logs and config | `docker compose` CLI, inherits the container environment | Yes |
 | Volume browser helper containers | Dockerode create, attach, start, wait, remove | Yes |
+| Reading Sencho's own Compose file | Read directly through Sencho's own mounts, or a short-lived `docker run` helper when no mount covers the file | Yes |
 | Self-update and reapply helpers | Helper container mounts `/var/run/docker.sock` directly, or the host socket the proxy mounts when the proxy is recreated with Sencho | Host Unix socket only |
 
 The last row is the exception to everything above. See [Self-update behind a proxy](#self-update-behind-a-proxy).
+
+Sencho reads its own Compose file to see how its image is pinned. When a folder Sencho has mounted holds the file, it reads it directly and starts no container. Otherwise it starts a short-lived helper labelled `io.sencho.helper=compose-read` at startup, when you click **Recheck** in **Node updates**, and before an update or reapply. Routine monitoring never starts one, so tools that watch Docker events get no recurring Sencho containers to react to. If you edit the file without redeploying, **Recheck** picks up the change.
 
 A Compose `hostname:` override on the Sencho service is supported. Sencho identifies its own container from the process cgroup when the hostname does not match the container ID, so self-protection and Reapply keep working with a custom hostname.
 

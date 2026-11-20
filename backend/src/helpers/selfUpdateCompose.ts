@@ -1,3 +1,4 @@
+import path from 'path';
 import { parse, parseDocument } from 'yaml';
 import semver from 'semver';
 import { normalizeImageRepository } from './imageChannel';
@@ -206,4 +207,52 @@ export function patchComposeServiceImage(content: string, serviceName: string, n
   }
   doc.setIn(['services', serviceName, 'image'], newImageRef);
   return String(doc);
+}
+
+/** A bind mount of Sencho's own container: host path and where it appears inside. */
+export interface PathMount {
+  source: string;
+  destination: string;
+}
+
+/** An absolute POSIX path with no `..` segment, normalized and without a trailing slash. */
+function normalizeAbsolutePath(value: string): string | null {
+  if (!value.startsWith('/') || value.includes('\0') || value.split('/').includes('..')) return null;
+  const normalized = path.posix.normalize(value);
+  return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+}
+
+/** Whether `child` is `parent` or sits under it, compared by whole path segment. */
+function isSameOrChildPath(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  return child.startsWith(parent === '/' ? '/' : `${parent}/`);
+}
+
+/**
+ * Translate a host path into the path Sencho sees it at, through the bind mount
+ * with the longest matching source. A prefix only matches on a whole path
+ * segment (`/opt/dock` never covers `/opt/docker/x`). Relative paths and `..`
+ * segments are refused rather than resolved, so a caller never reads a file the
+ * mount did not expose. Returns the mount's destination too, so the caller can
+ * confirm the resolved file still lives under it.
+ */
+export function mapHostPathToContainerPath(
+  hostPath: string,
+  mounts: ReadonlyArray<PathMount>,
+): { containerPath: string; mountDestination: string } | null {
+  const host = normalizeAbsolutePath(hostPath);
+  if (!host) return null;
+  let best: { source: string; destination: string } | null = null;
+  for (const mount of mounts) {
+    const source = normalizeAbsolutePath(mount.source);
+    const destination = normalizeAbsolutePath(mount.destination);
+    if (!source || !destination || !isSameOrChildPath(host, source)) continue;
+    if (!best || source.length > best.source.length) best = { source, destination };
+  }
+  if (!best) return null;
+  const relative = path.posix.relative(best.source, host);
+  return {
+    containerPath: relative ? path.posix.join(best.destination, relative) : best.destination,
+    mountDestination: best.destination,
+  };
 }

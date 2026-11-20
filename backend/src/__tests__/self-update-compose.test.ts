@@ -7,6 +7,7 @@
  *   - resolveServiceImageFromContents (reverse -f precedence),
  *   - patchComposeServiceImage (comment-preserving round-trip),
  *   - buildComposeReadArgs (throwaway cat container),
+ *   - mapHostPathToContainerPath (reading a covered file without a container),
  *   - the composeCopy branch of buildSelfUpdateComposeCmd,
  *   - the repinWritable branch of buildSelfUpdateRunArgs.
  */
@@ -16,6 +17,7 @@ import {
   buildTargetImageRef,
   isRepinBlocked,
   isValidImageRef,
+  mapHostPathToContainerPath,
   resolveServiceImageFromContents,
   patchComposeServiceImage,
   isSenchoDevRepository,
@@ -224,6 +226,7 @@ describe('buildComposeReadArgs', () => {
     expect(args).toEqual([
       'run', '--rm',
       '--user', 'root',
+      '--label', 'io.sencho.helper=compose-read',
       '--entrypoint', 'cat',
       '-v', '/opt/sencho:/opt/sencho:ro',
       '-w', '/opt/sencho',
@@ -236,6 +239,57 @@ describe('buildComposeReadArgs', () => {
     const args = buildComposeReadArgs('/srv/$(touch pwned)', 'img', '/srv/$(touch pwned)/compose.yml');
     expect(args).toContain('/srv/$(touch pwned):/srv/$(touch pwned):ro');
     expect(args[args.length - 1]).toBe('/srv/$(touch pwned)/compose.yml');
+  });
+});
+
+describe('mapHostPathToContainerPath', () => {
+  const same = { source: '/opt/sencho', destination: '/opt/sencho' };
+
+  it('maps a file under a folder mount, at the same path or a different one', () => {
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [same])).toEqual({
+      containerPath: '/opt/sencho/compose.yaml', mountDestination: '/opt/sencho',
+    });
+    expect(mapHostPathToContainerPath('/opt/sencho/sub/compose.yaml', [{ source: '/opt/sencho', destination: '/stacks/self' }])).toEqual({
+      containerPath: '/stacks/self/sub/compose.yaml', mountDestination: '/stacks/self',
+    });
+  });
+
+  it('maps an exact file mount to its destination', () => {
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/compose.yaml', destination: '/etc/self.yaml' }])).toEqual({
+      containerPath: '/etc/self.yaml', mountDestination: '/etc/self.yaml',
+    });
+  });
+
+  it('picks the mount with the longest source', () => {
+    const mounts = [
+      { source: '/opt', destination: '/host-opt' },
+      { source: '/opt/sencho', destination: '/self' },
+      { source: '/opt/sencho/data', destination: '/data' },
+    ];
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+    expect(mapHostPathToContainerPath('/opt/other/compose.yaml', mounts)?.containerPath).toBe('/host-opt/other/compose.yaml');
+  });
+
+  it('matches whole path segments only', () => {
+    expect(mapHostPathToContainerPath('/opt/docker/x.yaml', [{ source: '/opt/dock', destination: '/d' }])).toBeNull();
+    expect(mapHostPathToContainerPath('/opt/sencho-two/x.yaml', [same])).toBeNull();
+  });
+
+  it('ignores trailing slashes on a mount and normalizes the host path', () => {
+    const mounts = [{ source: '/opt/sencho/', destination: '/self/' }];
+    expect(mapHostPathToContainerPath('/opt/sencho//./compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+  });
+
+  it('refuses relative paths and any .. segment', () => {
+    expect(mapHostPathToContainerPath('opt/sencho/compose.yaml', [same])).toBeNull();
+    expect(mapHostPathToContainerPath('/opt/sencho/../../etc/passwd', [same])).toBeNull();
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/..', destination: '/x' }])).toBeNull();
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho', destination: 'relative' }])).toBeNull();
+  });
+
+  it('returns null with no mounts or no matching mount', () => {
+    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [])).toBeNull();
+    expect(mapHostPathToContainerPath('/srv/x/compose.yaml', [same])).toBeNull();
   });
 });
 
