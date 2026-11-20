@@ -482,10 +482,10 @@ describe('useContainerStats', () => {
       // Docker's first streaming frame carries an all-zero previous sample, and a
       // container that has used no CPU yet reports a zero total. Both are valid
       // readings: only the memory usage must be nonzero.
-      // Each row carries the CPU reading the frame must publish: a delta of 200 over
-      // a system delta of 2000 is 10% on one CPU and 40% on four. Docker omits a zero
-      // system time on the wire, so its first frame has no previous system time at
-      // all: the delta is then the whole current system time.
+      // Each row carries the CPU reading the frame must publish: a CPU delta that is
+      // a tenth of the system delta is 10% on one CPU and 40% on four. Docker omits a
+      // zero system time on the wire, so its first frame has no previous system time
+      // at all: the system delta is then the whole current system time.
       const zeroCpuFrames: Array<[string, Record<string, unknown>, string]> = [
         ['a zero previous CPU total and zero previous system CPU time', {
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
@@ -510,7 +510,7 @@ describe('useContainerStats', () => {
         ['no current system CPU time beside a previous one', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, online_cpus: 4 },
         }, '0.00%'],
-        // The online CPU count is optional: absent or zero scales by one CPU.
+        // The online CPU count is optional: absent, null or zero scales by one CPU.
         ['a positive CPU delta with no online CPU count', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000 },
         }, '10.00%'],
@@ -553,10 +553,11 @@ describe('useContainerStats', () => {
     });
 
     describe('container state changes', () => {
-      // The effect that drops a stopped container's flag runs after the commit, so
-      // only the render filter keeps the chip out of that first commit. Record every
-      // render's error: renders[0] after the rerender is the first commit, before
-      // any effect has pruned the flag.
+      // The effects that drop a stale flag run after the render, so only the
+      // render-time guards (the running-state filter and the node tag) keep the chip
+      // out of the first render after a list or node change. Record every render's
+      // error: errors[0] after the rerender is that first render, before any effect
+      // has pruned the flag.
       const setupRecording = (initial: ContainerInfo[]) => {
         vi.useRealTimers();
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -618,6 +619,34 @@ describe('useContainerStats', () => {
         rerender({ containers: [makeContainer('c1')], nodeId: 2 });
 
         expect(errors[0]).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('does not bring a node\'s failure back when the active node returns to it', () => {
+        const { result, rerender, errors, warnSpy } = setupRecording([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        rerender({ containers: [makeContainer('c1')], nodeId: 2 });
+        errors.length = 0;
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+        expect(errors[0]).toBeNull();
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('raises and clears a failure that happens after the active node changed', () => {
+        const { result, rerender, warnSpy } = setupRecording([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onerror?.(); });
+        rerender({ containers: [makeContainer('c1')], nodeId: 2 });
+        expect(result.current.error).toBeNull();
+
+        act(() => { MockWS.instances[1].onerror?.(); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
         warnSpy.mockRestore();
       });
 
