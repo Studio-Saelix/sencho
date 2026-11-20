@@ -9,8 +9,6 @@
 # runtime only ever starts a helper by digest. See docs/operations/
 # volume-recovery-points.mdx and docs/internal/architecture/recovery-engine.md.
 
-# The 1.27.4 toolchain carries the stdlib fix for CVE-2026-97054 (HTTP/1
-# MaxBytesReader header race, HIGH) that 1.27.3 shipped.
 ARG GO_IMAGE=golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
 
 # restic 0.19.1, tag v0.19.1. The tag-to-commit match is checked below, so a
