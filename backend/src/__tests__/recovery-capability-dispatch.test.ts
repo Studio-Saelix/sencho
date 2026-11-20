@@ -615,6 +615,86 @@ describe('the hub preflight and a node without the overwrite surface', () => {
   });
 });
 
+describe('a directory capture and a path restore reach the owning node, or nothing does', () => {
+  // A stand-in for the owning node: records every request the hub forwards and
+  // answers it as accepted, so a forward is observed rather than inferred.
+  let owner: import('http').Server;
+  let ownerUrl: string;
+  const received: Array<{ method: string; url: string; body: string }> = [];
+  let ownerProxyNodeId: number;
+
+  beforeAll(async () => {
+    const http = await import('http');
+    owner = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        received.push({ method: req.method ?? '', url: req.url ?? '', body });
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ operationId: 'op-owner', accepted: true }));
+      });
+    });
+    await new Promise<void>((resolve) => owner.listen(0, '127.0.0.1', resolve));
+    const address = owner.address() as import('net').AddressInfo;
+    ownerUrl = `http://127.0.0.1:${address.port}`;
+    ownerProxyNodeId = DatabaseService.getInstance().addNode({
+      name: 'recovery-owner-proxy', type: 'remote', api_url: ownerUrl, api_token: 't', compose_dir: '/srv', is_default: false,
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => owner.close(() => resolve()));
+  });
+
+  const transports = [
+    ['a direct-proxy node', () => ownerProxyNodeId],
+    ['a Pilot node', () => pilotNodeId],
+  ] as const;
+
+  const routeTo = async (nodeId: number) => {
+    if (nodeId !== pilotNodeId) return;
+    const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+    vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue(ownerUrl);
+  };
+
+  for (const [label, getId] of transports) {
+    describe(label, () => {
+      for (const [path, body, message] of [
+        ['/api/recovery/storage/roots/points', { stackName: 'app', rootId: 'root-1' }, /directory a stack binds/],
+        ['/api/recovery/points/pt-1/restore/path', { path: '/db/data.sqlite', targetVolumeName: 'restored' }, /one path of a recovery point/],
+      ] as const) {
+        it(`forwards POST ${path} with its body to the owning node when it advertises the capability`, async () => {
+          received.length = 0;
+          mockRead.mockImplementation(echoing({
+            ...descriptor('available', 'engine_registered'),
+            storageKinds: ['named_volume', 'bind_root'],
+            restoreScopes: ['root', 'path'],
+          }) as never);
+          await routeTo(getId());
+          const res = await request(app).post(path).set('Authorization', authHeader).set('x-node-id', String(getId())).send(body);
+          expect(res.status, JSON.stringify(res.body)).toBe(202);
+          expect(res.body).toMatchObject({ operationId: 'op-owner' });
+          expect(received).toHaveLength(1);
+          expect(received[0].method).toBe('POST');
+          expect(received[0].url.split('?')[0]).toBe(path);
+          expect(JSON.parse(received[0].body)).toMatchObject(body);
+        });
+
+        it(`answers POST ${path} with exactly 409 UPDATE_REQUIRED for an older node, and forwards nothing to it`, async () => {
+          received.length = 0;
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await routeTo(getId());
+          const res = await request(app).post(path).set('Authorization', authHeader).set('x-node-id', String(getId())).send(body);
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(message);
+          expect(received).toEqual([]);
+        });
+      }
+    });
+  }
+});
+
 describe('the hub preflight and a node without point reads', () => {
   it('advertises both point reads, so the field is not dead code', async () => {
     const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
