@@ -676,7 +676,7 @@ export function EditorView(props: EditorViewProps) {
                             never shrinks, or its chevron gets clipped. The tab group scrolls
                             sideways when even the icon-only actions leave it too little room. */}
                         <div className="@container p-4 border-b border-muted flex flex-nowrap items-center gap-x-4 shrink-0 min-w-0">
-                            <div className="flex flex-1 flex-nowrap items-center gap-4 min-w-0 overflow-x-auto [scrollbar-width:none]">
+                            <div className="flex flex-1 flex-nowrap items-center gap-4 min-w-0 overflow-x-auto py-1 -my-1 [scrollbar-width:none]">
                                 <Tabs className="shrink-0" value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
