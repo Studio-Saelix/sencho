@@ -24,7 +24,15 @@ vi.mock('@/context/AuthContext', () => ({
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: toastMock }));
 
-import { CloudflareAccountCard } from '../CloudflareAccountCard';
+import { CloudflareAccountCard as AccountCard } from '../CloudflareAccountCard';
+import { usePublicExposureAccount, useShowCloudflareAccountCard } from '@/hooks/usePublicExposureAccount';
+
+/** Mounts the card the way Networking does: the caller owns the account and the gate. */
+function CloudflareAccountCard() {
+  const show = useShowCloudflareAccountCard();
+  const account = usePublicExposureAccount(show);
+  return show ? <AccountCard account={account} /> : null;
+}
 
 const ACCOUNT = 'a1'.repeat(16);
 const ZONE = 'c3'.repeat(16);

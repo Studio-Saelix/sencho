@@ -5,9 +5,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StatusPath } from '@/components/ui/status-path';
-import { cn } from '@/lib/utils';
 import { useVisualBusy } from '@/hooks/useVisualBusy';
-import { usePublicExposureAccount, useShowCloudflareAccountCard, type PublicExposureAccount } from '@/hooks/usePublicExposureAccount';
+import type { PublicExposureAccount } from '@/hooks/usePublicExposureAccount';
 import type { AccountVerb } from '@/lib/cloudflareAccountStatus';
 import type { PublicExposureZone } from '@/lib/publicExposureApi';
 import { AccountStatusPath } from './CloudflareAccountStatusPath';
@@ -16,16 +15,15 @@ import { CloudflareAccountSheet, type CloudflareSheetMode, type CloudflareSheetT
 const KICKER = 'Public exposure · Control instance';
 
 /**
- * The hub's Cloudflare account on the Networking page. It belongs to the
- * control instance and serves every node, so it renders whichever node is
- * active, and even when that node cannot load Networking. Shown only to
- * Admins signed into this instance with the experimental flag on; otherwise it
- * renders nothing and makes no request.
+ * The hub's Cloudflare account on the Networking page: the body of the
+ * Cloudflare tab. It belongs to the control instance and serves every node,
+ * so it renders whichever node is active, and even when that node cannot load
+ * Networking. The caller owns the account state (the tab label reads it too)
+ * and mounts this only for Admins signed into this instance with the
+ * experimental flag on.
  */
-export function CloudflareAccountCard({ className }: { className?: string }) {
-  const show = useShowCloudflareAccountCard();
-  if (!show) return null;
-  return <CloudflareAccountCardBody className={className} />;
+export function CloudflareAccountCard({ account, className }: { account: PublicExposureAccount; className?: string }) {
+  return <CloudflareAccountCardBody account={account} className={className} />;
 }
 
 /** Seconds until a rate-limited Recheck may run again, counting down once a second while it waits. */
@@ -52,8 +50,7 @@ function useRecheckWait(account: PublicExposureAccount): number {
   return until > now ? Math.ceil((until - now) / 1000) : 0;
 }
 
-function CloudflareAccountCardBody({ className }: { className?: string }) {
-  const account = usePublicExposureAccount();
+function CloudflareAccountCardBody({ account, className }: { account: PublicExposureAccount; className?: string }) {
   const { showBusy } = useVisualBusy(account.loading);
   const recheckWait = useRecheckWait(account);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -105,7 +102,7 @@ function CloudflareAccountCardBody({ className }: { className?: string }) {
 
   const connected = account.view?.connected === true;
   return (
-    <Card data-testid="cloudflare-account-card" className={cn('mt-4 max-md:mt-3', className)}>
+    <Card data-testid="cloudflare-account-card" className={className}>
       <CardContent className="flex flex-col gap-3 p-4 max-md:p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">

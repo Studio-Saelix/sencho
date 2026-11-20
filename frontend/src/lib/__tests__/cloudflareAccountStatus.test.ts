@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cloudflareAccountStatus } from '../cloudflareAccountStatus';
+import { accountAttentionTone, cloudflareAccountStatus } from '../cloudflareAccountStatus';
 import type { CheckOutcome, ConnectedAccountView, PublicExposureZone } from '../publicExposureApi';
 
 const ACCOUNT = 'a1'.repeat(16);
@@ -156,5 +156,22 @@ describe('cloudflareAccountStatus', () => {
     }));
     expect(status.stages.find((s) => s.id === 'tunnel')?.line).toBeUndefined();
     expect(status.stages.find((s) => s.id === 'dns')?.line).toContain('DNS: Edit');
+  });
+});
+
+describe('accountAttentionTone', () => {
+  it('stays quiet when nothing is connected yet, or the account is settled', () => {
+    expect(accountAttentionTone({ connected: false }, false)).toBeNull();
+    expect(accountAttentionTone(view(), false)).toBeNull();
+  });
+
+  it('carries the answer tone for a warning or a blocking problem', () => {
+    expect(accountAttentionTone(failed('token_invalid'), false)).toBe('destructive');
+    expect(accountAttentionTone(failed('cloudflare_unreachable'), false)).toBe('warning');
+  });
+
+  it('warns when the account could not be loaded, and stays quiet while it is still loading', () => {
+    expect(accountAttentionTone(null, true)).toBe('warning');
+    expect(accountAttentionTone(null, false)).toBeNull();
   });
 });

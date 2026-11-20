@@ -55,11 +55,12 @@ export interface PublicExposureAccount {
  * It fetches once on mount; each verb replaces the view from its own answer
  * (a refused DNS check or disconnect refetches, since either may still have
  * changed a zone). It never polls. Mount it only where the operator may see
- * the account (experimental flag and Admin).
+ * the account (experimental flag and Admin), or pass `enabled: false` to make
+ * no request.
  */
-export function usePublicExposureAccount(): PublicExposureAccount {
+export function usePublicExposureAccount(enabled = true): PublicExposureAccount {
   const [view, setView] = useState<PublicExposureAccountView | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState<PublicExposurePending>(null);
   const mounted = useRef(true);
@@ -89,8 +90,8 @@ export function usePublicExposureAccount(): PublicExposureAccount {
   const reload = useCallback(() => load({ quiet: false }), [load]);
 
   useEffect(() => {
-    void load({ quiet: false });
-  }, [load]);
+    if (enabled) void load({ quiet: false });
+  }, [load, enabled]);
 
   const run = useCallback(async <T,>(kind: Exclude<PublicExposurePending, null>, action: () => Promise<T>): Promise<T> => {
     setPending(kind);
