@@ -195,7 +195,6 @@ function updatePolicyReason(policy: { reason: string | null }): string {
   return policy.reason ?? 'the stack is not eligible for this update';
 }
 
-/** A refusal sentence that never ends in two periods. */
 /**
  * Answer 409 `data_restore` (and return true) when a compose file the stack's
  * next Compose command opens is under a data restore's fence. Asked before a
@@ -214,6 +213,7 @@ async function refuseIfComposeFilesFenced(req: Request, res: Response, stackName
   }
 }
 
+/** A refusal sentence that never ends in two periods. */
 function updatePolicyRefusalText(prefix: string, policy: { reason: string | null }): string {
   const reason = updatePolicyReason(policy);
   return `${prefix}: ${reason}${reason.endsWith('.') ? '' : '.'}`;
