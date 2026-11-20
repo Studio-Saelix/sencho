@@ -4,7 +4,8 @@
  * error object, and answers a body-parser parse or verify failure with a fixed
  * sentence: body-parser attaches the raw body to the error and V8 quotes a
  * slice of the input in a JSON parse message, so either could carry a secret
- * the request held. Other errors keep their status and message.
+ * the request held. Other errors keep their status and message, and an
+ * unexpected 5xx is answered with a generic one.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { NextFunction, Request, Response } from 'express';

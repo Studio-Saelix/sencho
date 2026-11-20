@@ -15,10 +15,10 @@ import { PublicExposureError } from '../services/publicExposure/types';
  * write is Admin and signed-in-session only, because the account holds a
  * provider credential; only the enabled-zone list is a global `node:read` read.
  *
- * A refused connect (Cloudflare's 401 or 403 among them) is 422, a finished
- * recheck is 200 with its outcome in the body, and an unfinished DNS check is
- * 202. Transport failures are 502 or 503. None is ever 401: a local 401 signs
- * the browser out.
+ * A refused connect or DNS check (Cloudflare's 401 or 403 among them) is 422, a
+ * finished recheck is 200 with its outcome in the body, and an unfinished DNS
+ * check is 202. An unreachable or unreadable Cloudflare is 502 and a rate limit
+ * 503. None is ever 401: a local 401 signs the browser out.
  */
 
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;

@@ -55,8 +55,10 @@ export interface LastCheck {
  * complete listing it does. `refused` is a rejected token (401), a refused
  * location, or a refused delete right after the DNS check's own create, none
  * of which say the zone is out of reach. `unmatched` is records at the check
- * name that are none of the journaled one; `unreadable_journal` is a journal
- * that cannot be read and cannot be rebuilt from the control identity.
+ * name that Sencho cannot prove it created (none matches the journal, or
+ * there is no readable journal to match); `unreadable_journal` is what the view
+ * shows for a journal that cannot be read, and the cause when its record name
+ * cannot be rebuilt from the control identity.
  */
 export type CleanupCause =
   | 'unreachable'
@@ -79,7 +81,7 @@ export interface PendingScopeCheck {
   recordId: string | null;
   /** When the intent was journaled. A create that may still land is not declared lost too early. */
   createdAt: number;
-  /** Why the latest attempt to delete the record did not finish; unset until one fails. */
+  /** Why the latest attempt to delete the record did not finish; unset until one fails, and dropped when the token is replaced. */
   cause?: CleanupCause;
 }
 
@@ -91,7 +93,7 @@ export interface PublicExposureZoneView {
   dns: ZoneDnsState;
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
-  /** `note` is the sentence for the latest cleanup attempt that did not finish; null before any attempt failed. */
+  /** `note` is the sentence for the latest cleanup attempt that did not finish; null before any attempt failed. A journal that cannot be read always carries its own sentence. */
   cleanupPending: { recordName: string; note: string | null } | null;
   /** The TXT record the DNS write check creates and deletes, named in its preview. Null until this instance has an identity. */
   checkRecordName: string | null;

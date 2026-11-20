@@ -29,7 +29,7 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req: Request, r
   // message: body-parser attaches the raw body to the error, and V8 quotes a
   // slice of the input in a JSON parse message, so either could carry a
   // secret the request held. Unexpected server errors keep a redacted stack.
-  // body-parser marks its errors with an `entity.*` type and attaches the raw body to them.
+  // body-parser tags errors about a body's content with an `entity.*` type and attaches the raw body to them.
   const bodyParseFailure = typeof e.type === 'string' && e.type.startsWith('entity.');
   const logged = bodyParseFailure
     ? 'request body could not be parsed'
@@ -42,8 +42,9 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req: Request, r
     return;
   }
   const expose = e.expose === true || status < 500;
-  // The same rule as the log: a parse or verify failure of a body is answered with a fixed sentence,
-  // never its message, which quotes a slice of the body (a pasted token, a password).
+  // The same rule as the log: a body that failed to parse or verify is answered with a fixed sentence,
+  // never its message (a JSON parse message quotes a slice of the body: a pasted token, a password).
+  // Other `entity.*` errors, such as a body that is too large, keep their own message.
   const fixed = bodyParseFailure ? BODY_FAILURE_MESSAGES[e.type as string] : undefined;
   const message = fixed ?? (expose ? getErrorMessage(err, 'Request failed') : 'Internal server error');
   res.status(status).json({ error: message });

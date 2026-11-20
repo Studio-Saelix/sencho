@@ -275,8 +275,8 @@ export class CloudflareAccountAdapter {
   /**
    * Settle a zone whose journal column cannot be read. The record's name is
    * rebuilt from the control identity (`name`, null when there is none); the
-   * journal is cleared only when Cloudflare lists nothing at that name. Records
-   * there are never deleted, since the journaled content that proves one is
+   * journal is cleared only when Cloudflare lists nothing at that name, or the
+   * zone itself is gone. Records there are never deleted, since the journaled content that proves one is
    * ours is gone.
    */
   async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {

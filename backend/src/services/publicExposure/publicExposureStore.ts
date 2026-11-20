@@ -287,6 +287,14 @@ export const publicExposureStore = {
     db().prepare(`UPDATE exposure_zones SET dns_scope = 'unconfirmed', dns_checked_at = NULL WHERE account_id = ?`).run(accountRowId);
   },
 
+  /** A new token makes the last failed cleanup's cause stale: drop it from every journal that can be read; the next attempt writes a fresh one. */
+  clearCleanupCauses(accountRowId: number): void {
+    db().prepare(
+      `UPDATE exposure_zones SET scope_check_pending_json = json_remove(scope_check_pending_json, '$.cause')
+       WHERE account_id = ? AND scope_check_pending_json IS NOT NULL AND json_valid(scope_check_pending_json)`,
+    ).run(accountRowId);
+  },
+
   setZonePending(accountRowId: number, zoneRef: string, pending: PendingScopeCheck | null): void {
     db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE account_id = ? AND zone_ref = ?')
       .run(pending ? JSON.stringify(pending) : null, accountRowId, zoneRef);

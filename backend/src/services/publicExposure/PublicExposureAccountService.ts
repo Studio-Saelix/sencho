@@ -44,8 +44,8 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   too_recent: 'Its create may still be landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
-  unmatched: 'Other records sit at that name and none is the one Sencho created. Delete them in Cloudflare, then try again.',
-  unreadable_journal: 'Sencho cannot read what it kept about this record. Delete any record starting _sencho-check- in that zone in Cloudflare, then try again.',
+  unmatched: 'Other records already sit at that name, and Sencho does not delete records it cannot prove it created. Delete them in Cloudflare, then try again.',
+  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. Delete the record at that name in Cloudflare, then try again.',
 };
 
 function outcomeError(failure: CheckFailure): PublicExposureError {
@@ -158,6 +158,7 @@ export class PublicExposureAccountService {
           store.updateCredential(rowId, credentialEnc, now);
           store.updateCheck(rowId, { accountId, accountName: facts.accountName, zonesListedAt, scopes: facts.scopes, lastCheck, verifiedAt: now, now });
           store.resetZoneWriteProofs(rowId);
+          store.clearCleanupCauses(rowId);
         } else {
           rowId = store.insertAccount({
             adapterId: CLOUDFLARE_ADAPTER_ID, credentialEnc, accountId, accountName: facts.accountName, zonesListedAt,
@@ -260,8 +261,10 @@ export class PublicExposureAccountService {
 
   /**
    * Remove the account and its zone rows. Refused while any node endpoint
-   * exists or a check record cannot be cleaned up. Deletes nothing else in
-   * Cloudflare; the token stays valid there until it is revoked.
+   * exists or a check record cannot be cleaned up, except that a record in a
+   * zone the token can no longer reach is left behind and named in the result
+   * (`leftInCloudflare`). Deletes nothing else in Cloudflare; the token stays
+   * valid there until it is revoked.
    */
   async disconnect(actor: PublicExposureAuditContext): Promise<{ leftInCloudflare: string[] }> {
     return this.exclusive(async (options) => {
@@ -378,12 +381,15 @@ export class PublicExposureAccountService {
     return cleanup;
   }
 
-  /** Keep the cause on the zone's journal so the view can say why the record is still there. An unreadable journal has nowhere to keep it. */
+  /**
+   * Keep the cause on the zone's journal so the view can say why the record is still there. An ambiguous
+   * create has no cause to show (a recheck is the right next step), and a journal that cannot be read has
+   * nowhere to keep one: its zone always shows the unreadable-journal sentence instead.
+   */
   private noteCleanupCause(accountRowId: number, zoneRef: string, cause: CleanupCause | 'ambiguous_create'): void {
+    if (cause === 'ambiguous_create') return;
     const zone = store.getZone(accountRowId, zoneRef);
-    if (!zone?.pending) return;
-    const { cause: _previous, ...rest } = zone.pending;
-    store.setZonePending(accountRowId, zoneRef, cause === 'ambiguous_create' ? rest : { ...rest, cause });
+    if (zone?.pending) store.setZonePending(accountRowId, zoneRef, { ...zone.pending, cause });
   }
 
   private journalFor(accountRowId: number, zone: ZoneRecord): ScopeCheckJournal {

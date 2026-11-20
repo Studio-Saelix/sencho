@@ -3,7 +3,8 @@
  * response (including the 400 for a body that fails to parse, whose parser
  * message quotes the start of the body), an audit row, a log line, or the
  * diagnostics report. Drives every success and failure path with a sentinel
- * token and searches each surface for the token and for its first 8 characters.
+ * token and searches each surface for it; responses and logs are also searched
+ * for its first 8 characters, which is all a parse message quotes.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -112,6 +113,13 @@ describe('Cloudflare token containment', () => {
       .send(`{"token": ${FAKE_TOKEN}, "accountId": "x"}`);
     expect(unquoted.status).toBe(400);
     bodies.push(unquoted.text);
+    // The handler is shared: a login body that fails to parse is answered the same way.
+    const login = await request(app)
+      .post('/api/auth/login')
+      .set('Content-Type', 'application/json')
+      .send(`{"username": "admin", "password": ${FAKE_TOKEN}}`);
+    expect(login.status).toBe(400);
+    bodies.push(login.text);
 
     // An unexpected throw inside the route.
     const { PublicExposureAccountService } = await import('../services/publicExposure/PublicExposureAccountService');
@@ -129,6 +137,7 @@ describe('Cloudflare token containment', () => {
     expect(bodies.join('\n')).not.toContain(FAKE_TOKEN);
     expect(bodies.join('\n')).not.toContain(FAKE_TOKEN.slice(0, 8));
     expect(JSON.parse(unquoted.text)).toEqual({ error: 'The request body could not be parsed.' });
+    expect(JSON.parse(login.text)).toEqual({ error: 'The request body could not be parsed.' });
     expect(JSON.stringify(audit)).not.toContain(FAKE_TOKEN);
     expect(logged.join('\n')).not.toContain(FAKE_TOKEN);
     expect(logged.join('\n')).not.toContain(FAKE_TOKEN.slice(0, 8));

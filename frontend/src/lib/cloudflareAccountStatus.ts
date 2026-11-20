@@ -116,7 +116,7 @@ export function accountProblems(view: ConnectedAccountView): AccountProblem[] {
   }
   // A leftover check record is shown whether or not its zone is still enabled: it blocks disconnect either way.
   for (const zone of view.zones.filter((z) => z.cleanupPending)) {
-    problems.push({ status: 'cleanup_pending', tone: 'warning', title: 'Cleanup pending', line: `A permission-check record is left in ${zone.name}.${zone.cleanupPending?.note ? ` ${zone.cleanupPending.note}` : ''}`, detail: zone.cleanupPending?.recordName ?? null, verb: recheck, stage: 'dns' });
+    problems.push({ status: 'cleanup_pending', tone: 'warning', title: 'Cleanup pending', line: `A permission-check record may be left in ${zone.name}.${zone.cleanupPending?.note ? ` ${zone.cleanupPending.note}` : ''}`, detail: zone.cleanupPending?.recordName ?? null, verb: recheck, stage: 'dns' });
   }
   for (const zone of enabled.filter((z) => !z.seenAtLastCheck)) {
     problems.push({ status: 'zone_not_visible', tone: 'warning', title: 'Zone not visible', line: `${zone.name} is not visible to this token.`, verb: { kind: 'choose_zones' }, stage: 'zones' });

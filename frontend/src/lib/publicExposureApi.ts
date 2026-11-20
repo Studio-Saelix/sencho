@@ -28,7 +28,7 @@ export interface PublicExposureZone {
   dns: ZoneDnsState;
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
-  /** `note` is why the latest attempt to delete the record did not finish; null before any attempt failed. */
+  /** `note` is why the latest attempt to delete the record did not finish; null before any attempt failed. A journal that cannot be read always carries its own sentence. */
   cleanupPending: { recordName: string; note: string | null } | null;
   /** The TXT record the DNS write check creates and deletes. Null until the control instance has an identity. */
   checkRecordName: string | null;

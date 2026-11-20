@@ -1,7 +1,7 @@
 /**
  * Routes under /api/public-exposure: who may call them, input validation,
  * how Cloudflare refusals surface (never as a local 401), honest audit rows,
- * and the hub tables' migration.
+ * the disconnect response, and the hub tables' migration.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';

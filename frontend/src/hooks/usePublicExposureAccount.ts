@@ -141,8 +141,8 @@ export function usePublicExposureAccount(): PublicExposureAccount {
       const { leftInCloudflare } = await publicExposureApi.disconnect();
       if (mounted.current) setView({ connected: false });
       if (leftInCloudflare.length > 0) {
-        // The disconnect went through, but a record is still in Cloudflare: say so instead of reporting a clean success.
-        toast.warning(`Cloudflare account disconnected, but a permission-check record is still in Cloudflare: ${leftInCloudflare.join(', ')}. Delete it there.`);
+        // The disconnect went through, but a record may still be in Cloudflare: say so instead of reporting a clean success.
+        toast.warning(`Cloudflare account disconnected, but a permission-check record may still be in Cloudflare: ${leftInCloudflare.join(', ')}. Delete ${leftInCloudflare.length === 1 ? 'it' : 'them'} there.`);
       } else {
         toast.success('Cloudflare account disconnected.');
       }

@@ -151,6 +151,7 @@ describe('CloudflareAccountCard', () => {
     await screen.findByTestId('dns-check-preview');
     await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
     await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('may be left in example.com')));
+    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('A later Recheck deletes it'));
     expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'cleanup_pending');
   });
 
@@ -171,8 +172,8 @@ describe('CloudflareAccountCard', () => {
     await screen.findByTestId('dns-check-preview');
     await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
     await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('Cloudflare refused the delete')));
-    expect(toastMock.warning).not.toHaveBeenCalledWith(expect.stringContaining('a later Recheck deletes it'));
-    expect(await screen.findByText(/A permission-check record is left in example\.com\. Cloudflare refused the delete/)).toBeInTheDocument();
+    expect(toastMock.warning).not.toHaveBeenCalledWith(expect.stringContaining('A later Recheck deletes it'));
+    expect(await screen.findByText(/A permission-check record may be left in example\.com\. Cloudflare refused the delete/)).toBeInTheDocument();
   });
 
   it('previews enabling a zone with what stack editors may claim, and disables in one click', async () => {
@@ -244,7 +245,7 @@ describe('CloudflareAccountCard', () => {
     await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('_sencho-check-0123456789abcdef.example.com')));
-    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('still in Cloudflare'));
+    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('may still be in Cloudflare'));
     expect(toastMock.success).not.toHaveBeenCalled();
     expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'not_connected');
   });

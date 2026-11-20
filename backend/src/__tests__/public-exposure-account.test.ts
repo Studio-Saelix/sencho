@@ -2,7 +2,9 @@
  * The public exposure account service and its Cloudflare adapter, against a
  * fake Cloudflare API: every named check state, the account change rule, the
  * DNS write check and its journal, zone reconciliation, the lock, the
- * operation deadline, and the audit rows.
+ * operation deadline, the audit rows, Cloudflare answers that are successful
+ * but unreadable, check records the journal cannot name or does not match, the
+ * records a disconnect leaves behind, and the cause shown for a leftover record.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -1108,7 +1110,7 @@ describe('a check record older than the late-create window', () => {
     fake.requests = [];
     const view = await service.recheck(actor);
     expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
-    expect(zoneA(view).cleanupPending?.note).toContain('Other records sit at that name');
+    expect(zoneA(view).cleanupPending?.note).toContain('Other records already sit at that name');
     expect(journal(ZONE_A)).not.toBeNull();
     expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
     expect(fake.records.get(ZONE_A)).toHaveLength(2);
@@ -1120,7 +1122,7 @@ describe('a check record older than the late-create window', () => {
     fake.records.set(ZONE_A, [stranger('"someone else"')]);
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
-    expect(error.message).toContain('Other records sit at that name');
+    expect(error.message).toContain('Other records already sit at that name');
     expect(service.getView().connected).toBe(true);
   });
 
@@ -1291,5 +1293,74 @@ describe('a journal column that cannot be read', () => {
     expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('cannot be read');
     expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).not.toContain('cfsentinel_xyz');
     expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+  });
+});
+
+describe('journal edges after the audit round', () => {
+  it('drops a stale cleanup cause when the token is replaced', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    fake.remove = 403;
+    expect(zoneA(await service.recheck(actor)).cleanupPending?.note).toContain('Cloudflare refused the delete');
+    await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor);
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME, note: null });
+    const kept = JSON.parse(journal(ZONE_A) as string) as { recordId: string; cause?: string };
+    expect(kept.recordId).toMatch(/^[0-9a-f]{32}$/);
+    expect(kept.cause).toBeUndefined();
+  });
+
+  it('leaves an unreadable column alone when the token is replaced', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor);
+    expect(journal(ZONE_A)).toBe('{');
+  });
+
+  it('counts a zone that is gone from Cloudflare as settled for an unreadable journal', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    fake.dnsRead[ZONE_A] = 404;
+    expect(zoneA(await service.recheck(actor)).cleanupPending).toBeNull();
+    expect(journal(ZONE_A)).toBeNull();
+  });
+
+  it('lets disconnect through for an unreadable journal in a zone that left the account, and names the record it would have used', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    fake.dnsRead[ZONE_A] = 403;
+    fake.zones = [{ id: ZONE_B, name: 'example.net' }];
+    await service.recheck(actor);
+    expect(zoneA(service.getView())).toMatchObject({ seenAtLastCheck: false, cleanupPending: { recordName: CHECK_NAME } });
+    expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
+  });
+
+  it('runs a fresh DNS check once an unreadable journal has been settled', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    const { view, complete } = await service.dnsCheck(ZONE_A, actor);
+    expect(complete).toBe(true);
+    expect(zoneA(view).dns).toBe('confirmed');
+    expect(zoneA(view).cleanupPending).toBeNull();
+  });
+
+  it('reads an unreadable record list at the derived name as an unexpected answer', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    overrideAnswers([{ path: /^\/zones\/[0-9a-f]+\/dns_records$/, query: (url) => url.searchParams.get('name') === CHECK_NAME, result: [null] }]);
+    expect(zoneA(await service.recheck(actor)).cleanupPending?.note).toContain('cannot read what it kept');
+    expect(journal(ZONE_A)).toBe('{');
+    expect((await refusal(service.disconnect(actor))).message).toContain('could not be deleted');
+  });
+
+  it.each([
+    ['a null element', [null]],
+    ['an element with no id', [{ name: 'Example Account' }]],
+  ])('reads an account list with %s on a recheck as unexpected, never as a missing account', async (_label, accounts) => {
+    await connectWithZoneA();
+    (fake as { accounts: unknown }).accounts = accounts;
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck.outcome).toBe('unexpected_response');
+    expect(view.scopes.zoneRead).toBe('confirmed');
   });
 });
