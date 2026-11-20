@@ -18,13 +18,14 @@ export function composeArgvFiles(args: readonly string[]): string[] {
 }
 
 /**
- * Throw the fence's refusal when a file a Compose argv that starts containers
- * names with `-f` (resolved against `cwd`, the command's working directory),
+ * Throw the fence's refusal when a file a Compose argv names with `-f`
+ * (resolved against `cwd`, the command's working directory), whatever the
+ * action (`config`, `pull`, `build`, `down` open their files as `up` does),
  * or a path a link on the way to it names, sits in a directory a data restore
  * is overwriting; a file missing there may only be mid-swap, so it refuses too.
  *
- * ComposeService asks it when it assembles that argv (before a deploy's
- * verification pull, when there is one), so a layer it adds
+ * ComposeService asks it when it assembles each argv (a deploy's `up` before
+ * its verification pull, when there is one), so a layer it adds
  * after the caller's own ask (`FileSystemService.refuseIfComposeFenced`) is
  * still asked: the root file and override that a recovery, Mesh, Pilot,
  * digest-pin or bind-remap layer pins, and a captured invocation's file set.

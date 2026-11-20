@@ -1,6 +1,8 @@
 /**
- * A Compose argv that starts containers is asked against a data restore's
- * fence once it is assembled: the recovery, Mesh, Pilot and digest-pin layers
+ * Every Compose argv Sencho assembles (an `up`, and equally the `config`,
+ * `pull` or `build` a deploy, an update or an image pull runs first) is asked
+ * against a data restore's fence once it is assembled, and a deploy and an
+ * image pull ask before they run any of them: the recovery, Mesh, Pilot and digest-pin layers
  * name the root file and the first override with `-f` themselves, which turns
  * COMPOSE_FILE off, so the file list a caller asked up front is not the one
  * Compose opens.
@@ -35,6 +37,7 @@ vi.mock('../services/DatabaseService', () => ({
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
       isMeshStackEnabled: () => mockState.meshEnabled,
+      getRegistries: () => [],
     }),
   },
 }));
@@ -48,6 +51,7 @@ import { composeArgvFiles, refuseIfComposeArgvFenced } from '../helpers/composeA
 import * as envFileResolution from '../helpers/envFileResolution';
 import { resolveRollbackInventory } from '../services/rollbackInventory';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
+import { allowingPolicy } from './__helpers__/updatePolicyFixture';
 
 const NODE = 1;
 
@@ -146,7 +150,7 @@ describe('the fence asks the files an assembled Compose argv names', () => {
     expect(isDataRestoreFenceError(error), String(error)).toBe(true);
   });
 
-  it('refuses a Mesh or Pilot up that pins the override, and leaves a render and a COMPOSE_FILE up to the caller', async () => {
+  it('refuses every Compose command a Mesh or Pilot layer pins the override for, a render and a pull as much as an up, and leaves a COMPOSE_FILE argv to the caller', async () => {
     const meshLayer = path.join(dataDir, 'mesh.override.yml');
     await fsPromises.writeFile(meshLayer, 'services: {}\n');
     const svc = ComposeService.getInstance(NODE) as unknown as {
@@ -160,12 +164,104 @@ describe('the fence asks the files an assembled Compose argv names', () => {
     expect(plain).not.toContain('-f');
 
     vi.spyOn(MeshService.getInstance(), 'ensureStackOverride').mockResolvedValue(meshLayer);
-    const error = await refusal(svc.authoredComposeArgs('app', ['up', '-d']));
-    expect(isDataRestoreFenceError(error)).toBe(true);
-    // `create` makes the containers an up would, so it is asked too.
-    expect(isDataRestoreFenceError(await refusal(svc.authoredComposeArgs('app', ['create'])))).toBe(true);
-    // A render opens the same files but starts nothing; the connection check answers for it.
-    await expect(svc.authoredComposeArgs('app', ['config'])).resolves.toContain(meshLayer);
+    // Each of these opens the root, the override and the Mesh layer, so each
+    // is refused before a Compose process could read the override.
+    for (const action of [
+      ['up', '-d'], ['create'], ['config', '--quiet'], ['config', '--hash=web'],
+      ['pull', '--ignore-buildable'], ['build', '--pull'], ['start'], ['stop'], ['down'],
+    ]) {
+      expect(isDataRestoreFenceError(await refusal(svc.authoredComposeArgs('app', action))), action.join(' ')).toBe(true);
+    }
+  });
+
+  describe('a deploy, an image pull, and the checks they run before up', () => {
+    // Stand-ins for the Compose processes: any call means Docker Compose was started.
+    function watchSpawns(svc: ComposeService): { execute: ReturnType<typeof vi.spyOn>; capture: ReturnType<typeof vi.spyOn> } {
+      const inner = svc as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      // The SOPS preflight reads the GitOps store, which this suite does not stand up.
+      vi.spyOn(inner, 'assertSopsOverlayOrRefuse').mockResolvedValue(undefined);
+      return {
+        execute: vi.spyOn(inner, 'execute').mockResolvedValue(undefined),
+        capture: vi.spyOn(inner, 'captureCompose').mockResolvedValue(''),
+      };
+    }
+
+    async function withLayer(kind: 'mesh' | 'pilot'): Promise<void> {
+      if (kind === 'mesh') {
+        mockState.meshEnabled = true;
+        const meshLayer = path.join(dataDir, 'mesh.override.yml');
+        await fsPromises.writeFile(meshLayer, 'services: {}\n');
+        vi.spyOn(MeshService.getInstance(), 'ensureStackOverride').mockResolvedValue(meshLayer);
+        return;
+      }
+      process.env.SENCHO_MODE = 'pilot';
+      const overrides = path.join(dataDir, 'mesh', 'overrides', String(NODE));
+      await fsPromises.mkdir(overrides, { recursive: true });
+      await fsPromises.writeFile(path.join(overrides, 'app.override.yml'), 'services: {}\n');
+    }
+
+    for (const kind of ['mesh', 'pilot'] as const) {
+      it(`refuses an atomic and a plain deploy with a ${kind} layer before any Compose process or capture`, async () => {
+        await withLayer(kind);
+        holdFence();
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        const capture = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCandidate');
+        const svc = ComposeService.getInstance(NODE);
+        const spawns = watchSpawns(svc);
+        for (const atomic of [true, false]) {
+          const error = await refusal(svc.deployStack('app', undefined, atomic));
+          expect(isDataRestoreFenceError(error), `${kind} atomic=${atomic}: ${String(error)}`).toBe(true);
+        }
+        expect(capture).not.toHaveBeenCalled();
+        expect(spawns.execute).not.toHaveBeenCalled();
+        expect(spawns.capture).not.toHaveBeenCalled();
+      });
+
+      it(`refuses an image pull with a ${kind} layer before docker compose pull`, async () => {
+        await withLayer(kind);
+        holdFence();
+        const svc = ComposeService.getInstance(NODE);
+        const spawns = watchSpawns(svc);
+        const error = await refusal(svc.pullStackImages('app', allowingPolicy('app')));
+        expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+        expect(spawns.execute).not.toHaveBeenCalled();
+      });
+    }
+
+    it('still refuses the capture render, the guard hash and the pull at their own argv when the fence is recorded after the up-front ask', async () => {
+      await withLayer('mesh');
+      holdFence();
+      const { FileSystemService } = await import('../services/FileSystemService');
+      // The up-front ask ran before the fence was recorded.
+      vi.spyOn(FileSystemService.prototype, 'refuseIfComposeFenced').mockResolvedValue(undefined);
+      const svc = ComposeService.getInstance(NODE);
+      const inner = svc as unknown as { composeConfigHash(stack: string, service: string): Promise<string | null> };
+      const spawns = watchSpawns(svc);
+      expect(isDataRestoreFenceError(await refusal(svc.validateExactComposeInvocation('app')))).toBe(true);
+      // The guard's hash answers with the fence rather than "hash unknown".
+      const hashed = await refusal(inner.composeConfigHash('app', 'web'));
+      expect(isDataRestoreFenceError(hashed), String(hashed)).toBe(true);
+      const pulled = await refusal(svc.pullStackImages('app', allowingPolicy('app')));
+      expect(isDataRestoreFenceError(pulled), String(pulled)).toBe(true);
+      // Past the connection check (its hash is asked above), a plain deploy
+      // is refused at its up's argv.
+      vi.spyOn(svc, 'evaluateDockerEndpoint').mockResolvedValue(null);
+      const deployed = await refusal(svc.deployStack('app', undefined, false));
+      expect(isDataRestoreFenceError(deployed), String(deployed)).toBe(true);
+      expect(spawns.execute).not.toHaveBeenCalled();
+      expect(spawns.capture).not.toHaveBeenCalled();
+    });
+
+    it('deploys a stack whose fence is on another directory', async () => {
+      await withLayer('mesh');
+      await fsPromises.mkdir(path.join(root, 'elsewhere'));
+      holdFence(path.join(root, 'elsewhere'));
+      const svc = ComposeService.getInstance(NODE);
+      const spawns = watchSpawns(svc);
+      await expect(svc.validateExactComposeInvocation('app')).resolves.toBeUndefined();
+      expect(spawns.execute).toHaveBeenCalledTimes(1);
+      expect(spawns.execute.mock.calls[0][1]).toEqual(expect.arrayContaining(['config', '--quiet']));
+    });
   });
 
   it('reads every file flag form, and resolves a relative file against the command\'s working directory', async () => {

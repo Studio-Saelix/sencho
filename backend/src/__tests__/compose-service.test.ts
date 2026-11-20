@@ -24,7 +24,7 @@ const {
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
-  mockGetStackContent, mockGetEnvContent,
+  mockGetStackContent, mockGetEnvContent, mockRefuseIfComposeFenced,
   mockLoadStackBuildServices,
   mockResolveMissingExternalNetworks,
   mockCreateNetwork,
@@ -87,6 +87,7 @@ const {
   mockGetBindMounts: vi.fn().mockResolvedValue(null),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
+  mockRefuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
   mockLoadStackBuildServices: vi.fn().mockResolvedValue([]),
   mockResolveMissingExternalNetworks: vi.fn().mockResolvedValue({
     status: 'ok',
@@ -253,6 +254,7 @@ vi.mock('../services/FileSystemService', () => ({
       getOverrideFilename: mockGetOverrideFilename,
       getStackContent: mockGetStackContent,
       getEnvContent: mockGetEnvContent,
+      refuseIfComposeFenced: mockRefuseIfComposeFenced,
     }),
   },
 }));
@@ -408,6 +410,7 @@ beforeEach(() => {
   mockGetComposeFilename.mockResolvedValue('compose.yaml');
   mockGetOverrideFilename.mockResolvedValue(null);
   mockEnsureStackOverride.mockResolvedValue(null);
+  mockRefuseIfComposeFenced.mockResolvedValue(undefined);
   mockIsMeshStackEnabled.mockReturnValue(false);
   mockGetRegistries.mockReturnValue([]);
   mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
@@ -2121,6 +2124,62 @@ describe('ComposeService - deployStack', () => {
     }
   });
 
+  it('opens no GitOps deploy for a deploy a data restore fence refuses up front, atomic or not, and starts no Compose process', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    const handle = trackedHandle();
+    const spy = mockTrackedDeploy(handle);
+    mockRefuseIfComposeFenced.mockRejectedValue(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    try {
+      for (const atomic of [true, false]) {
+        const error = await ComposeService.getInstance(1).deployStack('my-stack', undefined, atomic).then(() => null, (e: unknown) => e);
+        expect(isDataRestoreFenceError(error), `atomic=${atomic}`).toBe(true);
+      }
+      expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack', { pinsComposeFiles: false });
+      expect(spy).not.toHaveBeenCalled();
+      expect(handle.failed).not.toHaveBeenCalled();
+      expect(mockCaptureCandidate).not.toHaveBeenCalled();
+      expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('asks a digest-pinned deploy for the root and the override it names', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockRefuseIfComposeFenced.mockRejectedValue(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'manual', actor: null, digestPins: { web: `nginx@sha256:${'a'.repeat(64)}` } } as never)
+      .catch(() => undefined);
+    expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack', { pinsComposeFiles: true });
+  });
+
+  it('opens no GitOps deploy for an update whose up a data restore fence refuses, and does not compensate it', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    const handle = trackedHandle();
+    const spy = mockTrackedDeploy(handle);
+    // The up-front ask passed; the fence is recorded by the time the up's argv is assembled.
+    mockAssertComposeInputs.mockImplementation(async (opts: unknown) => {
+      const { invocation } = opts as { invocation: string[] };
+      if (invocation.includes('up')) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    });
+    try {
+      const error = await ComposeService.getInstance(1).updateStack('my-stack').then(() => null, (e: unknown) => e);
+      expect(isDataRestoreFenceError(error)).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+      expect(handle.failed).not.toHaveBeenCalled();
+      expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+      expect(mockAbandon).toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('up'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+      mockAssertComposeInputs.mockReset().mockResolvedValue(undefined);
+    }
+  });
+
   // A deploy against a GitOps decrypt overlay runs Compose over decrypted
   // secret files, and Compose echoes interpolated values back in its
   // diagnostics (`unable to get image 'audit-...?': invalid reference
@@ -3265,6 +3324,15 @@ describe('ComposeService - a volume removal that would delete the recovery repos
 
     expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down', '--remove-orphans'], expect.any(Object));
     expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down'], expect.any(Object));
+  });
+
+  it('does not swallow a data restore fence refusal of a teardown, and starts no down', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockAssertComposeInputs.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const error = await ComposeService.getInstance(1).downStack('my-stack').then(() => null, (e: unknown) => e);
+    expect(isDataRestoreFenceError(error)).toBe(true);
+    expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('down'))).toBe(false);
   });
 
   it('still takes the same stack down, and deletes it, without removing volumes', async () => {

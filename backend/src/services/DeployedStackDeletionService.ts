@@ -325,6 +325,13 @@ export class DeployedStackDeletionService {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'recovery_volume_protected', error: downErr.message };
         }
+        // A compose file the down names is under a data restore's fence: the
+        // down was refused before Compose ran, so nothing was stopped and the
+        // files stay.
+        if (isDataRestoreFenceError(downErr)) {
+          db.updateCleanupPendingStatus(intentId, 'cancelled');
+          return { ok: false, code: 'data_restore', error: `${downErr.message} Nothing was stopped and the stack's files are untouched.` };
+        }
         // Sencho refused to hand the stack's inputs to Compose, so nothing was
         // torn down. With containers still bound to the directory, deleting its
         // files would orphan them with a success response; with none, there is

@@ -360,9 +360,10 @@ export class StackUpdateOrchestrator {
           },
         );
       } catch (composeError) {
-        // A compose file the service's up names went under a data restore's
-        // fence: refused before Compose ran, and answered by the route as the
-        // fence's refusal, not as a failed update.
+        // A compose file the service's pull or up names went under a data
+        // restore's fence: that command did not start and no container was
+        // replaced, so the route answers it as the fence's refusal, not as a
+        // failed update.
         if (isDataRestoreFenceError(composeError)) throw composeError;
         if (composeError instanceof PulledCandidateBlockedError) {
           return serviceFailed(

@@ -171,14 +171,6 @@ function isNonFatalCompensationError(error: unknown): boolean {
   return code === 'HELD_IMAGE_MISSING' || code === 'RECOVERY_PROBE_FAILED';
 }
 
-/**
- * An action that creates or starts containers from the compose files, so its
- * argv is asked against a data restore's fence before the spawn.
- */
-function opensComposeFilesToStart(action: readonly string[]): boolean {
-  return action.includes('up') || action.includes('create');
-}
-
 async function compensateOrSwallow(
   compensate: () => Promise<boolean>,
   onRefused?: (message: string) => void,
@@ -375,6 +367,9 @@ export class ComposeService {
     try {
       refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
     } catch (error) {
+      // The guard's `config --hash` was refused by a data restore's fence
+      // before Compose ran: the fence answers, not the guard.
+      if (isDataRestoreFenceError(error)) throw error;
       // A guard that cannot run is not a pass. Raised as a refusal so callers
       // that tolerate other teardown failures (delete, template rollback) keep
       // the stack's files and records.
@@ -462,6 +457,9 @@ export class ComposeService {
       }
       return null;
     } catch (error) {
+      // A file the render names is under a data restore's fence: that is the
+      // answer, not a hash the guard could not compute.
+      if (isDataRestoreFenceError(error)) throw error;
       console.warn('[ComposeService] config hash for %s/%s unavailable:', sanitizeForLog(stackName), sanitizeForLog(service), sanitizeForLog(getErrorMessage(error, 'unknown')));
       return null;
     }
@@ -525,6 +523,32 @@ export class ComposeService {
         sanitizeForLog(stackName), operation, sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
     }
+  }
+
+  /**
+   * Ask a data restore's fence for the compose files a deploy, an update, or
+   * an image pull opens, before the operation starts any Compose process (the
+   * required-env render, the endpoint guard's `config --hash`, the capture's
+   * `config --quiet`, a pull) and before it opens a GitOps deploy operation, so
+   * a fence already held is a refusal that ran nothing and recorded nothing.
+   * On the live stack this is the fence's own file list for the command
+   * (`FileSystemService.refuseIfComposeFenced`: an applied spec's files, the
+   * root and overrides a Mesh or Pilot layer pins, or a COMPOSE_FILE
+   * selection); `pinsComposeFiles` is set when the command names the root and
+   * override itself (a digest-pinned up). A decrypt overlay's copies are asked
+   * by the argv prefix that names them. A fence recorded after this ask is
+   * answered at each command's own argv (`authoredComposeArgs`).
+   */
+  private async refuseIfMutationFilesFenced(
+    stackName: string,
+    overlayDir: string | undefined,
+    pinsComposeFiles: boolean,
+  ): Promise<void> {
+    if (overlayDir) {
+      await refuseIfComposeArgvFenced(overlayDir, await this.authoredComposePrefix(stackName, overlayDir));
+      return;
+    }
+    await FileSystemService.getInstance(this.nodeId).refuseIfComposeFenced(stackName, { pinsComposeFiles });
   }
 
   public async validateStackForMutation(stackName: string): Promise<void> {
@@ -618,9 +642,10 @@ export class ComposeService {
       refuseIfUnreadable || action.includes('up') || action.includes('create'),
     );
     args.push(...action);
-    if (opensComposeFilesToStart(action)) {
-      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
-    }
+    // Every command built here opens the files its argv names, a `config`
+    // render or a `pull` as much as an `up`, so each is asked against a data
+    // restore's fence before any Compose process starts.
+    await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
     // the files, env selection, and project directory in the argv the CLI is
@@ -1716,6 +1741,12 @@ export class ComposeService {
       }
     }
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
+    // A digest-pinned up names the root file and override itself.
+    await this.refuseIfMutationFilesFenced(
+      stackName,
+      ctx?.overlayDir,
+      Object.keys(ctx?.digestPins ?? {}).length > 0,
+    );
     // Before the guard: a render that fails on a missing required variable
     // should say so, not that the guard could not read the model.
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
@@ -2314,11 +2345,10 @@ export class ComposeService {
       action.includes('up') || action.includes('create'),
     );
     out.push(...action);
-    if (opensComposeFilesToStart(action)) {
-      // The recovery layer pins the root file and override (or the captured
-      // file set) after the caller's own ask, so the argv itself is asked.
-      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), out);
-    }
+    // The recovery layer pins the root file and override (or the captured
+    // file set) after the caller's own ask, so the argv itself is asked,
+    // whatever the action.
+    await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), out);
     // A captured recovery invocation builds its file set without the authored
     // prefix, so the check has to run here as well: a restored generation can
     // name a compose layer that was never validated by this guard. Its captured
@@ -2811,6 +2841,7 @@ export class ComposeService {
     beforeUp?: () => Promise<void>,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
+    await this.refuseIfMutationFilesFenced(stackName, undefined, false);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSafePilotBindMapping(stackName);
@@ -2928,14 +2959,17 @@ export class ComposeService {
         }
       }
 
+      // The pulls this update needs already ran above, and a build-backed
+      // service runs the image it just built. `up` must not fetch again:
+      // `pull_policy: always` would otherwise pull a registry image over the
+      // built one, after the gate proved the installed image. Built before the
+      // GitOps deploy is opened, so a data restore's fence refusing a file it
+      // names records no failed deploy.
+      const upArgs = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
-        // The pulls this update needs already ran above, and a build-backed
-        // service runs the image it just built. `up` must not fetch again:
-        // `pull_policy: always` would otherwise pull a registry image over the
-        // built one, after the gate proved the installed image.
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
+        const args = upArgs;
         // Before the gates are superseded: a crash inside this bounded,
         // best-effort check must not leave a running workload with its gate
         // already retired.
@@ -3116,6 +3150,9 @@ export class ComposeService {
     // an image reference resolves against still-encrypted files on a SOPS stack,
     // so the pull can fetch a different image than a deploy would use.
     await this.assertSopsOverlayOrRefuse(stackName);
+    // The pull opens the same files an update does; one a data restore is
+    // overwriting refuses it before any Compose process starts.
+    await this.refuseIfMutationFilesFenced(stackName, undefined, false);
     // No `blocked` clause: the editor surfaces this behind its own "Image pull
     // failed:" prefix, and the remedy names the action the operator actually chose.
     await this.assertRequiredEnvPresent(stackName, undefined, {
@@ -3232,7 +3269,7 @@ export class ComposeService {
       // Sencho's refusal to run Compose is not "nothing to clean up": the stack
       // may be running, and the caller decides what is left (stack deletion
       // keeps the files, a template rollback has nothing started to remove).
-      if (error instanceof ComposeExpansionRefusal) throw error;
+      if (error instanceof ComposeExpansionRefusal || isDataRestoreFenceError(error)) throw error;
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }
   }
@@ -3266,6 +3303,7 @@ export class ComposeService {
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, fileAndEnvPrefix);
     }
+    await refuseIfComposeArgvFenced(stackDir, fileAndEnvPrefix);
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
       invocation: fileAndEnvPrefix,
