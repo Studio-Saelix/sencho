@@ -153,6 +153,29 @@ describe('EditorView Anatomy layout', () => {
   });
 });
 
+describe('EditorView editor full screen', () => {
+  it.each(['compose', 'env', 'files'] as const)('offers the toggle on the %s tab', (activeTab) => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab })} />);
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it('collapses the left column, keeps it across tabs, and resets when the editor closes', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose' })} />);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    rerender(<EditorView {...makeProps({ editingCompose: true, activeTab: 'env' })} />);
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+
+    rerender(<EditorView {...makeProps({ editingCompose: false, activeTab: 'env' })} />);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+  });
+});
+
 describe('EditorView service lifecycle permission', () => {
   afterEach(() => { lastContainersHealthCanDeploy = undefined; });
 
