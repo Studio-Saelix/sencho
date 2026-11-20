@@ -176,6 +176,20 @@ describe('EditorView editor full screen', () => {
   });
 });
 
+describe('EditorView full screen and deploy', () => {
+  it('exits full screen when Save & Deploy is chosen so the deploy output is visible', async () => {
+    const user = userEvent.setup();
+    const requestSaveAndDeploy = vi.fn();
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose', actionsReady: true, requestSaveAndDeploy })} />);
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Save & Deploy' }));
+    expect(requestSaveAndDeploy).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+  });
+});
+
 describe('EditorView service lifecycle permission', () => {
   afterEach(() => { lastContainersHealthCanDeploy = undefined; });
 

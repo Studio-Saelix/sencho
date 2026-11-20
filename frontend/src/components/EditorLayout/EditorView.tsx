@@ -731,7 +731,7 @@ export function EditorView(props: EditorViewProps) {
                                             )}
                                         </Button>
                                         <div className="flex shrink-0 items-center">
-                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady} aria-label={saveLabel} title={saveLabel}>
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={(e) => { setEditorFullscreen(false); requestSaveAndDeploy(e); }} disabled={lifecycleBusy || !actionsReady} aria-label={saveLabel} title={saveLabel}>
                                                 <Rocket className="w-4 h-4 @[46rem]:mr-2" strokeWidth={1.5} />
                                                 <span className="hidden @[46rem]:inline">{saveLabel}</span>
                                             </Button>
@@ -748,7 +748,7 @@ export function EditorView(props: EditorViewProps) {
                                                     </DropdownMenuItem>
                                                     {canPullImages && (
                                                         <DropdownMenuItem
-                                                            onClick={requestSaveAndPullImages}
+                                                            onClick={(e) => { setEditorFullscreen(false); requestSaveAndPullImages(e); }}
                                                             disabled={lifecycleBusy || !actionsReady}
                                                         >
                                                             <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
