@@ -1133,8 +1133,11 @@ export class StackUpdateRecoveryService {
     // recovery is opened, so a refused restore leaves the generation and the
     // live files as they were. The transaction's whole file set is then
     // registered with the fences until this returns, so a fence recorded
-    // after this ask waits for the restore, its up and any revert instead of
-    // landing between them.
+    // after this ask on one of those files waits for the transaction to end
+    // instead of landing between a write and its revert. The recovery up is
+    // admitted on its own at its spawn, so such a fence refuses that up; the
+    // restored files are then put back under the same registration, and the
+    // refusal is answered as pre_mutation when they are.
     let lease: Awaited<ReturnType<FileSystemService['admitStackFileWork']>>;
     try {
       await FileSystemService.getInstance(row.node_id)
@@ -1176,7 +1179,26 @@ export class StackUpdateRecoveryService {
         // Unreadable content: GENERATION_CONTENT_MISSING from the restore itself.
       }
     }
-    return FileSystemService.getInstance(row.node_id).admitStackFileWork(row.stack_name, relativePaths, prefixes);
+    // The restore also writes or deletes the live managed paths (a file the
+    // stack gained after capture), so those are asked too.
+    try {
+      const { resolveRollbackInventory } = await import('./rollbackInventory');
+      const inventory = await resolveRollbackInventory(row.node_id, row.stack_name);
+      relativePaths.push(
+        ...inventory.entries.map((entry) => entry.relativePath),
+        ...inventory.ownedUncapturedRelativePaths,
+      );
+    } catch {
+      // A live inventory that cannot be read refuses the restore itself; the
+      // managed files and the live selection are still asked here.
+    }
+    return FileSystemService.getInstance(row.node_id).admitStackFileWork(
+      row.stack_name,
+      relativePaths,
+      prefixes,
+      // A row without generation content restores the single backup slot.
+      { backupSlot: !expectsGenerationContent(row) },
+    );
   }
 
   private async compensateUnderFileLease(
@@ -1447,9 +1469,11 @@ export class StackUpdateRecoveryService {
   }
 
   /**
-   * Restore generation project files + Git manifesto/DB without compose-up.
-   * Used when legacy Git materialize fails mid-write and must reinstate the
-   * pre-apply capture before abandoning the recovery candidate.
+   * Restore generation project files + Git manifesto/DB without compose-up,
+   * for a legacy Git materialize that fails mid-write and must reinstate the
+   * pre-apply capture before abandoning the recovery candidate. Nothing in
+   * the current code calls it; its file set is registered with the directory
+   * fences like a rollback's, so a caller added later inherits that.
    */
   public async revertToGenerationContent(generationId: string): Promise<boolean> {
     const row = this.get(generationId);

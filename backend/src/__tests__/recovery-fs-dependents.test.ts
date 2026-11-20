@@ -460,6 +460,25 @@ describe('the fence on a host directory', () => {
   });
 });
 
+describe('a restore\'s own work under its fence', () => {
+  it('does not see its own fence, still sees another restore\'s, and leaves every other caller as it was', async () => {
+    const own = fencedDirectory({ senchoPath: '/srv/own', hostPath: '/srv/own' });
+    fencedDirectory({ senchoPath: '/srv/other', hostPath: '/srv/other' });
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    const store = fence.RestoreFenceStore.getInstance();
+    expect(store.liveFencedFsTargets().map((t) => t.hostPath).sort()).toEqual(['/srv/other', '/srv/own']);
+    await fence.runAsFenceOwner(own, async () => {
+      expect(store.liveFencedFsTargets().map((t) => t.hostPath)).toEqual(['/srv/other']);
+      // The restore's own re-check render of a file in its directory is admitted ...
+      expect((await fence.matchFsWorkToFences('/srv/own/compose.yaml')).refusal).toBeNull();
+      // ... and one in another restore's directory is not.
+      expect((await fence.matchFsWorkToFences('/srv/other/compose.yaml')).refusal).not.toBeNull();
+    });
+    // Outside the scope, and in work started beside it, both fences hold.
+    expect((await fence.matchFsWorkToFences('/srv/own/compose.yaml')).refusal).not.toBeNull();
+  });
+});
+
 describe('the fence when nothing was fenced at the match', () => {
   it('matches a directory fenced while the container is inspected, when only a volume was fenced before', async () => {
     vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);

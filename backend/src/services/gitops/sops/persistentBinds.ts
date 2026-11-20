@@ -1,4 +1,4 @@
-import { holdUntilExit, prepareComposeAdmission } from '../../../helpers/composeArgvFence';
+import { prepareComposeAdmission, spawnUnderLease } from '../../../helpers/composeArgvFence';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -399,15 +399,13 @@ async function readModel(
   // data restore's directory fence refuses it or waits for it.
   const admission = await prepareComposeAdmission({ cwd: overlay, args: composeArgs });
   return new Promise<OverlayModelRead>((resolve, reject) => {
-    const lease = admission.admit();
-    const child = spawn('docker', [...composeArgs, 'config', '--format', 'json', ...flags], {
+    const child = spawnUnderLease(admission, () => spawn('docker', [...composeArgs, 'config', '--format', 'json', ...flags], {
       cwd: overlay,
       env: {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       },
-    });
-    holdUntilExit(child, lease);
+    }));
     const MAX_OUTPUT = 5 * 1024 * 1024;
     let stdout = '';
     let capped = false;

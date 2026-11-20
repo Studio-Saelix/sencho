@@ -74,7 +74,10 @@ export interface FileWorkAdmission {
   admit(): FsWorkLeaseLike;
 }
 
-/** The part of `FsWorkLease` the callers here use; kept structural so this module imports no recovery code statically. */
+/**
+ * The part of `FsWorkLease` the callers here use; kept structural so this
+ * module imports no recovery code statically.
+ */
 export interface FsWorkLeaseLike {
   recheck(): DataRestoreFenceError | null;
   release(): void;
@@ -89,7 +92,10 @@ const NO_FILE_WORK: FsWorkLeaseLike = { recheck: () => null, release: () => unde
  * restore holds refuses here. A match that cannot run while a fence is held is
  * the fence's `unproven` refusal; with nothing fenced it is registered by
  * `fallback` instead (the directory the work runs in), so a fence recorded
- * while it runs still finds it and waits.
+ * while it runs still finds it and waits. Work with no paths is matched and
+ * registered by `fallback` too. The spellings are worked out whether or not
+ * anything is fenced (a readlink per path component), because a fence
+ * recorded while the work runs compares them in its drain.
  */
 export async function prepareFileWorkAdmission(paths: readonly string[], fallback: string): Promise<FileWorkAdmission> {
   const { matchFsWorkToFences, admitFsWork, RestoreFenceStore } = await import('../services/recovery/restoreFence');
@@ -137,8 +143,10 @@ export interface ComposeProcessInput {
  * Match one Compose process against the directory fences by the files it opens
  * (`composeSelectedInputPaths`: its `-f` files, or the COMPOSE_FILE selection
  * or discovered root and override when it names none, and its env sources),
- * whatever the caller asked before. Every spawn of `docker compose` admits
- * through this immediately before it starts the child and holds the lease
+ * whatever the caller asked before. Every spawn of `docker compose` for a
+ * stack or a Git candidate admits through this (Sencho's self-update helper,
+ * which runs Compose on Sencho's own project, does not) immediately before it
+ * starts the child and holds the lease
  * until the child has exited, so a restore that fences one of those files
  * either refuses the process before it starts or waits for it to finish
  * (`waitForFsWorkOn`): a render, a pull, an `up` started after its own
@@ -183,4 +191,26 @@ export async function admitComposeProcess(input: ComposeProcessInput): Promise<F
 export function holdUntilExit(child: { once(event: 'close' | 'error', listener: () => void): unknown }, lease: FsWorkLeaseLike): void {
   child.once('close', () => lease.release());
   child.once('error', () => lease.release());
+}
+
+/**
+ * Admit, then start the child in the same synchronous step, and hold the lease
+ * until it exits. A spawn that throws (Node throws for a NUL byte in an
+ * argument or the environment, or ENOMEM and E2BIG) releases the lease at
+ * once, so it cannot stay registered and hold off every later restore.
+ */
+export function spawnUnderLease<C extends { once(event: 'close' | 'error', listener: () => void): unknown }>(
+  admission: FileWorkAdmission,
+  start: () => C,
+): C {
+  const lease = admission.admit();
+  let child: C;
+  try {
+    child = start();
+  } catch (err) {
+    lease.release();
+    throw err;
+  }
+  holdUntilExit(child, lease);
+  return child;
 }

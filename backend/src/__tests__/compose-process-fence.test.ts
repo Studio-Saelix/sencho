@@ -29,13 +29,17 @@ interface FakeChild extends EventEmitter {
 
 const spawned: FakeChild[] = [];
 /** When false, a spawned child stays running until the test closes it. */
-const spawnControl = { autoClose: true, stdout: '{"services":{}}' };
+const spawnControl = { autoClose: true, stdout: '{"services":{}}', throwNext: false };
 
 vi.mock('child_process', async () => {
   const actual = await vi.importActual<typeof import('child_process')>('child_process');
   return {
     ...actual,
     spawn: vi.fn((_command: string, args: readonly string[]) => {
+      if (spawnControl.throwNext) {
+        spawnControl.throwNext = false;
+        throw new Error('spawn ENOMEM');
+      }
       const child = new EventEmitter() as FakeChild;
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
@@ -117,6 +121,7 @@ describe('a Compose process is admitted by the files it opens, and held until it
     process.env.DATA_DIR = dataDir;
     spawned.length = 0;
     spawnControl.autoClose = true;
+    spawnControl.throwNext = false;
     // A clear root file, and an override that is a readable link into the
     // directory a restore is overwriting. No COMPOSE_FILE: discovery opens both.
     await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
@@ -371,7 +376,83 @@ describe('a Compose process is admitted by the files it opens, and held until it
     });
   });
 
+  describe('the spawn itself', () => {
+    it('releases the lease when the spawn throws, so no later restore waits on it', async () => {
+      spawnControl.throwNext = true;
+      const error = await refusal(ComposeService.getInstance(NODE).renderConfig('app'));
+      expect(String(error)).toContain('ENOMEM');
+      expect(fsWorkInFlightCountForTests()).toBe(0);
+      holdFence();
+      await expect(waitForFsWorkOn(fences[0], 20)).resolves.toBe(true);
+    });
+
+    it('does not start a command whose client disconnected while it was being admitted', async () => {
+      const svc = ComposeService.getInstance(NODE) as unknown as {
+        execute(command: string, args: string[], cwd: string, ws?: unknown, throwOnError?: boolean, env?: unknown, idle?: number, signal?: AbortSignal): Promise<void>;
+      };
+      const controller = new AbortController();
+      const run = svc.execute('docker', ['compose', 'up', '-d'], stackDir, undefined, true, undefined, undefined, controller.signal);
+      // The abort lands while the admission is still reading the stack's files.
+      controller.abort();
+      await expect(run).rejects.toThrow(/OPERATION_ABORTED/);
+      expect(spawned).toHaveLength(0);
+      expect(fsWorkInFlightCountForTests()).toBe(0);
+    });
+
+    it('answers a down --volumes whose volume render is fenced with the fence, not "volumes could not be verified"', async () => {
+      holdFence();
+      const svc = ComposeService.getInstance(NODE) as unknown as { assertNoRecoveryVolumeRemoval(stack: string): Promise<void> };
+      const error = await refusal(svc.assertNoRecoveryVolumeRemoval('app'));
+      expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+      expect(spawned).toHaveLength(0);
+    });
+
+    it('refuses a captured `compose` read and the orphan classification `ps` with no spawn, and passes the fence on', async () => {
+      holdFence();
+      const svc = ComposeService.getInstance(NODE) as unknown as { captureCompose(args: string[], cwd: string): Promise<string> };
+      expect(isDataRestoreFenceError(await refusal(svc.captureCompose(['config', '--images'], stackDir)))).toBe(true);
+      const classified = await refusal(DockerController.getInstance(NODE).classifyLegacyOrphansForUpdate('app'));
+      expect(isDataRestoreFenceError(classified), String(classified)).toBe(true);
+      expect(spawned).toHaveLength(0);
+    });
+  });
+
+  describe('the up-front override check', () => {
+    it('does not refuse for a held override a clear one shadows, and still refuses for a winning name that dangles into the held directory', async () => {
+      const fsSvc = FileSystemService.getInstance(NODE);
+      // A clear winner; the lower-priority sibling links into the held directory.
+      await fsPromises.rm(path.join(stackDir, 'compose.override.yml'));
+      await fsPromises.writeFile(path.join(stackDir, 'compose.override.yml'), 'services: {}\n');
+      await fsPromises.writeFile(path.join(fenced, 'sibling.yml'), 'services: {}\n');
+      await fsPromises.symlink(path.join('data', 'sibling.yml'), path.join(stackDir, 'docker-compose.override.yml'));
+      holdFence();
+      await expect(fsSvc.refuseIfComposeFenced('app')).resolves.toBeUndefined();
+      await expect(ComposeService.getInstance(NODE).renderConfig('app')).resolves.toMatchObject({ code: 0 });
+      // Mid-swap: the winning name is now a link whose target the restore moved aside.
+      await fsPromises.rm(path.join(stackDir, 'compose.override.yml'));
+      await fsPromises.symlink(path.join('data', 'moved-aside.yml'), path.join(stackDir, 'compose.override.yml'));
+      const error = await refusal(fsSvc.refuseIfComposeFenced('app'));
+      expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+    });
+  });
+
   describe('a stack file transaction', () => {
+    it('asks every file a backup slot holds when the transaction restores it', async () => {
+      // The slot holds an env file the stack no longer lists, and the live
+      // name it is restored to links into the held directory.
+      const slot = path.join(dataDir, 'backups', String(NODE), 'app');
+      await fsPromises.mkdir(slot, { recursive: true });
+      await fsPromises.writeFile(path.join(slot, 'old.env'), 'A=1\n');
+      await fsPromises.rm(path.join(stackDir, 'compose.override.yml'));
+      await fsPromises.symlink(path.join('data', 'old.env'), path.join(stackDir, 'old.env'));
+      holdFence();
+      const fsSvc = FileSystemService.getInstance(NODE);
+      const live = await fsSvc.admitStackFileWork('app');
+      live.release();
+      const error = await refusal(fsSvc.admitStackFileWork('app', [], [], { backupSlot: true }));
+      expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+    });
+
     it('refuses when a recovery point\'s captured layer is held, though the live selection does not name it', async () => {
       const shared = path.join(composeDir, 'shared');
       await fsPromises.mkdir(shared);

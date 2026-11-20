@@ -14,6 +14,7 @@ import {
   fenceIdentityFor,
   releaseRestoreFence,
   RestoreFenceStore,
+  runAsFenceOwner,
   waitForWorkBeforeFence,
   type FenceMember,
   type FenceMemberInput,
@@ -2029,7 +2030,10 @@ async function recheckDependentsOrSettle(
 ): Promise<boolean> {
   let dependency: 'ok' | 'changed' | 'unknown';
   try {
-    dependency = await recheckDependents(ctx, state, options);
+    // The re-check renders the dependent stacks while this restore's fence is
+    // held and before its swap: run as the fence's owner, so its own fence
+    // does not refuse those renders (another restore's still does).
+    dependency = await runAsFenceOwner(ctx.intentId, () => recheckDependents(ctx, state, options));
   } catch (err) {
     logEngineThrow(state, step, err);
     await settleRollback(ctx, state, classifyRecoveryError(err));

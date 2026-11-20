@@ -1,8 +1,8 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
-import { holdUntilExit, prepareComposeAdmission } from './composeArgvFence';
+import { prepareComposeAdmission, spawnUnderLease } from './composeArgvFence';
 
 export async function runDockerCompose(
   args: string[],
@@ -29,16 +29,15 @@ export async function runDockerCompose(
   }
   // A validation render opens the candidate's files; a data restore's
   // directory fence refuses it or waits for it (see prepareComposeAdmission).
-  let lease;
+  let child: ChildProcessWithoutNullStreams;
   try {
-    lease = (await prepareComposeAdmission({ cwd: resolvedCwd, args })).admit();
+    const admission = await prepareComposeAdmission({ cwd: resolvedCwd, args });
+    child = spawnUnderLease(admission, () => spawn('docker', args, { cwd: resolvedCwd }));
   } catch (err) {
     // The runner answers with an exit result, never a rejection: a refused
-    // validation is a failed one, worded by the fence.
+    // validation (or a spawn that threw) is a failed one, worded by its cause.
     return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
   }
-  const child = spawn('docker', args, { cwd: resolvedCwd });
-  holdUntilExit(child, lease);
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';

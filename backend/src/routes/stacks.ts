@@ -2673,10 +2673,9 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
       skippedBuildBacked: result.skippedBuildBacked,
     });
   } catch (error: unknown) {
-    // A file a pull opens sits in, or links into, a directory a data restore
-    // is overwriting. The refused pull never started; a pull this request ran
-    // before it may already have updated the local image store, which changes
-    // no container. The answer is the fence's.
+    // A file the pull opens sits in, or links into, a directory a data
+    // restore is overwriting: the pull never started, and the answer is the
+    // fence's.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
       return;
@@ -3761,9 +3760,10 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // The snapshot, the restore, the deploy and any undo are one file
     // transaction: registered with a data restore's directory fences before
     // the first read, and held until the route answers, so a fence recorded
-    // meanwhile waits for it instead of landing between the restore and its
-    // undo. A fence already held refuses it here, with nothing moved.
-    backupFileLease = await fsSvc.admitStackFileWork(stackName);
+    // meanwhile waits for it, or refuses the deploy's own Compose commands,
+    // instead of landing between the restore and its undo. A fence already
+    // held refuses it here, with nothing moved.
+    backupFileLease = await fsSvc.admitStackFileWork(stackName, [], [], { backupSlot: true });
     revertRestore = await fsSvc.snapshotStackFiles(stackName);
     const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
     if (deliveryPrepId) {

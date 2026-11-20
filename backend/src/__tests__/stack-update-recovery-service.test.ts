@@ -65,6 +65,11 @@ vi.mock('../services/composeProjectContext', () => ({
   }),
 }));
 
+const mockResolveRollbackInventory = vi.fn(async (..._args: unknown[]) => ({ entries: [] as Array<{ relativePath: string }>, ownedUncapturedRelativePaths: [] as string[] }));
+vi.mock('../services/rollbackInventory', () => ({
+  resolveRollbackInventory: (...args: unknown[]) => mockResolveRollbackInventory(...args),
+}));
+
 vi.mock('../services/RollbackGenerationStore', () => ({
   RollbackGenerationStore: {
     retireGenerationContent: vi.fn().mockResolvedValue(undefined),
@@ -420,16 +425,20 @@ describe('StackUpdateRecoveryService', () => {
       } as never);
       leaseEvents.length = 0;
       mockAdmitStackFileWork.mockClear();
+      // A live file the stack gained after capture is written or deleted too.
+      mockResolveRollbackInventory.mockResolvedValueOnce({ entries: [{ relativePath: 'later.env' }], ownedUncapturedRelativePaths: [] });
       const { outcome } = await refuseRestoreUp({ contentPath: genId, revert: 'clean', fence: true });
       const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
-      const context = await vi.mocked(resolveComposeProjectContextForGeneration).mock.results.at(-1)?.value;
+      // The context refuseRestoreUp hands every call; the restore asks for it only after the admission.
+      const context = await (vi.mocked(resolveComposeProjectContextForGeneration).getMockImplementation() as unknown as () => Promise<{ restoreFromContext: () => Promise<void> }>)();
       vi.mocked(context.restoreFromContext).mockImplementation(async () => { leaseEvents.push('restore'); });
       vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockImplementation(async () => { leaseEvents.push('reconcile'); return true; });
       await expect(outcome).rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
       expect(mockAdmitStackFileWork).toHaveBeenCalledWith(
         'my-stack',
-        expect.arrayContaining(['compose.yaml', '.env']),
+        expect.arrayContaining(['compose.yaml', '.env', 'later.env']),
         [['-f', '../shared/base.yml', '-f', 'compose.yaml']],
+        { backupSlot: false },
       );
       // Admitted first, released last: the pre-compensate reconcile, the
       // restore, the refused up and the revert all ran under it.

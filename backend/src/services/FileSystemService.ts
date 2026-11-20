@@ -946,8 +946,9 @@ export class FileSystemService {
    * observation before their own read is refused. Any other read failure is not
    * this check's to answer: it is neither logged nor thrown here, and the
    * caller reports it from its own read. A fence recorded after this check is
-   * still answered by that later read, and by the assembled argv
-   * (`refuseIfComposeArgvFenced` in helpers/composeArgvFence).
+   * still answered by that later read, by the assembled argv
+   * (`refuseIfComposeArgvFenced` in helpers/composeArgvFence), and by each
+   * Compose process's own admission at its spawn (`prepareComposeAdmission`).
    *
    * The files asked are the ones that command opens (`composeFilesForCommand`).
    * A root file clear of the fence does not make the project clear when
@@ -1005,7 +1006,7 @@ export class FileSystemService {
    * - else the entries of a COMPOSE_FILE the stack's env sets, split as
    *   Compose splits them; it replaces override discovery for Compose. The
    *   root file is asked as well, because Sencho reads it itself.
-   * - else the root file and the implicit overrides.
+   * - else the root file and the implicit override (see below).
    * Without a spec, when the env sources a COMPOSE_FILE selection comes from
    * cannot be read here, those sources (and the stack `.env`) are asked too:
    * a source a restore holds refuses, and otherwise the selection is not the
@@ -2478,7 +2479,8 @@ export class FileSystemService {
    * point's own managed set), the files the stack's live Compose selection
    * opens, and the files each of `invocationPrefixes` (a recovery point's
    * captured Compose prefix, global flags only) opens, each by every spelling
-   * a link gives it. The caller holds the lease until its writes have settled
+   * a link gives it, and with `backupSlot` every file the stack's backup slot
+   * holds (a backup restore copies each one back). The caller holds the lease until its writes have settled
    * and its Compose `up` has exited, so a fence recorded meanwhile waits for it
    * (`waitForFsWorkOn`) instead of landing between a write and its revert.
    */
@@ -2486,9 +2488,25 @@ export class FileSystemService {
     stackName: string,
     relativePaths: readonly string[] = [],
     invocationPrefixes: ReadonlyArray<readonly string[]> = [],
+    options: { backupSlot?: boolean } = {},
   ): Promise<import('../helpers/composeArgvFence').FsWorkLeaseLike> {
     const stackDir = this.resolveStackDir(stackName);
     const names = new Set<string>([...PROTECTED_STACK_FILES, ...relativePaths]);
+    if (options.backupSlot) {
+      // A backup restore copies every file its slot holds back into the
+      // stack, whatever the project env list says now.
+      const backupRoot = path.resolve(getBackupBaseDir());
+      const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+      if (backupDir.startsWith(backupRoot + path.sep)) {
+        try {
+          for (const item of await fsPromises.readdir(backupDir)) {
+            if (!BACKUP_MARKER_FILES.has(item)) names.add(item);
+          }
+        } catch {
+          // No slot to read: the restore itself reports it.
+        }
+      }
+    }
     try {
       for (const f of DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName)) names.add(f);
     } catch {

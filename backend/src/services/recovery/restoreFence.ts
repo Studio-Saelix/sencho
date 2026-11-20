@@ -1,4 +1,5 @@
 import type Docker from 'dockerode';
+import { AsyncLocalStorage } from 'async_hooks';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { DataRestoreFenceError, type FenceSubject } from '../../helpers/dataRestoreFenceError';
 import { recoveryDb } from './recoveryDb';
@@ -118,6 +119,21 @@ function warnStoreUnreadable(err: unknown): void {
   );
 }
 
+/** The restore intent whose own work is running in this async context, if any. */
+const fenceOwnerScope = new AsyncLocalStorage<string>();
+
+/**
+ * Run `work` as the restore `intentId` itself: inside it, that restore's own
+ * directory fence is not listed (`liveFencedFsTargets`), so the reads the
+ * restore makes of the stacks that depend on its directory (the dependent
+ * re-check renders each one's Compose model, before the swap starts) are not
+ * refused by the fence the same restore holds. Every other restore's fence
+ * still applies, and nothing outside `work` is affected.
+ */
+export function runAsFenceOwner<T>(intentId: string, work: () => Promise<T>): Promise<T> {
+  return fenceOwnerScope.run(intentId, work);
+}
+
 export class RestoreFenceStore {
   private static instance: RestoreFenceStore;
 
@@ -214,6 +230,7 @@ export class RestoreFenceStore {
    * the common case, so the callers that check it pay one query.
    */
   liveFencedFsTargets(): FsTargetPaths[] {
+    const owner = fenceOwnerScope.getStore() ?? null;
     try {
       const rows = recoveryDb().prepare(`
         SELECT id, target_paths_json AS paths FROM recovery_restore_intents
@@ -221,7 +238,7 @@ export class RestoreFenceStore {
           AND target_volume LIKE 'fs:%'
           AND fence_state IN ${LIVE_FENCE_STATE}
       `).all() as Array<{ id: string; paths: string | null }>;
-      return rows.map((row) => {
+      return rows.filter((row) => row.id !== owner).map((row) => {
         const paths = parseFsTargetPaths(row.paths);
         if (paths) return paths;
         // A fenced directory whose record cannot be read is still fenced. It
