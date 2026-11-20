@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -834,7 +834,7 @@ export class ComposeService {
     }
   }
 
-  private execute(
+  private async execute(
     command: string,
     args: string[],
     cwd: string,
@@ -863,54 +863,31 @@ export class ComposeService {
     const withholdOutput = decryptedComposeOutputWithheld();
 
     if (effectiveAbortSignal?.aborted) {
-      return Promise.reject(new Error('OPERATION_ABORTED: client disconnected'));
+      throw new Error('OPERATION_ABORTED: client disconnected');
     }
 
     // The files this command opens are matched against a data restore's
     // directory fences here, whatever its caller asked earlier, and admitted
-    // in the same synchronous step as the spawn below.
-    const admission = admitted
-      ? Promise.resolve(null)
-      : prepareComposeAdmission({ cwd, args: command === 'docker' ? args : [], ...(env ? { env } : {}) });
-    return admission.then((ready) => new Promise<void>((resolve, reject) => {
-      // The admission awaited file work, and an abort listener added after
-      // the signal fired is never called: an abort in that window stops the
-      // command here, before it starts.
-      if (effectiveAbortSignal?.aborted) {
-        reject(new Error('OPERATION_ABORTED: client disconnected'));
-        return;
-      }
-      // Canonical inline js/path-injection barrier at the spawn cwd sink: a
-      // Compose command runs in a stack directory under the compose root, a
-      // GitOps decrypt overlay under the git-secrets area, or a temporary
-      // directory. Sequential single-condition guards, because CodeQL's
-      // barrier-guard recognizer only credits that shape, and only when the
-      // guard sits in the same closure as the sink.
-      const sinkCwd = path.resolve(cwd);
-      if (!sinkCwd.startsWith(path.resolve(this.baseDir) + path.sep)) {
-        if (!sinkCwd.startsWith(path.resolve(gitSecretsAreaBase()) + path.sep)) {
-          if (!sinkCwd.startsWith(path.resolve(os.tmpdir()) + path.sep)) {
-            reject(new Error('Invalid working directory'));
-            return;
-          }
+    // in the same synchronous step as the spawn below (the Promise executor
+    // runs at once, with no await between the two).
+    const ready = admitted
+      ? null
+      : await prepareComposeAdmission({ cwd, args: command === 'docker' ? args : [], ...(env ? { env } : {}) });
+    // The admission awaited file work, and an abort listener added after the
+    // signal fired is never called: an abort in that window stops the command
+    // here, before it starts.
+    if (effectiveAbortSignal?.aborted) {
+      throw new Error('OPERATION_ABORTED: client disconnected');
+    }
+    const lease: FsWorkLeaseLike | null = ready ? ready.admit() : null;
+    const run = new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd,
+        env: env ?? {
+          ...process.env,
+          PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
         }
-      }
-      let lease: FsWorkLeaseLike | null = null;
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        lease = ready ? ready.admit() : null;
-        child = spawn(command, args, {
-          cwd: sinkCwd,
-          env: env ?? {
-            ...process.env,
-            PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          }
-        });
-      } catch (err) {
-        lease?.release();
-        reject(err);
-        return;
-      }
+      });
 
       let errorLog = '';
       let settled = false;
@@ -1071,7 +1048,11 @@ export class ComposeService {
           else resolve();
         });
       });
-    }));
+    });
+    // A spawn that throws rejects the executor before any listener exists;
+    // the lease is released then too (release is idempotent).
+    run.catch(() => lease?.release());
+    return run;
   }
 
   private async withRegistryAuth<T>(

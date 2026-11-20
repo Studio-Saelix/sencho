@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
-import { prepareComposeAdmission, spawnUnderLease } from './composeArgvFence';
+import { holdUntilExit, prepareComposeAdmission, type FsWorkLeaseLike } from './composeArgvFence';
 
 export async function runDockerCompose(
   args: string[],
@@ -29,27 +29,23 @@ export async function runDockerCompose(
   }
   // A validation render opens the candidate's files; a data restore's
   // directory fence refuses it or waits for it (see prepareComposeAdmission).
-  let child: ChildProcessWithoutNullStreams;
+  let lease: FsWorkLeaseLike;
   try {
-    const admission = await prepareComposeAdmission({ cwd: resolvedCwd, args });
-    child = spawnUnderLease(admission, () => {
-      // The barrier above sits outside this closure, and CodeQL credits only a
-      // guard in the same scope as the sink, so it is repeated here.
-      const sinkCwd = path.resolve(resolvedCwd);
-      if (!sinkCwd.startsWith(managedBase + path.sep)) {
-        if (!sinkCwd.startsWith(secretsBase + path.sep)) {
-          if (!sinkCwd.startsWith(tmpBase + path.sep)) {
-            throw new Error('Invalid working directory');
-          }
-        }
-      }
-      return spawn('docker', args, { cwd: sinkCwd });
-    });
+    lease = (await prepareComposeAdmission({ cwd: resolvedCwd, args })).admit();
   } catch (err) {
     // The runner answers with an exit result, never a rejection: a refused
-    // validation (or a spawn that threw) is a failed one, worded by its cause.
+    // validation is a failed one, worded by the fence.
     return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
   }
+  // The spawn stays in this scope, under the barrier above, and in the same
+  // synchronous step as the admission; one that throws releases the lease.
+  let child: ChildProcessWithoutNullStreams | undefined;
+  try {
+    child = spawn('docker', args, { cwd: resolvedCwd });
+  } finally {
+    if (!child) lease.release();
+  }
+  holdUntilExit(child, lease);
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
