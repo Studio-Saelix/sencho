@@ -27,6 +27,8 @@ import type { AccountScopes, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDn
 const LOCATION_REFUSED_MESSAGE = /cannot use the access token from location/i;
 /** Cloudflare's code when a zone listing filters on an account id it does not know ("account with given Tag doesn't exist"). */
 const ACCOUNT_UNKNOWN_CODE = 70503;
+/** 400 codes that name the account id itself as wrong: unknown account, or an invalid object identifier (7003). */
+const ACCOUNT_ID_ERROR_CODES: readonly number[] = [ACCOUNT_UNKNOWN_CODE, 7003];
 const MAX_PARALLEL_DNS_PROBES = 4;
 /** Cloudflare object ids are 32 hex characters; anything else never reaches a request path. */
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
@@ -74,11 +76,12 @@ export interface ZoneProbeInput {
   dns: ZoneDnsState;
 }
 
-/** Why a journaled check record is still there. */
 /**
- * Why a check record cleanup did not finish. `zone_refused` is a plain 403 on
- * the zone's records: the token no longer reaches that zone. `refused` is a
- * rejected token or a refused location, which say nothing about the zone.
+ * Why a check record cleanup did not finish. `zone_refused` is a 403 on the
+ * zone's records that is not a location refusal; on its own it does not prove
+ * the zone is out of reach, but together with the zone missing from the last
+ * complete listing it does. `refused` is a rejected token (401) or a refused
+ * location, which say nothing about the zone.
  */
 export type CleanupCause = 'unreachable' | 'rate_limited' | 'refused' | 'zone_refused' | 'too_recent' | 'unexpected';
 
@@ -194,9 +197,10 @@ export class CloudflareAccountAdapter {
       const tunnelRefused = await this.tunnelReadRefused(token, accountId, options);
 
       // An account the token cannot see reads as inaccessible, not as missing
-      // permissions: the listing is refused, the account-scoped tunnel probe is
-      // refused, and the account's zone listing is refused or empty (a mistyped
-      // id lists no zones rather than refusing).
+      // permissions: the account listing is refused, empty or lacks the id, the
+      // account-scoped tunnel probe is refused, and the account's zone listing
+      // is refused or empty. (A mistyped id usually stops earlier, at the zone
+      // listing's 400 with code 70503.)
       if (!account.listed && tunnelRefused && (zones.refused || zones.list.length === 0)) {
         throw stop('account_not_accessible', null);
       }
@@ -329,7 +333,11 @@ export class CloudflareAccountAdapter {
     try {
       await this.deleteRecord(token, zone.zoneRef, recordId, options);
     } catch (error: unknown) {
-      if (error instanceof CloudflareApiError) return { kind: 'cleanup_pending', recordName, cause: cleanupCause(error) };
+      if (error instanceof CloudflareApiError) {
+        // The token just wrote to this zone, so a 403 here is a refused delete, not a zone out of reach.
+        const cause = cleanupCause(error);
+        return { kind: 'cleanup_pending', recordName, cause: cause === 'zone_refused' ? 'refused' : cause };
+      }
       throw error;
     }
     journal.write(null);
@@ -353,6 +361,10 @@ export class CloudflareAccountAdapter {
         if (stopOutcomeFor(accountError) !== null) throw accountError;
         // The account endpoint answers 404 for an account the token does not belong to: the id is wrong, not the token.
         if (accountError.kind === 'not_found') throw stop('account_not_accessible', null);
+        // A malformed or unknown account id can also answer 400 with an id error instead of 404.
+        if (accountError.kind === 'bad_request' && accountError.cfCodes.some((code) => ACCOUNT_ID_ERROR_CODES.includes(code))) {
+          throw stop('account_not_accessible', null);
+        }
         throw stop('token_invalid', null);
       }
     }

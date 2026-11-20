@@ -530,6 +530,29 @@ describe('account classification', () => {
     expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).scopes.tunnel).toBe('missing');
   });
 
+  it('does not read a zone listing 400 with another code as an inaccessible account', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/zones')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 1001, message: 'Invalid request' }], messages: [], result: null }), { status: 400 });
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).not.toBe('ACCOUNT_NOT_ACCESSIBLE');
+  });
+
+  it('reports an account-owned token with an invalid account id answer (400, 7003) as not accessible', async () => {
+    fake.verifyUser = 401;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/accounts/') && url.pathname.endsWith('/tokens/verify')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 7003, message: 'Could not route to /accounts/x/tokens/verify, perhaps your object identifier is invalid?' }], messages: [], result: null }), { status: 400 });
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    expect((await refusal(service.connect(FAKE_TOKEN, OTHER_ACCOUNT_ID, actor))).code).toBe('ACCOUNT_NOT_ACCESSIBLE');
+  });
+
   it('connects a token without account read, whose account listing comes back empty', async () => {
     fake.accounts = [];
     const view = connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor));
@@ -891,6 +914,45 @@ describe('round two edges', () => {
     }));
     expect((await refusal(service.disconnect(actor))).code).toBe('ENDPOINTS_EXIST');
     expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('names every record it leaves when several zones left the account', async () => {
+    await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor);
+    await service.setZone(ZONE_A, true, [], actor);
+    await service.setZone(ZONE_B, true, [], actor);
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    await service.dnsCheck(ZONE_B, actor);
+    fake.zones = [];
+    await service.recheck(actor);
+    fake.remove = 403;
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
+    await service.disconnect(actor);
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    const row = db().prepare(`SELECT summary FROM audit_log WHERE summary LIKE 'public_exposure.account.removed%'`).get() as { summary: string };
+    expect(row.summary).toContain(CHECK_NAME);
+    expect(row.summary).toContain(`_sencho-check-${CONTROL_ID}.example.net`);
+  });
+
+  it('keeps refusing disconnect on a 403 when the zones were never listed', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    db().prepare("UPDATE exposure_accounts SET config_json = json_set(config_json, '$.zonesListedAt', NULL)").run();
+    fake.remove = 403;
+    expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+  });
+
+  it('labels a refused delete right after the create as refused, not as a zone out of reach', async () => {
+    await connectWithZoneA();
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
+    fake.remove = 403;
+    await service.dnsCheck(ZONE_A, actor);
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    const row = db().prepare(`SELECT summary FROM audit_log WHERE summary LIKE 'public_exposure.account.dns_checked%'`).get() as { summary: string };
+    expect(row.summary).toContain('cause=refused');
   });
 
   it('audits a DNS check that left a record with status 202', async () => {
