@@ -132,7 +132,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # 1.27.4 toolchain carries the stdlib fixes for CVE-2026-111943 (crypto/x509
 # intermediate-certificate verification), CVE-2026-78667 (net/http
 # Range-header denial of service), CVE-2026-97031 (crypto/tls ECH denial
-# of service) and CVE-2026-97054 (Go stdlib, fixed in 1.27.4).
+# of service) and CVE-2026-97054 (HTTP/1 MaxBytesReader header race).
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS cli-builder
 
 ARG TARGETARCH
@@ -172,8 +172,9 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # Compose v5.6.0 requires Go 1.26.8 or newer, which the pinned 1.27.4 toolchain
 # satisfies. That toolchain also carries the stdlib fixes for CVE-2026-111943
 # (crypto/x509 intermediate-certificate verification), CVE-2026-78667 (net/http
-# Range-header denial of service) and CVE-2026-97031 (crypto/tls ECH denial of
-# service), so the binary's SBOM carries no Go stdlib CVEs.
+# Range-header denial of service), CVE-2026-97031 (crypto/tls ECH denial of
+# service) and CVE-2026-97054 (HTTP/1 MaxBytesReader header race), so the
+# binary's SBOM carries no Go stdlib CVEs.
 #
 # The v5.6.0 tag lifts almost every module floor this stage used to carry by
 # hand. Its own go.mod resolves otel/sdk v1.46.0 (CVE-2026-39883,

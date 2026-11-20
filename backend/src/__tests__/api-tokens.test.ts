@@ -124,8 +124,10 @@ const RECOVERY_READS = [
 const RECOVERY_WRITES = [
   '/api/recovery/repository',
   '/api/recovery/storage/points',
+  '/api/recovery/storage/roots/points',
   '/api/recovery/points/some-point-id/verify',
   '/api/recovery/points/some-point-id/restore',
+  '/api/recovery/points/some-point-id/restore/path',
   '/api/recovery/operations/some-operation-id/cancel',
   '/api/recovery/locks/release',
 ];

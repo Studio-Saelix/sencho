@@ -252,6 +252,34 @@ describe('DeployedStackDeletionService when the Docker endpoint guard refuses th
     prune.mockRestore();
   });
 
+  it('keeps the stack, and says nothing was stopped, when a data restore fence refuses its down', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const stackName = 'fenced-down-stack';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new DataRestoreFenceError('/srv/data', 'browse', 'directory'),
+    );
+    const prune = vi.spyOn((await import('../services/DockerController')).default.prototype, 'pruneManagedOnly');
+
+    const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: NODE,
+      stackName,
+      pruneVolumes: true,
+      actor: 'tester',
+    });
+
+    expect(result).toMatchObject({ ok: false, code: 'data_restore' });
+    expect((result as { error: string }).error).toContain('Nothing was stopped');
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+    expect(db().hasBlockingDeletionIntent(NODE, stackName)).toBe(false);
+    expect(prune).not.toHaveBeenCalled();
+    down.mockRestore();
+    prune.mockRestore();
+  });
+
   it('cancels a prepared prune deletion that the node refuses at startup, keeping the stack and not retrying', async () => {
     const { ComposeService } = await import('../services/ComposeService');
     const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');

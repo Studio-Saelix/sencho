@@ -109,7 +109,7 @@ import {
   getCodedError,
   selectFleetSnapshotApplyFiles,
 } from '../helpers/applyFleetSnapshotFiles';
-import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
+import { resolveStackEnvSources, discoverStackLocalEnvFiles, refuseIfFencedSource } from '../helpers/envFileResolution';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import {
   isSelfStack,
@@ -121,6 +121,7 @@ import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../help
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
+import type { FsWorkLease } from '../services/recovery/restoreFence';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -194,6 +195,24 @@ function updatePolicyReason(policy: { reason: string | null }): string {
   return policy.reason ?? 'the stack is not eligible for this update';
 }
 
+/**
+ * Answer 409 `data_restore` (and return true) when a compose file the stack's
+ * next Compose command opens is under a data restore's fence. Asked before a
+ * route's own connection check or policy render, which run Docker Compose over
+ * the same files. Any other failure of the check is left to the route's own
+ * reads, as `refuseIfComposeFenced` leaves it.
+ */
+async function refuseIfComposeFilesFenced(req: Request, res: Response, stackName: string): Promise<boolean> {
+  try {
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
+    return false;
+  } catch (error) {
+    if (!isDataRestoreFenceError(error)) throw error;
+    res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+    return true;
+  }
+}
+
 /** A refusal sentence that never ends in two periods. */
 function updatePolicyRefusalText(prefix: string, policy: { reason: string | null }): string {
   const reason = updatePolicyReason(policy);
@@ -204,6 +223,9 @@ function updatePolicyRefusalText(prefix: string, policy: { reason: string | null
  * Every image-refresh caller resolves the policy the same way: inside the stack
  * lock, before the security policy gate, so a refused update never writes the
  * gate's evidence. A block or skip is recorded as an activity row exactly once.
+ * A compose file a data restore is swapping does not render, so an
+ * unrenderable answer asks the directory fence first and throws its refusal in
+ * place of the block or skip; the caller's catch answers it with the fence.
  */
 async function evaluateUpdatePolicyFor(
   nodeId: number,
@@ -211,6 +233,9 @@ async function evaluateUpdatePolicyFor(
   actor: string | null,
 ) {
   const policy = await resolveUpdatePolicy(nodeId, request);
+  if (policy.evaluation === 'unrenderable') {
+    await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(request.stack);
+  }
   if (policy.decision !== 'allow') recordUpdatePolicyDecision(nodeId, policy, actor);
   return policy;
 }
@@ -348,11 +373,20 @@ export async function requireStackExists(
   const fsSvc = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsSvc.getBaseDir(), stackName);
   try {
+    // A compose file missing because a data restore is overwriting its
+    // directory (or the one a link to it points into) may only be mid-swap:
+    // hasComposeFile throws the fence's refusal then, not false.
     if (!(await fsSvc.hasComposeFile(stackDir))) {
       notFound();
       return false;
     }
-  } catch {
+  } catch (err) {
+    // A pre-check, so nothing has moved: a hub restoring through this node (a
+    // rollout rollback) is told so.
+    if (isDataRestoreFenceError(err)) {
+      res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return false;
+    }
     notFound();
     return false;
   }
@@ -664,7 +698,11 @@ async function runStackBulkOp(
     if (!(await fsSvc.hasComposeFile(stackDir))) {
       return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
     }
-  } catch {
+  } catch (err) {
+    // Mid-swap under a data restore the stack is not known to be gone.
+    if (isDataRestoreFenceError(err)) {
+      return { stackName, ok: false, error: err.message, code: DATA_RESTORE_FENCE_CODE };
+    }
     return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
   }
 
@@ -679,8 +717,12 @@ async function runStackBulkOp(
         stackName,
         action === 'update' ? { kind: 'update' } : { kind: action },
       );
+      // A compose file a data restore is swapping does not render: the fence answers.
+      if (refusal?.renderFailed) await fsSvc.refuseIfComposeFenced(stackName);
       if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
     } catch (error) {
+      // A compose file a data restore is swapping: the row carries the fence's reason.
+      if (isDataRestoreFenceError(error)) return { stackName, ok: false, error: error.message, code: DATA_RESTORE_FENCE_CODE };
       // An error here is not a pass: the stack is reported as failed and the batch carries on.
       console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
       return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: 'op_failed' };
@@ -717,6 +759,9 @@ async function runStackBulkOp(
           code: 'update_policy_skipped',
         };
       }
+      // A compose file a data restore is overwriting refuses the row before the
+      // gate, so it writes no gate evidence; the catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req, {
         imageSource: 'registry',
         unattended: false,
@@ -897,6 +942,11 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
     res.setHeader('X-Compose-File', filename);
     res.send(content);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
+    // A link into a directory a data restore is overwriting that dangles
+    // mid-swap is answered as the fence above, not as a link out of the stack.
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
       return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
@@ -943,6 +993,9 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
     res.setHeader('X-Compose-File', result.filename);
     res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs, filename: result.filename });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE') {
       return res.status(409).json({ error: COMPOSE_LINK_SAVE_ERROR });
@@ -961,6 +1014,9 @@ stacksRouter.get('/:stackName/envs', async (req: Request, res: Response) => {
     const envPaths = await resolveAllEnvFilePaths(req.nodeId, stackName);
     res.json({ envFiles: envPaths });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     res.status(500).json({ error: 'Failed to resolve env files' });
   }
 });
@@ -999,6 +1055,9 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       if (code !== 'ENOENT') {
         console.error('[Sencho] Unexpected error checking env file existence:', (e as Error).message);
       }
+      // A file a data restore fenced after the env files were resolved may only
+      // be mid-swap: refuse instead of answering that it is not there.
+      await refuseIfFencedSource(envPath);
       // No env file at the resolved path. For an explicit ?file= query we
       // surface a 404 (the caller asked for something specific). Otherwise
       // treat it as the empty-stack case above.
@@ -1016,10 +1075,15 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       res.setHeader('X-Env-Exists', 'true');
       return res.send(content);
     } catch (e: unknown) {
-      // TOCTOU: the file existed at access() but vanished before readFile().
-      // Return the same friendly empty-body shape rather than a generic 500
+      // TOCTOU: the file existed at access() but vanished before readFile(),
+      // or a link to it started dangling. When a data restore fenced its
+      // directory meanwhile, answer the fence. Otherwise a vanished default
+      // file gets the same friendly empty-body shape rather than a generic 500
       // that the frontend would otherwise echo as an opaque error.
       const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+        await refuseIfFencedSource(envPath);
+      }
       if (code === 'ENOENT' && !requestedFile) {
         res.setHeader('X-Env-Exists', 'false');
         return res.send('');
@@ -1027,6 +1091,12 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
       throw e;
     }
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
+    if ((error as NodeJS.ErrnoException)?.code === 'NOT_A_FILE') {
+      return res.status(409).json({ error: 'The env file is not a regular file' });
+    }
     console.error('Failed to read env file:', error);
     res.status(500).json({ error: 'Failed to read env file' });
   }
@@ -1035,6 +1105,8 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
 stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  // The file the save writes, once known, so a failure can be checked against a fence.
+  let written: string | undefined;
   try {
     const { content } = req.body;
     if (typeof content !== 'string') {
@@ -1077,6 +1149,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       if (!target) {
         return res.status(409).json({ error: 'No env file target is available for this stack' });
       }
+      written = target;
       const result = forceRequested
         ? await fsService.writeFileIfUnchanged(stackName, target, content, null)
         : await fsService.createFileExclusive(target, content);
@@ -1110,6 +1183,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'No env file exists for this stack' });
     }
 
+    written = envPath;
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await fsService.writeFileIfUnchanged(stackName, envPath, content, expectedMtimeMs);
     if (!result.ok) {
@@ -1128,9 +1202,29 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Env file saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      return res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     const code = (error as NodeJS.ErrnoException).code;
+    if (written && (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE' || code === 'ENOENT')) {
+      // A link into a directory a data restore fenced since the env files were
+      // resolved dangles mid-swap: answer the fence, not an unusable path or a
+      // missing stack.
+      try {
+        await refuseIfFencedSource(written);
+      } catch (fenced) {
+        if (isDataRestoreFenceError(fenced)) {
+          return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
+        }
+        // The check itself failing keeps the save's own answer below.
+      }
+    }
     if (code === 'EISDIR') {
       return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
+    }
+    if (code === 'NOT_A_FILE') {
+      // A FIFO, socket or directory took the file's place after it was resolved.
+      return res.status(409).json({ error: `${stackName}'s env file is not a regular file` });
     }
     if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
       // The target became unusable between resolution and write (symlink,
@@ -1571,6 +1665,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(409).json({ error: result.error, code: COMPOSE_INPUTS_REFUSED_CODE });
       return;
     }
+    if (result.code === 'data_restore') {
+      res.status(409).json({ error: result.error, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
@@ -1743,6 +1841,10 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to fetch services' });
   }
@@ -1778,15 +1880,18 @@ async function buildDriftPayload(
   gitopsRevision: GitOpsRevisionProjection;
 }> {
   const report = await buildStackDriftReport(nodeId, stackName);
-  // Only the on-disk read is best-effort: an unreadable compose is already surfaced
-  // by the report as a parse error, so temporal degrades to neutral. computeTemporal
-  // runs outside the try so a real ledger fault (a DB or hashing error) surfaces as a
-  // 500 instead of being hidden behind a misleading "no baseline".
+  // The on-disk read is best-effort for an unreadable compose file, which the
+  // temporal overlay answers as neutral. A compose file a data restore is
+  // overwriting is not unreadable but fenced: that refusal is thrown, before
+  // a re-check reconciles anything, and the route answers it with the fence
+  // instead of a "no baseline" that would read as a fresh stack. computeTemporal
+  // runs outside the try so a real ledger fault (a DB or hashing error) surfaces
+  // as a 500 instead of being hidden behind a misleading "no baseline".
   let content: string | null = null;
   try {
     content = await FileSystemService.getInstance(nodeId).getStackContent(stackName);
-  } catch {
-    // Unreadable compose: the report carries the parseError; temporal stays neutral.
+  } catch (error) {
+    if (isDataRestoreFenceError(error)) throw error;
   }
   const temporal: DriftTemporal = content !== null
     ? DriftLedgerService.getInstance().computeTemporal(nodeId, stackName, content)
@@ -1836,6 +1941,10 @@ stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, false));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build drift report' });
@@ -1853,6 +1962,10 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, true));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to re-check drift' });
@@ -1977,6 +2090,10 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
     const report = await ComposeDoctorService.getInstance().runPreflight(req.nodeId, stackName, req.user?.username ?? null);
     res.json(report);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to run preflight' });
@@ -2233,6 +2350,10 @@ stacksRouter.get('/:stackName/env-inventory', async (req: Request, res: Response
   try {
     res.json(await buildEnvInventory(req.nodeId, stackName));
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Failed to build env inventory for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build env inventory' });
@@ -2399,6 +2520,10 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  // A compose file the deploy opens that a data restore is overwriting refuses
+  // it before the connection check and the policy gate render the model: those
+  // renders are Docker Compose reading the same files.
+  if (await refuseIfComposeFilesFenced(req, res, stackName)) return;
   if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'up' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
@@ -2433,6 +2558,13 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
+    // A compose file the deploy names is under a data restore's fence: the
+    // Compose command that would have opened it did not start, and no
+    // container was replaced. A refusal, not a failed deploy to log or notify.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return;
+    }
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (error instanceof PulledCandidateBlockedError) {
@@ -2514,6 +2646,9 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'image_pull')) return;
   try {
+    // A compose file the pull opens that a data restore is overwriting refuses
+    // it before the update policy renders the model (the catch answers it).
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
     // Pull images refreshes the stack's images, so the operator's own click is
     // still a manual update: it is refused when any rendered service is disabled.
     const policy = await evaluateUpdatePolicyFor(
@@ -2538,6 +2673,13 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
       skippedBuildBacked: result.skippedBuildBacked,
     });
   } catch (error: unknown) {
+    // A file the pull opens sits in, or links into, a directory a data
+    // restore is overwriting: the pull never started, and the answer is the
+    // fence's.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     // A failed compose step reports the output it accumulated, so collapse the
     // line breaks into a visible separator before the sanitizer deletes them
     // outright: this entry is the only durable record of the failure, and
@@ -2949,7 +3091,10 @@ async function handleServiceScopedMutation(
   try {
     let result: OrchestratorResult;
     if (options.recoveryId) {
-      // Restore is not an image refresh, so it carries no policy decision.
+      // Restore is not an image refresh, so it carries no policy decision. A
+      // compose file a data restore is overwriting refuses it before anything
+      // inside restore runs; the catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       result = await StackUpdateOrchestrator.getInstance().restore(
         { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor },
         {
@@ -2976,6 +3121,10 @@ async function handleServiceScopedMutation(
         });
         return;
       }
+      // A compose file a data restore is overwriting refuses the update before
+      // the gate inside execute, so it writes no gate evidence and runs no
+      // Compose. The catch below answers it with the fence.
+      await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
       result = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId: req.nodeId, stackName, target: { scope: 'service', serviceName }, trigger: 'manual', actor, policy },
         {
@@ -3010,6 +3159,14 @@ async function handleServiceScopedMutation(
       );
     }
   } catch (error: unknown) {
+    // A data restore's fence refusal, raised by the pre-check above on either
+    // branch, by the policy read or the endpoint check of an unrenderable
+    // compose file, or by a fenced read inside the update or restore, is
+    // answered as the fence and is not logged or notified as a failure.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, serviceName });
+      return;
+    }
     console.error(
       '[Stacks] Service %s failed: %s/%s: %s',
       sanitizeForLog(options.notifyFailureAction),
@@ -3184,6 +3341,10 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
     res.json(preview);
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
@@ -3228,6 +3389,10 @@ stacksRouter.post('/:stackName/update-preview', async (req: Request, res: Respon
     }
     res.json({ ...preview, reconciled });
   } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Update preview reconcile failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
@@ -3273,6 +3438,10 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       });
       return;
     }
+    // A compose file a data restore is overwriting refuses the update before the
+    // gate, so the refusal writes no gate evidence and starts no scan. The catch
+    // below answers it with the fence.
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId, {
       imageSource: 'registry',
       unattended: trigger !== 'manual',
@@ -3334,6 +3503,16 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
+    // A file the update opens sits in, or links into, a directory a data
+    // restore is overwriting. The refusal comes before any container is
+    // removed or recreated (the up is admitted before legacy orphans are
+    // cleaned up, and held until it exits), so the rollback point is
+    // abandoned, not used; pulls that ran before it may have updated the local
+    // image store. A refusal, not a failure to log.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
+      return;
+    }
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
     // A policy refusal raised after the check passed: either a caller handed the
@@ -3402,7 +3581,30 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // restore" from an anonymous failure it has to fail closed on.
   if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
-  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
+  // A compose file the rollback's up opens sits in, or links into, a directory
+  // a data restore is overwriting: refused before anything is restored, whether
+  // or not the connection check below can render. A recovery generation's up
+  // names its files itself (the recovery layer is appended last): the root
+  // file and its override, or the file set the generation captured, which is
+  // known only once it is restored and is asked then, at the up's own argv.
+  // The live root and overrides are asked here, never a COMPOSE_FILE
+  // selection.
+  let recoveryUp = false;
+  try {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    // `getCurrent` answers undefined, not null, when no generation is current.
+    recoveryUp = Boolean(StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName));
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName, { pinsComposeFiles: recoveryUp });
+  } catch (error) {
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return;
+    }
+    console.error('[Stacks] Rollback pre-check failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    res.status(500).json({ error: getErrorMessage(error, 'Rollback failed.'), failureClass: 'pre_mutation' });
+    return;
+  }
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' }, { pinsComposeFiles: recoveryUp })) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
@@ -3410,6 +3612,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   let revertRestore: (() => Promise<void>) | null = null;
+  let backupFileLease: { release(): void } | null = null;
   try {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
@@ -3554,6 +3757,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // the restored target can be undone: restoreStackFiles commits to disk, and
     // without this a blocked rollback would leave disk rolled back while the
     // deployed state is unchanged.
+    // The snapshot, the restore, the deploy and any undo are one file
+    // transaction: registered with a data restore's directory fences before
+    // the first read, and held until the route answers, so a fence recorded
+    // meanwhile waits for it, or refuses the deploy's own Compose commands,
+    // instead of landing between the restore and its undo. A fence already
+    // held refuses it here, with nothing moved.
+    backupFileLease = await fsSvc.admitStackFileWork(stackName, [], [], { backupSlot: true });
     revertRestore = await fsSvc.snapshotStackFiles(stackName);
     const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
     if (deliveryPrepId) {
@@ -3586,7 +3796,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
-    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    // A data restore's fence refusing the rollback is answered below as a
+    // refusal, not logged as a failed rollback.
+    if (!isDataRestoreFenceError(error)) {
+      console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    }
     if (error instanceof PulledCandidateBlockedError) {
       // The pull landed an image the gate refused, so `up` never ran and the
       // previous containers are intact. The restored files are not what is
@@ -3606,6 +3820,28 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           ...policyBlockPayload(error.gate.policy, error.gate.violations, error.gate.evidence),
         });
       }
+      return;
+    }
+    if (isDataRestoreFenceError(error)) {
+      // A compose file the deploy, or a recovery generation's up, names went
+      // under a data restore's fence after the pre-check: refused before
+      // Compose ran. The backup path puts its restored files back here, and
+      // the answer says whether they could be; a generation's restore reverts
+      // its own files and rethrows only once they are back (pre_mutation). When
+      // the refusal came at the generation's up, the live gates were already
+      // ended by its callback, as for the Docker endpoint guard's refusal of
+      // the same up; one refused before the restore ended none.
+      let failureClass: 'pre_mutation' | 'post_mutation' = 'pre_mutation';
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a fenced rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+          failureClass = 'post_mutation';
+        }
+      }
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass });
       return;
     }
     if (isDockerEndpointProtectedError(error)) {
@@ -3656,6 +3892,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       res.status(500).json({ error: message, ...restoreFailureClassOf(error) });
     }
   } finally {
+    backupFileLease?.release();
     releaseStackOpLock(req, stackName);
   }
 });
@@ -3904,12 +4141,29 @@ async function resolveRootForOp(
   res: Response,
   stackName: string,
   mode: 'read' | 'write',
+  /** A write that writes nothing yet (an upload before its body), which a fence may cut off. */
+  options: { cutOffable?: boolean } = {},
 ): Promise<StackFileRoot | null> {
   const rootId = readRootId(req);
   // Back-compat fast path: no rootId (or the stack-source root) is exactly the
   // legacy behaviour. Return a synthetic stack-source root without touching the
   // roots service, so plain stack-source ops never trigger a compose render.
   if (rootId === STACK_SOURCE_ROOT_ID) {
+    // The stackName param check already refuses an escaping name; refusing it
+    // again here keeps an escaping name from reaching the fence's realpath.
+    const base = path.resolve(FileSystemService.getInstance(req.nodeId).getBaseDir());
+    const stackDir = path.resolve(base, stackName);
+    if (!stackDir.startsWith(base + path.sep)) {
+      res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' satisfies FsErrorCode });
+      return null;
+    }
+    // The fence compares the directory by its identity, so it is named from the
+    // compose base's own listing rather than from the request. A stack whose
+    // directory is not there yet is registered as the whole base, which overlaps
+    // everything a fence can hold below it.
+    const entry = (await fsp.readdir(base).catch(() => [] as string[])).find((name) => name === stackName);
+    const fenceDir = entry === undefined ? base : path.join(base, entry);
+    if (await refuseUnderDirectoryRestore(res, fenceDir, mode === 'read' || options.cutOffable === true)) return null;
     return stackSourceFileRoot();
   }
   if (!ROOT_ID_RE.test(rootId)) {
@@ -3935,7 +4189,125 @@ async function resolveRootForOp(
     res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
     return null;
   }
+  // A browsable or writable bind root's path is already canonical: the roots
+  // service resolved it with realpath when it listed the root, and the file
+  // gateway refuses a root swapped for a link since then (SYMLINK_ESCAPE).
+  if (root.backend === 'fs' && await refuseUnderDirectoryRestore(res, root.hostPathOrName, mode === 'read' || options.cutOffable === true)) return null;
   return root;
+}
+
+/**
+ * Refuse a file operation on a directory that overlaps one a data restore is
+ * overwriting, or whose relationship to it cannot be proven: reading it would
+ * show a half-swapped tree, and writing it would change data the restore is
+ * replacing. Otherwise admit it: the operation is registered until its handler
+ * has finished and its response has closed, and a fence recorded meanwhile waits
+ * for it before it captures or swaps anything. One query when no such restore
+ * is live.
+ */
+async function refuseUnderDirectoryRestore(res: Response, dir: string, cutOffable: boolean): Promise<boolean> {
+  const { matchFsWorkToFences, admitFsWork } = await import('../services/recovery/restoreFence');
+  const match = await matchFsWorkToFences(dir);
+  // A read (or an upload whose body is still to come) is cut off when a fence
+  // lands rather than waited for, so a slow client cannot hold a restore off; a
+  // write is waited for.
+  const admitted = match.refusal ?? admitFsWork(dir, match.checked, cutOffable ? () => cutOffFileOp(res) : null);
+  if (isDataRestoreFenceError(admitted)) {
+    res.status(409).json({ error: admitted.message, code: DATA_RESTORE_FENCE_CODE });
+    return true;
+  }
+  holdFsWork(res, admitted);
+  return false;
+}
+
+/**
+ * The stack file operations of one request: the directory fence leases it holds
+ * and how many of its handlers are still running. A lease is released when the
+ * response has closed and no handler is running, so neither a streamed download
+ * that outlives its handler nor a handler that keeps writing after its client
+ * went away is let go early.
+ */
+interface FileOpScope {
+  active: number;
+  closed: boolean;
+  leases: FsWorkLease[];
+}
+
+const fileOpScopes = new WeakMap<Response, FileOpScope>();
+
+function fileOpScopeOf(res: Response): FileOpScope {
+  const existing = fileOpScopes.get(res);
+  if (existing) return existing;
+  const scope: FileOpScope = { active: 0, closed: res.writableFinished || res.destroyed, leases: [] };
+  fileOpScopes.set(res, scope);
+  res.once('close', () => {
+    scope.closed = true;
+    settleFileOpScope(scope);
+  });
+  return scope;
+}
+
+function settleFileOpScope(scope: FileOpScope): void {
+  if (!scope.closed || scope.active > 0) return;
+  for (const lease of scope.leases.splice(0)) lease.release();
+}
+
+function holdFsWork(res: Response, lease: FsWorkLease): void {
+  const scope = fileOpScopeOf(res);
+  scope.leases.push(lease);
+  settleFileOpScope(scope);
+}
+
+/**
+ * The refusal for a directory fenced since this request's file operation was
+ * admitted, or null. Work with more than one step asks before each one.
+ */
+function fileOpRecheck(res: Response): { message: string } | null {
+  for (const lease of fileOpScopes.get(res)?.leases ?? []) {
+    const refusal = lease.recheck();
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/**
+ * End a request whose file operation a restore fence cut off. The connection is
+ * closed rather than answered, because the handler is still running and may
+ * answer or stream on its own; a retry is refused with the fence's reason.
+ */
+function cutOffFileOp(res: Response): void {
+  res.destroy();
+}
+
+/**
+ * Whether this request's response is gone: closed by the client, or cut off by
+ * a restore fence while the handler was still waiting on a source. A source
+ * opened after that has no one to stream to, and the response's close event has
+ * already fired, so the handler checks this after each wait and ends itself.
+ */
+function fileOpResponseGone(res: Response): boolean {
+  return res.destroyed || fileOpScopes.get(res)?.closed === true;
+}
+
+/** From here the fence waits for this request's file operation instead of cutting it off: its write is under way. */
+function stopCuttingOffFileOp(res: Response): void {
+  for (const lease of fileOpScopes.get(res)?.leases ?? []) lease.setAbort(null);
+}
+
+/** Run a stack file route handler inside its request's file operation scope. */
+function fileOp(
+  handler: (req: Request, res: Response, next: NextFunction) => unknown,
+): (req: Request, res: Response, next: NextFunction) => Promise<unknown> {
+  return async (req, res, next) => {
+    const scope = fileOpScopeOf(res);
+    scope.active += 1;
+    try {
+      return await handler(req, res, next);
+    } finally {
+      scope.active -= 1;
+      settleFileOpScope(scope);
+    }
+  };
 }
 
 /** Drop the cached root allowlist after a stack-source mutation that can change declared mounts. */
@@ -4024,7 +4396,7 @@ stacksRouter.get('/:stackName/file-roots', async (req: Request, res: Response) =
   }
 });
 
-stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4058,9 +4430,9 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
     recordFileOp(req.nodeId, 'list', startedAt, false);
     return sendFsError(res, err, 'Failed to list directory');
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/content', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4096,9 +4468,9 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'read', startedAt, false);
     return sendFsError(res, err, 'Failed to read file');
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/download', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/download', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4112,6 +4484,13 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
     const result = await FileRootGateway.getInstance(req.nodeId).download(root, stackName, relPath);
+    // The response closed (a client gone, or a restore fence's cut-off) while
+    // the source was being opened: nothing will read it, so it is closed here.
+    if (fileOpResponseGone(res)) {
+      if (result.kind !== 'buffer') result.stream.destroy();
+      recordFileOp(req.nodeId, 'download', startedAt, false);
+      return;
+    }
     const setDownloadHeaders = (filename: string, size: number, mime: string): void => {
       res.setHeader('Content-Type', mime);
       res.setHeader('Content-Length', size);
@@ -4191,7 +4570,7 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     recordFileOp(req.nodeId, 'download', startedAt, false);
     return sendFsError(res, err, 'Failed to download file');
   }
-});
+}));
 
 type UploadStartedReq = Request & { _fileUploadStartedAt?: number; _fileUploadRoot?: StackFileRoot };
 
@@ -4200,14 +4579,16 @@ stacksRouter.post(
   // Authorize BEFORE multer touches the body, so an unauthorized caller or a
   // read-only/non-existent root is rejected without ever spooling a temp file.
   // The resolved root is stashed for the handler so it is not resolved twice.
-  async (req: Request, res: Response, next: NextFunction) => {
+  fileOp(async (req: Request, res: Response, next: NextFunction) => {
     const stackName = req.params.stackName as string;
     if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
-    const root = await resolveRootForOp(req, res, stackName, 'write');
+    // Until the body has arrived the upload writes nothing in the directory, so a
+    // fence cuts it off instead of waiting on a slow client.
+    const root = await resolveRootForOp(req, res, stackName, 'write', { cutOffable: true });
     if (!root) return;
     (req as UploadStartedReq)._fileUploadRoot = root;
     next();
-  },
+  }),
   (req: Request, res: Response, next: NextFunction) => {
     // Capture the time the upload entered the route so every downstream
     // metric reports the same latency window: the body-transfer +
@@ -4245,7 +4626,7 @@ stacksRouter.post(
       next();
     });
   },
-  async (req: Request, res: Response) => {
+  fileOp(async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
     // The pre-multer middleware already authorized and resolved the root.
     const root = (req as UploadStartedReq)._fileUploadRoot;
@@ -4277,6 +4658,22 @@ stacksRouter.post(
     // Date.now() defensively in case the wrapper was bypassed in a test.
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
+    // From here the upload writes, so a fence waits for it; one recorded while
+    // the body was arriving is refused here instead of written under. A response
+    // that has already closed (a fence cut the upload off, or the client went
+    // away) has released its fence registration, so nothing is written for it.
+    stopCuttingOffFileOp(res);
+    if (fileOpScopes.get(res)?.closed) {
+      recordFileOp(req.nodeId, 'upload', startedAt, false);
+      await cleanupUploadTemp(req);
+      return;
+    }
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      recordFileOp(req.nodeId, 'upload', startedAt, false);
+      await cleanupUploadTemp(req);
+      return res.status(409).json({ error: fenced.message, code: DATA_RESTORE_FENCE_CODE });
+    }
     try {
       const gateway = FileRootGateway.getInstance(req.nodeId);
       const existing = await gateway.pathKind(root, stackName, targetRelPath);
@@ -4356,10 +4753,10 @@ stacksRouter.post(
       // always remains and must be removed on every exit (success, conflict, error).
       await cleanupUploadTemp(req);
     }
-  },
+  }),
 );
 
-stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response) => {
+stacksRouter.put('/:stackName/files/content', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4425,9 +4822,9 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'write', startedAt, false);
     return sendFsError(res, err, 'Failed to write file');
   }
-});
+}));
 
-stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => {
+stacksRouter.delete('/:stackName/files', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4467,9 +4864,9 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     recordFileOp(req.nodeId, 'delete', startedAt, false);
     return sendFsError(res, err, 'Failed to delete path');
   }
-});
+}));
 
-stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/folder', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4506,9 +4903,9 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
     recordFileOp(req.nodeId, 'mkdir', startedAt, false);
     return sendFsError(res, err, 'Failed to create folder');
   }
-});
+}));
 
-stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Response) => {
+stacksRouter.patch('/:stackName/files/rename', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const { from, to } = req.body as { from?: unknown; to?: unknown };
@@ -4555,9 +4952,9 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
     recordFileOp(req.nodeId, 'rename', startedAt, false);
     return sendFsError(res, err, 'Failed to rename');
   }
-});
+}));
 
-stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/copy', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const { from, to } = req.body as { from?: unknown; to?: unknown };
@@ -4604,7 +5001,7 @@ stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) 
     recordFileOp(req.nodeId, 'copy', startedAt, false);
     return sendFsError(res, err, 'Failed to copy');
   }
-});
+}));
 
 // ── Bulk file operations (delete / move / download) ─────────────────────────
 
@@ -4706,7 +5103,7 @@ async function enumerateArchiveFiles(
   return files;
 }
 
-stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/bulk-delete', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const parsed = parseBulkPaths((req.body as { paths?: unknown }).paths, res);
@@ -4719,6 +5116,12 @@ stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Res
   const failed: { path: string; error: string }[] = [];
   for (const relPath of normalized) {
     const startedAt = Date.now();
+    // A directory fenced while the earlier items ran stops the rest.
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      failed.push({ path: relPath, error: fenced.message });
+      continue;
+    }
     try {
       await gateway.deletePath(root, stackName, relPath, true);
       deleted.push(relPath);
@@ -4732,9 +5135,9 @@ stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Res
   if (deleted.length > 0) afterStackMutation(req, stackName);
   logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkDelete', stack: stackName, deleted: deleted.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
   return res.json({ deleted, failed });
-});
+}));
 
-stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Response) => {
+stacksRouter.post('/:stackName/files/bulk-move', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const body = req.body as { from?: unknown; toDir?: unknown };
@@ -4763,6 +5166,12 @@ stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Respo
     const startedAt = Date.now();
     const name = fromRel.split('/').pop() as string;
     const toRel = toDir ? `${toDir}/${name}` : name;
+    // A directory fenced while the earlier items ran stops the rest.
+    const fenced = fileOpRecheck(res);
+    if (fenced) {
+      failed.push({ path: fromRel, error: fenced.message });
+      continue;
+    }
     try {
       await gateway.rename(root, stackName, fromRel, toRel);
       moved.push(fromRel);
@@ -4775,9 +5184,9 @@ stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Respo
   if (moved.length > 0) afterStackMutation(req, stackName);
   logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkMove', stack: stackName, moved: moved.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
   return res.json({ moved, failed });
-});
+}));
 
-stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/bulk-download', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const raw = req.query.path;
@@ -4810,6 +5219,12 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
     recordFileOp(req.nodeId, 'download', startedAt, false);
     return res.status(404).json({ error: 'Nothing to download', code: 'NOT_FOUND' satisfies FsErrorCode });
   }
+  // The response closed during the prewalk (a client gone, or a restore
+  // fence's cut-off): its close event has fired, so no archive is started.
+  if (fileOpResponseGone(res)) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    return;
+  }
 
   res.setHeader('Content-Type', 'application/gzip');
   res.setHeader('Content-Disposition', `attachment; filename="${stackName}-files.tar.gz"`);
@@ -4821,13 +5236,18 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
   };
   pack.on('error', onStreamError);
   gzip.on('error', onStreamError);
-  // If the client aborts mid-download, stop fetching the remaining files (each
-  // helper-volume read is a container exec) instead of streaming into a dead pipe.
+  // If the client aborts mid-download, or a restore fence cuts the request off,
+  // stop fetching the remaining files (each helper-volume read is a container
+  // exec) instead of streaming into a dead pipe. An entry being written when it
+  // happens is settled here, because a destroyed pack never calls it back, and
+  // its source is closed.
   let aborted = false;
+  let abortEntry: (() => void) | null = null;
   res.on('close', () => {
     if (!res.writableEnded) {
       aborted = true;
       pack.destroy();
+      abortEntry?.();
     }
   });
   pack.pipe(gzip).pipe(res);
@@ -4836,18 +5256,28 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
     for (const relPath of files) {
       if (aborted) break;
       const dl = await gateway.download(root, stackName, relPath);
-      if (dl.kind === 'buffer') {
-        await new Promise<void>((resolve, reject) => {
+      if (aborted) {
+        if (dl.kind !== 'buffer') dl.stream.destroy();
+        break;
+      }
+      await new Promise<void>((resolve, reject) => {
+        abortEntry = () => {
+          if (dl.kind !== 'buffer') dl.stream.destroy();
+          resolve();
+        };
+        if (dl.kind === 'buffer') {
           pack.entry({ name: relPath }, dl.buffer, (err) => (err ? reject(err) : resolve()));
-        });
-      } else {
-        await new Promise<void>((resolve, reject) => {
+        } else {
           const entry = pack.entry({ name: relPath, size: dl.size }, (err) => (err ? reject(err) : resolve()));
           dl.stream.on('error', reject);
           entry.on('error', reject);
           dl.stream.pipe(entry);
-        });
-      }
+        }
+      }).finally(() => { abortEntry = null; });
+    }
+    if (aborted) {
+      recordFileOp(req.nodeId, 'download', startedAt, false);
+      return;
     }
     pack.finalize();
     recordFileOp(req.nodeId, 'download', startedAt, true);
@@ -4859,9 +5289,9 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
     pack.destroy();
     if (!res.writableEnded) res.destroy();
   }
-});
+}));
 
-stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/files/permissions', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4883,9 +5313,9 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
     recordFileOp(req.nodeId, 'permissionsRead', startedAt, false);
     return sendFsError(res, err, 'Failed to read permissions');
   }
-});
+}));
 
-stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Response) => {
+stacksRouter.put('/:stackName/files/permissions', fileOp(async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -4929,5 +5359,5 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
     recordFileOp(req.nodeId, 'chmod', startedAt, false);
     return sendFsError(res, err, 'Failed to set permissions');
   }
-});
+}));
 

@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   endpoint: vi.fn(), policy: vi.fn(), execute: vi.fn(), beginStack: vi.fn(), link: vi.fn(),
   recheck: vi.fn(), invalidate: vi.fn(), broadcast: vi.fn(), alert: vi.fn(),
-  render: vi.fn(), log: vi.fn(),
+  render: vi.fn(), log: vi.fn(), fence: vi.fn(),
 }));
 vi.mock('../services/ComposeService', () => ({ ComposeService: { getInstance: () => ({ evaluateDockerEndpoint: mocks.endpoint, renderConfig: mocks.render }) } }));
+vi.mock('../services/FileSystemService', () => ({ FileSystemService: { getInstance: () => ({ refuseIfComposeFenced: mocks.fence }) } }));
 vi.mock('../services/PolicyEnforcement', () => ({ enforcePolicyPreDeploy: mocks.policy }));
 vi.mock('../services/StackUpdateOrchestrator', () => ({ StackUpdateOrchestrator: { getInstance: () => ({ execute: mocks.execute }) } }));
 vi.mock('../services/HealthGateService', () => ({ HealthGateService: { getInstance: () => ({ beginStack: mocks.beginStack }) } }));
@@ -17,11 +18,13 @@ vi.mock('../services/DatabaseService', () => ({ DatabaseService: { getInstance: 
 
 import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
 import { StackOpLockService } from '../services/StackOpLockService';
+import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 beforeEach(() => {
   vi.clearAllMocks();
   StackOpLockService.resetForTests();
   mocks.endpoint.mockResolvedValue(null);
+  mocks.fence.mockResolvedValue(undefined);
   mocks.policy.mockResolvedValue({ ok: true, violations: [] });
   mocks.execute.mockResolvedValue({ kind: 'stack_compose_done', deployedGenerationId: 'generation', recoveryId: 'recovery' });
   mocks.beginStack.mockReturnValue('health');
@@ -38,6 +41,20 @@ beforeEach(() => {
 const input = { nodeId: 1, stackName: 'web', updatedImages: ['nginx:1'], policyOptions: { bypass: false, actor: 'automatic:test' } };
 
 describe('automatic stack apply pipeline', () => {
+  it('refuses a compose file a data restore is overwriting before the gate runs or the observation is verified or spent', async () => {
+    mocks.fence.mockRejectedValue(new DataRestoreFenceError('/srv/web/data', 'browse', 'directory'));
+    const verify = vi.fn();
+    const consume = vi.fn();
+    await expect(applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority', observation: { verify, consume } }))
+      .rejects.toMatchObject({ code: 'data_restore' });
+    expect(mocks.fence).toHaveBeenCalledWith('web');
+    expect(verify).not.toHaveBeenCalled();
+    expect(mocks.policy).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(StackOpLockService.getInstance().get(1, 'web')).toBeUndefined();
+  });
+
   it('alerts with the same prefixed wording the scheduler uses', async () => {
     // Two senders of the same sentence. The scheduler prefixes the action and the
     // stack; dispatching the bare sentence here made one operator-visible message

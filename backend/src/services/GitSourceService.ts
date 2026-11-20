@@ -94,6 +94,7 @@ import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
+import { prepareComposeAdmission, type FsWorkLeaseLike } from '../helpers/composeArgvFence';
 import {
     assertComposeInputsWithinExpansionLimits,
     assertComposeSourceWithinExpansionLimits,
@@ -2225,8 +2226,33 @@ export class GitSourceService {
         return null;
     }
 
-    private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
-        return spawnDockerCompose(args, cwd, timeoutMs);
+    /**
+     * A validation render opens the candidate's files, so it is admitted
+     * against a data restore's directory fences (see prepareComposeAdmission)
+     * and the runner is called in the same synchronous step, which spawns at
+     * once. The lease is held until the run has answered. A refused
+     * validation is a failed one, worded by the fence: the runner answers
+     * with an exit result, never a rejection.
+     */
+    private async runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
+        let lease: FsWorkLeaseLike;
+        try {
+            lease = (await prepareComposeAdmission({ cwd, args })).admit();
+        } catch (err) {
+            return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
+        }
+        let run: ReturnType<typeof spawnDockerCompose>;
+        try {
+            run = spawnDockerCompose(args, cwd, timeoutMs);
+        } catch (err) {
+            lease.release();
+            throw err;
+        }
+        try {
+            return await run;
+        } finally {
+            lease.release();
+        }
     }
 
     private async deployContextWithOptionalOverlay(args: {

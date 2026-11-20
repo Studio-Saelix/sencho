@@ -69,6 +69,10 @@ const descriptor = (state = 'unavailable', reason = 'engine_not_installed', cont
   volumeProtection: { capability: 'volume-protection-v1', version, state, reason },
   restoreModes: ['new_volume', 'staged_overwrite'] as string[],
   pointReads: ['list', 'download'] as string[],
+  // A node with no engine registered captures what a node that predates the
+  // field is read as.
+  storageKinds: ['named_volume'] as string[],
+  restoreScopes: ['root', 'path'] as string[],
 });
 
 /** The same answer from a node that predates the restore-mode and point-read fields. */
@@ -180,6 +184,9 @@ describe('resolveRemoteVolumeProtection', () => {
         status: { capability: 'volume-protection-v1', version: 1, state: 'available', reason: 'engine_registered' },
         restoreModes: ['new_volume'],
         pointReads: [],
+        // A node that predates the fields captures named volumes and restores whole points.
+        storageKinds: ['named_volume'],
+        restoreScopes: ['root'],
       });
   });
 
@@ -524,6 +531,32 @@ describe('the hub preflight and a node without the overwrite surface', () => {
         });
       }
 
+      for (const [path, message] of [
+        ['/api/recovery/storage/roots/points', /directory a stack binds/],
+        ['/api/recovery/points/pt-1/restore/path', /one path of a recovery point/],
+      ] as const) {
+        it(`refuses POST ${path} when the node never advertised it, before forwarding it`, async () => {
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(message);
+          expect(mockRead.mock.calls.map(([args]) => args.path)).toEqual(['/api/recovery/node']);
+        });
+
+        it(`lets POST ${path} through to a node that advertises it`, async () => {
+          mockRead.mockImplementation(echoing({
+            ...descriptor('available', 'engine_registered'),
+            storageKinds: ['named_volume', 'bind_root'],
+            restoreScopes: ['root', 'path'],
+          }) as never);
+          await giveTunnel(getId());
+          const res = await post(path, getId());
+          expect(res.body.code).not.toBe('UPDATE_REQUIRED');
+        });
+      }
+
       for (const path of otherPosts) {
         it(`does not refuse POST ${path} as an update-required request for a node without the overwrite`, async () => {
           mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
@@ -580,6 +613,86 @@ describe('the hub preflight and a node without the overwrite surface', () => {
     support.resetRemoteRecoverySupportCacheForTests();
     expect(await support.preflightRecoveryRequest(1)).toMatchObject({ ok: true });
   });
+});
+
+describe('a directory capture and a path restore reach the owning node, or nothing does', () => {
+  // A stand-in for the owning node: records every request the hub forwards and
+  // answers it as accepted, so a forward is observed rather than inferred.
+  let owner: import('http').Server;
+  let ownerUrl: string;
+  const received: Array<{ method: string; url: string; body: string }> = [];
+  let ownerProxyNodeId: number;
+
+  beforeAll(async () => {
+    const http = await import('http');
+    owner = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        received.push({ method: req.method ?? '', url: req.url ?? '', body });
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ operationId: 'op-owner', accepted: true }));
+      });
+    });
+    await new Promise<void>((resolve) => owner.listen(0, '127.0.0.1', resolve));
+    const address = owner.address() as import('net').AddressInfo;
+    ownerUrl = `http://127.0.0.1:${address.port}`;
+    ownerProxyNodeId = DatabaseService.getInstance().addNode({
+      name: 'recovery-owner-proxy', type: 'remote', api_url: ownerUrl, api_token: 't', compose_dir: '/srv', is_default: false,
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => owner.close(() => resolve()));
+  });
+
+  const transports = [
+    ['a direct-proxy node', () => ownerProxyNodeId],
+    ['a Pilot node', () => pilotNodeId],
+  ] as const;
+
+  const routeTo = async (nodeId: number) => {
+    if (nodeId !== pilotNodeId) return;
+    const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+    vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue(ownerUrl);
+  };
+
+  for (const [label, getId] of transports) {
+    describe(label, () => {
+      for (const [path, body, message] of [
+        ['/api/recovery/storage/roots/points', { stackName: 'app', rootId: 'root-1' }, /directory a stack binds/],
+        ['/api/recovery/points/pt-1/restore/path', { path: '/db/data.sqlite', targetVolumeName: 'restored' }, /one path of a recovery point/],
+      ] as const) {
+        it(`forwards POST ${path} with its body to the owning node when it advertises the capability`, async () => {
+          received.length = 0;
+          mockRead.mockImplementation(echoing({
+            ...descriptor('available', 'engine_registered'),
+            storageKinds: ['named_volume', 'bind_root'],
+            restoreScopes: ['root', 'path'],
+          }) as never);
+          await routeTo(getId());
+          const res = await request(app).post(path).set('Authorization', authHeader).set('x-node-id', String(getId())).send(body);
+          expect(res.status, JSON.stringify(res.body)).toBe(202);
+          expect(res.body).toMatchObject({ operationId: 'op-owner' });
+          expect(received).toHaveLength(1);
+          expect(received[0].method).toBe('POST');
+          expect(received[0].url.split('?')[0]).toBe(path);
+          expect(JSON.parse(received[0].body)).toMatchObject(body);
+        });
+
+        it(`answers POST ${path} with exactly 409 UPDATE_REQUIRED for an older node, and forwards nothing to it`, async () => {
+          received.length = 0;
+          mockRead.mockImplementation(echoing(legacyDescriptor()) as never);
+          await routeTo(getId());
+          const res = await request(app).post(path).set('Authorization', authHeader).set('x-node-id', String(getId())).send(body);
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'UPDATE_REQUIRED', errorClass: 'update_required' });
+          expect(res.body.error).toMatch(message);
+          expect(received).toEqual([]);
+        });
+      }
+    });
+  }
 });
 
 describe('the hub preflight and a node without point reads', () => {
@@ -654,5 +767,58 @@ describe('a node that cannot restore over an existing volume', () => {
     const read = await remote.resolveRemoteRecoverySupport(proxyNodeId);
     expect(read.restoreModes).toEqual(['new_volume']);
     remote.resetRemoteRecoverySupportCacheForTests();
+  });
+});
+
+describe('storage kinds and restore scopes', () => {
+  it('advertises host directories and path restores from this build', async () => {
+    const { RESTIC_STORAGE_KINDS } = await import('../services/recovery/restic/ResticEngine');
+    expect(RESTIC_STORAGE_KINDS).toEqual(['named_volume', 'bind_root']);
+    const res = await request(app).get('/api/recovery/node').set('Authorization', authHeader);
+    expect(res.body.restoreScopes).toEqual(['root', 'path']);
+  });
+
+  it('reads a missing field as what an older node can do, drops names it does not know, and refuses a non-list', async () => {
+    const parse = (extra: Record<string, unknown>) =>
+      capability.parseRecoveryNodeDescriptor({ ...descriptor('available', 'engine_registered'), ...extra });
+    const base = { ...descriptor('available', 'engine_registered') } as Record<string, unknown>;
+    delete base.storageKinds;
+    delete base.restoreScopes;
+    expect(capability.parseRecoveryNodeDescriptor(base)).toMatchObject({ storageKinds: ['named_volume'], restoreScopes: ['root'] });
+    expect(parse({ storageKinds: ['bind_root', 'object_store', 'bind_root'], restoreScopes: ['path', 'subtree'] }))
+      .toMatchObject({ storageKinds: ['bind_root'], restoreScopes: ['path'] });
+    expect(parse({ storageKinds: 'bind_root' })).toBeNull();
+    expect(parse({ restoreScopes: { path: true } })).toBeNull();
+  });
+
+  it('names the two routes an older node lacks, and no other', async () => {
+    const { requiredRecoveryScopeFor } = await import('../proxy/remoteNodeProxy');
+    expect(requiredRecoveryScopeFor('POST', '/recovery/storage/roots/points')).toEqual({ storageKind: 'bind_root' });
+    expect(requiredRecoveryScopeFor('post', '/recovery/storage/roots/points/')).toEqual({ storageKind: 'bind_root' });
+    expect(requiredRecoveryScopeFor('POST', '/recovery/points/p1/restore/path')).toEqual({ restoreScope: 'path' });
+    for (const [method, path] of [
+      ['GET', '/recovery/storage/roots/points'],
+      ['POST', '/recovery/storage/points'],
+      ['POST', '/recovery/points/p1/restore'],
+      ['POST', '/recovery/points/p1/restore/path/extra'],
+      ['POST', '/recovery/storage/roots/points/x'],
+    ] as const) {
+      expect(requiredRecoveryScopeFor(method, path), `${method} ${path}`).toEqual({});
+    }
+  });
+
+  it('refuses a directory capture or a path restore to a node that does not advertise it, and nothing else', async () => {
+    const support = await import('../services/recovery/remoteSupport');
+    const original = await import('../helpers/nodeProxyJson');
+    vi.spyOn(original, 'readNodeProxyJson').mockImplementation(echoing(legacyDescriptor()) as never);
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { storageKind: 'bind_root' }))
+      .toMatchObject({ ok: false, httpStatus: 409, errorClass: 'update_required' });
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { restoreScope: 'path' }))
+      .toMatchObject({ ok: false, httpStatus: 409, errorClass: 'update_required' });
+    support.resetRemoteRecoverySupportCacheForTests();
+    expect(await support.preflightRecoveryRequest(1, undefined, undefined, { storageKind: 'named_volume', restoreScope: 'root' }))
+      .toMatchObject({ ok: true });
   });
 });

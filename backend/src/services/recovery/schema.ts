@@ -18,7 +18,7 @@ import type Database from 'better-sqlite3';
  *   - a point with a hold (deploy checkpoint, policy, mobility, drain, last
  *     known good, operator, restore intent) cannot be deleted.
  */
-export const RECOVERY_SCHEMA_VERSION = 3;
+export const RECOVERY_SCHEMA_VERSION = 4;
 export const RECOVERY_SCHEMA_STATE_KEY = 'recovery_schema_version';
 /** Stable authority id for every storage and repository record this instance owns. */
 export const RECOVERY_AUTHORITY_STATE_KEY = 'recovery_authority_id';
@@ -38,6 +38,9 @@ export const RESTORE_INTENT_CARRIED_COLUMNS = [
   'id', 'operation_id', 'point_id', 'target_mode', 'target_volume', 'path_scope',
   'phase', 'files_restored', 'bytes_restored', 'verified', 'xattr_warnings',
   'actor', 'process_epoch', 'created_at', 'updated_at',
+  // v4. The added-columns step puts it on an older table before the v3 rebuild
+  // copies the rows, so it is carried like the original columns.
+  'target_paths_json',
 ] as const;
 
 /**
@@ -65,6 +68,11 @@ CREATE TABLE IF NOT EXISTS ${table} (
   -- stack can declare it without a running container, and a deploy of that stack
   -- must still be refused while the fence is held.
   dependent_stacks_json TEXT NULL,
+  -- v4: an overwrite of a host directory records where it lives in both
+  -- namespaces ({ senchoPath, hostPath, aliases }), so reconciliation can prove
+  -- the directory again before it touches it. target_volume then holds
+  -- 'fs:<storage key>', which no Docker volume name can collide with.
+  target_paths_json TEXT NULL,
   pre_restore_point_id TEXT NULL REFERENCES recovery_points(id),
   fence_state TEXT NOT NULL DEFAULT 'none' CHECK (fence_state IN ('none','held','released','release_failed')),
   outcome_class TEXT NULL,
@@ -281,6 +289,10 @@ export type RecoverySchemaOutcome =
  */
 const ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; definition: string }> = [
   { table: 'recovery_operations', column: 'request_digest', definition: 'TEXT NULL' },
+  // v4. Runs before the v3 rebuild, which recreates the table from
+  // `restoreIntentsSql` and copies RESTORE_INTENT_CARRIED_COLUMNS, so a v2
+  // table has the column to copy and a v3 table, which skips the rebuild, gains it.
+  { table: 'recovery_restore_intents', column: 'target_paths_json', definition: 'TEXT NULL' },
 ];
 
 function columnExists(db: Database.Database, table: string, column: string): boolean {

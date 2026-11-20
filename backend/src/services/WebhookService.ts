@@ -247,11 +247,22 @@ export class WebhookService {
                             const updatePolicy = await resolveUpdatePolicy(nodeId, {
                                 stack: stackName, target: { scope: 'stack' }, trigger: 'webhook',
                             });
+                            // A compose file a data restore is swapping does
+                            // not render: the fence answers before the skip,
+                            // and the catch below records it as the failure.
+                            if (updatePolicy.evaluation === 'unrenderable') {
+                                await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
+                            }
                             if (updatePolicy.decision !== 'allow') {
                                 recordUpdatePolicyDecision(nodeId, updatePolicy, 'system:webhook');
                                 policySkipNote = describePolicySkip(updatePolicy);
                                 break;
                             }
+                            // A compose file a data restore is overwriting
+                            // refuses the pull before the gate and the rollback
+                            // capture, as the update route does; the catch
+                            // below records the fence's reason as the failure.
+                            await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
                             const webhookGate = await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,

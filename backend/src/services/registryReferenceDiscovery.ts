@@ -1,3 +1,4 @@
+import { prepareComposeAdmission, spawnUnderLease } from '../helpers/composeArgvFence';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -480,10 +481,13 @@ async function renderComposeEffectiveModel(
     }
     throw err;
   }
-  const child = spawn('docker', args, {
+  // A render opens the stack's files, so a data restore's directory fence
+  // refuses it or waits for it (see prepareComposeAdmission).
+  const admission = await prepareComposeAdmission({ cwd, args, env: childEnv });
+  const child = spawnUnderLease(admission, () => spawn('docker', args, {
     cwd,
     env: childEnv,
-  });
+  }));
   return new Promise<string | null>((resolve) => {
     let stdout = '';
     let stderr = '';

@@ -20,8 +20,13 @@ import {
   RecoveryHelperRunner,
   buildHelperContainerConfig,
   helperHostname,
+  HELPER_GUARD_REFUSED_EXIT,
+  HOST_ROOT_SOURCE_PROFILES,
+  HOST_ROOT_TARGET_PROFILES,
+  type HelperMountSpec,
   type HelperProfile,
 } from '../services/recovery/restic/helperRunner';
+import { ProvenHostRoot, UnprovenHostPath } from '../services/recovery/hostRoots';
 
 const IMAGE = 'ghcr.io/studio-saelix/sencho-recovery-helper@sha256:' + 'a'.repeat(64);
 const AUTHORITY = 'authority-1';
@@ -32,7 +37,7 @@ const ALL_PROFILES = Object.keys(HELPER_PROFILES) as HelperProfile[];
 
 function specFor(
   profile: HelperProfile,
-  mounts: { repository?: string; source?: string; target?: string } = {
+  mounts: HelperMountSpec = {
     repository: 'repo-vol',
     source: 'src-vol',
     target: 'dst-vol',
@@ -67,7 +72,8 @@ describe('recovery helper profiles', () => {
       expect(hostConfig.Tmpfs, profile).toEqual({
         '/tmp': profile === 'backup' ? 'size=512m,mode=1777' : 'size=64m,mode=1777',
       });
-      // No bind, no socket, no host path: only named volumes.
+      // Given only volume names, no profile emits a bind, a socket or a host path.
+      // A host directory reaches a helper only as a branded root (below).
       expect(hostConfig.Binds, profile).toBeUndefined();
       for (const mount of hostConfig.Mounts as Array<Record<string, unknown>>) {
         expect(mount.Type, profile).toBe('volume');
@@ -383,5 +389,136 @@ describe('recovery helper runner', () => {
     const removed = await runnerFor(fake).removeForeignEpochHelpers();
     expect(removed).toBe(1);
     expect(fake.removed).toEqual(['dead']);
+  });
+});
+
+// --- Host roots -------------------------------------------------------------
+
+const PROVEN = ProvenHostRoot.mint('/srv/app/data', '64768', '18446744073709551557');
+const UNPROVEN = UnprovenHostPath.of('/srv/app/data');
+const GUARD_PREFIX = ['guard', '--root'];
+
+describe('recovery helper host roots', () => {
+  it('binds a proven capture source read-only, non-recursive, and starts it through the guard', () => {
+    const { config, hostConfig } = specFor('backup', { repository: 'repo-vol', source: PROVEN });
+    expect(hostConfig.Mounts).toEqual([
+      { Type: 'volume', Source: 'repo-vol', Target: HELPER_REPOSITORY_MOUNT, ReadOnly: false, VolumeOptions: { NoCopy: true } },
+      {
+        Type: 'bind',
+        Source: '/srv/app/data',
+        Target: HELPER_SOURCE_MOUNT,
+        ReadOnly: true,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: true },
+      },
+    ]);
+    expect(config.Entrypoint).toEqual(['/sencho-recovery-probe']);
+    expect(config.Cmd).toEqual([
+      ...GUARD_PREFIX, HELPER_SOURCE_MOUNT, '--expect', '64768:18446744073709551557', '--',
+      '/restic', '--repo', '/repo', 'version',
+    ]);
+    expect(hostConfig.Binds).toBeUndefined();
+    expect(hostConfig.VolumesFrom).toBeUndefined();
+    expect(JSON.stringify(hostConfig)).not.toContain('CreateMountpoint');
+    expect(JSON.stringify(hostConfig)).not.toMatch(/[:,]z\b|relabel/i);
+  });
+
+  it('binds a proven write target read-write for the materialize and swap profiles only, through the guard', () => {
+    for (const profile of ['materialize', 'swap'] as const) {
+      const { config, hostConfig } = specFor(profile, { repository: 'repo-vol', target: PROVEN });
+      const bind = (hostConfig.Mounts as Array<Record<string, unknown>>).find((m) => m.Type === 'bind');
+      expect(bind, profile).toEqual({
+        Type: 'bind',
+        Source: '/srv/app/data',
+        Target: HELPER_RESTORE_MOUNT,
+        ReadOnly: false,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: true },
+      });
+      expect(config.Entrypoint, profile).toEqual(['/sencho-recovery-probe']);
+      expect((config.Cmd as string[]).slice(0, 6), profile).toEqual([
+        ...GUARD_PREFIX, HELPER_RESTORE_MOUNT, '--expect', '64768:18446744073709551557', '--',
+      ]);
+    }
+  });
+
+  it('lets only the proof probe read an unproven path, without the guard it has nothing to compare against', () => {
+    const { config, hostConfig } = specFor('probe', { source: UNPROVEN });
+    expect(hostConfig.Mounts).toEqual([
+      {
+        Type: 'bind',
+        Source: '/srv/app/data',
+        Target: HELPER_SOURCE_MOUNT,
+        ReadOnly: true,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: true },
+      },
+    ]);
+    expect(config.Entrypoint).toEqual(['/restic']);
+    for (const profile of ALL_PROFILES.filter((p) => p !== 'probe')) {
+      expect(() => specFor(profile, { repository: 'repo-vol', source: UNPROVEN }), profile).toThrow();
+    }
+  });
+
+  it('binds recursively only for the nested-mount probe of a proven root', () => {
+    const { config, hostConfig } = specFor('probe', { source: PROVEN, recursiveSource: true });
+    expect(hostConfig.Mounts).toEqual([
+      {
+        Type: 'bind',
+        Source: '/srv/app/data',
+        Target: HELPER_SOURCE_MOUNT,
+        ReadOnly: true,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: false },
+      },
+    ]);
+    expect(config.Entrypoint).toEqual(['/sencho-recovery-probe']);
+    expect(() => specFor('backup', { repository: 'repo-vol', source: PROVEN, recursiveSource: true })).toThrow();
+    expect(() => specFor('probe', { source: 'src-vol', recursiveSource: true })).toThrow();
+    expect(() => specFor('probe', { source: UNPROVEN, recursiveSource: true })).toThrow();
+  });
+
+  it('refuses a host root in every slot the boundary does not name', () => {
+    expect([...HOST_ROOT_SOURCE_PROFILES].sort()).toEqual(['backup', 'probe']);
+    expect([...HOST_ROOT_TARGET_PROFILES].sort()).toEqual(['materialize', 'swap']);
+    for (const profile of ALL_PROFILES) {
+      const sourceOk = HOST_ROOT_SOURCE_PROFILES.has(profile);
+      const targetOk = HOST_ROOT_TARGET_PROFILES.has(profile);
+      const withSource = () => specFor(profile, { repository: 'repo-vol', source: PROVEN, target: 'dst-vol' });
+      const withTarget = () => specFor(profile, { repository: 'repo-vol', source: 'src-vol', target: PROVEN });
+      if (sourceOk) expect(withSource, profile).not.toThrow();
+      else expect(withSource, profile).toThrow();
+      if (targetOk) expect(withTarget, profile).not.toThrow();
+      else expect(withTarget, profile).toThrow();
+    }
+    // The restore profile serves only new volumes.
+    expect(() => specFor('restore', { repository: 'repo-vol', target: PROVEN })).toThrow();
+  });
+
+  it('refuses a plain string where only a volume name belongs', () => {
+    // A string is always a volume name: a path is refused by the daemon's volume
+    // grammar, never turned into a bind.
+    const { hostConfig } = specFor('backup', { repository: 'repo-vol', source: '/etc' });
+    const source = (hostConfig.Mounts as Array<Record<string, unknown>>).find((m) => m.Target === HELPER_SOURCE_MOUNT);
+    expect(source?.Type).toBe('volume');
+  });
+
+  it('reports a guard refusal only for a run that mounted a proven root', async () => {
+    const guarded = fakeDocker({ exitCode: HELPER_GUARD_REFUSED_EXIT });
+    const refused = await runnerFor(guarded).run({
+      profile: 'backup',
+      operationId: 'op-guard',
+      cmd: ['/restic', '--repo', '/repo', 'backup', '/data'],
+      mounts: { repository: 'repo-vol', source: PROVEN },
+      stdinSecret: PASSWORD,
+    });
+    expect(refused.guardRefused).toBe(true);
+    expect(guarded.removed).toHaveLength(1);
+
+    const plain = fakeDocker({ exitCode: HELPER_GUARD_REFUSED_EXIT });
+    const ordinary = await runnerFor(plain).run({
+      profile: 'backup',
+      operationId: 'op-plain',
+      cmd: ['/restic', '--repo', '/repo', 'backup', '/data'],
+      mounts: { repository: 'repo-vol', source: 'src-vol' },
+      stdinSecret: PASSWORD,
+    });
+    expect(ordinary.guardRefused).toBe(false);
   });
 });

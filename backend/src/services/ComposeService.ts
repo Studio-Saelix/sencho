@@ -58,6 +58,14 @@ import {
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
 import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
+import {
+  admitComposeProcess,
+  prepareComposeAdmission,
+  refuseIfComposeArgvFenced,
+  spawnUnderLease,
+  type FsWorkLeaseLike,
+} from '../helpers/composeArgvFence';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
 import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
@@ -176,10 +184,11 @@ async function compensateOrSwallow(
   try {
     return await compensate();
   } catch (compError) {
-    // The Docker endpoint guard refused the recovery up before it ran: the
-    // failed operation's own error is what the caller must see, with the reason
-    // the rollback did not happen.
-    if (compError instanceof DockerEndpointProtectedError) {
+    // The Docker endpoint guard, or a data restore's fence on a compose file
+    // the recovery up names, refused that up before Compose ran: the failed
+    // operation's own error is what the caller must see, with the reason the
+    // rollback did not happen.
+    if (compError instanceof DockerEndpointProtectedError || isDataRestoreFenceError(compError)) {
       onRefused?.(compError.message);
       return false;
     }
@@ -364,6 +373,9 @@ export class ComposeService {
     try {
       refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
     } catch (error) {
+      // The guard's `config --hash` was refused by a data restore's fence
+      // before Compose ran: the fence answers, not the guard.
+      if (isDataRestoreFenceError(error)) throw error;
       // A guard that cannot run is not a pass. Raised as a refusal so callers
       // that tolerate other teardown failures (delete, template rollback) keep
       // the stack's files and records.
@@ -419,6 +431,9 @@ export class ComposeService {
       }
     } catch (error) {
       if (error instanceof ComposeExpansionRefusal) throw error;
+      // A data restore's fence refused the render: the fence answers for the
+      // down, not "its volumes could not be verified".
+      if (isDataRestoreFenceError(error)) throw error;
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
     if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
@@ -451,6 +466,9 @@ export class ComposeService {
       }
       return null;
     } catch (error) {
+      // A file the render names is under a data restore's fence: that is the
+      // answer, not a hash the guard could not compute.
+      if (isDataRestoreFenceError(error)) throw error;
       console.warn('[ComposeService] config hash for %s/%s unavailable:', sanitizeForLog(stackName), sanitizeForLog(service), sanitizeForLog(getErrorMessage(error, 'unknown')));
       return null;
     }
@@ -514,6 +532,36 @@ export class ComposeService {
         sanitizeForLog(stackName), operation, sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
     }
+  }
+
+  /**
+   * Ask a data restore's fence for the compose files a deploy, an update, or
+   * an image pull opens, before the operation starts any Compose process (the
+   * required-env render, the endpoint guard's `config --hash`, the capture's
+   * `config --quiet`, a pull) and before it opens a GitOps deploy operation, so
+   * a fence already held is refused before this method starts any Compose
+   * process or records anything. (The deploy and image-pull routes ask before
+   * their own connection check and policy render, too.)
+   * On the live stack this is the fence's own file list for the command
+   * (`FileSystemService.refuseIfComposeFenced`: an applied spec's files, the
+   * root and overrides a Mesh or Pilot layer pins, or a COMPOSE_FILE
+   * selection); `pinsComposeFiles` is set when the command names the root and
+   * override itself (a digest-pinned up). A decrypt overlay's copies are asked
+   * by the argv prefix that names them. A fence recorded after this ask is
+   * answered at each command's own argv (`authoredComposeArgs`) and, whatever
+   * the argv names or leaves to discovery, when each Compose process is
+   * admitted at its spawn (`prepareComposeAdmission`).
+   */
+  private async refuseIfMutationFilesFenced(
+    stackName: string,
+    overlayDir: string | undefined,
+    pinsComposeFiles: boolean,
+  ): Promise<void> {
+    if (overlayDir) {
+      await refuseIfComposeArgvFenced(overlayDir, await this.authoredComposePrefix(stackName, overlayDir));
+      return;
+    }
+    await FileSystemService.getInstance(this.nodeId).refuseIfComposeFenced(stackName, { pinsComposeFiles });
   }
 
   public async validateStackForMutation(stackName: string): Promise<void> {
@@ -607,6 +655,10 @@ export class ComposeService {
       refuseIfUnreadable || action.includes('up') || action.includes('create'),
     );
     args.push(...action);
+    // Every command built here opens the files its argv names, a `config`
+    // render or a `pull` as much as an `up`, so each argv that names files
+    // with `-f` is asked against a data restore's fence before it is spawned.
+    await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
     // the files, env selection, and project directory in the argv the CLI is
@@ -769,6 +821,12 @@ export class ComposeService {
       const args = await this.authoredComposeArgs(stackName, [], stackDirOverride, true);
       await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
+      // The pin names the root file and override itself. deployStack asks the
+      // fence for those up front (`pinsComposeFiles`); this asks the assembled
+      // argv, overlay included, before anything else runs. The deploy then
+      // admits the up's files before its first irreversible step and launches
+      // it under that lease.
+      await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
       return { args, overlayDir };
     } catch (err) {
       await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
@@ -776,7 +834,7 @@ export class ComposeService {
     }
   }
 
-  private execute(
+  private async execute(
     command: string,
     args: string[],
     cwd: string,
@@ -788,6 +846,14 @@ export class ComposeService {
     // registry-auth call sites that pass `env` are unaffected.
     idleTimeoutMs?: number,
     abortSignal?: AbortSignal,
+    /**
+     * A lease the caller already holds on this command's inputs
+     * (`admitComposeProcess`), taken before an irreversible step that must not
+     * be followed by a refusal; the caller releases it. Without one, the
+     * command is admitted here, in the same step as its spawn, and released
+     * when the child exits.
+     */
+    admitted?: FsWorkLeaseLike,
   ): Promise<void> {
     const deliveryAbortSignal = getRegistryDeliveryContext()?.abortSignal;
     const effectiveAbortSignal = abortSignal ?? deliveryAbortSignal;
@@ -797,10 +863,24 @@ export class ComposeService {
     const withholdOutput = decryptedComposeOutputWithheld();
 
     if (effectiveAbortSignal?.aborted) {
-      return Promise.reject(new Error('OPERATION_ABORTED: client disconnected'));
+      throw new Error('OPERATION_ABORTED: client disconnected');
     }
 
-    return new Promise((resolve, reject) => {
+    // The files this command opens are matched against a data restore's
+    // directory fences here, whatever its caller asked earlier, and admitted
+    // in the same synchronous step as the spawn below (the Promise executor
+    // runs at once, with no await between the two).
+    const ready = admitted
+      ? null
+      : await prepareComposeAdmission({ cwd, args: command === 'docker' ? args : [], ...(env ? { env } : {}) });
+    // The admission awaited file work, and an abort listener added after the
+    // signal fired is never called: an abort in that window stops the command
+    // here, before it starts.
+    if (effectiveAbortSignal?.aborted) {
+      throw new Error('OPERATION_ABORTED: client disconnected');
+    }
+    const lease: FsWorkLeaseLike | null = ready ? ready.admit() : null;
+    const run = new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
         env: env ?? {
@@ -879,6 +959,7 @@ export class ComposeService {
         if (settled) return;
         settled = true;
         cleanup();
+        lease?.release();
         complete();
       };
 
@@ -968,6 +1049,10 @@ export class ComposeService {
         });
       });
     });
+    // A spawn that throws rejects the executor before any listener exists;
+    // the lease is released then too (release is idempotent).
+    run.catch(() => lease?.release());
+    return run;
   }
 
   private async withRegistryAuth<T>(
@@ -1236,17 +1321,18 @@ export class ComposeService {
       let code: number | null;
       try {
         const args = await this.authoredComposeArgs(stackName, ['config', '--quiet'], stackDirOverride);
+        const admission = await prepareComposeAdmission({ cwd: stackDirOverride, args });
         code = await new Promise<number | null>((resolve, reject) => {
           // Both streams to /dev/null: no pipe to fill, and no collected text
           // that could later be mistaken for something safe to publish.
-          const child = spawn('docker', args, {
+          const child = spawnUnderLease(admission, () => spawn('docker', args, {
             cwd: stackDirOverride,
             stdio: 'ignore',
             env: {
               ...process.env,
               PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             },
-          });
+          }));
           // The exit code is the only signal this check gets, so a wedged
           // Compose is bounded here rather than left to hang the deploy.
           const timer = setTimeout(() => child.kill('SIGKILL'), ComposeService.REQUIRED_ENV_CHECK_TIMEOUT_MS);
@@ -1265,6 +1351,9 @@ export class ComposeService {
         )) {
           throw err;
         }
+        // A file the render names is under a data restore's fence: the
+        // render did not start, and the fence answers for the deploy.
+        if (isDataRestoreFenceError(err)) throw err;
         return; // a launch failure is not a missing variable
       }
       // A render that resolved reports no required-variable error at all, so
@@ -1699,6 +1788,12 @@ export class ComposeService {
       }
     }
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
+    // A digest-pinned up names the root file and override itself.
+    await this.refuseIfMutationFilesFenced(
+      stackName,
+      ctx?.overlayDir,
+      Object.keys(ctx?.digestPins ?? {}).length > 0,
+    );
     // Before the guard: a render that fails on a missing required variable
     // should say so, not that the guard could not read the model.
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
@@ -1756,7 +1851,16 @@ export class ComposeService {
     // at all), so recovery of an interrupted attempt finds this deploy's
     // rows by exact id; every other caller lets an id be minted here,
     // unchanged.
-    const gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
+    // Armed once the up's argv is assembled and opened only after the up's
+    // admission, just before the first irreversible step. A data restore's
+    // fence refusing a command before Compose is handed the up opens no record;
+    // any other failure after arming opens it in the catch, so it is recorded
+    // as a failed pre_mutation deploy, and a failure before arming records
+    // nothing.
+    // Assigned inside the registry-auth callback, so the type is held open here.
+    let gitopsDeploy = null as GitOpsDeployHandle | null;
+    let gitopsArmed = false;
+    let upLease = null as FsWorkLeaseLike | null;
     let composeHandedOff = false;
 
     try {
@@ -1783,6 +1887,9 @@ export class ComposeService {
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
+          // From here a failure other than a fence refusal is a failed deploy
+          // (the record is opened in the catch when it is not open yet).
+          gitopsArmed = true;
           // The notice runs before the gates are superseded: a crash inside this
           // bounded, best-effort check must not leave a running workload with its
           // gate already retired.
@@ -1818,6 +1925,14 @@ export class ComposeService {
             }
             if (verification.verifyPulled) await verification.verifyPulled();
           }
+          // The up's own files are admitted against a data restore's directory
+          // fences here, after the pulls and the verification and before the
+          // first irreversible step (orphan removal, retiring the gates), and
+          // the lease is held until the up has exited. A fence recorded during
+          // the pulls is refused here with nothing changed; one recorded after
+          // this waits for the up instead of landing under it.
+          upLease = await admitComposeProcess({ cwd: stackDir, args, env });
+          gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
           // Legacy orphans are removed only once the candidate check has passed,
           // so a refused image leaves the running containers it found untouched.
           try {
@@ -1838,8 +1953,10 @@ export class ComposeService {
           // succeeded.
           await this.supersedeGatesForContainerOp(stackName, 'the stack was redeployed during the observation');
           composeHandedOff = true;
-          await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
+          await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs(), undefined, upLease);
         } finally {
+          upLease?.release();
+          upLease = null;
           if (overlayDir) {
             await fs.promises.rm(overlayDir, { recursive: true, force: true }).catch(() => undefined);
           }
@@ -1884,6 +2001,15 @@ export class ComposeService {
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
       gitopsDeploy?.bound();
     } catch (deployError) {
+      // A data restore's fence refusing a command before Compose was handed
+      // the up (the verification pull, or the up's own admission) is a
+      // refusal, not a failed deploy: no GitOps deploy record is opened for it.
+      // Any other failure once the up's argv was assembled opens the record if
+      // the admission had not yet, so it is recorded as before.
+      const fenceRefusedBeforeUp = isDataRestoreFenceError(deployError) && !composeHandedOff;
+      if (gitopsArmed && !gitopsDeploy && !fenceRefusedBeforeUp) {
+        gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
+      }
       // Classified by whether Compose was handed the mutation. Only a failure
       // before that leaves the previous workload provably intact.
       gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
@@ -1899,6 +2025,17 @@ export class ComposeService {
       // runtime that is still the one it captured, so a block cannot recreate
       // running containers.
       if (deployError instanceof Error && deployError.name === 'PulledCandidateBlockedError') {
+        if (atomic && recoverySvc && recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+        }
+        throw deployError;
+      }
+      // A data restore's fence refused a compose file the up names before
+      // Compose was handed it: the previous runtime is still the one the
+      // generation captured, so it is abandoned, not compensated (which would
+      // restore files under the fence and be refused the same way), and the
+      // refusal leaves this method as itself.
+      if (isDataRestoreFenceError(deployError) && !composeHandedOff) {
         if (atomic && recoverySvc && recoveryId) {
           await recoverySvc.abandon(recoveryId);
         }
@@ -2286,6 +2423,10 @@ export class ComposeService {
       action.includes('up') || action.includes('create'),
     );
     out.push(...action);
+    // The recovery layer pins the root file and override (or the captured
+    // file set) after the caller's own ask, so the argv itself is asked,
+    // whatever the action.
+    await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), out);
     // A captured recovery invocation builds its file set without the authored
     // prefix, so the check has to run here as well: a restored generation can
     // name a compose layer that was never validated by this guard. Its captured
@@ -2778,6 +2919,7 @@ export class ComposeService {
     beforeUp?: () => Promise<void>,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
+    await this.refuseIfMutationFilesFenced(stackName, undefined, false);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSafePilotBindMapping(stackName);
@@ -2794,6 +2936,7 @@ export class ComposeService {
     // Compose, so there is no deploy to record.
     let gitopsDeploy: ReturnType<ComposeService['beginGitOpsDeploy']> = null;
     let composeHandedOff = false;
+    let upLease: FsWorkLeaseLike | null = null;
 
     // Dynamic import avoids a static cycle (recovery imports getComposeCommandTimeoutMs).
     const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
@@ -2863,6 +3006,20 @@ export class ComposeService {
       // abandoned, never a compensating rollback of an update that never ran.
       if (beforeUp) await beforeUp();
 
+      // The pulls this update needs already ran above, and a build-backed
+      // service runs the image it just built. `up` must not fetch again:
+      // `pull_policy: always` would otherwise pull a registry image over the
+      // built one, after the gate proved the installed image. Built, and its
+      // files admitted against a data restore's directory fences, before the
+      // generation is handed off and before any legacy orphan is removed: a
+      // fence refusal here leaves every container in place and the candidate
+      // abandoned. A fence recorded after it either refuses the update at the
+      // orphan classification's own `compose ps`, still before any container
+      // is removed, or waits for this lease, which is held until the up has
+      // exited.
+      const upArgs = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
+      upLease = await admitComposeProcess({ cwd: stackDir, args: upArgs });
+
       const dockerController = DockerController.getInstance(this.nodeId);
       sendOutput('=== Classifying legacy orphans ===\n');
       const classified = await dockerController.classifyLegacyOrphansForUpdate(stackName);
@@ -2898,11 +3055,7 @@ export class ComposeService {
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
-        // The pulls this update needs already ran above, and a build-backed
-        // service runs the image it just built. `up` must not fetch again:
-        // `pull_policy: always` would otherwise pull a registry image over the
-        // built one, after the gate proved the installed image.
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans', '--pull', 'never']);
+        const args = upArgs;
         // Before the gates are superseded: a crash inside this bounded,
         // best-effort check must not leave a running workload with its gate
         // already retired.
@@ -2916,8 +3069,10 @@ export class ComposeService {
         // reading compose args or resolving registry auth can still fail with
         // the previous workload provably intact.
         composeHandedOff = true;
-        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
+        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs(), undefined, upLease ?? undefined);
       }, sendOutput);
+      upLease?.release();
+      upLease = null;
 
       // Immediate verification probe
       await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -2978,6 +3133,8 @@ export class ComposeService {
       }
       gitopsDeploy?.bound();
     } catch (updateError) {
+      upLease?.release();
+      upLease = null;
       gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
       // Mirrors the deployStack stamp so any caller correlating a failed
       // deploy to its GitOps record reads the id off the thrown error,
@@ -2988,6 +3145,16 @@ export class ComposeService {
       if (!handedOff && recoveryId) {
         await recoverySvc.abandon(recoveryId);
         recoveryId = null;
+      }
+      // As in deployStack: a fence refusal before Compose was handed the
+      // update leaves the captured runtime running, so it is abandoned rather
+      // than compensated, and the refusal is thrown as itself.
+      if (isDataRestoreFenceError(updateError) && !composeHandedOff) {
+        if (recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+          recoveryId = null;
+        }
+        throw updateError;
       }
       if (handedOff && recoveryId) {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
@@ -3073,6 +3240,9 @@ export class ComposeService {
     // an image reference resolves against still-encrypted files on a SOPS stack,
     // so the pull can fetch a different image than a deploy would use.
     await this.assertSopsOverlayOrRefuse(stackName);
+    // The pull opens the same files an update does; one a data restore is
+    // overwriting refuses it before any Compose process starts.
+    await this.refuseIfMutationFilesFenced(stackName, undefined, false);
     // No `blocked` clause: the editor surfaces this behind its own "Image pull
     // failed:" prefix, and the remedy names the action the operator actually chose.
     await this.assertRequiredEnvPresent(stackName, undefined, {
@@ -3189,7 +3359,7 @@ export class ComposeService {
       // Sencho's refusal to run Compose is not "nothing to clean up": the stack
       // may be running, and the caller decides what is left (stack deletion
       // keeps the files, a template rollback has nothing started to remove).
-      if (error instanceof ComposeExpansionRefusal) throw error;
+      if (error instanceof ComposeExpansionRefusal || isDataRestoreFenceError(error)) throw error;
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }
   }
@@ -3271,15 +3441,16 @@ export class ComposeService {
     );
   }
 
-  private captureCompose(args: string[], cwd: string, timeoutMs?: number): Promise<string> {
+  private async captureCompose(args: string[], cwd: string, timeoutMs?: number): Promise<string> {
+    const admission = await prepareComposeAdmission({ cwd, args: ['compose', ...args] });
     return new Promise((resolve, reject) => {
-      const child = spawn('docker', ['compose', ...args], {
+      const child = spawnUnderLease(admission, () => spawn('docker', ['compose', ...args], {
         cwd,
         env: {
           ...process.env,
           PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
         },
-      });
+      }));
       let stdout = '';
       let stderr = '';
       let timer: NodeJS.Timeout | null = null;
@@ -3345,13 +3516,14 @@ export class ComposeService {
       cwd: stackDir,
       invocation: renderArgs,
     });
-    const child = spawn('docker', [...renderArgs, 'config'], {
+    const admission = await prepareComposeAdmission({ cwd: stackDir, args: [...renderArgs, 'config'] });
+    const child = spawnUnderLease(admission, () => spawn('docker', [...renderArgs, 'config'], {
       cwd: stackDir,
       env: {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       },
-    });
+    }));
     return new Promise((resolve, reject) => {
       const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
       const TIMEOUT_MS = 30_000;
@@ -3424,7 +3596,9 @@ export class ComposeService {
    * Captures stderr (where Compose reports unset variables) and never rejects
    * on a non-zero exit, so the Compose Doctor can turn a failed render into a
    * finding rather than an exception. Bounded by a timeout and an output cap.
-   * Rejects only when the docker binary cannot be spawned.
+   * Rejects when the docker binary cannot be spawned, and with the fence's
+   * `DataRestoreFenceError` when a file the render opens is under a data
+   * restore (the render is then never started).
    *
    * `opts.stackDirOverride` renders the model the deployment it gates will
    * actually use: a GitOps decrypt overlay, whose env files are plaintext while
@@ -3535,13 +3709,17 @@ export class ComposeService {
       }
       throw err;
     }
-    const child = spawn('docker', composeArgs, {
+    // The render opens the same files a mutation would, so a data restore's
+    // directory fence refuses it (a typed rejection every mutating caller
+    // passes on) or waits for it, as for any Compose process.
+    const admission = await prepareComposeAdmission({ cwd: cwdResolved, args: composeArgs });
+    const child = spawnUnderLease(admission, () => spawn('docker', composeArgs, {
       cwd: cwdResolved,
       env: {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       },
-    });
+    }));
     return new Promise((resolve, reject) => {
       const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
       const TIMEOUT_MS = 20_000;

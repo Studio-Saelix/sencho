@@ -1186,7 +1186,7 @@ describe('audit summaries', () => {
     expect(getAuditSummary('POST', 'recovery/storage/points')).toBe('Created a recovery point');
     expect(getAuditSummary('POST', 'recovery/points/abc/verify')).toBe('Verified recovery point: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/restore')).toBe('Restored recovery point: abc');
-    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Started a restore over the existing volume: abc');
+    expect(getAuditSummary('POST', 'recovery/points/abc/overwrite')).toBe('Started a restore over the existing data: abc');
     expect(getAuditSummary('POST', 'recovery/locks/release')).toBe('Released a stale recovery lock');
   });
 
@@ -1194,45 +1194,45 @@ describe('audit summaries', () => {
     // A preview changes nothing, so it is never worded as a restore.
     const { getAuditSummary } = await import('../utils/audit-summaries');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 200))
-      .toBe('Previewed a restore over the existing volume: abc');
+      .toBe('Previewed a restore over the existing data: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview', 403))
-      .toBe('Preview of a restore over the existing volume refused (403): abc');
+      .toBe('Preview of a restore over the existing data refused (403): abc');
   });
 
   it('tells retry from release_fence, and a refusal from an action', async () => {
     const { getAuditSummary } = await import('../utils/audit-summaries');
     const retry = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'retry' });
     const release = getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: 'release_fence' });
-    expect(retry).toBe('Retried a restore over the existing volume: intent-1');
-    expect(release).toBe('Released the fence of a restore over the existing volume: intent-1');
+    expect(retry).toBe('Retried a restore over the existing data: intent-1');
+    expect(release).toBe('Released the fence of a restore over the existing data: intent-1');
     expect(retry).not.toBe(release);
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'release_fence' }))
       .toBe('Release of a restore fence refused (409): intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 409, { action: 'retry' }))
-      .toBe('Retry of a restore over the existing volume refused (409): intent-1');
+      .toBe('Retry of a restore over the existing data refused (409): intent-1');
     // A body without a known action (a refused 400, or a request a hub forwarded
     // to a remote node without reading it) still words the route without claiming one.
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 400, { action: 'other' }))
-      .toBe('Resolve of a restore over the existing volume refused (400): intent-1');
+      .toBe('Resolve of a restore over the existing data refused (400): intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200))
-      .toBe('Resolved a restore over the existing volume: intent-1');
+      .toBe('Resolved a restore over the existing data: intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, { action: '__proto__' }))
-      .toBe('Resolved a restore over the existing volume: intent-1');
+      .toBe('Resolved a restore over the existing data: intent-1');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 200, [{ action: 'retry' }]))
-      .toBe('Resolved a restore over the existing volume: intent-1');
+      .toBe('Resolved a restore over the existing data: intent-1');
   });
 
   it('does not word a request that was not served as a restore', async () => {
     const { getAuditSummary } = await import('../utils/audit-summaries');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 409))
-      .toBe('Restore over the existing volume refused (409): abc');
+      .toBe('Restore over the existing data refused (409): abc');
     // A server error is a failure, not a refusal.
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 503))
-      .toBe('Restore over the existing volume failed (503): abc');
+      .toBe('Restore over the existing data failed (503): abc');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve', 500, { action: 'retry' }))
-      .toBe('Retry of a restore over the existing volume failed (500): intent-1');
+      .toBe('Retry of a restore over the existing data failed (500): intent-1');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite', 202))
-      .toBe('Started a restore over the existing volume: abc');
+      .toBe('Started a restore over the existing data: abc');
   });
 
   it('words a trailing slash and a malformed escape like the route the router served', async () => {
@@ -1240,13 +1240,13 @@ describe('audit summaries', () => {
     // not decode must not drop the audit row.
     const { getAuditSummary } = await import('../utils/audit-summaries');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/', 202))
-      .toBe('Started a restore over the existing volume: abc');
+      .toBe('Started a restore over the existing data: abc');
     expect(getAuditSummary('POST', 'recovery/points/abc/overwrite/preview/', 200))
-      .toBe('Previewed a restore over the existing volume: abc');
+      .toBe('Previewed a restore over the existing data: abc');
     expect(getAuditSummary('POST', 'recovery/restores/intent-1/resolve/', 200, { action: 'retry' }))
-      .toBe('Retried a restore over the existing volume: intent-1');
+      .toBe('Retried a restore over the existing data: intent-1');
     expect(getAuditSummary('POST', 'recovery/points/%E0%A4%A/overwrite', 202))
-      .toBe('Started a restore over the existing volume: %E0%A4%A');
+      .toBe('Started a restore over the existing data: %E0%A4%A');
   });
 });
 
@@ -1270,7 +1270,7 @@ describe('the audit log row of a restore resolve', () => {
   it('names the action the request carried, so a retry and a release_fence read differently', async () => {
     const retry = await auditRowFor('retry');
     const release = await auditRowFor('release_fence');
-    expect(retry.summary).toBe(`Retry of a restore over the existing volume refused (400): ${retry.intentId}`);
+    expect(retry.summary).toBe(`Retry of a restore over the existing data refused (400): ${retry.intentId}`);
     expect(release.summary).toBe(`Release of a restore fence refused (400): ${release.intentId}`);
   });
 });

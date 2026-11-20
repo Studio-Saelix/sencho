@@ -138,11 +138,11 @@ describe('pointReadEligibility', () => {
       .toEqual({ readable: false, reason: 'repository_replaced' });
   });
 
-  it('answers unsupported_entry_type for a path point and a bind root', () => {
+  it('answers unsupported_entry_type for a path point, and reads a root point of a host directory', () => {
     const pathPoint = { ...finished('succeeded'), kind: 'path', pathScope: 'sub' } as const;
     expect(pointReadEligibility(pathPoint, STORAGE, ACTIVE)).toEqual({ readable: false, reason: 'unsupported_entry_type' });
     expect(pointReadEligibility(finished('succeeded'), { kind: 'bind_root' } as Pick<StorageIdentity, 'kind'>, ACTIVE))
-      .toEqual({ readable: false, reason: 'unsupported_entry_type' });
+      .toMatchObject({ readable: true });
   });
 });
 

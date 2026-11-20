@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto';
 import type Docker from 'dockerode';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
+import { canonicalizePathScope } from './recoveryPoints';
+import { isFsTargetKey, parseFsTargetPaths, type FsTargetPaths } from './fsTargets';
 import { RecoveryError } from './redaction';
 import { HELPER_LABEL_RESTORE_INTENT } from './restic/helperRunner';
 import type { IntegrityMethod, RecoveryErrorClass, RestoreIntentPhase } from './types';
@@ -102,6 +104,8 @@ export interface RestoreIntentRecord {
   expectedGenerationToken: string | null;
   /** Stacks whose models declare the target volume, with or without containers. */
   dependentStacks: string[];
+  /** Where a host directory target lives, for an overwrite of one; null for a volume. */
+  targetPaths: FsTargetPaths | null;
   /** The root point taken with the workloads stopped, before any live entry moves. */
   preRestorePointId: string | null;
   fenceState: RestoreFenceState;
@@ -128,6 +132,7 @@ interface IntentRow {
   staging_volume: string | null;
   expected_generation_token: string | null;
   dependent_stacks_json: string | null;
+  target_paths_json: string | null;
   pre_restore_point_id: string | null;
   fence_state: RestoreFenceState;
   outcome_class: RecoveryErrorClass | null;
@@ -153,6 +158,7 @@ function toRecord(row: IntentRow): RestoreIntentRecord {
     stagingVolume: row.staging_volume,
     expectedGenerationToken: row.expected_generation_token,
     dependentStacks: parseStackList(row.dependent_stacks_json),
+    targetPaths: parseFsTargetPaths(row.target_paths_json),
     preRestorePointId: row.pre_restore_point_id,
     fenceState: row.fence_state,
     outcomeClass: row.outcome_class,
@@ -178,6 +184,11 @@ export interface RestoreIntentInput {
    * volume from it before the row exists, so both agree.
    */
   id?: string;
+  /**
+   * One path inside the point, relative to its root, for a restore of that path
+   * alone into a new volume. Omitted for a whole-point restore.
+   */
+  pathScope?: string;
 }
 
 /** The stacks an overwrite fences, read back from the row. */
@@ -203,6 +214,8 @@ export interface OverwriteIntentInput extends RestoreIntentInput {
   expectedGenerationToken: string;
   /** Every stack whose model declares the target volume. */
   dependentStacks?: string[];
+  /** A host directory target's paths; required when `targetVolume` is an `fs:` key. */
+  targetPaths?: FsTargetPaths;
 }
 
 export interface IntentAdvanceFields {
@@ -239,17 +252,20 @@ export class RestoreIntentStore {
    * overwrite of that volume while the first is unsettled.
    */
   recordOverwrite(input: OverwriteIntentInput, now = Date.now()): RestoreIntentRecord {
+    // A host directory is only ever overwritten with its paths on record.
+    if (isFsTargetKey(input.targetVolume) !== (input.targetPaths !== undefined)) throw new RecoveryError('invalid_request');
     return this.insert('staged_overwrite', input, {
       stagingVolume: input.stagingVolume,
       expectedGenerationToken: input.expectedGenerationToken,
       dependentStacks: input.dependentStacks,
+      targetPaths: input.targetPaths,
     }, now);
   }
 
   private insert(
     targetMode: RestoreIntentTargetMode,
     input: RestoreIntentInput,
-    extra: { stagingVolume?: string; expectedGenerationToken?: string; dependentStacks?: string[] },
+    extra: { stagingVolume?: string; expectedGenerationToken?: string; dependentStacks?: string[]; targetPaths?: FsTargetPaths },
     now: number,
   ): RestoreIntentRecord {
     if (!input.targetVolume) throw new RecoveryError('invalid_request');
@@ -259,19 +275,27 @@ export class RestoreIntentStore {
       db.prepare(`
         INSERT INTO recovery_restore_intents
           (id, operation_id, point_id, target_mode, target_volume, path_scope, phase,
-           staging_volume, expected_generation_token, dependent_stacks_json,
+           staging_volume, expected_generation_token, dependent_stacks_json, target_paths_json,
            actor, process_epoch, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, NULL, 'recorded', ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         input.operationId,
         input.pointId,
         targetMode,
         input.targetVolume,
+        input.pathScope === undefined ? null : canonicalizePathScope(input.pathScope),
         extra.stagingVolume ?? null,
         extra.expectedGenerationToken ?? null,
         extra.dependentStacks && extra.dependentStacks.length > 0
           ? JSON.stringify([...new Set(extra.dependentStacks)].sort())
+          : null,
+        extra.targetPaths
+          ? JSON.stringify({
+            senchoPath: extra.targetPaths.senchoPath,
+            hostPath: extra.targetPaths.hostPath,
+            aliases: [...extra.targetPaths.aliases].sort(),
+          })
           : null,
         input.actor,
         input.processEpoch,

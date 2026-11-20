@@ -17,6 +17,8 @@ import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { parseInterpolationRefs, type InterpolationRef } from './envVarParse';
+import { isDataRestoreFenceError } from './dataRestoreFenceError';
+import { linkSpellings } from './linkSpellings';
 
 const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB, matches the routes/stacks.ts bound
 const ROOT_COMPOSE_CANDIDATES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
@@ -102,12 +104,30 @@ function inlineEnvKeysOf(environment: unknown): string[] {
   return [];
 }
 
+/**
+ * Throw the fence's refusal when `abs`, or any path a link on the way to it
+ * names, sits in a directory a data restore is overwriting. A file that is not
+ * there, or cannot be read, in such a directory may only be mid-swap, so its
+ * absence is not an answer. Asked only after a file was found missing or
+ * unusable: when nothing is fenced it returns after one lookup, without
+ * reading any link. Exported for the routes and Secrets sinks that would
+ * otherwise answer such a file as missing, as a link out of the compose root,
+ * or the stack as gone.
+ */
+export async function refuseIfFencedSource(abs: string): Promise<void> {
+  const { matchFsWorkToFences, RestoreFenceStore } = await import('../services/recovery/restoreFence');
+  if (RestoreFenceStore.getInstance().liveFencedFsTargets().length === 0) return;
+  const match = await matchFsWorkToFences(await linkSpellings(abs));
+  if (match.refusal) throw match.refusal;
+}
+
 async function existenceOf(fsService: FileSystemService, abs: string, baseDir: string): Promise<EnvFileExistence> {
   if (!isPathWithinBase(abs, baseDir)) return 'unverifiable';
   try {
     await fsService.access(abs);
     return 'present';
   } catch (err) {
+    await refuseIfFencedSource(abs);
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unverifiable';
   }
 }
@@ -134,7 +154,9 @@ async function discoverAuthoredComposeFiles(
       await fsService.access(abs);
       return [abs];
     } catch {
-      // try next candidate
+      // A compose file missing because its directory is being restored is not
+      // "no compose file"; otherwise try the next candidate.
+      await refuseIfFencedSource(abs);
     }
   }
   return [];
@@ -147,7 +169,15 @@ async function parseComposeServices(fsService: FileSystemService, absPath: strin
   let content: string;
   try {
     content = await fsService.readFile(absPath, 'utf-8');
-  } catch {
+  } catch (err) {
+    // A data restore overwriting the compose file's directory is not "no
+    // compose file": answering that would list no env file, and the editor
+    // would offer to create one the next deploy reads. That holds as well for
+    // a read that failed before admission (a link into the fenced directory
+    // that dangles mid-swap, an applied Git deploy spec naming such a link) or
+    // a file gone since it was found.
+    if (isDataRestoreFenceError(err)) throw err;
+    await refuseIfFencedSource(absPath);
     return null;
   }
   if (content.length > MAX_COMPOSE_PARSE_BYTES) return null;

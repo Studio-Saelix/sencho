@@ -47,6 +47,7 @@ function scriptedRunner(script: ScriptedResult[]) {
           stderrTail: '',
           aborted: next.aborted ?? false,
           killed: next.killed ?? false,
+          guardRefused: false,
         };
         results.push(result);
         return result;

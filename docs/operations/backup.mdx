@@ -154,7 +154,7 @@ If other Sencho instances were pointing to your old host as a remote node, updat
 
 | Item | Location | Notes |
 |------|----------|-------|
-| Container data volumes | Wherever each stack's volumes are mounted on the host | Back these up separately per-application, or capture [volume recovery points](/operations/volume-recovery-points) on the node that holds them |
+| Container data volumes | Wherever each stack's volumes are mounted on the host | Back these up separately per-application, or capture [recovery points](/operations/volume-recovery-points) of the volumes and bind directories on the node that holds them |
 | Actual container images | Docker image cache | These are re-pulled on next deploy; no backup needed |
 | Sencho logs (docker logs) | Container stdout | Not persisted beyond container lifetime |
 

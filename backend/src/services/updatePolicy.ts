@@ -3,6 +3,7 @@ import { DatabaseService, type StackUpdateUnattendedPolicy } from './DatabaseSer
 import { ComposeService } from './ComposeService';
 import { NodeRegistry } from './NodeRegistry';
 import { withTimeout } from '../utils/withTimeout';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import {
   resolveSenchoLabels,
   SENCHO_UPDATE_LABEL,
@@ -268,6 +269,9 @@ async function renderResolution(nodeId: number, stackName: string): Promise<Senc
   try {
     rendered = await ComposeService.getInstance(nodeId).renderConfig(stackName);
   } catch (error) {
+    // A data restore's fence refused the render: the caller answers with the
+    // fence rather than an unrenderable policy.
+    if (isDataRestoreFenceError(error)) throw error;
     console.warn(
       '[UpdatePolicy] Render failed for %s: %s',
       sanitizeForLog(stackName),
@@ -296,7 +300,10 @@ export async function resolveUpdatePolicy(
     renderResolution(nodeId, request.stack),
     POLICY_READ_TIMEOUT_MS,
     'update policy render',
-  ).catch(() => null);
+  ).catch((error: unknown) => {
+    if (isDataRestoreFenceError(error)) throw error;
+    return null;
+  });
   if (!resolution) return unrenderable(request, UNRENDERABLE_REASON);
   return evaluateUpdatePolicy(resolution, request);
 }

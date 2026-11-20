@@ -1,3 +1,4 @@
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import Docker from 'dockerode';
 import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
@@ -3293,17 +3294,24 @@ class DockerController {
       cwd: stackDir,
       invocation: [...filePrefix, ...envFileArgs],
     });
-    const { stdout, stderr } = await execFileAsync(
-      'docker',
-      ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],
-      {
+    const psArgs = ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'];
+    // `compose ps` loads the project's files, so a data restore's directory
+    // fence refuses it or waits for it, as for every Compose process.
+    const { prepareComposeAdmission } = await import('../helpers/composeArgvFence');
+    const lease = (await prepareComposeAdmission({ cwd: stackDir, args: psArgs })).admit();
+    let stdout: string;
+    let stderr: string;
+    try {
+      ({ stdout, stderr } = await execFileAsync('docker', psArgs, {
         cwd: stackDir,
         env: {
           ...process.env,
           PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
         }
-      }
-    );
+      }));
+    } finally {
+      lease.release();
+    }
 
     let containers: ComposePsContainer[] = [];
     if (stdout && stdout.trim() !== '') {
@@ -3410,6 +3418,9 @@ class DockerController {
       // Empty successful ps: only then may smartFallback report leftovers (name + stack-dir evidence).
       return await fallbackOrphans();
     } catch (error) {
+      // A data restore's fence refused the `ps`: the update answers with the
+      // fence, not as a failed classification.
+      if (isDataRestoreFenceError(error)) throw error;
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');

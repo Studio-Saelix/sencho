@@ -553,4 +553,41 @@ describe('node-aware Git source webhooks', () => {
         expect(history[0].status).toBe('failure');
         expect(history[0].error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
     });
+
+    it('forwards a remote image pull to the node\'s update route and records its data restore refusal as the failure', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-fenced-pull-webhook',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote-fenced.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'fenced remote pull',
+            stack_name: 'remote-stack',
+            action: 'pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        const service = WebhookService.getInstance() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+        vi.spyOn(service, 'remotePullPolicyRefusal').mockResolvedValue(null);
+        const policyGate = await import('../helpers/policyGate');
+        vi.spyOn(policyGate, 'remoteCandidateGateRefusal').mockResolvedValue(null);
+        const refusal = 'This location overlaps the directory "/srv/web/data", which a data restore is overwriting.';
+        const forward = vi.spyOn(service, 'remoteStackRequest').mockResolvedValue(
+            new Response(JSON.stringify({ error: refusal, code: 'data_restore' }), { status: 409 }),
+        );
+        try {
+            const result = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'pull', 'test');
+            expect(forward).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', 'update', 'POST', undefined);
+            expect(result).toMatchObject({ success: false, error: refusal });
+            const history = db.getWebhookExecutions(webhookId);
+            expect(history[0]).toMatchObject({ status: 'failure', error: refusal });
+        } finally {
+            db.deleteNode(remoteNodeId);
+        }
+    });
 });
