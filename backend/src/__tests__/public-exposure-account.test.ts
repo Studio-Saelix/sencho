@@ -7,7 +7,7 @@
  * records a disconnect leaves behind, the cause shown for a leftover record,
  * journals whose timing cannot be read and the late-create window that follows,
  * stored record ids that are not Cloudflare ids, and listings whose paging
- * details contradict each other.
+ * details contradict each other, on one page or between pages.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -1522,6 +1522,160 @@ describe('a listing whose paging details contradict each other is never a comple
       await expect(service.dnsCheck(ZONE_A, actor)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
       expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
     });
+  });
+});
+
+describe('a listing that changes what it declared between pages is never a complete listing', () => {
+  interface Page { items: unknown[]; info: Record<string, number> | null }
+  /** Answer a listing from a script, one scripted page per request; a page past the script is empty with no paging block. */
+  function overridePaged(matches: (url: URL, method: string) => boolean, pages: Page[]): void {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (matches(url, init?.method ?? 'GET')) {
+        const page = pages[Number(url.searchParams.get('page')) - 1];
+        fake.requests.push(`${init?.method ?? 'GET'} ${url.pathname.replace('/client/v4', '')}`);
+        return new Response(JSON.stringify({ success: true, errors: [], messages: [], result: page?.items ?? [], ...(page?.info ? { result_info: page.info } : {}) }));
+      }
+      return answer(fake, url, init ?? {});
+    }));
+  }
+
+  /** The listing the provider is really serving is `items`; each script tells it with a later page that contradicts an earlier one. Item three is the one a truncated listing omits. */
+  const SCRIPTS: Array<[string, (items: unknown[]) => Page[]]> = [
+    ['a total that shrinks on page two while its total_count disappears', (i) => [
+      { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 2 } },
+    ]],
+    ['a total_count that shrinks on page two', (i) => [
+      { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 3, total_count: 2 } },
+    ]],
+    ['paging details that vanish on page two', (i) => [
+      { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [i[1]], info: null },
+    ]],
+    ['a page size that changes on page two', (i) => [
+      { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2, total_count: 3 } },
+      { items: [i[2]], info: { page: 2, per_page: 3, total_pages: 2, total_count: 3 } },
+    ]],
+    ['more results than the page size it declared', (i) => [
+      { items: i, info: { page: 1, per_page: 1, total_pages: 1 } },
+    ]],
+  ];
+
+  const account = (id: string, name: string) => ({ id, name });
+  const ACCOUNTS = [account('e5'.repeat(16), 'First'), account('f6'.repeat(16), 'Second'), account(FAKE_ACCOUNT_ID, 'Example Account')];
+  // Zone B is last, so a truncated listing drops a zone Sencho holds disabled.
+  const ZONES = [{ id: ZONE_A, name: 'example.com' }, { id: 'e5'.repeat(16), name: 'example.org' }, { id: ZONE_B, name: 'example.net' }];
+  const FOREIGN = (n: number) => ({ id: `${n}`.repeat(32), type: 'TXT', name: CHECK_NAME, content: `"somebody-else-${n}"` });
+  const OURS = { id: 'f'.repeat(32), type: 'TXT', name: CHECK_NAME, content: `"${OLD_JOURNAL.content}"` };
+  const RECORDS = [FOREIGN(1), FOREIGN(2), OURS];
+
+  const accountsList = onPath(/^\/accounts$/);
+  const zonesList = onPath(/^\/zones$/);
+  const recordsAtCheckName = (url: URL, m: string) => onPath(/^\/zones\/[0-9a-f]+\/dns_records$/)(url, m) && url.searchParams.get('name') === CHECK_NAME;
+
+  function expectZonesKept(view: PublicExposureAccountView, before: ReturnType<typeof connected>): void {
+    const kept = connected(view);
+    expect(kept.zones.map((z) => [z.zoneRef, z.enabled])).toEqual(before.zones.map((z) => [z.zoneRef, z.enabled]));
+    expect(kept.zonesVisible).toBe(before.zonesVisible);
+    expect(kept.scopes).toEqual(before.scopes);
+  }
+
+  describe.each([
+    ['the account listing', accountsList, ACCOUNTS],
+    ['the zone listing', zonesList, ZONES],
+  ])('in %s', (_name, matches, items) => {
+    describe.each(SCRIPTS)('with %s', (_label, script) => {
+      it('refuses a first connect as an unexpected answer and stores nothing', async () => {
+        overridePaged(matches, script(items));
+        expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+        expect(service.getView()).toEqual({ connected: false });
+      });
+
+      it('refuses a token replacement as unexpected, keeping the stored token and every zone', async () => {
+        await connectWithZoneA();
+        const before = connected(service.getView());
+        const stored = db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string };
+        overridePaged(matches, script(items));
+        expect((await refusal(service.connect(`${FAKE_TOKEN}-new`, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+        expect((db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string }).credential_enc).toBe(stored.credential_enc);
+        expectZonesKept(service.getView(), before);
+      });
+
+      it('records an unexpected answer on recheck and keeps every zone', async () => {
+        await connectWithZoneA();
+        const before = connected(service.getView());
+        overridePaged(matches, script(items));
+        const view = await service.recheck(actor);
+        expect(connected(view).lastCheck.outcome).toBe('unexpected_response');
+        expectZonesKept(view, before);
+      });
+    });
+  });
+
+  describe.each(SCRIPTS)('a record listing at the check name, with %s', (_label, script) => {
+    const cleanupNote = () => zoneA(service.getView()).cleanupPending?.note ?? '';
+
+    it('keeps the journal through recheck and says the answer could not be read, not that other records sit there', async () => {
+      await connectWithZoneA();
+      setJournal(JSON.stringify(OLD_JOURNAL));
+      overridePaged(recordsAtCheckName, script(RECORDS));
+      await service.recheck(actor);
+      expect(JSON.parse(journal(ZONE_A) as string)).toMatchObject(OLD_JOURNAL);
+      expect(cleanupNote()).toContain('could not read');
+      expect(cleanupNote()).not.toContain('Other records already sit');
+    });
+
+    it('keeps the journal through disconnect and refuses it', async () => {
+      await connectWithZoneA();
+      setJournal(JSON.stringify(OLD_JOURNAL));
+      overridePaged(recordsAtCheckName, script(RECORDS));
+      expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+      expect(JSON.parse(journal(ZONE_A) as string)).toMatchObject(OLD_JOURNAL);
+      expect(service.getView().connected).toBe(true);
+    });
+
+    it('keeps the journal through a DNS check, names the cause and sends no create', async () => {
+      await connectWithZoneA();
+      setJournal(JSON.stringify(OLD_JOURNAL));
+      overridePaged(recordsAtCheckName, script(RECORDS));
+      fake.requests = [];
+      expect((await service.dnsCheck(ZONE_A, actor)).complete).toBe(false);
+      expect(JSON.parse(journal(ZONE_A) as string)).toMatchObject(OLD_JOURNAL);
+      expect(cleanupNote()).toContain('could not read');
+      expect(fake.requests.filter((r) => r.startsWith('POST') || r.startsWith('DELETE'))).toEqual([]);
+    });
+
+    it('keeps a journal column that cannot be read through recheck and disconnect', async () => {
+      await connectWithZoneA();
+      setJournal('{');
+      overridePaged(recordsAtCheckName, script(RECORDS));
+      await service.recheck(actor);
+      expect(journal(ZONE_A)).toBe('{');
+      expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+      expect(journal(ZONE_A)).toBe('{');
+    });
+
+    it('sends no create from the preflight listing of a DNS check with no journal', async () => {
+      await connectWithZoneA();
+      overridePaged(recordsAtCheckName, script(RECORDS));
+      fake.requests = [];
+      await expect(service.dnsCheck(ZONE_A, actor)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
+      expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
+    });
+  });
+
+  it('still reads an honest listing whose later pages drop details the first page gave', async () => {
+    await connectWithZoneA();
+    overridePaged(zonesList, [
+      { items: [ZONES[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [ZONES[1]], info: null },
+      { items: [ZONES[2]], info: { page: 3, total_pages: 3 } },
+    ]);
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck.outcome).toBe('ok');
+    expect(view.zonesVisible).toBe(3);
   });
 });
 

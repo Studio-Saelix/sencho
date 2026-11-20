@@ -5,9 +5,11 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * through it; none adds another.
  *
  * It owns the transport rules Cloudflare's API needs: the response envelope
- * (`success`, `errors`, `messages`, `result_info`), read only when every field
- * has its documented shape, complete pagination checked against the paging
- * block's own counts, with a page cap, bounded retries with full jitter that honour `Retry-After`,
+ * (`success`, `errors`, `messages`, `result_info`), read only when each field is
+ * a list or an object as documented and `result_info` holds whole counts (the text
+ * inside an informational `errors` or `messages` entry is read when it is a string
+ * and dropped otherwise), complete pagination that holds every page to the totals,
+ * page size and page bounds the listing declared before it, with a page cap, bounded retries with full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
  * whole operation, refused redirects, and a process-wide request budget.
  *
@@ -225,24 +227,43 @@ function contradictoryPaging(): CloudflareApiError {
   return new CloudflareApiError({ kind: 'invalid_response', message: "Cloudflare's paging details do not match the listing it returned; Sencho did not use it." });
 }
 
-/** A page whose paging block disagrees with the page, or with itself, is not trusted: the listing could be incomplete. */
-function assertConsistentPage(info: CloudflareResultInfo | null, resultLength: number, page: number, perPage: number): void {
-  if (!info) return;
-  if (info.page !== undefined && info.page !== page) throw contradictoryPaging();
-  if (info.count !== undefined && info.count !== resultLength) throw contradictoryPaging();
-  if (info.total_pages === 0 && resultLength > 0) throw contradictoryPaging();
-  if (info.total_pages !== undefined && info.total_count !== undefined) {
-    const pageSize = info.per_page !== undefined && info.per_page > 0 ? info.per_page : perPage;
-    const expected = Math.ceil(info.total_count / pageSize);
+/** What a listing has declared about its own size so far. A later page can repeat a declaration but never change or drop it. */
+interface ListingBounds {
+  totalPages?: number;
+  totalCount?: number;
+  perPage?: number;
+}
+
+/**
+ * Check one page against its own paging block and against everything the pages before it declared.
+ * A listing that moves its totals, its page size or its page bounds midway is not trusted: any page
+ * that omits a declaration still answers to the earlier one, so no later page can make an incomplete
+ * listing look whole.
+ */
+function assertConsistentPage(bounds: ListingBounds, info: CloudflareResultInfo | null, resultLength: number, page: number, perPage: number): void {
+  if (info) {
+    if (info.page !== undefined && info.page !== page) throw contradictoryPaging();
+    if (info.count !== undefined && info.count !== resultLength) throw contradictoryPaging();
+    for (const [key, declared] of [['totalPages', info.total_pages], ['totalCount', info.total_count], ['perPage', info.per_page && info.per_page > 0 ? info.per_page : undefined]] as const) {
+      if (declared === undefined) continue;
+      if (bounds[key] !== undefined && bounds[key] !== declared) throw contradictoryPaging();
+      bounds[key] = declared;
+    }
+  }
+  const pageSize = bounds.perPage ?? perPage;
+  if (resultLength > pageSize) throw contradictoryPaging();
+  const { totalPages, totalCount } = bounds;
+  if (totalPages === 0 && resultLength > 0) throw contradictoryPaging();
+  if (totalPages !== undefined && totalCount !== undefined) {
     // An empty listing is reported as zero pages or as one empty page; both are legitimate.
-    const emptyListing = info.total_count === 0 && info.total_pages <= 1;
-    if (info.total_pages !== expected && !emptyListing) throw contradictoryPaging();
+    const emptyListing = totalCount === 0 && totalPages <= 1;
+    if (totalPages !== Math.ceil(totalCount / pageSize) && !emptyListing) throw contradictoryPaging();
   }
 }
 
-/** The collected items, once they match the total Cloudflare reported (when it reported one). */
-function completeListing<T>(items: T[], info: CloudflareResultInfo | null): T[] {
-  if (info?.total_count !== undefined && info.total_count !== items.length) throw contradictoryPaging();
+/** The collected items, once they match the total any page declared. */
+function completeListing<T>(items: T[], bounds: ListingBounds): T[] {
+  if (bounds.totalCount !== undefined && bounds.totalCount !== items.length) throw contradictoryPaging();
   return items;
 }
 
@@ -286,6 +307,7 @@ export class CloudflareApiClient {
     options: CloudflareCallOptions = {},
   ): Promise<T[]> {
     const items: T[] = [];
+    const bounds: ListingBounds = {};
     for (let page = 1; ; page += 1) {
       if (page > MAX_PAGES) {
         throw new CloudflareApiError({ kind: 'invalid_response', message: `Cloudflare listed more than ${MAX_PAGES} pages; Sencho stopped reading.` });
@@ -300,14 +322,13 @@ export class CloudflareApiClient {
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a listing without a list.' });
       }
       const info = response.resultInfo;
-      assertConsistentPage(info, response.result.length, page, perPage);
+      assertConsistentPage(bounds, info, response.result.length, page, perPage);
       items.push(...(response.result as T[]));
-      const totalPages = info?.total_pages;
-      if (typeof totalPages === 'number') {
-        if (page >= totalPages) return completeListing(items, info);
+      if (bounds.totalPages !== undefined) {
+        if (page >= bounds.totalPages) return completeListing(items, bounds);
         if (response.result.length === 0) throw contradictoryPaging();
-      } else if (response.result.length < Math.min(perPage, info?.per_page ?? perPage)) {
-        return completeListing(items, info);
+      } else if (response.result.length < Math.min(perPage, bounds.perPage ?? perPage)) {
+        return completeListing(items, bounds);
       } else {
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
       }
@@ -445,7 +466,7 @@ export class CloudflareApiClient {
       });
     }
     const unreadable = () => new CloudflareApiError({ kind: 'invalid_response', status, message: 'A field in its answer had an unexpected shape.' });
-    // A success is read only when every envelope field has its documented shape, so nothing below can throw on it.
+    // A success is read only when each envelope field is a list or object as documented, so nothing below can throw on it.
     const { errors, messages: rawMessages } = envelope;
     // A null `errors`, `messages` or `result_info` reads as absent; any other shape than a list (or an object) does not.
     if (errors != null && (!Array.isArray(errors) || !errors.every(isPlainObject))) throw unreadable();

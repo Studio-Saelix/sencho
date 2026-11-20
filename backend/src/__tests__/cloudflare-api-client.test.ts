@@ -2,7 +2,8 @@
  * The shared Cloudflare API client: envelope parsing, complete pagination,
  * bounded retries that honour Retry-After, permanent 4xx, ambiguous POSTs,
  * deadlines, refused redirects, the request budget, envelope fields that are
- * not in their documented shape, and paging details that contradict each other.
+ * not a list or object as documented, and paging details that contradict each
+ * other, on one page or between pages.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
@@ -463,6 +464,87 @@ describe('CloudflareApiClient contradictory paging', () => {
       }),
     ]);
     expect((await client.paginate<{ id: string }>(TOKEN, '/zones', {}, 2)).map((z) => z.id)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('CloudflareApiClient paging bounds hold across pages', () => {
+  const item = (n: number) => ({ id: `i${n}` });
+  type Info = Record<string, number> | null;
+  /** The provider's pages as scripted; a page past the script is an empty answer with no paging block. */
+  type Script = Array<{ items: number[]; info: Info }>;
+  function scripted(pages: Script) {
+    return clientWith([
+      (url) => {
+        const page = pages[Number(url.searchParams.get('page')) - 1];
+        return ok((page?.items ?? []).map(item), page?.info ?? undefined);
+      },
+    ]);
+  }
+
+  it.each<[string, Script]>([
+    ['a total that shrinks on page two', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 2 } },
+    ]],
+    ['a total_count that shrinks on page two', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 3, total_count: 2 } },
+    ]],
+    ['a total_pages that grows on page two', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 2 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 3, total_count: 2 } },
+    ]],
+    ['a page two that sits past the pages page one declared', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: { page: 2, per_page: 1, total_pages: 1 } },
+    ]],
+    ['a page size that changes on page two', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
+      { items: [3, 4], info: { page: 2, per_page: 3, total_pages: 2, total_count: 4 } },
+    ]],
+    ['a page of results larger than the page size declared', [
+      { items: [1, 2, 3], info: { page: 1, per_page: 1, total_pages: 1 } },
+    ]],
+    ['a page of results larger than the page size an earlier page declared', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 3 } },
+      { items: [2, 3], info: null },
+    ]],
+  ])('refuses %s', async (_label, pages) => {
+    const { client } = scripted(pages);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
+  });
+
+  it.each<[string, Script]>([
+    ['paging details that vanish on the last page', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: null },
+    ]],
+    ['a later page that drops its total_count and ends short', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3, total_count: 5 } },
+      { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
+    ]],
+  ])('does not let %s end a listing early', async (_label, pages) => {
+    const { client, calls } = scripted(pages);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
+    // The earlier total_pages still asks for page three; the empty page it gets is the contradiction.
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('keeps an earlier total as the bound when a later page repeats nothing, and accepts the listing that meets it', async () => {
+    const { client } = scripted([
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2], info: null },
+      { items: [3], info: { page: 3, total_pages: 3 } },
+    ]);
+    expect((await client.paginate<{ id: string }>(TOKEN, '/zones', {}, 50)).map((i) => i.id)).toEqual(['i1', 'i2', 'i3']);
+  });
+
+  it('accepts a later page that repeats the earlier declarations', async () => {
+    const { client } = scripted([
+      { items: [1, 2], info: { page: 1, per_page: 2, count: 2, total_pages: 2, total_count: 3 } },
+      { items: [3], info: { page: 2, per_page: 2, count: 1, total_pages: 2, total_count: 3 } },
+    ]);
+    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(3);
   });
 });
 
