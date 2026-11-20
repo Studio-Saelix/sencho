@@ -74,6 +74,7 @@ import { diagnosticsRouter } from './routes/diagnostics';
 import { dependencyMapRouter } from './routes/dependencyMap';
 import { networkingRouter } from './routes/networking';
 import { registryDeliveryRouter } from './routes/registryDelivery';
+import { publicExposureRouter } from './routes/publicExposure';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
 // util._extend internally. The warning fires at runtime when createProxyServer() is
@@ -192,6 +193,8 @@ app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/dependency-map', dependencyMapRouter);
 app.use('/api/networking', networkingRouter);
 app.use('/api/registry-delivery', registryDeliveryRouter);
+// Hub-only: the hub's Cloudflare account and its zones (HUB_ONLY_PREFIXES).
+app.use('/api/public-exposure', publicExposureRouter);
 // Read-only bootstrap preflight. Mounted ahead of the nodes router so its exact
 // paths are not matched by `/api/nodes/:id`.
 app.use('/api/nodes/bootstrap', nodeBootstrapRouter);

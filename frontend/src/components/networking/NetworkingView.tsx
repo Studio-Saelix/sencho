@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  LayoutDashboard, Network, GraphStar, AlertTriangle, RefreshCw, Plus, Unplug,
+  LayoutDashboard, Network, GraphStar, AlertTriangle, RefreshCw, Plus, Unplug, Cloud,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
@@ -30,6 +30,10 @@ import { NetworkingFindingActions, type NetworkingFindingControls } from './Netw
 import { NetworkingFindingText } from './NetworkingFindingText';
 import { AcknowledgeInDoctorDialog } from './AcknowledgeInDoctorDialog';
 import { NetworkingTopologyPanel } from './NetworkingTopologyPanel';
+import { CloudflareAccountCard } from './CloudflareAccountCard';
+import { usePublicExposureAccount, useShowCloudflareAccountCard } from '@/hooks/usePublicExposureAccount';
+import { accountAttentionTone } from '@/lib/cloudflareAccountStatus';
+import { STATUS_DOT_CLASS } from '@/lib/statusTone';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
@@ -44,7 +48,7 @@ import type {
   NetworkingNetworkRow, NodeNetworkingOverview,
 } from '@/types/networking';
 
-export type NetworkingTab = 'overview' | 'topology' | 'networks' | 'findings';
+export type NetworkingTab = 'overview' | 'topology' | 'networks' | 'findings' | 'cloudflare';
 
 interface NetworkingViewProps {
   headerActions?: ReactNode;
@@ -56,6 +60,8 @@ const TABS: { value: NetworkingTab; label: string; icon: typeof LayoutDashboard 
   { value: 'topology', label: 'Topology', icon: GraphStar },
   { value: 'findings', label: 'Findings', icon: AlertTriangle },
 ];
+
+const CLOUDFLARE_TAB = { value: 'cloudflare' as const, label: 'Cloudflare', icon: Cloud };
 
 const POSTURE_TONE: Record<ReturnType<typeof getNetworkingPosture>['tone'], 'error' | 'warn' | 'idle' | 'live'> = {
   critical: 'error',
@@ -95,6 +101,10 @@ function destinationForAction(kind: NetworkingRecommendedAction['kind']): Sencho
 export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const { isAdmin, can } = useAuth();
   const { activeNode } = useNodes();
+  const showAccountCard = useShowCloudflareAccountCard();
+  const account = usePublicExposureAccount(showAccountCard);
+  const accountTone = showAccountCard ? accountAttentionTone(account.view, account.loadError !== null) : null;
+  const tabs = showAccountCard ? [...TABS, CLOUDFLARE_TAB] : TABS;
   const isMobile = useIsMobile();
   const developerMode = useDeveloperMode(activeNode?.id);
   // Read the flag through a ref inside the load effect so flipping it does not
@@ -103,7 +113,9 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   developerModeRef.current = developerMode;
   const nodeId = activeNode?.id;
 
-  const [tab, setTab] = useState<NetworkingTab>('overview');
+  const [selectedTab, setTab] = useState<NetworkingTab>('overview');
+  // The Cloudflare tab exists only while its gate holds; without it the page reads as Overview.
+  const tab = selectedTab === 'cloudflare' && !showAccountCard ? 'overview' : selectedTab;
   const [dismissedOpen, setDismissedOpen] = useState(false);
   // The count that opened the sheet, plus a surviving tab region: closing returns
   // focus to the exact count, or to the tab panel when restoring the last item
@@ -375,20 +387,30 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     isRestoring: (item: DismissedNetworkingFinding) => (item.dismissal === null ? clearingAck.has(item.finding.id) : isPending(item.dismissal.id)),
   }), [partition.dismissed, now, can, nodeId, canDismiss, clearAcknowledgement, restore, isPending, clearingAck]);
 
+  // The Cloudflare account belongs to the control instance, not this node, so
+  // it stays reachable, above the unavailable state (there is no tab
+  // strip then), when the active node cannot serve Networking.
+  const withAccountCard = (content: ReactNode) => (showAccountCard ? (
+    <div className="flex h-full flex-col overflow-auto p-4 md:p-6">
+      <CloudflareAccountCard account={account} className="mb-4" />
+      {content}
+    </div>
+  ) : content);
+
   if (unsupported) {
-    return (
+    return withAccountCard(
       <LockCard
         icon={Unplug}
         title="Networking is not available on this node"
         body="Upgrade the node to use the Networking page."
-      />
+      />,
     );
   }
 
   // Nothing on this page was read, so nothing on it may be shown: an empty
   // network list would read as a clean node.
   if (loadFailure) {
-    return (
+    return withAccountCard(
       <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 min-h-[280px]">
         <div className="flex max-w-md flex-col items-center gap-4 rounded-xl border border-card-border bg-card px-10 py-8 text-center">
           <Unplug className="h-8 w-8 text-warning" strokeWidth={1.5} aria-hidden />
@@ -403,7 +425,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             Retry
           </Button>
         </div>
-      </div>
+      </div>,
     );
   }
 
@@ -618,11 +640,19 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const tabControls = (
     <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
       <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-        {TABS.map(t => (
+        {tabs.map(t => (
           <TabsHighlightItem key={t.value} value={t.value}>
             <TabsTrigger value={t.value}>
               <t.icon className="mr-1.5 h-4 w-4" strokeWidth={1.5} />
               {t.label}
+              {t.value === 'cloudflare' && accountTone && (
+                <span
+                  data-testid="cloudflare-tab-attention"
+                  role="img"
+                  aria-label="Needs attention"
+                  className={`ml-1.5 h-1.5 w-1.5 rounded-full ${STATUS_DOT_CLASS[accountTone]}`}
+                />
+              )}
             </TabsTrigger>
           </TabsHighlightItem>
         ))}
@@ -640,12 +670,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             ariaLabel="Networking sections"
             active={tab}
             onSelect={(v) => setTab(v as NetworkingTab)}
-            tabs={TABS.map(t => ({ value: t.value, label: t.label }))}
+            tabs={tabs.map(t => ({ value: t.value, label: t.label }))}
           />
         ) : (
           <div className="flex items-center justify-between gap-3 mb-4 mt-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
             {tabControls}
-            <div className="flex items-center gap-2">
+            {tab !== 'cloudflare' && <div className="flex items-center gap-2">
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -668,7 +698,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                   Create network
                 </Button>
               )}
-            </div>
+            </div>}
           </div>
         )}
 
@@ -726,6 +756,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             disabled={isLegacy}
           />
         </TabsContent>
+
+        {showAccountCard && (
+          <TabsContent value="cloudflare" className="mt-4">
+            <CloudflareAccountCard account={account} />
+          </TabsContent>
+        )}
       </Tabs>
 
       <DismissedSheet
