@@ -32,6 +32,7 @@ import {
 import {
   buildTargetImageRef,
   isRepinBlocked,
+  isSameOrChildPath,
   isValidImageRef,
   mapHostPathToContainerPath,
   patchComposeServiceImage,
@@ -856,15 +857,14 @@ class SelfUpdateService {
       if (direct.kind === 'uncovered') needsHelper = true;
       let content = direct.kind === 'read' ? direct.content : null;
       if (content === null && allowHelper) content = await this.readConfigFileViaHelper(filePath, ctx);
-      if (content === null) {
-        if (!allowHelper) {
-          this.noteFailedRoutineRead(startedAt, filePath, direct.kind === 'failed' ? direct.reason : 'not readable directly');
-          return null;
-        }
+      if (content !== null) {
+        files.push({ filePath, content });
+      } else if (allowHelper) {
         unread.push(filePath);
-        continue;
+      } else {
+        this.noteFailedRoutineRead(startedAt, filePath, direct.kind === 'failed' ? direct.reason : 'not readable directly');
+        return null;
       }
-      files.push({ filePath, content });
     }
     const info = resolveServiceImageFromContents(files, ctx.serviceName);
     if (unread.length > 0) {
@@ -895,7 +895,7 @@ class SelfUpdateService {
         fs.promises.realpath(mapped.containerPath),
         fs.promises.realpath(mapped.mountDestination),
       ]);
-      if (real !== root && !real.startsWith(root === '/' ? '/' : `${root}/`)) return { kind: 'uncovered' };
+      if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
       const [rootStat, stat] = await Promise.all([fs.promises.stat(root), fs.promises.stat(real)]);
       if (!rootStat.isDirectory() || !stat.isFile() || stat.size > COMPOSE_READ_MAX_BYTES) return { kind: 'uncovered' };
       const content = await fs.promises.readFile(real, 'utf8');

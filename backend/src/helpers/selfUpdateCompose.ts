@@ -223,7 +223,7 @@ function normalizeAbsolutePath(value: string): string | null {
 }
 
 /** Whether `child` is `parent` or sits under it, compared by whole path segment. */
-function isSameOrChildPath(child: string, parent: string): boolean {
+export function isSameOrChildPath(child: string, parent: string): boolean {
   if (child === parent) return true;
   return child.startsWith(parent === '/' ? '/' : `${parent}/`);
 }
@@ -242,7 +242,7 @@ export function mapHostPathToContainerPath(
 ): { containerPath: string; mountDestination: string } | null {
   const host = normalizeAbsolutePath(hostPath);
   if (!host) return null;
-  let best: { source: string; destination: string } | null = null;
+  let best: PathMount | null = null;
   for (const mount of mounts) {
     const source = normalizeAbsolutePath(mount.source);
     const destination = normalizeAbsolutePath(mount.destination);
@@ -250,9 +250,8 @@ export function mapHostPathToContainerPath(
     if (!best || source.length > best.source.length) best = { source, destination };
   }
   if (!best) return null;
-  const relative = path.posix.relative(best.source, host);
   return {
-    containerPath: relative ? path.posix.join(best.destination, relative) : best.destination,
+    containerPath: path.posix.join(best.destination, path.posix.relative(best.source, host)),
     mountDestination: best.destination,
   };
 }
