@@ -33,7 +33,7 @@ export interface CloudflareAccountSheetProps {
 
 /**
  * Connect, replace and zones for the hub's Cloudflare account, in one sheet.
- * Every verb calls the shared account hook the card uses.
+ * Every verb goes through the shared account state the card passes in.
  */
 export function CloudflareAccountSheet({
   open, onOpenChange, mode, onModeChange, tab, onTabChange, account, recheckWait, onVerb, onRequestDnsCheck,

@@ -222,7 +222,7 @@ export function cloudflareAccountStatus(view: PublicExposureAccountView): Accoun
 /**
  * The tone a tab label carries for the account, or null when it needs no
  * attention. A connection that is not set up yet is a choice, not a problem,
- * so it stays quiet; a failed load or a blocking or warning answer does not.
+ * so it stays quiet; a failed load or a destructive or warning answer does not.
  */
 export function accountAttentionTone(view: PublicExposureAccountView | null, loadFailed: boolean): StatusTone | null {
   if (!view) return loadFailed ? 'warning' : null;

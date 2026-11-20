@@ -50,13 +50,13 @@ export interface PublicExposureAccount {
 }
 
 /**
- * The one shared hook behind every public exposure verb. The card and the
- * sheet both read it, so a verb runs the same way wherever it is offered.
- * It fetches once on mount; each verb replaces the view from its own answer
- * (a refused DNS check or disconnect refetches, since either may still have
- * changed a zone). It never polls. Mount it only where the operator may see
- * the account (experimental flag and Admin), or pass `enabled: false` to make
- * no request.
+ * The one shared hook behind every public exposure verb. The caller calls it
+ * once and hands the result to the card, which hands it to the sheet, so a
+ * verb runs the same way wherever it is offered. While `enabled` (the
+ * experimental flag and Admin), it fetches on mount and again whenever
+ * `enabled` turns on; with `enabled: false` it makes no request. Each verb
+ * replaces the view from its own answer (a refused DNS check or disconnect
+ * refetches, since either may still have changed a zone). It never polls.
  */
 export function usePublicExposureAccount(enabled = true): PublicExposureAccount {
   const [view, setView] = useState<PublicExposureAccountView | null>(null);
@@ -90,7 +90,10 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
   const reload = useCallback(() => load({ quiet: false }), [load]);
 
   useEffect(() => {
-    if (enabled) void load({ quiet: false });
+    if (!enabled) return;
+    // A late enable (the experimental flag resolves after mount) starts a fresh first load.
+    setLoading(true);
+    void load({ quiet: false });
   }, [load, enabled]);
 
   const run = useCallback(async <T,>(kind: Exclude<PublicExposurePending, null>, action: () => Promise<T>): Promise<T> => {

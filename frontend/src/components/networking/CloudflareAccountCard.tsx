@@ -16,7 +16,8 @@ const KICKER = 'Public exposure · Control instance';
 
 /**
  * The hub's Cloudflare account on the Networking page: the body of the
- * Cloudflare tab. It belongs to the control instance and serves every node,
+ * Cloudflare tab, and the standalone block above the unavailable state when
+ * the active node cannot load Networking. It belongs to the control instance and serves every node,
  * so it renders whichever node is active, and even when that node cannot load
  * Networking. The caller owns the account state (the tab label reads it too)
  * and mounts this only for Admins signed into this instance with the

@@ -113,7 +113,9 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   developerModeRef.current = developerMode;
   const nodeId = activeNode?.id;
 
-  const [tab, setTab] = useState<NetworkingTab>('overview');
+  const [selectedTab, setTab] = useState<NetworkingTab>('overview');
+  // The Cloudflare tab exists only while its gate holds; without it the page reads as Overview.
+  const tab = selectedTab === 'cloudflare' && !showAccountCard ? 'overview' : selectedTab;
   const [dismissedOpen, setDismissedOpen] = useState(false);
   // The count that opened the sheet, plus a surviving tab region: closing returns
   // focus to the exact count, or to the tab panel when restoring the last item
@@ -386,7 +388,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   }), [partition.dismissed, now, can, nodeId, canDismiss, clearAcknowledgement, restore, isPending, clearingAck]);
 
   // The Cloudflare account belongs to the control instance, not this node, so
-  // it stays reachable when the active node cannot serve Networking.
+  // it stays reachable, above the unavailable state (there is no tab
+  // strip then), when the active node cannot serve Networking.
   const withAccountCard = (content: ReactNode) => (showAccountCard ? (
     <div className="flex h-full flex-col overflow-auto p-4 md:p-6">
       <CloudflareAccountCard account={account} className="mb-4" />
