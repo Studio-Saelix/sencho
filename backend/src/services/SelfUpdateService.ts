@@ -896,13 +896,31 @@ class SelfUpdateService {
         fs.promises.realpath(mapped.mountDestination),
       ]);
       if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
-      const [rootStat, stat] = await Promise.all([fs.promises.stat(root), fs.promises.stat(real)]);
-      if (!rootStat.isDirectory() || !stat.isFile() || stat.size > COMPOSE_READ_MAX_BYTES) return { kind: 'uncovered' };
-      const content = await fs.promises.readFile(real, 'utf8');
-      return content.length > COMPOSE_READ_MAX_BYTES ? { kind: 'uncovered' } : { kind: 'read', content };
+      if (!(await fs.promises.stat(root)).isDirectory()) return { kind: 'uncovered' };
+      const content = await this.readPlainFile(real);
+      return content === null ? { kind: 'uncovered' } : { kind: 'read', content };
     } catch (error) {
       if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Direct compose read failed', filePath, (error as Error).message);
       return { kind: 'failed', reason: (error as NodeJS.ErrnoException).code ?? (error as Error).message };
+    }
+  }
+
+  /**
+   * Read a plain file within the size limit, or null for anything else. The file
+   * is opened first and checked through the open handle, so the file that passed
+   * the check is the file that is read. A symlink swapped in after the path was
+   * resolved fails the open, and a FIFO opens without waiting for a writer.
+   */
+  private async readPlainFile(file: string): Promise<string | null> {
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    const handle = await fs.promises.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > COMPOSE_READ_MAX_BYTES) return null;
+      const content = await handle.readFile('utf8');
+      return content.length > COMPOSE_READ_MAX_BYTES ? null : content;
+    } finally {
+      await handle.close();
     }
   }
 

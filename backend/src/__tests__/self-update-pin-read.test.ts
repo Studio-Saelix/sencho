@@ -105,6 +105,11 @@ function helperCalls(): unknown[][] {
   return mockExecFileAsync.mock.calls.filter(isReadHelper);
 }
 
+/** A stand-in for an open file handle that serves `content`. */
+function fakeHandle(content: string): unknown {
+  return { stat: async () => ({ isFile: () => true, size: content.length }), readFile: async () => content, close: async () => undefined };
+}
+
 function writeCovered(image: string): void {
   fs.writeFileSync(coveredFile, compose(image));
 }
@@ -182,7 +187,7 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await service.getPinInfo({ fresh: true });
 
     clock += FIVE_MIN + TICK;
-    vi.spyOn(fs.promises, 'readFile').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+    vi.spyOn(fs.promises, 'open').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
     await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     expect(helperCalls()).toHaveLength(0);
   });
@@ -192,7 +197,7 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     hostFiles.set(coveredFile, compose('saelix/sencho:0.99.1'));
     const service = setup([coveredFile], [sameMount]);
 
-    vi.spyOn(fs.promises, 'readFile').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+    vi.spyOn(fs.promises, 'open').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
     await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
     expect(helperCalls()).toHaveLength(1);
   });
@@ -227,6 +232,18 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     expect(helperCalls()).toHaveLength(1);
   });
 
+  it('opens the file without following a symlink or waiting on a FIFO, then checks the open handle', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile], [sameMount]);
+    const open = vi.spyOn(fs.promises, 'open');
+
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+
+    const flags = open.mock.calls[0][1] as number;
+    expect(flags & fs.constants.O_NOFOLLOW).toBe(fs.constants.O_NOFOLLOW);
+    expect(flags & fs.constants.O_NONBLOCK).toBe(fs.constants.O_NONBLOCK);
+  });
+
   it('reads directly when the mount is the host root', async () => {
     writeCovered('saelix/sencho:0.99.0');
     const service = setup([coveredFile], [{ source: '/', destination: '/' }]);
@@ -259,7 +276,7 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     writeCovered('saelix/sencho:0.99.0');
     hostFiles.set(coveredFile, compose('saelix/sencho:0.99.1'));
     const service = setup([coveredFile], [sameMount]);
-    vi.spyOn(fs.promises, 'readFile').mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'EBUSY' }));
+    vi.spyOn(fs.promises, 'open').mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'EBUSY' }));
 
     await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
     expect(helperCalls()).toHaveLength(1);
@@ -275,17 +292,17 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     const service = setup([coveredFile], [sameMount]);
     await service.getPinInfo({ fresh: true });
 
-    const readFile = vi.spyOn(fs.promises, 'readFile').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+    const open = vi.spyOn(fs.promises, 'open').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     clock += FIVE_MIN;
     for (let tick = 0; tick < 5; tick++) {
       clock += TICK;
       await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     }
-    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledTimes(1);
     clock += FIVE_MIN;
     await service.getPinInfo();
-    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledTimes(2);
     expect(helperCalls()).toHaveLength(0);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(coveredFile));
@@ -298,17 +315,17 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await service.getPinInfo({ fresh: true });
 
     clock += FIVE_MIN;
-    const real = fs.promises.readFile.bind(fs.promises) as (...args: unknown[]) => Promise<string>;
+    const real = fs.promises.open.bind(fs.promises) as (...args: unknown[]) => Promise<unknown>;
     let release: () => void = () => undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
-    vi.spyOn(fs.promises, 'readFile').mockImplementation((async (...args: unknown[]) => {
+    vi.spyOn(fs.promises, 'open').mockImplementation((async (...args: unknown[]) => {
       if (calls++ === 0) {
         await gate;
-        return compose('saelix/sencho:0.99.0');
+        return fakeHandle(compose('saelix/sencho:0.99.0'));
       }
       return real(...args);
-    }) as unknown as typeof fs.promises.readFile);
+    }) as unknown as typeof fs.promises.open);
 
     const late = service.getPinInfo();
     await vi.waitFor(() => expect(calls).toBe(1));
@@ -331,13 +348,13 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(fs.promises, 'readFile').mockImplementation((async () => {
+    vi.spyOn(fs.promises, 'open').mockImplementation((async () => {
       if (calls++ === 0) {
         await gate;
-        return compose('saelix/sencho:0.99.2');
+        return fakeHandle(compose('saelix/sencho:0.99.2'));
       }
       throw Object.assign(new Error('denied'), { code: 'EACCES' });
-    }) as unknown as typeof fs.promises.readFile);
+    }) as unknown as typeof fs.promises.open);
 
     const fresh = service.getPinInfo({ fresh: true });
     await vi.waitFor(() => expect(calls).toBe(1));
@@ -356,18 +373,18 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
 
     clock += FIVE_MIN;
     const routineStart = clock;
-    const real = fs.promises.readFile.bind(fs.promises) as (...args: unknown[]) => Promise<string>;
+    const real = fs.promises.open.bind(fs.promises) as (...args: unknown[]) => Promise<unknown>;
     let release: () => void = () => undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(fs.promises, 'readFile').mockImplementation((async (...args: unknown[]) => {
+    vi.spyOn(fs.promises, 'open').mockImplementation((async (...args: unknown[]) => {
       if (calls++ === 0) {
         await gate;
         throw Object.assign(new Error('denied'), { code: 'EACCES' });
       }
       return real(...args);
-    }) as unknown as typeof fs.promises.readFile);
+    }) as unknown as typeof fs.promises.open);
 
     const slowRoutine = service.getPinInfo();
     await vi.waitFor(() => expect(calls).toBe(1));
@@ -572,11 +589,11 @@ describe('routine reads before any classification exists', () => {
   it('return null without reading anything', async () => {
     writeCovered('saelix/sencho:0.99.0');
     const service = setup([coveredFile], [sameMount]);
-    const readFile = vi.spyOn(fs.promises, 'readFile');
+    const open = vi.spyOn(fs.promises, 'open');
 
     await expect(service.getPinInfo()).resolves.toBeNull();
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toBeNull();
-    expect(readFile).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
     expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
 
