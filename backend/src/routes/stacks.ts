@@ -2673,8 +2673,10 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
       skippedBuildBacked: result.skippedBuildBacked,
     });
   } catch (error: unknown) {
-    // The compose file sits in, or links into, a directory a data restore is
-    // overwriting: nothing was pulled, and the answer is the fence's.
+    // A file a pull opens sits in, or links into, a directory a data restore
+    // is overwriting. The refused pull never started; a pull this request ran
+    // before it may already have updated the local image store, which changes
+    // no container. The answer is the fence's.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
       return;
@@ -3502,9 +3504,12 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
-    // The compose file sits in, or links into, a directory a data restore is
-    // overwriting, so the update was refused before anything was pulled or
-    // recreated: a refusal, not a failure to log.
+    // A file the update opens sits in, or links into, a directory a data
+    // restore is overwriting. The refusal comes before any container is
+    // removed or recreated (the up is admitted before legacy orphans are
+    // cleaned up, and held until it exits), so the rollback point is
+    // abandoned, not used; pulls that ran before it may have updated the local
+    // image store. A refusal, not a failure to log.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE });
       return;
@@ -3608,6 +3613,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   let revertRestore: (() => Promise<void>) | null = null;
+  let backupFileLease: { release(): void } | null = null;
   try {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
@@ -3752,6 +3758,12 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // the restored target can be undone: restoreStackFiles commits to disk, and
     // without this a blocked rollback would leave disk rolled back while the
     // deployed state is unchanged.
+    // The snapshot, the restore, the deploy and any undo are one file
+    // transaction: registered with a data restore's directory fences before
+    // the first read, and held until the route answers, so a fence recorded
+    // meanwhile waits for it instead of landing between the restore and its
+    // undo. A fence already held refuses it here, with nothing moved.
+    backupFileLease = await fsSvc.admitStackFileWork(stackName);
     revertRestore = await fsSvc.snapshotStackFiles(stackName);
     const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
     if (deliveryPrepId) {
@@ -3880,6 +3892,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       res.status(500).json({ error: message, ...restoreFailureClassOf(error) });
     }
   } finally {
+    backupFileLease?.release();
     releaseStackOpLock(req, stackName);
   }
 });

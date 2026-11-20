@@ -22,13 +22,20 @@ const {
   mockGetBackupInfo,
   mockRestoreStackFiles,
   mockSnapshotStackFiles,
-} = vi.hoisted(() => ({
+  mockAdmitStackFileWork,
+  leaseReleased,
+} = vi.hoisted(() => {
+  const leaseReleased = vi.fn();
+  return {
+  leaseReleased,
+  mockAdmitStackFileWork: vi.fn(async () => ({ recheck: () => null, release: leaseReleased })),
   mockDeployStack: vi.fn(),
   mockComposeUpWithRecoveryOverride: vi.fn(),
   mockGetBackupInfo: vi.fn(),
   mockRestoreStackFiles: vi.fn(),
   mockSnapshotStackFiles: vi.fn(),
-}));
+  };
+});
 
 vi.mock('../services/ComposeService', async () => {
   const actual = await vi.importActual<typeof import('../services/ComposeService')>(
@@ -56,6 +63,7 @@ vi.mock('../services/FileSystemService', () => ({
       getBackupInfo: mockGetBackupInfo,
       restoreStackFiles: mockRestoreStackFiles,
       snapshotStackFiles: mockSnapshotStackFiles,
+      admitStackFileWork: mockAdmitStackFileWork,
     }),
   },
 }));
@@ -267,6 +275,36 @@ describe('A data restore fence recorded after the rollback pre-check', () => {
       clearGenerations();
       compensate.mockRestore();
     }
+  });
+
+  it('registers the backup rollback\'s files before the snapshot, moves nothing when one is held, and releases it when the route answers', async () => {
+    mockTier('paid');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockSnapshotStackFiles.mockClear();
+    mockRestoreStackFiles.mockClear();
+    mockDeployStack.mockClear();
+    mockAdmitStackFileWork.mockClear();
+    mockAdmitStackFileWork.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const refused = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+    expect(mockSnapshotStackFiles).not.toHaveBeenCalled();
+    expect(mockRestoreStackFiles).not.toHaveBeenCalled();
+    expect(mockDeployStack).not.toHaveBeenCalled();
+
+    // Admitted: held through the snapshot, the restore and the deploy, then released.
+    leaseReleased.mockClear();
+    mockSnapshotStackFiles.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
+    let releasedDuringDeploy: boolean | null = null;
+    mockDeployStack.mockImplementationOnce(async () => {
+      releasedDuringDeploy = leaseReleased.mock.calls.length > 0;
+    });
+    const ok = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(ok.status).toBe(200);
+    expect(releasedDuringDeploy).toBe(false);
+    expect(mockAdmitStackFileWork.mock.invocationCallOrder[1]).toBeLessThan(mockSnapshotStackFiles.mock.invocationCallOrder[0]);
+    expect(leaseReleased).toHaveBeenCalledTimes(1);
   });
 
   it('puts the restored backup files back and answers 409 data_restore when the deploy is refused', async () => {

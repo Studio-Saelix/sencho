@@ -5,6 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockTag = vi.fn().mockResolvedValue(undefined);
 const mockRefuseIfComposeFenced = vi.fn().mockResolvedValue(undefined);
+/** The stack file transaction's lease, and the order it was taken and released in. */
+const leaseEvents: string[] = [];
+const mockAdmitStackFileWork = vi.fn(async (..._args: unknown[]) => {
+  leaseEvents.push('admit');
+  return { recheck: () => null, release: () => { leaseEvents.push('release'); } };
+});
 const mockRemove = vi.fn().mockResolvedValue(undefined);
 const mockListContainers = vi.fn().mockResolvedValue([]);
 const mockInspectContainer = vi.fn();
@@ -39,6 +45,7 @@ vi.mock('../services/FileSystemService', () => ({
       backupStackFiles: vi.fn().mockResolvedValue(undefined),
       restoreStackFiles: vi.fn().mockResolvedValue(undefined),
       refuseIfComposeFenced: (...args: unknown[]) => mockRefuseIfComposeFenced(...args),
+      admitStackFileWork: (...args: unknown[]) => mockAdmitStackFileWork(...args),
     }),
   },
 }));
@@ -69,6 +76,7 @@ vi.mock('../services/RollbackGenerationStore', () => ({
     hasPendingRestoreIntent: vi.fn().mockResolvedValue(false),
     isRestoreInFlight: vi.fn().mockReturnValue(false),
     attachImages: vi.fn().mockResolvedValue(undefined),
+    readVerifiedGeneration: vi.fn().mockRejectedValue(new Error('no content in this suite')),
   },
   getBackupBaseDir: () => '/tmp/backups',
 }));
@@ -400,6 +408,57 @@ describe('StackUpdateRecoveryService', () => {
       expect(composeUp).not.toHaveBeenCalled();
       expect(begin).not.toHaveBeenCalled();
       expect(failed).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('registers the whole file transaction, the captured invocation\'s files included, before any file moves, and holds it through the up and the revert', async () => {
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      vi.mocked(RollbackGenerationStore.readVerifiedGeneration).mockResolvedValueOnce({
+        managedRelativePaths: ['compose.yaml', '.env'],
+        entries: [{ relativePath: 'compose.yaml' }],
+        invocation: { composeArgsPrefix: ['compose', '-f', '../shared/base.yml', '-f', 'compose.yaml'], composeLayers: ['compose.yaml'] },
+      } as never);
+      leaseEvents.length = 0;
+      mockAdmitStackFileWork.mockClear();
+      const { outcome } = await refuseRestoreUp({ contentPath: genId, revert: 'clean', fence: true });
+      const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+      const context = await vi.mocked(resolveComposeProjectContextForGeneration).mock.results.at(-1)?.value;
+      vi.mocked(context.restoreFromContext).mockImplementation(async () => { leaseEvents.push('restore'); });
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockImplementation(async () => { leaseEvents.push('reconcile'); return true; });
+      await expect(outcome).rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(mockAdmitStackFileWork).toHaveBeenCalledWith(
+        'my-stack',
+        expect.arrayContaining(['compose.yaml', '.env']),
+        [['-f', '../shared/base.yml', '-f', 'compose.yaml']],
+      );
+      // Admitted first, released last: the pre-compensate reconcile, the
+      // restore, the refused up and the revert all ran under it.
+      expect(leaseEvents[0]).toBe('admit');
+      expect(leaseEvents.at(-1)).toBe('release');
+      expect(leaseEvents.filter((e) => e === 'admit')).toHaveLength(1);
+    });
+
+    it('moves nothing when a data restore holds a file of the transaction at its registration', async () => {
+      const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      const composeUp = vi.fn();
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'clean', fence: true });
+      await outcome.catch(() => undefined);
+      const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+      const restore = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({ restoreFromContext: restore } as never);
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockClear();
+      const begin = vi.mocked((StackUpdateRecoveryService.prototype as unknown as { beginGitOpsRecovery: () => unknown }).beginGitOpsRecovery);
+      begin.mockClear();
+      update.mockClear();
+      failed.mockClear();
+      mockAdmitStackFileWork.mockRejectedValueOnce(new DataRestoreFenceError('/srv/shared', 'browse', 'directory'));
+      await expect(StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(genId, composeUp))
+        .rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(RollbackGenerationStore.reconcileInterruptedRestore).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+      expect(composeUp).not.toHaveBeenCalled();
+      expect(begin).not.toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
     });
 

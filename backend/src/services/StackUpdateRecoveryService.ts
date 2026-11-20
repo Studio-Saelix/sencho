@@ -1131,15 +1131,60 @@ export class StackUpdateRecoveryService {
     // captured file set, asked at that up's own argv). One a data restore is
     // overwriting refuses here, before any file moves and before a GitOps
     // recovery is opened, so a refused restore leaves the generation and the
-    // live files as they were. A fence recorded after this ask is answered at
-    // the up's argv, and the restored files are put back.
+    // live files as they were. The transaction's whole file set is then
+    // registered with the fences until this returns, so a fence recorded
+    // after this ask waits for the restore, its up and any revert instead of
+    // landing between them.
+    let lease: Awaited<ReturnType<FileSystemService['admitStackFileWork']>>;
     try {
       await FileSystemService.getInstance(row.node_id)
         .refuseIfComposeFenced(row.stack_name, { pinsComposeFiles: true });
+      lease = await this.admitGenerationFileWork(row);
     } catch (error) {
       if (isDataRestoreFenceError(error)) Object.assign(error, { failureClass: 'pre_mutation' });
       throw error;
     }
+    try {
+      return await this.compensateUnderFileLease(generationId, row, composeUp, policyOptions);
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * Register a generation's file transaction with the directory fences before
+   * its first write (`FileSystemService.admitStackFileWork`): the files the
+   * generation holds or may delete, the ones its own captured invocation
+   * opens (which can name a shared layer the live selection does not), and
+   * the live ones. A generation whose content cannot be read is asked by its
+   * live files only; its restore refuses on that content anyway.
+   */
+  private async admitGenerationFileWork(row: StackUpdateRecoveryGenerationRow) {
+    const relativePaths: string[] = [];
+    const prefixes: string[][] = [];
+    if (expectsGenerationContent(row) && row.content_path && looksLikeGenerationUuid(row.content_path)) {
+      try {
+        const manifest = await RollbackGenerationStore.readVerifiedGeneration(row.node_id, row.stack_name, row.content_path);
+        relativePaths.push(...manifest.managedRelativePaths, ...manifest.entries.map((entry) => entry.relativePath));
+        if (manifest.invocation?.composeArgsPrefix) {
+          prefixes.push(manifest.invocation.composeArgsPrefix.filter((arg) => arg !== 'compose'));
+        }
+        if (manifest.invocation?.composeLayers) {
+          relativePaths.push(...manifest.invocation.composeLayers);
+        }
+      } catch {
+        // Unreadable content: GENERATION_CONTENT_MISSING from the restore itself.
+      }
+    }
+    return FileSystemService.getInstance(row.node_id).admitStackFileWork(row.stack_name, relativePaths, prefixes);
+  }
+
+  private async compensateUnderFileLease(
+    generationId: string,
+    row: StackUpdateRecoveryGenerationRow,
+    composeUp: CompensationComposeUp,
+    policyOptions?: PolicyEnforcementOptions,
+  ): Promise<CompensationOutcome> {
     // Finish any leftover restore transaction for this generation before a new
     // restore can overwrite pre-restore/ with an already-restored tree.
     if (row.content_path) {
@@ -1410,6 +1455,22 @@ export class StackUpdateRecoveryService {
     const row = this.get(generationId);
     if (!row || !expectsGenerationContent(row) || !row.content_path) return false;
     await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
+    // The files-only revert writes the same set a rollback does, so it is
+    // registered with the directory fences the same way, through its own
+    // revert of a failed write.
+    const lease = await this.admitGenerationFileWork(row);
+    try {
+      return await this.revertToGenerationContentUnderLease(generationId, row);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async revertToGenerationContentUnderLease(
+    generationId: string,
+    row: StackUpdateRecoveryGenerationRow,
+  ): Promise<boolean> {
+    if (!row.content_path) return false;
 
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
 
