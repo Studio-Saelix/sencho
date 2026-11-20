@@ -57,6 +57,16 @@ async function connectWithZoneA(): Promise<void> {
   await service.setZone(ZONE_A, true, [], actor);
 }
 
+/** A check record left in zone A, then a recheck whose complete listing no longer shows zone A. */
+async function leftoverInGoneZone(): Promise<void> {
+  await connectWithZoneA();
+  fake.remove = 500;
+  await service.dnsCheck(ZONE_A, actor);
+  fake.zones = [{ id: ZONE_B, name: 'example.net' }];
+  await service.recheck(actor);
+  expect(zoneA(service.getView())).toMatchObject({ seenAtLastCheck: false, cleanupPending: { recordName: CHECK_NAME } });
+}
+
 function zoneA(view: PublicExposureAccountView) {
   const zone = connected(view).zones.find((z) => z.zoneRef === ZONE_A);
   if (!zone) throw new Error('zone A missing');
@@ -792,15 +802,88 @@ describe('round two edges', () => {
   });
 
   it('lets disconnect through when the zone left the account and its record cannot be deleted', async () => {
-    await connectWithZoneA();
-    fake.remove = 500;
-    await service.dnsCheck(ZONE_A, actor);
-    fake.zones = [{ id: ZONE_B, name: 'example.net' }];
+    await leftoverInGoneZone();
     fake.remove = 403;
-    await service.recheck(actor);
-    expect(zoneA(service.getView()).seenAtLastCheck).toBe(false);
+    const warn = vi.spyOn(console, 'warn');
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
     await service.disconnect(actor);
     expect(service.getView()).toEqual({ connected: false });
+    expect(warn.mock.calls.some((call) => String(call[0]).includes(CHECK_NAME))).toBe(true);
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    const row = db().prepare(`SELECT summary FROM audit_log WHERE summary LIKE 'public_exposure.account.removed%'`).get() as { summary: string };
+    expect(row.summary).toContain(`left_in_cloudflare=${CHECK_NAME}`);
+  });
+
+  it.each([
+    ['unreachable', 'down' as const, 'Could not reach api.cloudflare.com'],
+    ['a rejected token', 401 as const, 'Cloudflare refused the delete'],
+    ['a refused location', 'location' as const, 'Cloudflare refused the delete'],
+  ])('keeps refusing disconnect for a zone that left the account when the delete is %s', async (_label, remove, message) => {
+    await leftoverInGoneZone();
+    fake.remove = remove;
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain(message);
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('keeps refusing disconnect for a zone that left the account when Cloudflare rate limits the delete', async () => {
+    await leftoverInGoneZone();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return new Response(JSON.stringify({ success: false, errors: [], messages: [], result: null }), { status: 429, headers: { 'retry-after': '120' } });
+      return answer(fake, new URL(String(input)), init ?? {});
+    }));
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain('Cloudflare is limiting requests');
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('keeps refusing disconnect for a zone that left the account while a timed-out create may still land', async () => {
+    await leftoverInGoneZone();
+    db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?')
+      .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:late', recordId: null, createdAt: Date.now() }), ZONE_A);
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain('may still be landing');
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('keeps refusing disconnect for a zone that left the account when its record answer cannot be read', async () => {
+    await leftoverInGoneZone();
+    fake.records.set(ZONE_A, [{ id: 'not-a-cloudflare-id', type: 'TXT', name: CHECK_NAME, content: '"sencho-scope-check:odd"' }]);
+    db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?')
+      .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:odd', recordId: null, createdAt: 0 }), ZONE_A);
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('keeps the leftover record journal when an endpoint appears during a disconnect that would abandon it', async () => {
+    await leftoverInGoneZone();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        db().prepare(`INSERT INTO exposure_node_endpoints (node_id, account_id, provider_ref, name, state, created_by, created_at)
+          VALUES (1, 1, 'tunnel-late', 'sencho-x-1', 'provisioning', 'admin', 0)`).run();
+      }
+      fake.remove = 403;
+      return answer(fake, new URL(String(input)), init ?? {});
+    }));
+    expect((await refusal(service.disconnect(actor))).code).toBe('ENDPOINTS_EXIST');
+    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+  });
+
+  it('audits a DNS check that left a record with status 202', async () => {
+    await connectWithZoneA();
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    const row = db().prepare(`SELECT summary, status_code FROM audit_log WHERE summary LIKE 'public_exposure.account.dns_checked%'`).get() as { summary: string; status_code: number };
+    expect(row.status_code).toBe(202);
+    expect(row.summary).toContain('result=cleanup_pending');
   });
 
   it('keeps refusing disconnect while a still-listed zone cannot be cleaned up', async () => {

@@ -40,6 +40,7 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   unreachable: 'Could not reach api.cloudflare.com to delete it. Try again shortly.',
   rate_limited: 'Cloudflare is limiting requests. Try again shortly.',
   refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
+  zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   too_recent: 'Its create may still be landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
 };
@@ -256,6 +257,8 @@ export class PublicExposureAccountService {
       const account = this.requireAccount();
       if (store.countEndpoints() > 0) throw this.endpointsRefusal();
       const pendingZones = store.listZones(account.id).filter((z) => z.pending);
+      // Check records left behind in zones the token can no longer reach. Their journals are dropped with the account.
+      const abandoned: string[] = [];
       if (pendingZones.length > 0) {
         const token = this.readToken(account);
         for (const zone of pendingZones) {
@@ -263,19 +266,16 @@ export class PublicExposureAccountService {
           if (token === null) {
             throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} is still in Cloudflare and the stored token cannot be read to delete it. Replace the token, then disconnect.`);
           }
-          const journal = this.journalFor(account.id, zone);
-          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);
-          // A zone the last complete listing no longer showed is gone from this account, and its record with it.
+          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+          if (cleanup.cleaned) continue;
+          // Only a refusal on the zone itself, for a zone the last complete listing no longer showed, says the token cannot reach it again.
           const zoneGone = account.zonesListedAt !== null && zone.lastSeenAt !== account.zonesListedAt;
-          if (!cleanup.cleaned && zoneGone && cleanup.cause !== 'unreachable' && cleanup.cause !== 'rate_limited') {
-            console.warn(`[PublicExposure] Dropping the check record journal for zone ${sanitizeForLog(zone.name)}: the zone is no longer in the account.`);
-            journal.write(null);
+          if (zoneGone && cleanup.cause === 'zone_refused') {
+            abandoned.push(record);
             continue;
           }
-          if (!cleanup.cleaned) {
-            console.warn(`[PublicExposure] Disconnect refused: check record cleanup in zone ${sanitizeForLog(zone.name)} did not finish (${cleanup.cause}).`);
-            throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} could not be deleted from Cloudflare. ${CLEANUP_MESSAGE[cleanup.cause]}`);
-          }
+          console.warn(`[PublicExposure] Disconnect refused: check record cleanup in zone ${sanitizeForLog(zone.name)} did not finish (${cleanup.cause}).`);
+          throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} could not be deleted from Cloudflare. ${CLEANUP_MESSAGE[cleanup.cause]}`);
         }
       }
       store.transaction(() => {
@@ -283,7 +283,12 @@ export class PublicExposureAccountService {
         if (store.countEndpoints() > 0) throw this.endpointsRefusal();
         store.deleteAccount(account.id);
       });
-      recordPublicExposureAudit(actor, 'public_exposure.account.removed', { account: account.accountId });
+      for (const record of abandoned) {
+        console.warn(`[PublicExposure] Disconnected with the permission-check record ${sanitizeForLog(record)} left in Cloudflare: the token can no longer reach its zone.`);
+      }
+      recordPublicExposureAudit(actor, 'public_exposure.account.removed', {
+        account: account.accountId, left_in_cloudflare: abandoned.length > 0 ? abandoned.join(',') : null,
+      });
     });
   }
 

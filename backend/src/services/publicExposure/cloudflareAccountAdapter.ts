@@ -73,7 +73,12 @@ export interface ZoneProbeInput {
 }
 
 /** Why a journaled check record is still there. */
-export type CleanupCause = 'unreachable' | 'rate_limited' | 'refused' | 'too_recent' | 'unexpected';
+/**
+ * Why a check record cleanup did not finish. `zone_refused` is a plain 403 on
+ * the zone's records: the token no longer reaches that zone. `refused` is a
+ * rejected token or a refused location, which say nothing about the zone.
+ */
+export type CleanupCause = 'unreachable' | 'rate_limited' | 'refused' | 'zone_refused' | 'too_recent' | 'unexpected';
 
 export type CleanupResult = { cleaned: true } | { cleaned: false; cause: CleanupCause };
 
@@ -159,6 +164,7 @@ function cleanupCause(error: CloudflareApiError): CleanupCause {
   const outcome = stopOutcomeFor(error);
   if (outcome === 'cloudflare_unreachable') return 'unreachable';
   if (outcome === 'rate_limited') return 'rate_limited';
+  if (error.kind === 'forbidden' && !isLocationRefusal(error)) return 'zone_refused';
   if (error.kind === 'forbidden' || error.kind === 'unauthorized') return 'refused';
   return 'unexpected';
 }
