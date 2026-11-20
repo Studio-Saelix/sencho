@@ -3164,7 +3164,8 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
         // The root file alone is clear of the fence.
         await expect(FileSystemService.getInstance(nodeId).getStackContent('web'), label).resolves.toContain('nginx:1');
         // No recovery generation: the rollback restores the backup and deploys it, with no -f of its own.
-        const noGeneration = vi.spyOn(recovery, 'getCurrent').mockReturnValue(null as never);
+        // Not stubbed: with no row the store answers undefined, which is what the route must read as "none".
+        expect(recovery.getCurrent(nodeId, 'web'), label).toBeUndefined();
         for (const [kind, pending] of Object.entries({
           update: request(app).post('/api/stacks/web/update').set('Cookie', adminCookie),
           service: request(app).post('/api/stacks/web/services/app/update').set('Cookie', adminCookie),
@@ -3175,7 +3176,6 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
           expect(res.body.code, `${label} ${kind}`).toBe(expected);
           if (kind === 'rollback' && expected === 'data_restore') expect(res.body.failureClass, label).toBe('pre_mutation');
         }
-        noGeneration.mockRestore();
         const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
         const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
         const expectedLocal = dangling && variant.expectedDangling ? variant.expectedDangling : variant.expectedRecovery ?? expected;

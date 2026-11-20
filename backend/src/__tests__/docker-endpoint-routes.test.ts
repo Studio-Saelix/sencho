@@ -179,7 +179,9 @@ describe('a refused lifecycle request', () => {
     expect(res.body.error).toContain('data restore is overwriting');
     // Refused before anything moved, so a hub rolling a rollout back through this node records no partial restore.
     expect(res.body.failureClass).toBe('pre_mutation');
-    expect(fenced).toHaveBeenCalledWith('infra', url.endsWith('/rollback') ? { pinsComposeFiles: true } : {});
+    // No recovery generation is current here (`getCurrent` answers undefined),
+    // so the rollback restores a backup whose deploy names no recovery layer.
+    expect(fenced).toHaveBeenCalledWith('infra', url.endsWith('/rollback') ? { pinsComposeFiles: false } : {});
     expect(logged).not.toHaveBeenCalled();
     expect(mockDeployStack).not.toHaveBeenCalled();
     expect(mockUpdateStack).not.toHaveBeenCalled();

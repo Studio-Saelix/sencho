@@ -2536,8 +2536,9 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
-    // A compose file the deploy names went under a data restore's fence before
-    // Compose ran: a refusal, not a failed deploy to log or notify.
+    // A compose file the deploy names is under a data restore's fence: the
+    // Compose command that would have opened it did not start, and no
+    // container was replaced. A refusal, not a failed deploy to log or notify.
     if (isDataRestoreFenceError(error)) {
       if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
       return;
@@ -3562,7 +3563,8 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   let recoveryUp = false;
   try {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
-    recoveryUp = StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName) !== null;
+    // `getCurrent` answers undefined, not null, when no generation is current.
+    recoveryUp = Boolean(StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName));
     await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName, { pinsComposeFiles: recoveryUp });
   } catch (error) {
     if (isDataRestoreFenceError(error)) {
@@ -3757,7 +3759,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
-    console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    // A data restore's fence refusing the rollback is answered below as a
+    // refusal, not logged as a failed rollback.
+    if (!isDataRestoreFenceError(error)) {
+      console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
+    }
     if (error instanceof PulledCandidateBlockedError) {
       // The pull landed an image the gate refused, so `up` never ran and the
       // previous containers are intact. The restored files are not what is

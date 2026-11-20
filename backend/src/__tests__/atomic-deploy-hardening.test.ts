@@ -254,12 +254,16 @@ describe('A data restore fence recorded after the rollback pre-check', () => {
       .mockRejectedValue(Object.assign(new DataRestoreFenceError('/srv/data', 'browse', 'directory'), { failureClass: 'pre_mutation' }));
     const { NotificationService } = await import('../services/NotificationService');
     const alert = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+    const errors = vi.spyOn(console, 'error');
     try {
       const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
       expect(res.status).toBe(409);
       expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
       expect(alert.mock.calls.filter(([level]) => level === 'error')).toEqual([]);
+      // A refusal, not a failed rollback.
+      expect(errors.mock.calls.filter(([first]) => String(first).includes('Rollback failed'))).toEqual([]);
     } finally {
+      errors.mockRestore();
       clearGenerations();
       compensate.mockRestore();
     }
@@ -271,10 +275,13 @@ describe('A data restore fence recorded after the rollback pre-check', () => {
     const revert = vi.fn().mockResolvedValue(undefined);
     mockSnapshotStackFiles.mockResolvedValue(revert);
     mockDeployStack.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const errors = vi.spyOn(console, 'error');
     const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
     expect(revert).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls.filter(([first]) => String(first).includes('Rollback failed'))).toEqual([]);
+    errors.mockRestore();
 
     // A revert that fails leaves restored files in place: the answer says something moved.
     revert.mockReset().mockRejectedValue(new Error('disk full'));
