@@ -74,12 +74,23 @@ export const CLEANUP_CAUSES: readonly CleanupCause[] = [
   'unreachable', 'rate_limited', 'refused', 'zone_refused', 'too_recent', 'unexpected', 'unmatched', 'unreadable_journal',
 ];
 
+/** Cloudflare object ids are 32 hex characters; anything else never reaches a request path or a stored handle. */
+export const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
+
+/** The content of a journal that kept no record content (one rebuilt from an unreadable column). Nothing is ever matched to it, so nothing is deleted by it. */
+export const UNKNOWN_CHECK_CONTENT = '';
+
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
 export interface PendingScopeCheck {
   name: string;
   content: string;
+  /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by name and content). */
   recordId: string | null;
-  /** When the intent was journaled. A create that may still land is not declared lost too early. */
+  /**
+   * When the intent was journaled; 0 when the stored value was missing or not a
+   * timestamp. A create that may still land is not declared lost too early,
+   * and an unknown time is never read as an old one: cleanup stamps it first.
+   */
   createdAt: number;
   /** Why the latest attempt to delete the record did not finish; unset until one fails, and dropped when the token is replaced. */
   cause?: CleanupCause;

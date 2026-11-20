@@ -1,5 +1,5 @@
 import { DatabaseService } from '../DatabaseService';
-import { CHECK_OUTCOMES, CLEANUP_CAUSES, type AccountScopes, type CheckOutcome, type CleanupCause, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
+import { CHECK_OUTCOMES, CLEANUP_CAUSES, CLOUDFLARE_ID, type AccountScopes, type CheckOutcome, type CleanupCause, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
 
 /**
  * SQL for the public exposure hub tables. Rows are parsed into typed records
@@ -113,8 +113,9 @@ function parsePending(text: string | null): { pending: PendingScopeCheck | null;
   const pending: PendingScopeCheck = {
     name: record.name,
     content: record.content,
-    recordId: typeof record.recordId === 'string' ? record.recordId : null,
-    createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
+    // A stored id that is not a Cloudflare id is no handle: cleanup finds the record by name and content instead.
+    recordId: typeof record.recordId === 'string' && CLOUDFLARE_ID.test(record.recordId) ? record.recordId : null,
+    createdAt: typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) && record.createdAt > 0 ? record.createdAt : 0,
   };
   if (CLEANUP_CAUSES.includes(record.cause as CleanupCause)) pending.cause = record.cause as CleanupCause;
   return { pending, unreadable: false };

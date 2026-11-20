@@ -23,7 +23,10 @@ export interface FakeCloudflare {
   tunnel: 'ok' | Refusal;
   dnsRead: Record<string, 'ok' | Refusal>;
   records: Map<string, FakeRecord[]>;
-  create: 'ok' | 'ok-no-delete' | Refusal;
+  /** 'reset-late': the answer is lost and the record lands only when the test calls `landLateCreates`. */
+  create: 'ok' | 'ok-no-delete' | 'reset-late' | Refusal;
+  /** Creates that were sent but have not landed yet. */
+  lateCreates: Array<{ zone: string; record: FakeRecord }>;
   remove: 'ok' | Refusal;
   /** Every request, method and path only. */
   requests: string[];
@@ -42,6 +45,7 @@ export function makeFakeCloudflare(): FakeCloudflare {
     dnsRead: {},
     records: new Map(),
     create: 'ok',
+    lateCreates: [],
     remove: 'ok',
     requests: [],
     gate: null,
@@ -69,7 +73,8 @@ function paged<T>(items: T[], url: URL): Response {
   const perPage = Number(url.searchParams.get('per_page') ?? '50');
   const page = Number(url.searchParams.get('page') ?? '1');
   const totalPages = Math.max(1, Math.ceil(items.length / perPage));
-  return ok(items.slice((page - 1) * perPage, page * perPage), { page, per_page: perPage, total_pages: totalPages, count: items.length });
+  const slice = items.slice((page - 1) * perPage, page * perPage);
+  return ok(slice, { page, per_page: perPage, total_pages: totalPages, count: slice.length, total_count: items.length });
 }
 
 export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Response {
@@ -109,6 +114,12 @@ export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Respo
       return paged(name ? records.filter((r) => r.name === name) : records, url);
     }
     if (method === 'POST') {
+      if (fake.create === 'reset-late') {
+        const body = JSON.parse(String(init.body)) as { type: string; name: string; content: string };
+        const id = (fake.nextId++).toString(16).padStart(32, 'e');
+        fake.lateCreates.push({ zone, record: { id, type: body.type, name: body.name, content: `"${body.content}"` } });
+        return refusal('reset');
+      }
       if (fake.create !== 'ok' && fake.create !== 'ok-no-delete') {
         if (fake.create === 500 || fake.create === 'reset') {
           // The record landed even though the answer was lost.
@@ -132,6 +143,12 @@ export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Respo
     return ok({ id: m[2] });
   }
   return refusal(404);
+}
+
+/** Let every create that was sent and not yet applied land, as Cloudflare would after the caller gave up. */
+export function landLateCreates(fake: FakeCloudflare): void {
+  for (const { zone, record } of fake.lateCreates) fake.records.set(zone, [...(fake.records.get(zone) ?? []), record]);
+  fake.lateCreates = [];
 }
 
 /** Install the fake as the global fetch. */

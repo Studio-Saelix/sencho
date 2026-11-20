@@ -121,6 +121,64 @@ describe('CloudflareApiClient envelope and transport', () => {
   });
 });
 
+describe('CloudflareApiClient envelope fields it cannot read', () => {
+  const success = (extra: Record<string, unknown>) => json({ success: true, result: [], ...extra });
+
+  it.each([
+    ['a null error element', { errors: [null] }],
+    ['an errors field that is an object', { errors: {} }],
+    ['an errors field that is text', { errors: 'bad' }],
+    ['an error element that is a number', { errors: [5] }],
+    ['a messages field that is an object', { messages: {} }],
+    ['a null message', { messages: [null] }],
+    ['a message that is a number', { messages: [5] }],
+    ['a result_info that is text', { result_info: 'x' }],
+    ['a result_info that is a list', { result_info: [] }],
+    ['a total_pages that is text', { result_info: { total_pages: '3' } }],
+    ['a negative total_pages', { result_info: { total_pages: -1 } }],
+    ['a fractional page', { result_info: { page: 1.5 } }],
+    ['a null count', { result_info: { count: null } }],
+  ])('reads a success with %s as an invalid response, never a raw exception', async (_label, extra) => {
+    for (const method of ['GET', 'POST', 'DELETE'] as const) {
+      const { client, calls } = clientWith([() => success(extra)]);
+      const error = await caught(client.request(TOKEN, { method, path: '/zones/x/dns_records' }));
+      expect(error.kind).toBe('invalid_response');
+      // Cloudflare may have acted on the call, so it is never repeated blindly: a POST is sent once.
+      if (method === 'POST') expect(calls).toHaveLength(1);
+      expect(error.preSend).toBe(false);
+    }
+  });
+
+  it.each([
+    ['no errors, messages or result_info', {}],
+    ['an empty result_info', { result_info: {} }],
+    ['a null result_info', { result_info: null }],
+    ['message objects and strings', { messages: [{ message: 'note', code: 1 }, 'plain'] }],
+    ['an error list on a success', { errors: [] }],
+  ])('still reads a success with %s', async (_label, extra) => {
+    const { client } = clientWith([() => success(extra)]);
+    const res = await client.request(TOKEN, { method: 'GET', path: '/zones' });
+    expect(res.result).toEqual([]);
+  });
+
+  it.each([
+    [500, 'server'],
+    [429, 'rate_limited'],
+    [404, 'not_found'],
+    [400, 'bad_request'],
+  ] as const)('keeps the kind of a %s whose errors field is unreadable', async (status, kind) => {
+    const { client } = clientWith([() => json({ success: false, errors: [null, 5, { code: 1000, message: 'refused' }], messages: {}, result: null }, status)]);
+    const error = await caught(client.request(TOKEN, { method: 'GET', path: '/zones' }));
+    expect(error.kind).toBe(kind);
+    expect(error.cfCodes).toEqual([1000]);
+  });
+
+  it('keeps the kind of a success:false answer whose errors field is not a list', async () => {
+    const { client } = clientWith([() => json({ success: false, errors: [null], result: null })]);
+    expect((await caught(client.request(TOKEN, { method: 'GET', path: '/zones' }))).kind).toBe('bad_request');
+  });
+});
+
 describe('CloudflareApiClient retries', () => {
   it('retries a 5xx on GET and on DELETE', async () => {
     for (const method of ['GET', 'DELETE'] as const) {
@@ -314,6 +372,61 @@ describe('CloudflareApiClient pagination', () => {
   it('accepts a short page without paging details as complete', async () => {
     const { client } = clientWith([() => ok([{ id: 1 }])]);
     expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(1);
+  });
+});
+
+describe('CloudflareApiClient contradictory paging', () => {
+  const zone = (id: string) => ({ id });
+  const list = (info: Record<string, number>, items: Array<{ id: string }> = [zone('a')]) => clientWith([() => ok(items, info)]);
+
+  it.each([
+    ['zero total_pages beside a total_count the page does not hold', { page: 1, per_page: 50, count: 1, total_pages: 0, total_count: 2 }],
+    ['a total_count the listing never reaches', { page: 1, per_page: 50, count: 1, total_pages: 1, total_count: 2 }],
+    ['zero total_pages beside a listed item', { page: 1, per_page: 50, count: 1, total_pages: 0 }],
+    ['a total_pages that does not follow from total_count', { page: 1, per_page: 50, count: 1, total_pages: 3, total_count: 1 }],
+    ['a count that is not the page length', { page: 1, per_page: 50, count: 7, total_pages: 1 }],
+    ['a page number that is not the one asked for', { page: 2, per_page: 50, count: 1, total_pages: 1 }],
+    ['a total_count with no total_pages that the short page does not reach', { page: 1, per_page: 50, count: 1, total_count: 5 }],
+  ])('refuses a listing with %s', async (_label, info) => {
+    const { client } = list(info);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
+  });
+
+  it('refuses a listing whose later pages run short of the total', async () => {
+    const { client } = clientWith([
+      (url) => ok(url.searchParams.get('page') === '1' ? [zone('a'), zone('b')] : [zone('c')], { page: Number(url.searchParams.get('page')), per_page: 2, total_pages: 2, total_count: 5 }),
+    ]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
+  });
+
+  it('refuses an empty page in the middle of a listing', async () => {
+    const { client } = clientWith([
+      (url) => ok(url.searchParams.get('page') === '1' ? [zone('a')] : [], { page: Number(url.searchParams.get('page')), per_page: 1, total_pages: 3 }),
+    ]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 1))).kind).toBe('invalid_response');
+  });
+
+  it('refuses a short page when Cloudflare says it paged smaller than asked', async () => {
+    const { client } = list({ page: 1, per_page: 1, count: 1 });
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
+  });
+
+  it.each([
+    ['zero pages', { page: 1, per_page: 50, count: 0, total_pages: 0, total_count: 0 }],
+    ['one empty page', { page: 1, per_page: 50, count: 0, total_pages: 1, total_count: 0 }],
+    ['no total_count', { page: 1, per_page: 50, count: 0, total_pages: 0 }],
+  ])('accepts an empty listing reported as %s', async (_label, info) => {
+    const { client } = list(info, []);
+    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toEqual([]);
+  });
+
+  it('accepts a listing whose counts all agree across pages', async () => {
+    const { client } = clientWith([
+      (url) => ok(url.searchParams.get('page') === '1' ? [zone('a'), zone('b')] : [zone('c')], {
+        page: Number(url.searchParams.get('page')), per_page: 2, count: url.searchParams.get('page') === '1' ? 2 : 1, total_pages: 2, total_count: 3,
+      }),
+    ]);
+    expect((await client.paginate<{ id: string }>(TOKEN, '/zones', {}, 2)).map((z) => z.id)).toEqual(['a', 'b', 'c']);
   });
 });
 

@@ -104,16 +104,41 @@ export interface CloudflareClientDeps {
   random?: () => number;
 }
 
+/** The envelope as parsed: only `success` is known to be typed; every other field is checked before it is read. */
 interface CloudflareEnvelope {
   success: boolean;
-  errors?: Array<{ code?: unknown; message?: unknown }>;
-  messages?: Array<{ message?: unknown } | string>;
+  errors?: unknown;
+  messages?: unknown;
   result?: unknown;
-  result_info?: CloudflareResultInfo;
+  result_info?: unknown;
 }
 
 function isEnvelope(value: unknown): value is CloudflareEnvelope {
   return typeof value === 'object' && value !== null && typeof (value as { success?: unknown }).success === 'boolean';
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const RESULT_INFO_FIELDS = ['page', 'per_page', 'total_pages', 'count', 'total_count'] as const;
+
+/**
+ * The paging block of a success answer, or null when it is absent. A block
+ * that is not an object, or whose counts are not whole non-negative numbers,
+ * is unreadable: a listing is never judged complete from it.
+ */
+function readResultInfo(value: unknown): CloudflareResultInfo | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value)) return undefined;
+  const info: CloudflareResultInfo = {};
+  for (const field of RESULT_INFO_FIELDS) {
+    const raw = value[field];
+    if (raw === undefined) continue;
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) return undefined;
+    info[field] = raw;
+  }
+  return info;
 }
 
 /** Remove the token (if Cloudflare ever echoed it) and any credential-looking text, then bound the length. */
@@ -123,8 +148,9 @@ function safeMessage(text: string, token: string): string {
   return redacted.length > MAX_MESSAGE_LENGTH ? `${redacted.slice(0, MAX_MESSAGE_LENGTH)}...` : redacted;
 }
 
+/** The codes and text of an answer that already failed by status. Reads what it can; an odd `errors` field never changes the failure's kind. */
 function envelopeErrors(envelope: CloudflareEnvelope | null): { codes: number[]; text: string } {
-  const errors = Array.isArray(envelope?.errors) ? envelope.errors : [];
+  const errors = (Array.isArray(envelope?.errors) ? envelope.errors : []).filter(isPlainObject);
   const codes = errors.map((e) => (typeof e.code === 'number' ? e.code : Number.NaN)).filter((c) => Number.isFinite(c));
   const text = errors.map((e) => (typeof e.message === 'string' ? e.message : '')).filter(Boolean).join('; ');
   return { codes, text };
@@ -194,6 +220,31 @@ function readBody(response: Response, signal: AbortSignal): Promise<string> {
   });
 }
 
+function contradictoryPaging(): CloudflareApiError {
+  return new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare listed a page whose paging details contradict each other; Sencho did not use it.' });
+}
+
+/** A page whose paging block disagrees with the page itself is not trusted: the listing could be incomplete. */
+function assertConsistentPage(info: CloudflareResultInfo | null, resultLength: number, page: number, perPage: number): void {
+  if (!info) return;
+  if (info.page !== undefined && info.page !== page) throw contradictoryPaging();
+  if (info.count !== undefined && info.count !== resultLength) throw contradictoryPaging();
+  if (info.total_pages === 0 && resultLength > 0) throw contradictoryPaging();
+  if (info.total_pages !== undefined && info.total_count !== undefined) {
+    const pageSize = info.per_page !== undefined && info.per_page > 0 ? info.per_page : perPage;
+    const expected = Math.ceil(info.total_count / pageSize);
+    // An empty listing is reported as zero pages or as one empty page; both are legitimate.
+    const emptyListing = info.total_count === 0 && info.total_pages <= 1;
+    if (info.total_pages !== expected && !emptyListing) throw contradictoryPaging();
+  }
+}
+
+/** The collected items, once they match the total Cloudflare reported (when it reported one). */
+function completeListing<T>(items: T[], info: CloudflareResultInfo | null): T[] {
+  if (info?.total_count !== undefined && info.total_count !== items.length) throw contradictoryPaging();
+  return items;
+}
+
 export class CloudflareApiClient {
   private readonly fetchImpl: () => typeof fetch;
   private readonly now: () => number;
@@ -247,12 +298,15 @@ export class CloudflareApiClient {
       if (!Array.isArray(response.result)) {
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a listing without a list.' });
       }
+      const info = response.resultInfo;
+      assertConsistentPage(info, response.result.length, page, perPage);
       items.push(...(response.result as T[]));
-      const totalPages = response.resultInfo?.total_pages;
+      const totalPages = info?.total_pages;
       if (typeof totalPages === 'number') {
-        if (page >= totalPages) return items;
-      } else if (response.result.length < perPage) {
-        return items;
+        if (page >= totalPages) return completeListing(items, info);
+        if (response.result.length === 0) throw contradictoryPaging();
+      } else if (response.result.length < Math.min(perPage, info?.per_page ?? perPage)) {
+        return completeListing(items, info);
       } else {
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
       }
@@ -389,11 +443,18 @@ export class CloudflareApiClient {
         message: safeMessage(errorText || `Cloudflare refused the request (${status}).`, token),
       });
     }
-    const messages = (envelope.messages ?? [])
-      .map((m) => (typeof m === 'string' ? m : typeof m?.message === 'string' ? m.message : ''))
+    const unreadable = () => new CloudflareApiError({ kind: 'invalid_response', status, message: 'Cloudflare sent a response Sencho could not read.' });
+    // A success is read only when every envelope field has its documented shape, so nothing below can throw on it.
+    const { errors, messages: rawMessages } = envelope;
+    if (errors !== undefined && (!Array.isArray(errors) || !errors.every(isPlainObject))) throw unreadable();
+    if (rawMessages !== undefined && (!Array.isArray(rawMessages) || !rawMessages.every((m) => typeof m === 'string' || isPlainObject(m)))) throw unreadable();
+    const resultInfo = readResultInfo(envelope.result_info);
+    if (resultInfo === undefined) throw unreadable();
+    const messages = ((rawMessages ?? []) as Array<string | Record<string, unknown>>)
+      .map((m) => (typeof m === 'string' ? m : typeof m.message === 'string' ? m.message : ''))
       .filter(Boolean)
       .map((m) => safeMessage(m, token));
-    return { result: envelope.result as T, resultInfo: envelope.result_info ?? null, messages };
+    return { result: envelope.result as T, resultInfo, messages };
   }
 }
 

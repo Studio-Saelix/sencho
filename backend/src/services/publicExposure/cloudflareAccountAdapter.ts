@@ -5,7 +5,7 @@ import {
   type CloudflareApiClient,
   type CloudflareCallOptions,
 } from './cloudflareApiClient';
-import type { AccountScopes, CleanupCause, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDnsState } from './types';
+import { CLOUDFLARE_ID, UNKNOWN_CHECK_CONTENT, type AccountScopes, type CleanupCause, type FailedOutcome, type LastCheck, type PendingScopeCheck, type ZoneDnsState } from './types';
 
 export type { CleanupCause };
 
@@ -32,12 +32,13 @@ const ACCOUNT_UNKNOWN_CODE = 70503;
 /** 400 codes that name the account id itself as wrong: unknown account, or an invalid object identifier (7003). */
 const ACCOUNT_ID_ERROR_CODES: readonly number[] = [ACCOUNT_UNKNOWN_CODE, 7003];
 const MAX_PARALLEL_DNS_PROBES = 4;
-/** Cloudflare object ids are 32 hex characters; anything else never reaches a request path. */
-const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
 const CHECK_RECORD_COMMENT = 'Sencho permission check, deleted right away';
 /**
  * A create that timed out can still land on Cloudflare's side. A journal
  * younger than this is not declared lost when the record is not there yet.
+ * A journal whose age is unknown (no readable timestamp, or one in the
+ * future) is stamped with the time it was first examined, and that stamp
+ * starts the same window, so one empty listing never settles it.
  */
 const LATE_CREATE_WINDOW_MS = 2 * 60_000;
 
@@ -237,7 +238,8 @@ export class CloudflareAccountAdapter {
     const pending = journal.current();
     if (!pending) return { cleaned: true };
     try {
-      let recordId = pending.recordId;
+      // The store keeps only valid ids; this is the one place an id becomes a path, so it checks again.
+      let recordId = pending.recordId !== null && CLOUDFLARE_ID.test(pending.recordId) ? pending.recordId : null;
       if (!recordId) {
         let records: DnsRecord[];
         try {
@@ -250,16 +252,10 @@ export class CloudflareAccountAdapter {
           }
           throw error;
         }
-        const match = records.find((r) => r.type === 'TXT' && typeof r.content === 'string' && unquote(r.content) === pending.content);
-        if (!match) {
-          // A create that timed out a moment ago may still land; wait before declaring it lost.
-          if (this.now() - pending.createdAt < LATE_CREATE_WINDOW_MS) return { cleaned: false, cause: 'too_recent' };
-          // The journal is the only handle on a record that may differ from what was journaled. Records
-          // at the name that are none of ours keep it; only an empty name proves nothing was created.
-          if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
-          journal.write(null);
-          return { cleaned: true };
-        }
+        const match = pending.content === UNKNOWN_CHECK_CONTENT
+          ? undefined
+          : records.find((r) => r.type === 'TXT' && typeof r.content === 'string' && unquote(r.content) === pending.content);
+        if (!match) return this.settleWhenAbsent(pending, records, journal);
         if (typeof match.id !== 'string' || !CLOUDFLARE_ID.test(match.id)) return { cleaned: false, cause: 'unexpected' };
         recordId = match.id;
       }
@@ -273,26 +269,51 @@ export class CloudflareAccountAdapter {
   }
 
   /**
-   * Settle a zone whose journal column cannot be read. The record's name is
-   * rebuilt from the control identity (`name`, null when there is none); the
-   * journal is cleared only when Cloudflare lists nothing at that name, or the
-   * zone itself is gone. Records there are never deleted, since the journaled content that proves one is
-   * ours is gone.
+   * A journaled record that is not in the listing. It is declared lost only
+   * when nothing sits at the name and the late-create window has passed since
+   * the journal was written. A journal with no usable timestamp is stamped now
+   * and kept: that stamp is persisted, so the window survives a restart and
+   * one empty listing never settles a create that may still land.
    */
-  async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {
-    if (name === null) return { cleaned: false, cause: 'unreadable_journal' };
-    try {
-      const records = await this.recordsAt(token, zoneRef, name, options);
-      if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
-    } catch (error: unknown) {
-      // A zone that is gone took its records with it.
-      if (!(error instanceof CloudflareApiError && error.kind === 'not_found' && !isLocationRefusal(error))) {
-        if (error instanceof CloudflareApiError) return { cleaned: false, cause: cleanupCause(error) };
-        throw error;
-      }
+  private settleWhenAbsent(pending: PendingScopeCheck, records: readonly DnsRecord[], journal: ScopeCheckJournal): CleanupResult {
+    const now = this.now();
+    const timingKnown = pending.createdAt > 0 && pending.createdAt <= now + LATE_CREATE_WINDOW_MS;
+    if (timingKnown && now - pending.createdAt < LATE_CREATE_WINDOW_MS) return { cleaned: false, cause: 'too_recent' };
+    // Records at the name that are none of ours keep the journal: it is the only handle on a record that
+    // may differ from what was journaled. Only an empty name proves nothing was created.
+    if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
+    if (!timingKnown) {
+      journal.write({ ...pending, createdAt: now });
+      return { cleaned: false, cause: 'too_recent' };
     }
     journal.write(null);
     return { cleaned: true };
+  }
+
+  /**
+   * Settle a zone whose journal column cannot be read. The record's name is
+   * rebuilt from the control identity (`name`, null when there is none). Records
+   * there are never deleted, since the journaled content that proves one is
+   * ours is gone. The column is settled only when the zone itself is gone, or
+   * when Cloudflare lists nothing at that name after the late-create window:
+   * the first empty listing replaces the column with a journal that has no
+   * content, stamped now, and the next cleanup past the window clears it.
+   */
+  async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {
+    if (name === null) return { cleaned: false, cause: 'unreadable_journal' };
+    let records: DnsRecord[];
+    try {
+      records = await this.recordsAt(token, zoneRef, name, options);
+    } catch (error: unknown) {
+      if (error instanceof CloudflareApiError && error.kind === 'not_found' && !isLocationRefusal(error)) {
+        // A zone that is gone took its records with it.
+        journal.write(null);
+        return { cleaned: true };
+      }
+      if (error instanceof CloudflareApiError) return { cleaned: false, cause: cleanupCause(error) };
+      throw error;
+    }
+    return this.settleWhenAbsent({ name, content: UNKNOWN_CHECK_CONTENT, recordId: null, createdAt: 0 }, records, journal);
   }
 
   /**
