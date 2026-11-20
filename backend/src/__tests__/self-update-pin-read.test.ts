@@ -51,6 +51,7 @@ const uncoveredFile = '/srv/uncovered/compose.yaml';
 const overrideFile = '/srv/uncovered/override.yaml';
 const FIVE_MIN = 5 * 60 * 1000;
 const TICK = 30_000;
+const HOUR = 60 * 60 * 1000;
 
 const sameMount = { source: coveredDir, destination: coveredDir };
 
@@ -225,6 +226,14 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     expect(helperCalls()).toHaveLength(1);
   });
 
+  it('reads directly when the mount is the host root', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile], [{ source: '/', destination: '/' }]);
+
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    expect(helperCalls()).toHaveLength(0);
+  });
+
   it('does not follow a symlink into a sibling folder that shares the mount name as a prefix', async () => {
     const evil = path.join(siblingDir, 'x.yaml');
     fs.writeFileSync(evil, compose('saelix/sencho:9.9.9'));
@@ -359,14 +368,14 @@ describe('a Compose file no bind mount covers', () => {
     await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
     expect(helperCalls()).toHaveLength(1);
 
-    for (let tick = 0; tick < 100; tick++) {
-      clock += TICK;
+    for (let elapsed = TICK; elapsed < HOUR; elapsed += TICK * 20) {
+      clock = 1_000_000 + elapsed;
       await expect(service.getPinInfo()).resolves.toBeNull();
     }
     expect(helperCalls()).toHaveLength(1);
 
     hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
-    clock += 11 * 60 * 1000;
+    clock = 1_000_000 + HOUR;
     await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
     expect(helperCalls()).toHaveLength(2);
 

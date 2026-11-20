@@ -12,7 +12,7 @@
  *   - Authorization: both DELETE clear routes require admin.
  *   - The forced-recheck throttle on DELETE /update-status?recheck=true.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import type { RemoteMeta } from '../services/CapabilityRegistry';
@@ -404,50 +404,136 @@ function mockRemoteUpdateAnswer(remote: () => Response): { calls: () => number }
   return { calls: () => calls };
 }
 
-const blockedAnswer = () => new Response(JSON.stringify({ error: 'blocked', code: 'update_blocked' }), { status: 409 });
+const PIN_BLOCKED_TEXT = 'This install pins the Sencho image to a digest or a value Fleet cannot resolve, so it cannot repin automatically.';
+const blockedAnswer = () => new Response(JSON.stringify({ error: PIN_BLOCKED_TEXT, code: 'update_blocked' }), { status: 409 });
+const unreadableAnswer = () => new Response(JSON.stringify({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' }), { status: 409 });
 const acceptedAnswer = () => new Response(JSON.stringify({ message: 'ok' }), { status: 202 });
 
 describe('a remote whose cached pin classification says the update is blocked', () => {
-  const staleBlocked = () => mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'community' }));
+  const staleBlocked = (over: Partial<RemoteMeta> = {}) =>
+    mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'community', ...over }));
+  const updateRemote = () => request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+  const updateAll = () => request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
+  const trackerStatus = () => FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status;
+
+  beforeEach(() => FleetUpdateTrackerService.getInstance().delete(proxyNodeId));
 
   it('updates once the node itself accepts, because its own fresh read decides', async () => {
     mockTarget();
     staleBlocked();
     const remote = mockRemoteUpdateAnswer(acceptedAnswer);
 
-    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+    const res = await updateRemote();
 
     expect(res.status).toBe(202);
     expect(remote.calls()).toBe(1);
-    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status).toBe('updating');
+    expect(trackerStatus()).toBe('updating');
   });
 
-  it('answers 409 update_blocked when the node itself still refuses, without recording a failure', async () => {
+  it('answers 409 with the node\'s own reason when it still refuses, without recording a failure', async () => {
     mockTarget();
     staleBlocked();
-    mockRemoteUpdateAnswer(blockedAnswer);
+    const remote = mockRemoteUpdateAnswer(blockedAnswer);
 
-    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+    const res = await updateRemote();
 
+    expect(remote.calls()).toBe(1);
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('update_blocked');
-    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)).toBeUndefined();
+    expect(res.body).toEqual({ error: PIN_BLOCKED_TEXT, code: 'update_blocked' });
+    expect(trackerStatus()).toBeUndefined();
   });
 
-  it('is updated by update-all when the node accepts, and skipped when it still refuses', async () => {
+  it('keeps a node\'s refusal for another reason a failure when its cached flag does not say blocked', async () => {
+    mockTarget();
+    staleBlocked({ updateBlocked: false, imagePinKind: null });
+    mockRemoteUpdateAnswer(unreadableAnswer);
+
+    const res = await updateRemote();
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' });
+    expect(trackerStatus()).toBe('failed');
+  });
+
+  it('still reaches a hardened peer that answers update_blocked, as a failure', async () => {
+    mockTarget();
+    staleBlocked({ imageChannel: 'hardened' });
+    mockRemoteUpdateAnswer(blockedAnswer);
+
+    const res = await updateRemote();
+
+    expect(res.status).toBe(502);
+    expect(trackerStatus()).toBe('failed');
+  });
+
+  it('is updated by update-all when the node accepts', async () => {
     mockTarget();
     staleBlocked();
     mockRemoteUpdateAnswer(acceptedAnswer);
-    const accepted = await request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
-    expect(accepted.body).toEqual({ updating: ['proxy-hardening-test'], skipped: [], failed: [] });
 
-    FleetUpdateTrackerService.getInstance().delete(proxyNodeId);
-    vi.restoreAllMocks();
+    const res = await updateAll();
+
+    expect(res.body).toEqual({ updating: ['proxy-hardening-test'], skipped: [], failed: [] });
+    expect(trackerStatus()).toBe('updating');
+  });
+
+  it('is skipped by update-all when the node still refuses for its pin, with no failure recorded', async () => {
     mockTarget();
     staleBlocked();
     mockRemoteUpdateAnswer(blockedAnswer);
-    const refused = await request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
-    expect(refused.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
+
+    const res = await updateAll();
+
+    expect(res.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
+    expect(trackerStatus()).toBeUndefined();
+  });
+
+  it('is reported failed by update-all when the node refuses for another reason', async () => {
+    mockTarget();
+    staleBlocked({ updateBlocked: false, imagePinKind: null });
+    mockRemoteUpdateAnswer(unreadableAnswer);
+
+    const res = await updateAll();
+
+    expect(res.body.failed).toEqual([expect.objectContaining({ nodeId: proxyNodeId, code: 'update_blocked' })]);
+    expect(res.body.skipped).toEqual([]);
+  });
+
+  describe('when no release target can be resolved, so the node would skip its own pin check', () => {
+    // No release lookup answers and the hub's own version is not comparable (a dev build).
+    const noTarget = async () => {
+      const version = await import('../services/CapabilityRegistry');
+      vi.spyOn(version, 'getSenchoVersion').mockReturnValue('dev');
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 500 }));
+    };
+
+    beforeEach(async () => {
+      const { CacheService } = await import('../services/CacheService');
+      CacheService.getInstance().invalidate('latest-version-info');
+    });
+
+    it('refuses an update from the cached flag without calling the node', async () => {
+      mockTarget();
+      staleBlocked();
+      const fetchSpy = await noTarget();
+
+      const res = await updateRemote();
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('update_blocked');
+      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(false);
+    });
+
+    it('skips the node in update-all from the cached flag without calling it', async () => {
+      mockTarget();
+      staleBlocked();
+      const fetchSpy = await noTarget();
+
+      const res = await updateAll();
+
+      expect(res.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
+      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(false);
+    });
   });
 });
 

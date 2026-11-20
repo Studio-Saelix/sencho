@@ -314,6 +314,33 @@ async function resolveUpdateTarget(requested?: string): Promise<string | undefin
   return pickCompareTarget(compareVersion, compareValid);
 }
 
+/** The slice of a remote's /api/meta that says whether its pin blocks an update. */
+interface RemotePinMeta {
+  updateBlocked: boolean;
+  imageChannel: string | null;
+}
+
+/**
+ * A remote's `updateBlocked` is its cached pin classification, which can be older
+ * than an edit the operator made to that node's compose file. The remote re-reads
+ * the file before it accepts an update that names a target, so the hub only trusts
+ * the cached flag alone when no target is sent (the remote then skips that check).
+ * Hardened peers must still reach /api/system/update so machine creds get
+ * HARDENED_REMOTE_UPDATE_UNSUPPORTED.
+ */
+function cachedPinBlocksUpdate(meta: RemotePinMeta, target: string | undefined): boolean {
+  return target === undefined && meta.updateBlocked && meta.imageChannel !== 'hardened';
+}
+
+/**
+ * A remote's own refusal because its pin blocks the update. Its other
+ * `update_blocked` answers (compose file unreadable, self-update unavailable) are
+ * real failures and keep their own reason, so the cached flag must agree.
+ */
+function isRemotePinRefusal(meta: RemotePinMeta, failure: { code?: string }): boolean {
+  return failure.code === 'update_blocked' && meta.updateBlocked && meta.imageChannel !== 'hardened';
+}
+
 async function fetchLocalNodeOverview(node: Node, allowUnknownHostUsage: boolean): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
@@ -2063,19 +2090,17 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
     if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
-    // `meta.updateBlocked` is the remote's cached pin classification, which can
-    // be older than an edit the operator just made to that node's compose file.
-    // The remote re-reads the file before it accepts an update, so the request
-    // goes through and a block comes back as that node's own `update_blocked`
-    // answer. Hardened peers are digest-pinned and rely on the same pass-through
-    // so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
     const resolvedTarget = await resolveUpdateTarget(requestedTarget);
+    if (cachedPinBlocksUpdate(meta, resolvedTarget)) {
+      res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
+      return;
+    }
     const response = await postSystemUpdate(target, resolvedTarget, replaceEndpointProvider);
 
     if (!response.ok) {
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
-      if (failure.code === 'update_blocked' && meta.imageChannel !== 'hardened') {
-        res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
+      if (isRemotePinRefusal(meta, failure)) {
+        res.status(409).json({ error: failure.error, code: 'update_blocked' });
         return;
       }
       updateTracker.set(nodeId, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
@@ -2312,15 +2337,17 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
+      if (cachedPinBlocksUpdate(meta, updateAllTarget)) {
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
+      }
       const response = await postSystemUpdate(target, updateAllTarget, false);
       if (response.ok) {
         updateTracker.set(node.id, updateTracker.create('updating', meta.version, meta.startedAt));
         return { nodeId: node.id, name: node.name, kind: 'updating' as const };
       }
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
-      // A node whose pin blocks the update is skipped, as its cached flag used to
-      // decide here; the node's own fresh read is the authority, not that flag.
-      if (failure.code === 'update_blocked' && meta.imageChannel !== 'hardened') {
+      // The node's own fresh read decided: a pin that blocks the update is skipped.
+      if (isRemotePinRefusal(meta, failure)) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       updateTracker.set(node.id, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));

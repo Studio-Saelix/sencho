@@ -308,7 +308,7 @@ Open **Node management** in the Overview tab's toolbar and choose **Node updates
 
 ### Header actions
 
-- **Recheck** re-queries every node's `/api/meta` endpoint and re-resolves the latest available Sencho version from GitHub Releases (with a Docker Hub fallback if the GitHub API is unreachable). The button also re-reads the local node's Compose image pin, at most once every two minutes like the version refresh, so a tag you edited in the Compose file shows up without a redeploy. Routine status checks never start a helper container; see [Self-hosting](/operations/self-hosting). The button disables and shows a spinner while the check is in flight.
+- **Recheck** re-queries every node's `/api/meta` endpoint and re-resolves the latest available Sencho version from GitHub Releases (with a Docker Hub fallback if the GitHub API is unreachable). The button also re-reads the local node's Compose image pin, at most once every two minutes like the version refresh, so a tag you edited in the Compose file shows up without a redeploy. Once a node's pin has been read, routine status checks do not start a helper container; see [Self-hosting](/operations/self-hosting). The button disables and shows a spinner while the check is in flight.
 - **Update all (n)** carries the count of remote nodes with a pending update. Clicking it dispatches the update to every remote with a known current and latest version. Nodes with a skipped version are excluded.
 
 ### Summary cards

@@ -63,13 +63,15 @@ const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
 // How long a cached pin classification is served before a routine caller
 // re-reads it. Only config files Sencho can read directly through its own bind
 // mounts are re-read (no container). When a file needs the helper container, the
-// cached classification is served until a fresh read (an update decision, the
-// Fleet Recheck, or a restart) replaces it, so routine monitoring never starts a
-// container. Update DECISIONS always read fresh (fresh: true).
+// cached classification is served until a fresh read replaces it (an update
+// decision, the Fleet Recheck, opening the image channel settings, or a
+// restart), so routine monitoring never starts a container once a pin is
+// classified. Update DECISIONS always read fresh (fresh: true).
 const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
 
-// While no classification exists yet (the startup read failed, for example), a
-// routine caller may retry the full read, helper included, at most this often.
+// While no classification exists yet (the startup read failed, for example), the
+// one case where a routine caller may start the helper: it retries the full read
+// at most this often.
 // A read that could not read every file is never cached, so a transient Docker
 // failure at startup cannot leave the pin unknown until a restart.
 const PIN_UNCLASSIFIED_RETRY_MS = 60 * 60 * 1000;
@@ -92,12 +94,12 @@ type HostMount = PathMount;
 /** Outcome of reading one config file through Sencho's own bind mounts. */
 type DirectRead =
   | { kind: 'read'; content: string }
-  /** No usable mount exposes it: not mounted, a single-file mount, a path leaving the mount, or not a plain file. */
+  /** No usable mount exposes it: not mounted, a single-file mount, a path leaving the mount, or a file that is not plain or is oversized. */
   | { kind: 'uncovered' }
   /** A mount exposes it but this read failed (permissions, a file mid-rename). */
   | { kind: 'failed' };
 
-/** Result of reading every config file; `info` is null when no file sets the service image. */
+/** Result of reading every config file; `info` is null when none of the files it read sets the service image. */
 interface ComposeRead {
   info: ResolvedComposeImage | null;
 }
@@ -150,13 +152,13 @@ export function shQuote(value: string): string {
 
 /**
  * Build the argv for a one-shot helper that reads a single compose config file
- * from the host. It is used only when Sencho cannot read
- * the file directly (not mounted, a single-file mount, a path that leaves the
- * mount, or a failed read on a fresh read), so the helper mounts the working dir
- * read-only into a throwaway container and cats the file out. The label names its purpose in `docker
- * events`. Pure and exported for unit testing. The path is a discrete argv
- * element handed to execFile (no shell), so a path with shell metacharacters
- * stays inert.
+ * from the host. It is used only when Sencho cannot read the file directly (not
+ * mounted, a single-file mount, a path that leaves the mount, a file that is not
+ * plain or is oversized, or a failed direct read), so the helper mounts the
+ * working dir read-only into a throwaway container and cats the file out. The
+ * label names its purpose in `docker events`. Pure and exported for unit
+ * testing. The path is a discrete argv element handed to execFile (no shell), so
+ * a path with shell metacharacters stays inert.
  */
 export function buildComposeReadArgs(workingDir: string, imageName: string, configFilePath: string): string[] {
   return [
@@ -447,13 +449,18 @@ class SelfUpdateService {
   /** Stashed when the helper exits before any onceHelperExit listener is registered. */
   private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
-  /** Only a complete read is cached; `at` is the last read attempt. */
+  /** Only a complete read is cached. */
   private pinCache: {
     info: ResolvedComposeImage | null;
+    /** When the read behind `info` started; a read that started earlier never replaces it. */
     at: number;
+    /** When a routine read last looked at the files, so a failing re-read is retried once per TTL. */
+    checkedAt: number;
     /** True when at least one config file cannot be read directly, so only the helper can refresh it. */
     needsHelper: boolean;
   } | null = null;
+  /** A failing routine re-read has been logged, until one succeeds. */
+  private routineReadWarned = false;
   /** The newest read that may start the helper, so routine callers can wait for it. */
   private pinInflight: Promise<ComposeRead | null> | null = null;
   private lastFullReadAt = 0;
@@ -607,6 +614,7 @@ class SelfUpdateService {
   private applyDetection(code: SelfUpdateUnavailableCode | null): void {
     // A new detection may describe a different Compose project: drop what the last one read.
     this.pinCache = null;
+    this.routineReadWarned = false;
     this.lastFullReadAt = 0;
     if (code === null) {
       this.canSelfUpdate = true;
@@ -745,7 +753,8 @@ class SelfUpdateService {
 
   /**
    * Classify how this instance's compose image is pinned. Frequent status/meta
-   * callers are served from a cache that never starts a container; pass
+   * callers are served from a cache and start a container only while nothing is
+   * classified yet (at most once an hour); `cacheOnly` never reads. Pass
    * `{ fresh: true }` for update decisions so a live compose edit is always
    * reflected. Returns null when self-update is unavailable, the compose file
    * could not be read, or no read has classified the pin yet.
@@ -802,7 +811,7 @@ class SelfUpdateService {
     if (fresh) return (await this.startFullRead())?.info ?? null;
     const cache = this.pinCache;
     if (cache) {
-      const expired = Date.now() - cache.at >= PIN_CACHE_TTL_MS;
+      const expired = Date.now() - cache.checkedAt >= PIN_CACHE_TTL_MS;
       if (cacheOnly || !expired || cache.needsHelper) return cache.info;
       return (await this.readComposeImage(false))?.info ?? cache.info;
     }
@@ -825,8 +834,10 @@ class SelfUpdateService {
 
   /**
    * Read every config file and classify the image. A routine read (no helper)
-   * returns null, keeping the cache, when a file cannot be read directly. Only a
-   * read that got every file is cached, and never over a newer entry.
+   * returns null, keeping the cache, when a file cannot be read directly, and
+   * records the attempt in `checkedAt` so it is not repeated on every tick. Only
+   * a read that got every file is cached, and never over a newer entry; a fresh
+   * read that missed a file still returns what it read but leaves the cache alone.
    */
   private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
     const ctx = this.composeContext;
@@ -845,7 +856,7 @@ class SelfUpdateService {
       if (content === null && allowHelper) content = await this.readConfigFileViaHelper(filePath, ctx);
       if (content === null) {
         if (!allowHelper) {
-          if (this.pinCache && this.pinCache.at <= startedAt) this.pinCache.at = startedAt;
+          this.noteFailedRoutineRead(startedAt);
           return null;
         }
         complete = false;
@@ -854,10 +865,21 @@ class SelfUpdateService {
       files.push({ filePath, content });
     }
     const info = resolveServiceImageFromContents(files, ctx.serviceName);
-    if (complete && (!this.pinCache || this.pinCache.at <= startedAt)) {
-      this.pinCache = { info, at: startedAt, needsHelper };
+    if (!complete) {
+      console.warn('[SelfUpdate] Could not read every Compose config file; the image pin was not updated from this read.');
+    } else if (!this.pinCache || this.pinCache.at <= startedAt) {
+      this.pinCache = { info, at: startedAt, checkedAt: startedAt, needsHelper };
+      this.routineReadWarned = false;
     }
     return { info };
+  }
+
+  /** A routine read could not read a file directly: keep the cache, retry after the TTL, log once. */
+  private noteFailedRoutineRead(at: number): void {
+    if (this.pinCache) this.pinCache.checkedAt = at;
+    if (this.routineReadWarned) return;
+    this.routineReadWarned = true;
+    console.warn('[SelfUpdate] Could not re-read the Compose file directly; keeping the last known image pin until it can be read.');
   }
 
   /** Read a config file through one of Sencho's own bind mounts. A single-file
