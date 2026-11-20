@@ -133,6 +133,14 @@ describe('service-scoped update', () => {
     });
   });
 
+  it('throws a data restore fence refusal inside the compose call as itself, for the route to answer as the fence', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const fence = new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    state.updateService.mockRejectedValue(fence);
+
+    await expect(orch().execute(ctx, { policyOptions })).rejects.toBe(fence);
+  });
+
   it('still reports any other compose error as a compose failure', async () => {
     state.updateService.mockRejectedValue(new Error('pull access denied'));
 
@@ -182,6 +190,15 @@ describe('service-scoped restore', () => {
     // The snapshot was claimed before the refusal; it must be restorable again.
     expect(state.reactivate).toHaveBeenCalledWith('rec-1');
     expect(state.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('throws a data restore fence refusal inside the recreate as itself, and gives the claimed recovery back', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const fence = new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    state.recreateServiceFromLocal.mockRejectedValue(fence);
+
+    await expect(orch().restore(ctx, restoreOptions)).rejects.toBe(fence);
+    expect(state.reactivate).toHaveBeenCalledWith('rec-1');
   });
 
   it('still reports any other recreate error as a restore compose failure', async () => {

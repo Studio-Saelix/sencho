@@ -3265,7 +3265,7 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('asks only the files an applied Git deployment or a COMPOSE_FILE names, so a root file it leaves out is not a refusal', async () => {
+  it('asks only the files an applied Git deployment names, so a root file it leaves out is not a refusal, while a COMPOSE_FILE that leaves it out still asks it', async () => {
     const updatePolicy = await import('../services/updatePolicy');
     const { resolveSenchoLabels } = await import('../helpers/senchoLabels');
     vi.spyOn(updatePolicy, 'resolveUpdatePolicy').mockImplementation(async (_nodeId, request) =>
@@ -3284,8 +3284,9 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const variants: Array<{ name: string; spec?: string[]; env?: string; update: string; recoveryUp: string }> = [
       { name: 'spec without the root', spec: ['deploy/web.yml'], update: 'docker_endpoint_protected', recoveryUp: 'docker_endpoint_protected' },
       { name: 'spec with the root', spec: ['compose.yaml', 'deploy/web.yml'], update: 'data_restore', recoveryUp: 'data_restore' },
-      // A recovery up names the root itself, which turns COMPOSE_FILE off.
-      { name: 'compose-file without the root', env: 'COMPOSE_FILE=deploy/web.yml\n', update: 'docker_endpoint_protected', recoveryUp: 'data_restore' },
+      // Sencho reads the root itself during an update without an applied Git
+      // deployment, and a recovery up names it, which turns COMPOSE_FILE off.
+      { name: 'compose-file without the root', env: 'COMPOSE_FILE=deploy/web.yml\n', update: 'data_restore', recoveryUp: 'data_restore' },
       { name: 'root alone', update: 'data_restore', recoveryUp: 'data_restore' },
     ];
     for (const variant of variants) {

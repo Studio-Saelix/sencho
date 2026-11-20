@@ -179,7 +179,7 @@ describe('a refused lifecycle request', () => {
     expect(res.body.error).toContain('data restore is overwriting');
     // Refused before anything moved, so a hub rolling a rollout back through this node records no partial restore.
     expect(res.body.failureClass).toBe('pre_mutation');
-    expect(fenced).toHaveBeenCalledWith('infra');
+    expect(fenced).toHaveBeenCalledWith('infra', url.endsWith('/rollback') ? { pinsComposeFiles: true } : {});
     expect(logged).not.toHaveBeenCalled();
     expect(mockDeployStack).not.toHaveBeenCalled();
     expect(mockUpdateStack).not.toHaveBeenCalled();

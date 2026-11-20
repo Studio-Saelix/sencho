@@ -1,3 +1,4 @@
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import axios, { AxiosError } from 'axios';
@@ -1702,7 +1703,8 @@ export class BlueprintService {
                     if (recoveryId !== null) {
                         try {
                             // The restore's up names the root file and its
-                            // override itself; one a data restore is
+                            // override itself (or a captured file set, asked
+                            // at its own argv); one a data restore is
                             // overwriting refuses it before any file moves.
                             await fs.refuseIfComposeFenced(stackName, { pinsComposeFiles: true });
                             const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
@@ -1718,7 +1720,9 @@ export class BlueprintService {
                                 );
                             }
                         } catch (compError) {
-                            console.error(
+                            // A data restore's fence refusing the restore is
+                            // a refusal, not a failed compensation.
+                            (isDataRestoreFenceError(compError) ? console.warn : console.error)(
                                 '[BlueprintService] Recovery compensation failed for "%s": %s',
                                 sanitizeForLog(stackName),
                                 sanitizeForLog(BlueprintService.formatError(compError)),

@@ -2536,6 +2536,12 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       );
     }
   } catch (error: unknown) {
+    // A compose file the deploy names went under a data restore's fence before
+    // Compose ran: a refusal, not a failed deploy to log or notify.
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return;
+    }
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (error instanceof PulledCandidateBlockedError) {
@@ -3548,8 +3554,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // A compose file the rollback's up opens sits in, or links into, a directory
   // a data restore is overwriting: refused before anything is restored, whether
   // or not the connection check below can render. A recovery generation's up
-  // names the root file and its override itself (the recovery layer is
-  // appended last), so those are its files, not a COMPOSE_FILE selection.
+  // names its files itself (the recovery layer is appended last): the root
+  // file and its override, or the file set the generation captured, which is
+  // known only once it is restored and is asked then, at the up's own argv.
+  // The live root and overrides are asked here, never a COMPOSE_FILE
+  // selection.
   let recoveryUp = false;
   try {
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
@@ -3646,13 +3655,6 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       } catch (compError: unknown) {
         const compCode = (compError as { code?: string }).code;
         const compFailureClass = restoreFailureClassOf(compError);
-        if (isDataRestoreFenceError(compError)) {
-          // A compose file the recovery up names went under a data restore's
-          // fence after the pre-check: refused before that up ran, and the
-          // service says whether the restored files were put back.
-          res.status(409).json({ error: compError.message, code: DATA_RESTORE_FENCE_CODE, ...compFailureClass });
-          return;
-        }
         if (compCode === 'ROLLBACK_PROHIBITED') {
           // A policy refusal carries the decision the block dialog renders; an
           // integrity or held-image refusal does not, and stays a plain 409.
@@ -3778,9 +3780,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       return;
     }
     if (isDataRestoreFenceError(error)) {
-      // A compose file the deploy names went under a data restore's fence
-      // after the pre-check: refused before compose ran, so the restored files
-      // are put back, and the answer says whether they could be.
+      // A compose file the deploy, or a recovery generation's up, names went
+      // under a data restore's fence after the pre-check: refused before
+      // Compose ran. The backup path puts its restored files back here, and
+      // the answer says whether they could be; a generation's restore reverts
+      // its own files and rethrows only once they are back (pre_mutation). The
+      // live gates were already ended by the generation's up callback, as for
+      // the Docker endpoint guard's refusal of the same up.
       let failureClass: 'pre_mutation' | 'post_mutation' = 'pre_mutation';
       if (revertRestore) {
         try {

@@ -1,11 +1,14 @@
 /**
- * A mutating Compose argv is asked against a data restore's fence after it is
- * assembled: the recovery, Mesh, Pilot and digest-pin layers name the root
- * file and the first override with `-f` themselves, which turns COMPOSE_FILE
- * off, so the file list a caller asked up front is not the one Compose opens.
+ * A Compose argv that starts containers is asked against a data restore's
+ * fence once it is assembled: the recovery, Mesh, Pilot and digest-pin layers
+ * name the root file and the first override with `-f` themselves, which turns
+ * COMPOSE_FILE off, so the file list a caller asked up front is not the one
+ * Compose opens.
  *
- * The argv builders, the stack files and the link walk are real. The fence
- * store reports one held directory, so only its record is a stand-in.
+ * The argv builders, the stack files and the link walk are real. Stand-ins:
+ * the fence store reports one held directory, Sencho's own mounts read as
+ * "not in a container", the node registry and database are minimal mocks, and
+ * one case supplies the Mesh override path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
@@ -41,6 +44,8 @@ import { MeshService } from '../services/MeshService';
 import { RestoreFenceStore } from '../services/recovery/restoreFence';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { composeArgvFiles, refuseIfComposeArgvFenced } from '../helpers/composeArgvFence';
+import * as envFileResolution from '../helpers/envFileResolution';
 import { resolveRollbackInventory } from '../services/rollbackInventory';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
 
@@ -157,22 +162,57 @@ describe('the fence asks the files an assembled Compose argv names', () => {
     vi.spyOn(MeshService.getInstance(), 'ensureStackOverride').mockResolvedValue(meshLayer);
     const error = await refusal(svc.authoredComposeArgs('app', ['up', '-d']));
     expect(isDataRestoreFenceError(error)).toBe(true);
+    // `create` makes the containers an up would, so it is asked too.
+    expect(isDataRestoreFenceError(await refusal(svc.authoredComposeArgs('app', ['create'])))).toBe(true);
     // A render opens the same files but starts nothing; the connection check answers for it.
     await expect(svc.authoredComposeArgs('app', ['config'])).resolves.toContain(meshLayer);
+  });
+
+  it('reads every file flag form, and resolves a relative file against the command\'s working directory', async () => {
+    expect(composeArgvFiles(['compose', '-f', 'a.yml', '--file', 'b.yml', '--file=c.yml', 'up', '-f'])).toEqual(['a.yml', 'b.yml', 'c.yml']);
+    holdFence();
+    for (const args of [['-f', 'compose.override.yml'], ['--file', 'compose.override.yml'], ['--file=compose.override.yml']]) {
+      expect(isDataRestoreFenceError(await refusal(refuseIfComposeArgvFenced(stackDir, ['compose', ...args, 'up']))), args.join(' ')).toBe(true);
+    }
+    // The same name in another working directory is another file.
+    const other = path.join(composeDir, 'other');
+    await fsPromises.mkdir(other);
+    await fsPromises.writeFile(path.join(other, 'compose.override.yml'), 'services: {}\n');
+    await expect(refuseIfComposeArgvFenced(other, ['compose', '-f', 'compose.override.yml', 'up'])).resolves.toBeUndefined();
+    // An argv that names no file is left to the caller's own ask.
+    await expect(refuseIfComposeArgvFenced(stackDir, ['compose', 'up', '-d'])).resolves.toBeUndefined();
+  });
+
+  it('answers a check that fails while a fence is held as the fence\'s unproven refusal, and asks nothing when no fence is held', async () => {
+    const check = vi.spyOn(envFileResolution, 'refuseIfFencedSource').mockRejectedValue(new Error('EIO'));
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(refuseIfComposeArgvFenced(stackDir, ['compose', '-f', 'compose.yaml', 'up'])).resolves.toBeUndefined();
+    expect(check).not.toHaveBeenCalled();
+    holdFence();
+    const error = await refusal(refuseIfComposeArgvFenced(stackDir, ['compose', '-f', 'compose.yaml', 'up']));
+    expect(isDataRestoreFenceError(error)).toBe(true);
+    expect((error as Error).message).toContain('cannot prove');
+    expect(warned).toHaveBeenCalled();
   });
 
   it('refuses a digest-pinned up whose pin names the override, and removes the overlay it wrote', async () => {
     const svc = ComposeService.getInstance(NODE) as unknown as {
       withDigestPinOverlay(stack: string, action: string[], dir: string | undefined, pins: Record<string, string>): Promise<{ args: string[]; overlayDir: string }>;
     };
-    const before = new Set(await fsPromises.readdir(os.tmpdir()));
     holdFence();
+    const made: string[] = [];
+    const mkdtemp = fsPromises.mkdtemp.bind(fsPromises);
+    vi.spyOn(fsPromises, 'mkdtemp').mockImplementation(async (prefix: string) => {
+      const dir = await mkdtemp(prefix);
+      made.push(dir);
+      return dir;
+    });
     const error = await refusal(svc.withDigestPinOverlay('app', ['up', '-d'], undefined, {
       web: `nginx@sha256:${'a'.repeat(64)}`,
     }));
     expect(isDataRestoreFenceError(error)).toBe(true);
-    const left = (await fsPromises.readdir(os.tmpdir())).filter((name) => !before.has(name) && name.startsWith('sencho-digest-pin'));
-    expect(left).toEqual([]);
+    expect(made).toHaveLength(1);
+    await expect(fsPromises.access(made[0])).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('says a Pilot override pushed by central, or a Mesh row, puts a layer on the stack', async () => {

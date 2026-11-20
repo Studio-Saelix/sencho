@@ -52,6 +52,7 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getBaseDir: () => '/tmp/compose',
       hasComposeFile: vi.fn().mockResolvedValue(true),
+      refuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
       getBackupInfo: mockGetBackupInfo,
       restoreStackFiles: mockRestoreStackFiles,
       snapshotStackFiles: mockSnapshotStackFiles,
@@ -241,6 +242,47 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     mockDeployStack.mockResolvedValueOnce({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const second = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(second.status).toBe(200);
+  });
+});
+
+describe('A data restore fence recorded after the rollback pre-check', () => {
+  it('answers 409 data_restore with the restore\'s class when the recovery up is refused', async () => {
+    mockTier('paid');
+    insertGeneration({ id: 'gen-fenced' });
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidateOutcome')
+      .mockRejectedValue(Object.assign(new DataRestoreFenceError('/srv/data', 'browse', 'directory'), { failureClass: 'pre_mutation' }));
+    const { NotificationService } = await import('../services/NotificationService');
+    const alert = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+    try {
+      const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(alert.mock.calls.filter(([level]) => level === 'error')).toEqual([]);
+    } finally {
+      clearGenerations();
+      compensate.mockRestore();
+    }
+  });
+
+  it('puts the restored backup files back and answers 409 data_restore when the deploy is refused', async () => {
+    mockTier('paid');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const revert = vi.fn().mockResolvedValue(undefined);
+    mockSnapshotStackFiles.mockResolvedValue(revert);
+    mockDeployStack.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+    expect(revert).toHaveBeenCalledTimes(1);
+
+    // A revert that fails leaves restored files in place: the answer says something moved.
+    revert.mockReset().mockRejectedValue(new Error('disk full'));
+    mockDeployStack.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const mixed = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(mixed.status).toBe(409);
+    expect(mixed.body).toMatchObject({ code: 'data_restore', failureClass: 'post_mutation' });
   });
 });
 

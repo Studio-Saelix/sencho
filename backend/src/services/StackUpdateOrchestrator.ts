@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
@@ -359,6 +360,10 @@ export class StackUpdateOrchestrator {
           },
         );
       } catch (composeError) {
+        // A compose file the service's up names went under a data restore's
+        // fence: refused before Compose ran, and answered by the route as the
+        // fence's refusal, not as a failed update.
+        if (isDataRestoreFenceError(composeError)) throw composeError;
         if (composeError instanceof PulledCandidateBlockedError) {
           return serviceFailed(
             'policy_blocked',
@@ -552,6 +557,8 @@ export class StackUpdateOrchestrator {
           stackName, serviceName, options.terminalWs ?? undefined,
         );
       } catch (composeError) {
+        // As for a service update: the fence's refusal is not a failed restore.
+        if (isDataRestoreFenceError(composeError)) throw composeError;
         if (isDockerEndpointProtectedError(composeError)) {
           return serviceFailed(
             composeError.code,

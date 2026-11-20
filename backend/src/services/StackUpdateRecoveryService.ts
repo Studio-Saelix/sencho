@@ -1330,10 +1330,10 @@ export class StackUpdateRecoveryService {
         }
       }
       // The Docker endpoint guard, or a data restore's fence on a compose file
-      // the recovery up names, refused that up before it ran, and the files are
-      // back where they were: nothing moved, and the recovery point is still
-      // intact for a later restore, so it is neither marked recovery_required
-      // nor flattened into a failed restore.
+      // the recovery up names, refused that up before Compose ran, and the
+      // files are back where they were: no container changed, and the
+      // recovery point is still intact for a later restore, so it is neither
+      // marked recovery_required nor flattened into a failed restore.
       const refusedBeforeAnyMovement = (isDockerEndpointProtectedError(error) || isDataRestoreFenceError(error))
         && !revertFailed && filesRevertedClean;
       if (refusedBeforeAnyMovement) failureClass = 'pre_mutation';

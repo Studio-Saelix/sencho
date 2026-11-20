@@ -951,8 +951,8 @@ export class FileSystemService {
    * The files asked are the ones that command opens (`composeFilesForCommand`).
    * A root file clear of the fence does not make the project clear when
    * another of those files links into, or is missing from, a directory a
-   * restore is overwriting, and a root file the command does not open is not a
-   * refusal. A check of those files that cannot run while a fence is held is
+   * restore is overwriting, and a root file an applied Git deployment leaves
+   * out is not a refusal. A check of those files that cannot run while a fence is held is
    * answered as the fence's `unproven` refusal, as for the root file. Files an
    * `include:` or `extends:` pulls in are not asked.
    *
@@ -990,16 +990,20 @@ export class FileSystemService {
    * builders in ComposeService make, so it has to follow them:
    * - an applied Git deploy spec's `-f` files; Compose then reads neither
    *   COMPOSE_FILE nor an override, nor the discovered root unless the spec
-   *   names it. An entry the spawn sink refuses (empty, absolute, or escaping
+   *   names it, and Sencho's own update reads render the spec rather than
+   *   read the root. An entry the spawn sink refuses (empty, absolute, or escaping
    *   the stack) is left out; the sink refuses the whole deploy for it, so
    *   Compose reads none of them.
    * - else, when the command names its files itself (a recovery up, or a Mesh
    *   or Pilot override layer: `authoredComposePrefix` and
    *   `ensureExplicitComposeFiles`), the root file and the implicit override
    *   it adds. Any `-f` turns COMPOSE_FILE off, so that selection is not this
-   *   command's.
+   *   command's. A recovery up that replays a captured file set names those
+   *   files instead; they are known only once the generation is restored, so
+   *   that up's own argv asks them (`refuseIfComposeArgvFenced`).
    * - else the entries of a COMPOSE_FILE the stack's env sets, split as
-   *   Compose splits them; it replaces the root file and override discovery.
+   *   Compose splits them; it replaces override discovery for Compose. The
+   *   root file is asked as well, because Sencho reads it itself.
    * - else the root file and the implicit overrides.
    * Without a spec, when the env sources a COMPOSE_FILE selection comes from
    * cannot be read here, those sources (and the stack `.env`) are asked too:
@@ -1034,8 +1038,10 @@ export class FileSystemService {
     const { MeshService } = await import('./MeshService');
     const pinned = pinsComposeFiles || await MeshService.getInstance().stackOverrideApplies(this.nodeId, stackName);
     if (!pinned && selection.kind === 'value') {
-      // Compose ignores empty entries.
-      return { readsRoot: false, others: selection.value.split(selection.pathSeparator).filter((entry) => entry !== '') };
+      // Compose ignores empty entries. Sencho itself still reads the root file
+      // during the update (the build-service lookup reads it when no applied
+      // Git deployment names the files), so it is asked too.
+      return { readsRoot: true, others: selection.value.split(selection.pathSeparator).filter((entry) => entry !== '') };
     }
     // An unread selection's layers are not known here, so the root file and
     // the overrides are what is asked for it.

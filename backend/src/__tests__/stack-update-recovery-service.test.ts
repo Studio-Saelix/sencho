@@ -301,8 +301,9 @@ describe('StackUpdateRecoveryService', () => {
   describe('a Docker endpoint guard refusal of the restore up', () => {
     const genId = '77777777-7777-4777-8777-777777777777';
 
-    async function refuseRestoreUp(opts: { contentPath: string | null; revert?: 'clean' | 'fails'; refusedBeforeRestore?: boolean }) {
+    async function refuseRestoreUp(opts: { contentPath: string | null; revert?: 'clean' | 'fails'; refusedBeforeRestore?: boolean; fence?: boolean }) {
       const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+      const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
       const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
       const context = {
         validateForMutation: vi.fn().mockResolvedValue(undefined),
@@ -364,6 +365,7 @@ describe('StackUpdateRecoveryService', () => {
       const outcome = StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(
         genId,
         async () => {
+          if (opts.fence) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
           throw new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
         },
       );
@@ -378,6 +380,22 @@ describe('StackUpdateRecoveryService', () => {
       // The class recorded for the recovery is the one the caller receives.
       expect(failed).toHaveBeenCalledTimes(1);
       expect(failed).toHaveBeenCalledWith('pre_mutation');
+    });
+
+    it('rethrows a data restore fence refusal of the up as pre_mutation, unmarked, when the restored files were reverted cleanly', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'clean', fence: true });
+
+      await expect(outcome).rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+      expect(failed).toHaveBeenCalledWith('pre_mutation');
+    });
+
+    it('holds a fence refusal as post_mutation and marks recovery_required when the revert fails', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'fails', fence: true });
+
+      await expect(outcome).resolves.toEqual({ rolledBack: false, failureClass: 'post_mutation' });
+      expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+      expect(failed).toHaveBeenCalledWith('post_mutation');
     });
 
     it('rethrows it as pre_mutation, unmarked, when it is raised before any file was restored', async () => {

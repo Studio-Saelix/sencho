@@ -345,9 +345,10 @@ function restoreLocal(args: {
         // container carrying this node's Docker API when the stack holds it.
         let endpointRefusal: DockerEndpointRefusal | null;
         try {
-          // The restore's up names the root file and its override itself (the
-          // recovery layer is appended last), so those are asked whether or
-          // not the connection check below can render.
+          // The restore's up names its files itself (the recovery layer is
+          // appended last), so the root file and its override are asked
+          // whether or not the connection check below can render; a captured
+          // file set is asked at the up's own argv, once it is restored.
           await FileSystemService.getInstance(args.nodeId)
             .refuseIfComposeFenced(args.stackName, { pinsComposeFiles: true });
           endpointRefusal = await ComposeService.getInstance(args.nodeId)
@@ -394,11 +395,15 @@ function restoreLocal(args: {
         }
         return { ok: true as const, ...(policyEvidence ? { policyEvidence } : {}) };
       } catch (error) {
-        console.error(
-        '[GitOps recovery] Local restore failed for %s:',
-        sanitizeForLog(args.stackName),
-        sanitizeForLog(error instanceof Error ? error.message : String(error)),
-      );
+        // A data restore's fence refusing the restore's up is a refusal with
+        // its own code and class, not a failure to log.
+        if (!isDataRestoreFenceError(error)) {
+          console.error(
+            '[GitOps recovery] Local restore failed for %s:',
+            sanitizeForLog(args.stackName),
+            sanitizeForLog(error instanceof Error ? error.message : String(error)),
+          );
+        }
         return { ok: false as const, code: errorCode(error), error: errorText(error), ...restoreFailureClassOf(error) };
       }
     })

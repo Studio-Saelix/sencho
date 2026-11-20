@@ -187,7 +187,7 @@ async function compensateOrSwallow(
     return await compensate();
   } catch (compError) {
     // The Docker endpoint guard, or a data restore's fence on a compose file
-    // the recovery up names, refused that up before it ran: the failed
+    // the recovery up names, refused that up before Compose ran: the failed
     // operation's own error is what the caller must see, with the reason the
     // rollback did not happen.
     if (compError instanceof DockerEndpointProtectedError || isDataRestoreFenceError(compError)) {
@@ -783,7 +783,8 @@ export class ComposeService {
       const args = await this.authoredComposeArgs(stackName, [], stackDirOverride, true);
       await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
-      // The pin names the root file and override itself, after the caller's ask.
+      // The pin names the root file and override itself; no caller asks the
+      // fence for a digest-pinned deploy up front, so this is its ask.
       await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
       return { args, overlayDir };
     } catch (err) {
@@ -1920,6 +1921,17 @@ export class ComposeService {
         }
         throw deployError;
       }
+      // A data restore's fence refused a compose file the up names before
+      // Compose was handed it: the previous runtime is still the one the
+      // generation captured, so it is abandoned, not compensated (which would
+      // restore files under the fence and be refused the same way), and the
+      // refusal leaves this method as itself.
+      if (isDataRestoreFenceError(deployError) && !composeHandedOff) {
+        if (atomic && recoverySvc && recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+        }
+        throw deployError;
+      }
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
@@ -3009,6 +3021,16 @@ export class ComposeService {
       if (!handedOff && recoveryId) {
         await recoverySvc.abandon(recoveryId);
         recoveryId = null;
+      }
+      // As in deployStack: a fence refusal before Compose was handed the
+      // update leaves the captured runtime running, so it is abandoned rather
+      // than compensated, and the refusal is thrown as itself.
+      if (isDataRestoreFenceError(updateError) && !composeHandedOff) {
+        if (recoveryId) {
+          await recoverySvc.abandon(recoveryId);
+          recoveryId = null;
+        }
+        throw updateError;
       }
       if (handedOff && recoveryId) {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
