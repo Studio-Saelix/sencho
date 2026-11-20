@@ -1,12 +1,95 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContainerInfo, ContainerStatsEntry } from '../EditorView';
 
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  // The unit index is clamped: a fraction of a byte would index below B, and a
+  // rate past the last unit would index past it, so either rendered "undefined".
+  const i = Math.min(BYTE_UNITS.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + BYTE_UNITS[i];
+}
+
+interface StatsSample {
+  cpuPercent: number;
+  memBytes: number;
+  rx: number;
+  tx: number;
+}
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+// A counter Docker may leave out: absent reads as 0, anything else must be a finite number.
+const optionalCounter = (v: unknown): number | null =>
+  v == null ? 0 : isFiniteNumber(v) ? v : null;
+
+/**
+ * Turns one Docker stats frame into usable readings, or null when the frame
+ * cannot yield them: a stats section is absent, a required counter (current and
+ * previous CPU totals, memory usage) is missing or not a finite number, memory
+ * usage is zero, or any counter that is present is not a finite number. The CPU
+ * totals may be zero (Docker's first streaming frame carries a zero previous
+ * total); memory usage may not, since a container that is not running reports
+ * zero. The caller drops a rejected frame: it must neither publish a metric nor
+ * count as proof that the stream recovered. Counters Docker omits on some
+ * runtimes (system CPU time, online CPUs, per-interface byte counts) may be
+ * absent or null and read as 0. A frame whose derived CPU percentage or network
+ * totals overflow to Infinity or NaN, although every counter is finite, is also
+ * rejected. A CPU total that went backwards (a counter reset or a restart) is a
+ * valid frame and reads 0%, never a negative percentage. A null network entry
+ * throws, which the caller reports as a parse failure.
+ */
+function readStatsSample(data: {
+  cpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown; online_cpus?: unknown };
+  precpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown };
+  memory_stats?: { usage?: unknown };
+  networks?: Record<string, { rx_bytes?: unknown; tx_bytes?: unknown }>;
+}): StatsSample | null {
+  // The truthiness test on memory usage is deliberate: zero (a container that is
+  // not running) is rejected here. The CPU totals are checked as numbers below,
+  // so a zero total passes.
+  if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return null;
+
+  const cpuTotal = data.cpu_stats.cpu_usage.total_usage;
+  const preCpuTotal = data.precpu_stats.cpu_usage.total_usage;
+  const memUsage = data.memory_stats.usage;
+  // Checked here, not after the arithmetic: the subtraction below coerces a
+  // numeric string or null to a finite number, so the derived-value check at the
+  // end could not tell it from a real reading. memUsage is never derived, so
+  // this is its only type guard (its zero case is rejected above).
+  if (!isFiniteNumber(cpuTotal) || !isFiniteNumber(preCpuTotal) || !isFiniteNumber(memUsage)) return null;
+
+  const systemNow = optionalCounter(data.cpu_stats.system_cpu_usage);
+  const systemPrev = optionalCounter(data.precpu_stats.system_cpu_usage);
+  const onlineCpus = optionalCounter(data.cpu_stats.online_cpus);
+  if (systemNow === null || systemPrev === null || onlineCpus === null) return null;
+
+  let rx = 0;
+  let tx = 0;
+  if (data.networks) {
+    for (const net of Object.values(data.networks)) {
+      const rxBytes = optionalCounter(net.rx_bytes);
+      const txBytes = optionalCounter(net.tx_bytes);
+      if (rxBytes === null || txBytes === null) return null;
+      rx += rxBytes;
+      tx += txBytes;
+    }
+  }
+
+  const systemDelta = systemNow - systemPrev;
+  const rawCpuPercent = systemDelta > 0
+    ? ((cpuTotal - preCpuTotal) / systemDelta) * (onlineCpus || 1) * 100
+    : 0;
+  // rawCpuPercent, rx and tx are derived, so they can still overflow to Infinity
+  // or NaN although every input is finite.
+  if (![rawCpuPercent, rx, tx].every(Number.isFinite)) return null;
+  // A container restart or a counter reset makes the CPU total go backwards. That
+  // frame is a valid reading of "no usage this interval", so it reads as 0, as
+  // the byte rates do, instead of a negative percentage. The clamp follows the
+  // finiteness check so that an overflow is still rejected, not turned into 0.
+  const cpuPercent = Math.max(0, rawCpuPercent);
+  return { cpuPercent, memBytes: memUsage, rx, tx };
 }
 
 export interface ContainerStatsHookResult {
@@ -14,12 +97,27 @@ export interface ContainerStatsHookResult {
   error: string | null;
 }
 
+const STATS_UNAVAILABLE_MESSAGE = 'Container stats unavailable. The node may be unreachable.';
+
+// Stream failures belong to one node: the failed IDs are stored with the node
+// they were raised on, so a read for another node sees none even in the render
+// before any effect has pruned them.
+interface StreamFailures {
+  nodeId: number | null | undefined;
+  ids: ReadonlySet<string>;
+}
+const NO_IDS: ReadonlySet<string> = new Set();
+
 export function useContainerStats(
   containers: ContainerInfo[],
   activeNodeId: number | null | undefined,
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
-  const [error, setError] = useState<string | null>(null);
+  // IDs of running containers whose current stats stream has failed, tagged with
+  // the node they belong to. A container leaves the set when it delivers a valid
+  // sample, when a list shows it stopped or gone, or when the active node changes.
+  const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
+  const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
 
   const pendingStatsRef = useRef<Record<string, {
     cpu: string; ram: string; net: string;
@@ -29,31 +127,60 @@ export function useContainerStats(
 
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
 
-  // Reset the error banner only on an actual node switch. Doing it inside the
-  // main effect would clear the banner on every containers-array identity
-  // change (which fires at the dashboard's refresh cadence) and cause the
-  // banner to visibly flap against a persistently-flaky daemon.
-  useEffect(() => {
-    setError(null);
-  }, [activeNodeId]);
-
   useEffect(() => {
     const wsMap: Record<string, WebSocket> = {};
+    // Set by the cleanup before it closes the sockets, as a second line of
+    // defence next to the detached handlers: the browser fires error/close for a
+    // socket closed while connecting, and that is our own teardown, not a
+    // stream failure.
+    let disposed = false;
     // Track which WSs have already emitted a console.warn for the lifetime of
     // this effect, so a flaky daemon does not spam the console at message rate.
     const warnedOnce = new Set<string>();
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
+    // A node switch drops every failure. Opening another stack starts clean, and
+    // a container this list shows as stopped or gone loses its flag, so its next
+    // run starts clean. A container that stays listed as running keeps its flag
+    // until a valid sample arrives, which also covers a restart (running to
+    // running, same ID): the new stream's first valid sample clears it.
+    const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
+    // Clearing everything on each containers-array identity change (the
+    // dashboard's refresh cadence) would make the warning visibly flap against a
+    // persistently-flaky daemon, so a refresh drops only what the list contradicts.
+    setFailures(prev => {
+      if (prev.nodeId !== activeNodeId) return { nodeId: activeNodeId, ids: NO_IDS };
+      const kept = [...prev.ids].filter(id => runningIds.has(id));
+      return kept.length === prev.ids.size ? prev : { nodeId: activeNodeId, ids: new Set(kept) };
+    });
+
     (containers || []).forEach(container => {
       if (!container?.Id) return;
 
       const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
+        // This effect run belongs to the container's state in the list it was
+        // given. A container that list shows as not running has no stream to
+        // lose, and its failure would otherwise be carried into its next run.
+        if (disposed || container.State !== 'running') return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
           console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
         }
-        setError('Container stats unavailable. The node may be unreachable.');
+        setFailures(prev => {
+          if (prev.nodeId === activeNodeId && prev.ids.has(container.Id)) return prev;
+          const ids = new Set(prev.nodeId === activeNodeId ? prev.ids : NO_IDS);
+          return { nodeId: activeNodeId, ids: ids.add(container.Id) };
+        });
+      };
+
+      const clearFailure = () => {
+        setFailures(prev => {
+          if (prev.nodeId !== activeNodeId || !prev.ids.has(container.Id)) return prev;
+          const ids = new Set(prev.ids);
+          ids.delete(container.Id);
+          return { nodeId: activeNodeId, ids };
+        });
       };
 
       try {
@@ -74,24 +201,15 @@ export function useContainerStats(
         };
 
         ws.onmessage = (event) => {
+          if (disposed) return;
           try {
-            const data = JSON.parse(event.data);
-            if (!data.cpu_stats?.cpu_usage || !data.precpu_stats?.cpu_usage || !data.memory_stats?.usage) return;
+            const sample = readStatsSample(JSON.parse(event.data));
+            if (!sample) return;
 
-            const cpuDelta = data.cpu_stats.cpu_usage.total_usage - data.precpu_stats.cpu_usage.total_usage;
-            const systemDelta = (data.cpu_stats.system_cpu_usage || 0) - (data.precpu_stats.system_cpu_usage || 0);
-            const onlineCpus = data.cpu_stats.online_cpus || 1;
-            const cpuPercent = systemDelta > 0 ? ((cpuDelta / systemDelta) * onlineCpus * 100).toFixed(2) : '0.00';
-            const ramUsage = (data.memory_stats.usage / (1024 * 1024)).toFixed(2) + ' MB';
-
-            let currentRx = 0;
-            let currentTx = 0;
-            if (data.networks) {
-              Object.values(data.networks as Record<string, { rx_bytes?: number; tx_bytes?: number }>).forEach(net => {
-                currentRx += net.rx_bytes || 0;
-                currentTx += net.tx_bytes || 0;
-              });
-            }
+            const cpuPercent = sample.cpuPercent.toFixed(2);
+            const ramUsage = (sample.memBytes / (1024 * 1024)).toFixed(2) + ' MB';
+            const currentRx = sample.rx;
+            const currentTx = sample.tx;
 
             const prevRaw = rawBytesRef.current[container.Id];
             const rxRate = prevRaw ? Math.max(0, currentRx - prevRaw.lastRx) : 0;
@@ -105,10 +223,11 @@ export function useContainerStats(
               lastRx: currentRx,
               lastTx: currentTx,
               cpuNum: parseFloat(cpuPercent) || 0,
-              memNum: data.memory_stats.usage / (1024 * 1024),
+              memNum: sample.memBytes / (1024 * 1024),
               netInNum: rxRate,
               netOutNum: txRate,
             };
+            clearFailure();
           } catch {
             recordFailure('parse-error');
           }
@@ -145,11 +264,25 @@ export function useContainerStats(
     }, 1500);
 
     return () => {
+      disposed = true;
       clearInterval(flushInterval);
       pendingStatsRef.current = {};
-      Object.values(wsMap).forEach(ws => { try { ws.close(1000); } catch { /* ignore */ } });
+      Object.values(wsMap).forEach(ws => {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try { ws.close(1000); } catch { /* ignore */ }
+      });
     };
   }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { stats: containerStats, error };
+  // The effect drops a container's flag once it is no longer running or the node
+  // changes. The node tag above and this filter cover the render between a list
+  // or node update and that effect, so the chip never shows for a container that
+  // just stopped or for another node's failure.
+  const streamFailing = failedIds.size > 0
+    && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
+
+  return { stats: containerStats, error: streamFailing ? STATS_UNAVAILABLE_MESSAGE : null };
 }
