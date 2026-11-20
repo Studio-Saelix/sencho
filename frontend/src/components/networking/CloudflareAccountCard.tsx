@@ -14,19 +14,6 @@ import { CloudflareAccountSheet, type CloudflareSheetMode, type CloudflareSheetT
 
 const KICKER = 'Public exposure · Control instance';
 
-/**
- * The hub's Cloudflare account on the Networking page: the body of the
- * Cloudflare tab, and the standalone block above the unavailable state when
- * the active node cannot load Networking. It belongs to the control instance and serves every node,
- * so it renders whichever node is active, and even when that node cannot load
- * Networking. The caller owns the account state (the tab label reads it too)
- * and mounts this only for Admins signed into this instance with the
- * experimental flag on.
- */
-export function CloudflareAccountCard({ account, className }: { account: PublicExposureAccount; className?: string }) {
-  return <CloudflareAccountCardBody account={account} className={className} />;
-}
-
 /** Seconds until a rate-limited Recheck may run again, counting down once a second while it waits. */
 function useRecheckWait(account: PublicExposureAccount): number {
   const view = account.view;
@@ -51,7 +38,15 @@ function useRecheckWait(account: PublicExposureAccount): number {
   return until > now ? Math.ceil((until - now) / 1000) : 0;
 }
 
-function CloudflareAccountCardBody({ account, className }: { account: PublicExposureAccount; className?: string }) {
+/**
+ * The hub's Cloudflare account on the Networking page: the body of the
+ * Cloudflare tab, and the standalone block above the unavailable state when
+ * the active node cannot load Networking. It belongs to the control instance
+ * and serves every node, so it renders whichever node is active. The caller
+ * owns the account state (the tab label reads it too) and mounts this only for
+ * Admins signed into this instance with the experimental flag on.
+ */
+export function CloudflareAccountCard({ account, className }: { account: PublicExposureAccount; className?: string }) {
   const { showBusy } = useVisualBusy(account.loading);
   const recheckWait = useRecheckWait(account);
   const [sheetOpen, setSheetOpen] = useState(false);
