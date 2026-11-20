@@ -434,13 +434,13 @@ export function EditorView(props: EditorViewProps) {
         }
     }, [activeTab, canRead, setActiveTab]);
 
-    // Fullscreen the file browser + editor by collapsing the left column. Only
-    // meaningful on the files tab; reset when leaving it or closing the editor so
-    // it can never strand the compose/env panels in a single-column layout.
-    const [filesFullscreen, setFilesFullscreen] = useState(false);
+    // Fullscreen the editor card (compose, env or files) by collapsing the left
+    // column. Reset when the editor closes so it can never strand the stack
+    // detail in a single-column layout.
+    const [editorFullscreen, setEditorFullscreen] = useState(false);
     useEffect(() => {
-        if (!editingCompose || activeTab !== 'files') setFilesFullscreen(false);
-    }, [editingCompose, activeTab]);
+        if (!editingCompose) setEditorFullscreen(false);
+    }, [editingCompose]);
 
     // Expand the logs by collapsing the Command Center card so the logs pane
     // fills the left column. Toggled from the structured log viewer header.
@@ -513,14 +513,15 @@ export function EditorView(props: EditorViewProps) {
         />
     );
 
-    const anatomyResizable = anatomyMode === 'resizable' && !editingCompose && !filesFullscreen;
+    const saveLabel = canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy';
+    const anatomyResizable = anatomyMode === 'resizable' && !editingCompose && !editorFullscreen;
 
     return (
         <ErrorBoundary>
-            <div className={`grid min-w-0 gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+            <div className={`grid min-w-0 gap-6 ${editorFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
                 {/* Left column: identity + health strip + logs, stacked. Hidden in
-                    files fullscreen so the editor card fills the width. */}
-                {!filesFullscreen && (
+                    editor fullscreen so the editor card fills the width. */}
+                {!editorFullscreen && (
                 <div className="flex min-h-0 min-w-0 flex-col gap-6" data-testid="stack-detail-primary-pane">
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
@@ -670,11 +671,13 @@ export function EditorView(props: EditorViewProps) {
                 {/* Right column: anatomy panel by default, Monaco editor when editing */}
                 {editingCompose ? (
                     <Card className="rounded-xl border-muted overflow-hidden flex flex-col h-full min-h-0 min-w-0 bg-card">
-                        {/* Wrap inside the pane. Do not shrink the split save control,
-                            or its chevron gets clipped. */}
-                        <div className="p-4 border-b border-muted flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0 min-w-0">
-                            <div className="flex flex-wrap items-center gap-4 min-w-0">
-                                <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
+                        {/* One line at every width: the actions collapse to icons in a
+                            narrow pane instead of wrapping. The split save control
+                            never shrinks, or its chevron gets clipped. The tab group scrolls
+                            sideways when even the icon-only actions leave it too little room. */}
+                        <div className="@container p-4 border-b border-muted flex flex-nowrap items-center gap-x-4 shrink-0 min-w-0">
+                            <div className="flex flex-1 flex-nowrap items-center gap-4 min-w-0 overflow-x-auto [scrollbar-width:none]">
+                                <Tabs className="shrink-0" value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="compose">
@@ -697,7 +700,7 @@ export function EditorView(props: EditorViewProps) {
 
                                 {activeTab === 'env' && envFiles.length > 1 && (
                                     <Select value={selectedEnvFile} onValueChange={changeEnvFile} disabled={hasUnsavedChanges() || isFileLoading}>
-                                        <SelectTrigger className="h-9 text-xs bg-muted border-none min-w-[200px]">
+                                        <SelectTrigger className="h-9 text-xs bg-muted border-none w-[200px] shrink-0">
                                             <SelectValue placeholder="Select environment file" />
                                         </SelectTrigger>
                                         <SelectContent>
@@ -710,7 +713,7 @@ export function EditorView(props: EditorViewProps) {
                                     </Select>
                                 )}
                             </div>
-                            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
+                            <div className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-2">
                                 {activeTab !== 'files' && canEditCompose && (
                                     <>
                                         <Button
@@ -718,17 +721,19 @@ export function EditorView(props: EditorViewProps) {
                                             variant="outline"
                                             className="rounded-lg relative"
                                             onClick={() => setGitSourceOpen(true)}
+                                            aria-label="Git Source"
+                                            title="Git Source"
                                         >
-                                            <GitBranch className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                            Git Source
+                                            <GitBranch className="w-4 h-4 @[46rem]:mr-2" strokeWidth={1.5} />
+                                            <span className="hidden @[46rem]:inline">Git Source</span>
                                             {gitSourcePendingMap[stackName] && (
                                                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brand animate-pulse" />
                                             )}
                                         </Button>
                                         <div className="flex shrink-0 items-center">
-                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady}>
-                                                <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady} aria-label={saveLabel} title={saveLabel}>
+                                                <Rocket className="w-4 h-4 @[46rem]:mr-2" strokeWidth={1.5} />
+                                                <span className="hidden @[46rem]:inline">{saveLabel}</span>
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
@@ -771,20 +776,18 @@ export function EditorView(props: EditorViewProps) {
                                         </div>
                                     </>
                                 )}
-                                {activeTab === 'files' && (
-                                    <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="rounded-lg h-8 w-8 p-0"
-                                        onClick={() => setFilesFullscreen((v) => !v)}
-                                        aria-label={filesFullscreen ? 'Exit full screen' : 'Full screen'}
-                                        title={filesFullscreen ? 'Exit full screen' : 'Full screen'}
-                                    >
-                                        {filesFullscreen
-                                            ? <Minimize2 className="w-4 h-4" strokeWidth={1.5} />
-                                            : <Maximize2 className="w-4 h-4" strokeWidth={1.5} />}
-                                    </Button>
-                                )}
+                                <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="rounded-lg h-8 w-8 p-0"
+                                    onClick={() => setEditorFullscreen((v) => !v)}
+                                    aria-label={editorFullscreen ? 'Exit full screen' : 'Full screen'}
+                                    title={editorFullscreen ? 'Exit full screen' : 'Full screen'}
+                                >
+                                    {editorFullscreen
+                                        ? <Minimize2 className="w-4 h-4" strokeWidth={1.5} />
+                                        : <Maximize2 className="w-4 h-4" strokeWidth={1.5} />}
+                                </Button>
                                 <Button
                                     size="sm"
                                     variant="ghost"
