@@ -37,11 +37,21 @@ export async function runDockerCompose(
     // validation is a failed one, worded by the fence.
     return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
   }
-  // The spawn stays in this scope, under the barrier above, and in the same
-  // synchronous step as the admission; one that throws releases the lease.
+  // The admission awaited, and CodeQL does not carry the barrier above across
+  // that await, so the same guards are repeated here, in the same synchronous
+  // step as the admission and the spawn; a spawn that throws releases the lease.
+  const spawnCwd = path.resolve(resolvedCwd);
+  if (!spawnCwd.startsWith(managedBase + path.sep)) {
+    if (!spawnCwd.startsWith(secretsBase + path.sep)) {
+      if (!spawnCwd.startsWith(tmpBase + path.sep)) {
+        lease.release();
+        return { code: -1, stdout: '', stderr: 'Invalid working directory' };
+      }
+    }
+  }
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
-    child = spawn('docker', args, { cwd: resolvedCwd });
+    child = spawn('docker', args, { cwd: spawnCwd });
   } finally {
     if (!child) lease.release();
   }
