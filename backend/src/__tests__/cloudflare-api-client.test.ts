@@ -1,8 +1,8 @@
 /**
  * The shared Cloudflare API client: envelope parsing, complete pagination,
  * bounded retries that honour Retry-After, permanent 4xx, ambiguous POSTs,
- * deadlines, refused redirects and the request budget. Every guard here was
- * confirmed to fail with the guard reverted.
+ * deadlines, refused redirects, the request budget, envelope fields that are
+ * not in their documented shape, and paging details that contradict each other.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
@@ -138,6 +138,11 @@ describe('CloudflareApiClient envelope fields it cannot read', () => {
     ['a negative total_pages', { result_info: { total_pages: -1 } }],
     ['a fractional page', { result_info: { page: 1.5 } }],
     ['a null count', { result_info: { count: null } }],
+    ['a negative per_page', { result_info: { per_page: -1 } }],
+    ['a total_count that is text', { result_info: { total_count: '5' } }],
+    ['a null per_page', { result_info: { per_page: null } }],
+    ['an error element that is a list', { errors: [[]] }],
+    ['a message that is a list', { messages: [[]] }],
   ])('reads a success with %s as an invalid response, never a raw exception', async (_label, extra) => {
     for (const method of ['GET', 'POST', 'DELETE'] as const) {
       const { client, calls } = clientWith([() => success(extra)]);
@@ -155,6 +160,7 @@ describe('CloudflareApiClient envelope fields it cannot read', () => {
     ['a null result_info', { result_info: null }],
     ['message objects and strings', { messages: [{ message: 'note', code: 1 }, 'plain'] }],
     ['an error list on a success', { errors: [] }],
+    ['null errors and messages', { errors: null, messages: null }],
   ])('still reads a success with %s', async (_label, extra) => {
     const { client } = clientWith([() => success(extra)]);
     const res = await client.request(TOKEN, { method: 'GET', path: '/zones' });
@@ -173,7 +179,14 @@ describe('CloudflareApiClient envelope fields it cannot read', () => {
     expect(error.cfCodes).toEqual([1000]);
   });
 
-  it('keeps the kind of a success:false answer whose errors field is not a list', async () => {
+  it.each([['an object', {}], ['text', 'bad']])('keeps the kind of a failed answer whose errors field is %s, with no codes', async (_label, errors) => {
+    const { client } = clientWith([() => json({ success: false, errors, result: null }, 403)]);
+    const error = await caught(client.request(TOKEN, { method: 'GET', path: '/zones' }));
+    expect(error.kind).toBe('forbidden');
+    expect(error.cfCodes).toEqual([]);
+  });
+
+  it('keeps the kind of a success:false answer whose errors list holds no readable error', async () => {
     const { client } = clientWith([() => json({ success: false, errors: [null], result: null })]);
     expect((await caught(client.request(TOKEN, { method: 'GET', path: '/zones' }))).kind).toBe('bad_request');
   });
@@ -392,9 +405,16 @@ describe('CloudflareApiClient contradictory paging', () => {
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
   });
 
-  it('refuses a listing whose later pages run short of the total', async () => {
+  it('refuses a listing whose total_pages does not follow from its total_count across pages', async () => {
     const { client } = clientWith([
       (url) => ok(url.searchParams.get('page') === '1' ? [zone('a'), zone('b')] : [zone('c')], { page: Number(url.searchParams.get('page')), per_page: 2, total_pages: 2, total_count: 5 }),
+    ]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
+  });
+
+  it('refuses a listing whose last page leaves the collected items short of the total', async () => {
+    const { client } = clientWith([
+      (url) => ok(url.searchParams.get('page') === '1' ? [zone('a'), zone('b')] : [], { page: Number(url.searchParams.get('page')), per_page: 2, total_pages: 2, total_count: 3 }),
     ]);
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
   });
@@ -418,6 +438,22 @@ describe('CloudflareApiClient contradictory paging', () => {
   ])('accepts an empty listing reported as %s', async (_label, info) => {
     const { client } = list(info, []);
     expect(await client.paginate(TOKEN, '/zones', {}, 50)).toEqual([]);
+  });
+
+  it('accepts a listing Cloudflare pages smaller than asked, when its counts add up', async () => {
+    const { client } = clientWith([
+      (url) => {
+        const page = Number(url.searchParams.get('page'));
+        const size = page === 3 ? 5 : 20;
+        return ok(Array.from({ length: size }, (_v, i) => zone(`p${page}-${i}`)), { page, per_page: 20, count: size, total_pages: 3, total_count: 45 });
+      },
+    ]);
+    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(45);
+  });
+
+  it('falls back to the asked page size when Cloudflare reports a per_page of zero beside a total_count', async () => {
+    const { client } = list({ page: 1, per_page: 0, count: 1, total_pages: 1, total_count: 1 });
+    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(1);
   });
 
   it('accepts a listing whose counts all agree across pages', async () => {

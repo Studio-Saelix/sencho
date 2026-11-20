@@ -5,8 +5,9 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * through it; none adds another.
  *
  * It owns the transport rules Cloudflare's API needs: the response envelope
- * (`success`, `errors`, `messages`, `result_info`), complete pagination with a
- * page cap, bounded retries with full jitter that honour `Retry-After`,
+ * (`success`, `errors`, `messages`, `result_info`), read only when every field
+ * has its documented shape, complete pagination checked against the paging
+ * block's own counts, with a page cap, bounded retries with full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
  * whole operation, refused redirects, and a process-wide request budget.
  *
@@ -148,7 +149,7 @@ function safeMessage(text: string, token: string): string {
   return redacted.length > MAX_MESSAGE_LENGTH ? `${redacted.slice(0, MAX_MESSAGE_LENGTH)}...` : redacted;
 }
 
-/** The codes and text of an answer that already failed by status. Reads what it can; an odd `errors` field never changes the failure's kind. */
+/** The codes and text of whatever `errors` entries can be read. Runs for every answer, so an odd `errors` field never changes a failure's kind. */
 function envelopeErrors(envelope: CloudflareEnvelope | null): { codes: number[]; text: string } {
   const errors = (Array.isArray(envelope?.errors) ? envelope.errors : []).filter(isPlainObject);
   const codes = errors.map((e) => (typeof e.code === 'number' ? e.code : Number.NaN)).filter((c) => Number.isFinite(c));
@@ -221,10 +222,10 @@ function readBody(response: Response, signal: AbortSignal): Promise<string> {
 }
 
 function contradictoryPaging(): CloudflareApiError {
-  return new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare listed a page whose paging details contradict each other; Sencho did not use it.' });
+  return new CloudflareApiError({ kind: 'invalid_response', message: "Cloudflare's paging details do not match the listing it returned; Sencho did not use it." });
 }
 
-/** A page whose paging block disagrees with the page itself is not trusted: the listing could be incomplete. */
+/** A page whose paging block disagrees with the page, or with itself, is not trusted: the listing could be incomplete. */
 function assertConsistentPage(info: CloudflareResultInfo | null, resultLength: number, page: number, perPage: number): void {
   if (!info) return;
   if (info.page !== undefined && info.page !== page) throw contradictoryPaging();
@@ -433,7 +434,7 @@ export class CloudflareApiClient {
       throw new CloudflareApiError({ kind: 'server', status, cfCodes: codes, message: safeMessage(errorText || `Cloudflare answered ${status}.`, token) });
     }
     if (!envelope) {
-      throw new CloudflareApiError({ kind: 'invalid_response', status, message: 'Cloudflare sent a response Sencho could not read.' });
+      throw new CloudflareApiError({ kind: 'invalid_response', status, message: "Its answer was not in Cloudflare's envelope format." });
     }
     if (status >= 400 || !envelope.success) {
       throw new CloudflareApiError({
@@ -443,11 +444,12 @@ export class CloudflareApiClient {
         message: safeMessage(errorText || `Cloudflare refused the request (${status}).`, token),
       });
     }
-    const unreadable = () => new CloudflareApiError({ kind: 'invalid_response', status, message: 'Cloudflare sent a response Sencho could not read.' });
+    const unreadable = () => new CloudflareApiError({ kind: 'invalid_response', status, message: 'A field in its answer had an unexpected shape.' });
     // A success is read only when every envelope field has its documented shape, so nothing below can throw on it.
     const { errors, messages: rawMessages } = envelope;
-    if (errors !== undefined && (!Array.isArray(errors) || !errors.every(isPlainObject))) throw unreadable();
-    if (rawMessages !== undefined && (!Array.isArray(rawMessages) || !rawMessages.every((m) => typeof m === 'string' || isPlainObject(m)))) throw unreadable();
+    // A null `errors`, `messages` or `result_info` reads as absent; any other shape than a list (or an object) does not.
+    if (errors != null && (!Array.isArray(errors) || !errors.every(isPlainObject))) throw unreadable();
+    if (rawMessages != null && (!Array.isArray(rawMessages) || !rawMessages.every((m) => typeof m === 'string' || isPlainObject(m)))) throw unreadable();
     const resultInfo = readResultInfo(envelope.result_info);
     if (resultInfo === undefined) throw unreadable();
     const messages = ((rawMessages ?? []) as Array<string | Record<string, unknown>>)

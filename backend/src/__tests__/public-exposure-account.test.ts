@@ -4,7 +4,10 @@
  * DNS write check and its journal, zone reconciliation, the lock, the
  * operation deadline, the audit rows, Cloudflare answers that are successful
  * but unreadable, check records the journal cannot name or does not match, the
- * records a disconnect leaves behind, and the cause shown for a leftover record.
+ * records a disconnect leaves behind, the cause shown for a leftover record,
+ * journals whose timing cannot be read and the late-create window that follows,
+ * stored record ids that are not Cloudflare ids, and listings whose paging
+ * details contradict each other.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -897,7 +900,7 @@ describe('round two edges', () => {
       .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:late', recordId: null, createdAt: Date.now() }), ZONE_A);
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
-    expect(error.message).toContain('may still be landing');
+    expect(error.message).toContain('still landing');
     expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
@@ -1180,7 +1183,7 @@ describe('a recheck that cannot delete a leftover record says why', () => {
   it.each([
     ['a refused delete', { remove: 403 as const }, 'Cloudflare refused the delete'],
     ['an unreachable Cloudflare', { remove: 'down' as const }, 'Could not reach api.cloudflare.com'],
-    ['a record that is too recent', { recent: true }, 'still be landing'],
+    ['a record that is too recent', { recent: true }, 'still landing'],
   ])('puts the cause on the pending zone after %s', async (_label, setup, sentence) => {
     await connectWithZoneA();
     if ('recent' in setup) {
@@ -1298,7 +1301,7 @@ describe('a journal column that cannot be read', () => {
     setJournal('{"secret-looking":"cfsentinel_xyz');
     const warn = vi.spyOn(console, 'warn');
     // The first empty listing only starts the late-create window.
-    expect(zoneA(await service.recheck(actor)).cleanupPending?.note).toContain('may still be landing');
+    expect(zoneA(await service.recheck(actor)).cleanupPending?.note).toContain('still landing');
     ageJournal();
     const view = await service.recheck(actor);
     expect(zoneA(view).cleanupPending).toBeNull();
@@ -1420,13 +1423,24 @@ describe('a Cloudflare answer with unreadable envelope fields reaches every cons
       expect(view.zones.map((z) => z.enabled)).toEqual(before.zones.map((z) => z.enabled));
       expect(view.scopes).toEqual(before.scopes);
     });
+  });
 
-    it.each(BAD_FIELDS)('refuses a connect as unexpected and stores nothing, with %s', async (_label, fields) => {
-      if (/dns_records/.test(String(path))) return; // no zone is enabled before the first connect, so no DNS probe runs
+  // No zone is enabled before the first connect, so a first connect sends no DNS probe.
+  describe.each(REQUESTS.filter(([name]) => name !== 'the DNS probe'))('on a first connect, in %s', (_name, path, result) => {
+    it.each(BAD_FIELDS)('refuses as unexpected and stores nothing, with %s', async (_label, fields) => {
       overrideRaw(onPath(path), { success: true, result, ...fields });
       expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
       expect(service.getView()).toEqual({ connected: false });
     });
+  });
+
+  it('refuses a token replacement as unexpected from an unreadable DNS probe, and keeps the stored token and zones', async () => {
+    await connectWithZoneA();
+    const stored = db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string };
+    overrideRaw(onPath(/^\/zones\/[0-9a-f]+\/dns_records$/), { success: true, result: [], errors: [null] });
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+    expect((db().prepare('SELECT credential_enc FROM exposure_accounts').get() as { credential_enc: string }).credential_enc).toBe(stored.credential_enc);
+    expect(connected(service.getView()).zones.map((z) => z.zoneRef)).toEqual([ZONE_A, ZONE_B]);
   });
 
   it('reads the account-owned token verify the same way', async () => {
@@ -1522,6 +1536,8 @@ describe('a journal whose timing cannot be read is not settled by one empty list
     ['a null createdAt', (p) => JSON.stringify({ ...p, createdAt: null }), true],
     ['a createdAt that is text', (p) => JSON.stringify({ ...p, createdAt: 'yesterday' }), true],
     ['a createdAt of zero', (p) => JSON.stringify({ ...p, createdAt: 0 }), true],
+    ['a negative createdAt', (p) => JSON.stringify({ ...p, createdAt: -1 }), true],
+    ['a createdAt too large to be a number', (p) => JSON.stringify({ ...p, createdAt: 1 }).replace('"createdAt":1', '"createdAt":1e999'), true],
     ['a createdAt a year ahead', (p) => JSON.stringify({ ...p, createdAt: Date.now() + 365 * 24 * 60 * 60_000 }), true],
   ];
 
@@ -1561,7 +1577,7 @@ describe('a journal whose timing cannot be read is not settled by one empty list
       expect(journal(ZONE_A)).not.toBeNull();
       expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
       expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
-      if (caller === 'disconnect') expect(first.refused).toContain('may still be landing');
+      if (caller === 'disconnect') expect(first.refused).toContain('still landing');
       if (caller === 'dnsCheck') expect(first.complete).toBe(false);
       expect(service.getView().connected).toBe(true);
 
@@ -1570,12 +1586,19 @@ describe('a journal whose timing cannot be read is not settled by one empty list
       const second = await run(caller);
       if (contentSurvives) {
         expect(fake.records.get(ZONE_A) ?? []).toEqual([]);
+        // Found by its content and deleted, and nothing is left to recover.
+        if (caller !== 'disconnect') expect(journal(ZONE_A)).toBeNull();
         if (caller === 'dnsCheck') expect(second.complete).toBe(true);
+        if (caller === 'disconnect') {
+          expect(second.refused).toBeNull();
+          expect(service.getView().connected).toBe(false);
+        }
       } else {
         // Its content is gone, so it cannot be proven ours: it stays, and so does the handle on it.
         expect(fake.records.get(ZONE_A)).toHaveLength(1);
         expect(journal(ZONE_A)).not.toBeNull();
-        if (caller === 'disconnect') expect(second.refused).toContain('could not be deleted');
+        // The stamp is only seconds old, so the honest cause is the window, not the stranger.
+        if (caller === 'disconnect') expect(second.refused).toContain('still landing');
         // Once the window has passed too, the record is still never deleted, and the cause is the honest one.
         ageJournal();
         const third = await run(caller);
@@ -1594,7 +1617,7 @@ describe('a journal whose timing cannot be read is not settled by one empty list
     let clock = Date.now();
     const restarted = () => new Service(new Adapter(cloudflareApiClient, () => clock));
 
-    expect(zoneA(await restarted().recheck(actor)).cleanupPending?.note).toContain('may still be landing');
+    expect(zoneA(await restarted().recheck(actor)).cleanupPending?.note).toContain('still landing');
     const stamped = JSON.parse(journal(ZONE_A) as string) as { createdAt: number; content: string };
     expect(stamped.createdAt).toBe(clock);
     expect(stamped.content).toBe('');
@@ -1631,7 +1654,7 @@ describe('a journal whose timing cannot be read is not settled by one empty list
 });
 
 describe('a stored record id that is not a Cloudflare id is not used as a delete handle', () => {
-  const BAD_IDS = ['bad', '../zones', 'A'.repeat(32), '9'.repeat(31), `${'9'.repeat(32)}0`, 'nested/id'];
+  const BAD_IDS = ['bad', '../zones', '..', '%2e%2e', '', 'A'.repeat(32), '9'.repeat(31), `${'9'.repeat(32)}0`, 'nested/id'];
 
   async function withStoredId(recordId: unknown): Promise<string> {
     await connectWithZoneA();
@@ -1651,7 +1674,8 @@ describe('a stored record id that is not a Cloudflare id is not used as a delete
       const realId = await withStoredId(bad);
       await service.recheck(actor);
       expect(deleted(realId)).toBe(true);
-      expect(fake.requests.some((r) => r.startsWith('DELETE') && r.includes('/dns_records/') && !r.endsWith(realId))).toBe(false);
+      // The one delete that is sent is for the real id: no request carries the stored text as a path, however it normalises.
+      expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([`DELETE /zones/${ZONE_A}/dns_records/${realId}`]);
       expect(fake.records.get(ZONE_A)).toEqual([]);
       expect(journal(ZONE_A)).toBeNull();
     });
@@ -1680,14 +1704,141 @@ describe('a stored record id that is not a Cloudflare id is not used as a delete
     expect(fake.requests.some((r) => r.startsWith('DELETE'))).toBe(false);
   });
 
-  it('leaves a stored valid id alone, and a non-text id reads as none', async () => {
-    const realId = await withStoredId('d'.repeat(32));
-    fake.records.set(ZONE_A, [{ id: 'd'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"sencho-scope-check:00"' }]);
+  it('deletes by a stored valid id even when the record at the name does not match the journal content', async () => {
+    await connectWithZoneA();
+    fake.records.set(ZONE_A, [{ id: 'd'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"unrelated"' }]);
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, recordId: 'd'.repeat(32) }));
+    fake.requests = [];
     await service.recheck(actor);
     expect(deleted('d'.repeat(32))).toBe(true);
-    expect(realId).toBeTruthy();
-    const numeric = await withStoredId(42);
+    expect(journal(ZONE_A)).toBeNull();
+  });
+
+  it('reads a non-text stored id as none', async () => {
+    const realId = await withStoredId(42);
     await service.recheck(actor);
-    expect(deleted(numeric)).toBe(true);
+    expect(deleted(realId)).toBe(true);
+  });
+
+  it('is enforced by the adapter itself, not only by the store', async () => {
+    const realId = 'c'.repeat(32);
+    fake.records.set(ZONE_A, [{ id: realId, type: 'TXT', name: CHECK_NAME, content: '"sencho-scope-check:00"' }]);
+    let current: { name: string; content: string; recordId: string | null; createdAt: number } | null = { ...OLD_JOURNAL, recordId: '../zones' };
+    const result = await new Adapter(cloudflareApiClient).resumeCleanup(FAKE_TOKEN, ZONE_A, { current: () => current, write: (p) => { current = p; } }, {});
+    expect(result).toEqual({ cleaned: true });
+    expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([`DELETE /zones/${ZONE_A}/dns_records/${realId}`]);
+  });
+
+  it('is dropped by the store when the journal is read', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, recordId: 'bad' }));
+    const { publicExposureStore } = await import('../services/publicExposure/publicExposureStore');
+    const { CLOUDFLARE_ADAPTER_ID } = await import('../services/publicExposure/types');
+    const account = publicExposureStore.getAccount(CLOUDFLARE_ADAPTER_ID);
+    const zone = publicExposureStore.getZone(account!.id, ZONE_A);
+    expect(zone?.pending).toMatchObject({ name: CHECK_NAME, recordId: null });
+  });
+});
+
+describe('the late-create window and its edges', () => {
+  const WINDOW = 2 * 60_000;
+  const at = (clock: () => number) => new Service(new Adapter(cloudflareApiClient, clock));
+
+  it('keeps a readable journal until the window has fully passed, and not a millisecond longer', async () => {
+    await connectWithZoneA();
+    const now = Date.now();
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, createdAt: now - (WINDOW - 1) }));
+    expect(zoneA(await at(() => now).recheck(actor)).cleanupPending?.note).toContain('still landing');
+    expect(journal(ZONE_A)).not.toBeNull();
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, createdAt: now - WINDOW }));
+    expect(zoneA(await at(() => now).recheck(actor)).cleanupPending).toBeNull();
+    expect(journal(ZONE_A)).toBeNull();
+  });
+
+  it('treats a stamp a minute ahead as a known time (clock skew), and one beyond the window as unknown', async () => {
+    await connectWithZoneA();
+    const now = Date.now();
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, createdAt: now + 60_000 }));
+    await at(() => now).recheck(actor);
+    expect(JSON.parse(journal(ZONE_A) as string).createdAt).toBe(now + 60_000);
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, createdAt: now + WINDOW + 1 }));
+    await at(() => now).recheck(actor);
+    expect(JSON.parse(journal(ZONE_A) as string).createdAt).toBe(now);
+  });
+
+  it('never deletes a stranger\'s empty TXT record under a journal that kept no content', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    await service.recheck(actor); // stamps the column
+    fake.records.set(ZONE_A, [{ id: 'a'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '""' }]);
+    ageJournal();
+    fake.requests = [];
+    const view = await service.recheck(actor);
+    expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+    expect(fake.records.get(ZONE_A)).toHaveLength(1);
+    expect(journal(ZONE_A)).not.toBeNull();
+    expect(zoneA(view).cleanupPending?.note).toContain('Other records already sit');
+  });
+
+  it('leaves a journal with no timestamp untouched while a stranger\'s record sits at the name', async () => {
+    await connectWithZoneA();
+    const column = JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:00', recordId: null });
+    setJournal(column);
+    fake.records.set(ZONE_A, [{ id: 'a'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"someone else"' }]);
+    const view = await service.recheck(actor);
+    expect(zoneA(view).cleanupPending?.note).toContain('Other records already sit');
+    expect(JSON.parse(journal(ZONE_A) as string)).toEqual({ ...JSON.parse(column), recordId: null, createdAt: 0, cause: 'unmatched' });
+  });
+
+  describe.each([
+    ['an unreadable column', () => '{'],
+    ['a readable journal without a timestamp', () => JSON.stringify({ name: CHECK_NAME, content: 'x', recordId: null })],
+    ['a recent readable journal', () => JSON.stringify({ name: CHECK_NAME, content: 'x', recordId: null, createdAt: Date.now() })],
+  ])('when the zone is gone from Cloudflare, with %s', (_label, column) => {
+    it.each(['recheck', 'disconnect', 'dnsCheck'] as const)('%s settles it at once', async (caller) => {
+      await connectWithZoneA();
+      setJournal(column());
+      fake.dnsRead[ZONE_A] = 404;
+      if (caller === 'disconnect') {
+        expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+        expect(service.getView()).toEqual({ connected: false });
+        return;
+      }
+      // A zone that is gone took its record with it: the journal is cleared now, with no window to wait out.
+      if (caller === 'recheck') await service.recheck(actor);
+      else await service.dnsCheck(ZONE_A, actor).catch(() => undefined);
+      expect(journal(ZONE_A)).toBeNull();
+    });
+  });
+
+  it('settles a readable journal across restarts through disconnect, without moving the stamp mid-window', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:00', recordId: null }));
+    let clock = Date.now();
+    const start = clock;
+    expect((await refusal(at(() => clock).disconnect(actor))).message).toContain('still landing');
+    clock += 60_000;
+    expect((await refusal(at(() => clock).disconnect(actor))).message).toContain('still landing');
+    expect(JSON.parse(journal(ZONE_A) as string).createdAt).toBe(start);
+    clock += 2 * 60_000;
+    expect(await at(() => clock).disconnect(actor)).toEqual({ leftInCloudflare: [] });
+  });
+});
+
+describe('listings and answers the validation must still accept', () => {
+  it('reads a recheck whose listings report a smaller page size than asked, as long as they add up', async () => {
+    await connectWithZoneA();
+    const zones = Array.from({ length: 45 }, (_v, i) => ({ id: i.toString(16).padStart(32, 'a'), name: `z${i}.example.org` }));
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/zones') && (init?.method ?? 'GET') === 'GET') {
+        const page = Number(url.searchParams.get('page'));
+        return new Response(JSON.stringify({ success: true, result: zones.slice((page - 1) * 20, page * 20), result_info: { page, per_page: 20, total_pages: 3, total_count: 45, count: Math.min(20, 45 - (page - 1) * 20) } }));
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck.outcome).toBe('ok');
+    expect(view.zonesVisible).toBe(45);
   });
 });

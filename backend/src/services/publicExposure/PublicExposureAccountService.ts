@@ -42,10 +42,10 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   rate_limited: 'Cloudflare is limiting requests. Try again shortly.',
   refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
-  too_recent: 'Its create may still be landing. Try again in a couple of minutes.',
+  too_recent: 'Sencho cannot yet rule out that its create is still landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
   unmatched: 'Other records already sit at that name, and Sencho does not delete records it cannot prove it created. Delete them in Cloudflare, then try again.',
-  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. Delete the record at that name in Cloudflare, then try again.',
+  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a record sits at that name, delete it in Cloudflare. Then try again: Sencho lets go once the name has stayed empty for a couple of minutes.',
 };
 
 function outcomeError(failure: CheckFailure): PublicExposureError {
@@ -383,8 +383,9 @@ export class PublicExposureAccountService {
 
   /**
    * Keep the cause on the zone's journal so the view can say why the record is still there. An ambiguous
-   * create has no cause to show (a recheck is the right next step), and a journal that cannot be read has
-   * nowhere to keep one: its zone always shows the unreadable-journal sentence instead.
+   * create has no cause to show (a recheck is the right next step), and a column that still cannot be read has
+   * nowhere to keep one: its zone shows the unreadable-journal sentence until the first empty listing
+   * replaces the column with a readable journal.
    */
   private noteCleanupCause(accountRowId: number, zoneRef: string, cause: CleanupCause | 'ambiguous_create'): void {
     if (cause === 'ambiguous_create') return;

@@ -36,9 +36,10 @@ const CHECK_RECORD_COMMENT = 'Sencho permission check, deleted right away';
 /**
  * A create that timed out can still land on Cloudflare's side. A journal
  * younger than this is not declared lost when the record is not there yet.
- * A journal whose age is unknown (no readable timestamp, or one in the
- * future) is stamped with the time it was first examined, and that stamp
- * starts the same window, so one empty listing never settles it.
+ * A journal whose age is unknown (no readable timestamp, or one more than this
+ * window in the future) is, when nothing sits at its name, stamped with the
+ * time it was first examined. That stamp starts the same window, so one empty
+ * listing never settles it.
  */
 const LATE_CREATE_WINDOW_MS = 2 * 60_000;
 
@@ -238,7 +239,8 @@ export class CloudflareAccountAdapter {
     const pending = journal.current();
     if (!pending) return { cleaned: true };
     try {
-      // The store keeps only valid ids; this is the one place an id becomes a path, so it checks again.
+      // The store hands back only valid ids, but the stored text is not trusted: the id becomes a request
+      // path in deleteRecord, so it is checked again here.
       let recordId = pending.recordId !== null && CLOUDFLARE_ID.test(pending.recordId) ? pending.recordId : null;
       if (!recordId) {
         let records: DnsRecord[];

@@ -55,10 +55,13 @@ export interface LastCheck {
  * complete listing it does. `refused` is a rejected token (401), a refused
  * location, or a refused delete right after the DNS check's own create, none
  * of which say the zone is out of reach. `unmatched` is records at the check
- * name that Sencho cannot prove it created (none matches the journal, or
- * there is no readable journal to match); `unreadable_journal` is what the view
- * shows for a journal that cannot be read, and the cause when its record name
- * cannot be rebuilt from the control identity.
+ * name that Sencho cannot prove it created (none matches the journal, the
+ * journal kept no content, or there is no readable journal to match);
+ * `too_recent` is a create that may still land, or a journal whose time was
+ * unknown and has just been stamped; `unreadable_journal` is what the view
+ * shows for a column that cannot be read, until the first empty listing
+ * replaces it, and the cause when its record name cannot be rebuilt from the
+ * control identity.
  */
 export type CleanupCause =
   | 'unreachable'
