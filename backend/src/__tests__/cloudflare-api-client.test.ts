@@ -529,6 +529,14 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
       { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3, total_count: 5 } },
       { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
     ]],
+    ['an empty last page of a listing that declares two pages, with no total_count', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2 } },
+      { items: [], info: { page: 2, per_page: 2, total_pages: 2, count: 0 } },
+    ]],
+    ['a page that repeats the items of the page before it, with counts that add up', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
+      { items: [1, 2], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
+    ]],
     ['a page of results larger than the page size an earlier page declared', [
       { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 3 } },
       { items: [2, 3], info: null },

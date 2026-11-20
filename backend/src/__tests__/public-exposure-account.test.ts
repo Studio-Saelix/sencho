@@ -1558,6 +1558,14 @@ describe('a listing that contradicts what it declared, on one page or between pa
       { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2, total_count: 3 } },
       { items: [i[2]], info: { page: 2, per_page: 3, total_pages: 2, total_count: 3 } },
     ]],
+    ['an empty last page of a listing that declares two pages, with no total_count', (i) => [
+      { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2 } },
+      { items: [], info: { page: 2, per_page: 2, total_pages: 2, count: 0 } },
+    ]],
+    ['a page two that repeats page one, with counts that add up', (i) => [
+      { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
+      { items: [i[0], i[1]], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
+    ]],
     ['more results than the page size it declared', (i) => [
       { items: i, info: { page: 1, per_page: 1, total_pages: 1 } },
     ]],

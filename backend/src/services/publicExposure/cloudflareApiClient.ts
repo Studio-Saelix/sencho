@@ -10,7 +10,8 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * of a `messages` entry is kept when it is a string, or an object with a string
  * `message`; `errors` on a success is checked for shape and its text is not read),
  * complete pagination that holds every page to the total_pages, total_count and
- * per_page the listing declared before it, with a page cap, bounded retries with
+ * per_page the listing declared before it (and refuses a repeated item or an empty last
+ * page), with a page cap, bounded retries with
  * full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
  * whole operation, refused redirects, and a process-wide request budget.
@@ -263,9 +264,16 @@ function assertConsistentPage(bounds: ListingBounds, info: CloudflareResultInfo 
   }
 }
 
-/** The collected items, once they match the total any page declared. */
+/** The collected items, once they match the total any page declared and no item came twice (a repeated page would otherwise stand in for the page it hid). */
 function completeListing<T>(items: T[], bounds: ListingBounds): T[] {
   if (bounds.totalCount !== undefined && bounds.totalCount !== items.length) throw contradictoryPaging();
+  const seen = new Set<string>();
+  for (const item of items) {
+    const id = isPlainObject(item) ? item.id : undefined;
+    if (typeof id !== 'string') continue;
+    if (seen.has(id)) throw contradictoryPaging();
+    seen.add(id);
+  }
   return items;
 }
 
@@ -327,7 +335,11 @@ export class CloudflareApiClient {
       assertConsistentPage(bounds, info, response.result.length, page, perPage);
       items.push(...(response.result as T[]));
       if (bounds.totalPages !== undefined) {
-        if (page >= bounds.totalPages) return completeListing(items, bounds);
+        if (page >= bounds.totalPages) {
+          // A listing that declares several pages has items on the last of them.
+          if (bounds.totalPages >= 2 && response.result.length === 0) throw contradictoryPaging();
+          return completeListing(items, bounds);
+        }
         // A page before the last holds a full page: at least the declared page size, and never nothing.
         if (response.result.length < Math.max(1, bounds.perPage ?? 1)) throw contradictoryPaging();
       } else if (response.result.length < Math.min(perPage, bounds.perPage ?? perPage)) {
