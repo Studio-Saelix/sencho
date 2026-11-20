@@ -349,6 +349,59 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.2' });
   });
 
+  it('never moves the retry time backwards when a slow routine re-read fails after a newer read', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    clock += FIVE_MIN;
+    const routineStart = clock;
+    const real = fs.promises.readFile.bind(fs.promises) as (...args: unknown[]) => Promise<string>;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(fs.promises, 'readFile').mockImplementation((async (...args: unknown[]) => {
+      if (calls++ === 0) {
+        await gate;
+        throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      }
+      return real(...args);
+    }) as unknown as typeof fs.promises.readFile);
+
+    const slowRoutine = service.getPinInfo();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    clock += 1000;
+    await service.getPinInfo({ fresh: true });
+    release();
+    await slowRoutine;
+
+    clock = routineStart + FIVE_MIN + 500;
+    await service.getPinInfo();
+    expect(calls).toBe(2);
+  });
+
+  it('returns a routine re-read that finds no image for the service, not the stale pin', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    fs.writeFileSync(coveredFile, 'services:\n  other:\n    image: busybox\n');
+    clock += FIVE_MIN;
+    await expect(service.getPinInfo()).resolves.toBeNull();
+    await expect(service.getPinInfo()).resolves.toBeNull();
+  });
+
+  it('strips control characters from the path in the unreadable-file warning', async () => {
+    const service = setup(['/srv/un\ncovered/compose.yaml'], []);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await service.getPinInfo({ fresh: true });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).not.toContain('\n');
+  });
+
   it('is treated as uncovered when the mapped path is not a regular file', async () => {
     fs.mkdirSync(coveredFile);
     hostFiles.set(coveredFile, compose('saelix/sencho:0.99.0'));
