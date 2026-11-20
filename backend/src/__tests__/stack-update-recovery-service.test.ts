@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockTag = vi.fn().mockResolvedValue(undefined);
+const mockRefuseIfComposeFenced = vi.fn().mockResolvedValue(undefined);
 const mockRemove = vi.fn().mockResolvedValue(undefined);
 const mockListContainers = vi.fn().mockResolvedValue([]);
 const mockInspectContainer = vi.fn();
@@ -37,6 +38,7 @@ vi.mock('../services/FileSystemService', () => ({
       getBaseDir: () => '/test/compose',
       backupStackFiles: vi.fn().mockResolvedValue(undefined),
       restoreStackFiles: vi.fn().mockResolvedValue(undefined),
+      refuseIfComposeFenced: (...args: unknown[]) => mockRefuseIfComposeFenced(...args),
     }),
   },
 }));
@@ -371,6 +373,35 @@ describe('StackUpdateRecoveryService', () => {
       );
       return { outcome, update, failed };
     }
+
+    it('asks the fence for the files the restore up names before any file moves, and moves nothing when one is held', async () => {
+      const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      const composeUp = vi.fn();
+      // The same generation row and stand-ins as the up refusals below; its own run is not this case.
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'clean', fence: true });
+      await outcome.catch(() => undefined);
+      const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+      const restore = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({ restoreFromContext: restore } as never);
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockClear();
+      const begin = vi.mocked((StackUpdateRecoveryService.prototype as unknown as { beginGitOpsRecovery: () => unknown }).beginGitOpsRecovery);
+      begin.mockClear();
+      update.mockClear();
+      failed.mockClear();
+      mockRefuseIfComposeFenced.mockClear();
+      mockRefuseIfComposeFenced.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+
+      await expect(StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(genId, composeUp))
+        .rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack', { pinsComposeFiles: true });
+      expect(RollbackGenerationStore.reconcileInterruptedRestore).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+      expect(composeUp).not.toHaveBeenCalled();
+      expect(begin).not.toHaveBeenCalled();
+      expect(failed).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
 
     it('rethrows it as pre_mutation, unmarked and recorded as such, when the restored files were reverted cleanly', async () => {
       const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'clean' });

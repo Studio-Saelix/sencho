@@ -573,6 +573,38 @@ describe('BlueprintService per-stack lock', () => {
         expect(abandonSpy).toHaveBeenCalledWith('rec-1');
     });
 
+    it('reports a compensation a data restore fence refuses as a refusal, not a failed compensation', async () => {
+        const { apply, deploySpy, compensateSpy } = await setupCaptureApply();
+        const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+        deploySpy.mockRejectedValue(new Error('compose up failed'));
+        compensateSpy.mockRejectedValue(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+        const errors = vi.spyOn(console, 'error');
+        const warns = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+            await expect(apply()).rejects.toThrow(/compose up failed/);
+            const said = (spy: typeof errors) => spy.mock.calls.map(([first]) => String(first));
+            expect(said(errors).filter((line) => line.includes('Recovery compensation failed'))).toEqual([]);
+            expect(said(warns).filter((line) => line.includes('Recovery compensation failed'))).toEqual([]);
+            expect(said(warns).some((line) => line.includes('was refused by a data restore'))).toBe(true);
+        } finally {
+            errors.mockRestore();
+            warns.mockRestore();
+        }
+    });
+
+    it('still logs a compensation that fails for another reason as failed', async () => {
+        const { apply, deploySpy, compensateSpy } = await setupCaptureApply();
+        deploySpy.mockRejectedValue(new Error('compose up failed'));
+        compensateSpy.mockRejectedValue(new Error('restore exploded'));
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            await expect(apply()).rejects.toThrow(/compose up failed/);
+            expect(errors.mock.calls.some(([first]) => String(first).includes('Recovery compensation failed'))).toBe(true);
+        } finally {
+            errors.mockRestore();
+        }
+    });
+
     it('compensates a handed-off recovery row when the deploy fails', async () => {
         const { apply, deploySpy, compensateSpy } = await setupCaptureApply();
         deploySpy.mockRejectedValue(new Error('compose up failed'));

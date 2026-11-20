@@ -1127,6 +1127,19 @@ export class StackUpdateRecoveryService {
     // nothing; the underlying error this used to collapse into a bare `false`
     // cannot happen before the row exists.
     if (!row) return { rolledBack: false, failureClass: 'pre_mutation' };
+    // The restore's up names the root file and its override itself (or a
+    // captured file set, asked at that up's own argv). One a data restore is
+    // overwriting refuses here, before any file moves and before a GitOps
+    // recovery is opened, so a refused restore leaves the generation and the
+    // live files as they were. A fence recorded after this ask is answered at
+    // the up's argv, and the restored files are put back.
+    try {
+      await FileSystemService.getInstance(row.node_id)
+        .refuseIfComposeFenced(row.stack_name, { pinsComposeFiles: true });
+    } catch (error) {
+      if (isDataRestoreFenceError(error)) Object.assign(error, { failureClass: 'pre_mutation' });
+      throw error;
+    }
     // Finish any leftover restore transaction for this generation before a new
     // restore can overwrite pre-restore/ with an already-restored tree.
     if (row.content_path) {
