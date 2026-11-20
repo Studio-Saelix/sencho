@@ -990,6 +990,12 @@ describe('io.sencho.infrastructure', () => {
 
         expect(refusal?.message).toContain('docker compose config timed out');
       });
+
+      it('passes a data restore\'s fence refusal of the render on as itself, not as a render it could not read', async () => {
+        const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+        const fence = new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+        await expect(run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockRejectedValue(fence) }), 'blog')).rejects.toBe(fence);
+      });
     });
   });
 

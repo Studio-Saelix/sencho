@@ -2,8 +2,9 @@ import { spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
+import { holdUntilExit, prepareComposeAdmission } from './composeArgvFence';
 
-export function runDockerCompose(
+export async function runDockerCompose(
   args: string[],
   cwd: string,
   timeoutMs: number,
@@ -26,7 +27,18 @@ export function runDockerCompose(
       }
     }
   }
+  // A validation render opens the candidate's files; a data restore's
+  // directory fence refuses it or waits for it (see prepareComposeAdmission).
+  let lease;
+  try {
+    lease = (await prepareComposeAdmission({ cwd: resolvedCwd, args })).admit();
+  } catch (err) {
+    // The runner answers with an exit result, never a rejection: a refused
+    // validation is a failed one, worded by the fence.
+    return { code: -1, stdout: '', stderr: (err as Error)?.message ?? String(err) };
+  }
   const child = spawn('docker', args, { cwd: resolvedCwd });
+  holdUntilExit(child, lease);
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';

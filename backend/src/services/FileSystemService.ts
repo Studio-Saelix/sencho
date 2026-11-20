@@ -1010,8 +1010,9 @@ export class FileSystemService {
    * cannot be read here, those sources (and the stack `.env`) are asked too:
    * a source a restore holds refuses, and otherwise the selection is not the
    * fence's to answer.
-   * Every override name is asked: Compose and `getOverrideFilename` take the
-   * first one present, so asking each is the safe superset.
+   * The override names are asked in priority order up to the first one
+   * present, which is the one Compose and `getOverrideFilename` take
+   * (`orderedComposeCandidates`).
    */
   private async composeFilesForCommand(
     stackName: string,
@@ -1045,8 +1046,14 @@ export class FileSystemService {
       return { readsRoot: true, others: selection.value.split(selection.pathSeparator).filter((entry) => entry !== '') };
     }
     // An unread selection's layers are not known here, so the root file and
-    // the overrides are what is asked for it.
-    return { readsRoot: true, others: [...unreadSources, ...COMPOSE_OVERRIDE_FILENAMES] };
+    // the override are what is asked for it. The override is the one Compose
+    // and `getOverrideFilename` pick, the first name present; the names before
+    // it are asked too (one that dangles into, or is missing from, a fenced
+    // directory may be mid-swap), and the ones after it are not, because no
+    // command opens a sibling that the winner shadows.
+    const { orderedComposeCandidates } = await import('../helpers/composeExpansionGuard');
+    const overrides = await orderedComposeCandidates(this.resolveStackDir(stackName), COMPOSE_OVERRIDE_FILENAMES);
+    return { readsRoot: true, others: [...unreadSources, ...overrides] };
   }
 
   /**
@@ -2460,6 +2467,59 @@ export class FileSystemService {
     // Write timestamp marker
     await fsPromises.writeFile(path.join(backupDir, '.timestamp'), Date.now().toString(), 'utf-8');
     if (debug) console.debug(`[FileSystemService:debug] Backup completed in ${Date.now() - t0}ms`, { stackName });
+  }
+
+  /**
+   * Register a stack file transaction (a rollback's restore and the revert it
+   * may need, a backup restore and its undo, a files-only Git revert) with a
+   * data restore's directory fences, before its first write, or throw the
+   * fence's refusal. The files asked are the ones it can read or write: the
+   * managed stack files and project env files, `relativePaths` (a recovery
+   * point's own managed set), the files the stack's live Compose selection
+   * opens, and the files each of `invocationPrefixes` (a recovery point's
+   * captured Compose prefix, global flags only) opens, each by every spelling
+   * a link gives it. The caller holds the lease until its writes have settled
+   * and its Compose `up` has exited, so a fence recorded meanwhile waits for it
+   * (`waitForFsWorkOn`) instead of landing between a write and its revert.
+   */
+  async admitStackFileWork(
+    stackName: string,
+    relativePaths: readonly string[] = [],
+    invocationPrefixes: ReadonlyArray<readonly string[]> = [],
+  ): Promise<import('../helpers/composeArgvFence').FsWorkLeaseLike> {
+    const stackDir = this.resolveStackDir(stackName);
+    const names = new Set<string>([...PROTECTED_STACK_FILES, ...relativePaths]);
+    try {
+      for (const f of DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName)) names.add(f);
+    } catch {
+      // A settings read failure: the live selection below still names the env files Compose reads.
+    }
+    const paths: string[] = [];
+    for (const name of names) {
+      if (typeof name !== 'string' || name === '' || !isValidRelativeStackPath(name)) continue;
+      const abs = path.resolve(stackDir, name);
+      if (abs.startsWith(stackDir + path.sep)) paths.push(abs);
+    }
+    const { composeSelectedInputPaths } = await import('../helpers/composeExpansionGuard');
+    const { authoredComposeFileArgs, authoredComposeEnvFileArgs } = await import('../utils/authoredComposeArgs');
+    const prefixes: Array<readonly string[]> = [...invocationPrefixes];
+    try {
+      prefixes.push([
+        ...authoredComposeFileArgs(stackName, this.nodeId),
+        ...await authoredComposeEnvFileArgs(stackName, this.nodeId),
+      ]);
+    } catch {
+      // No live selection to add (an invalid applied spec, say): the managed files above still are.
+    }
+    for (const prefix of prefixes) {
+      try {
+        paths.push(...await composeSelectedInputPaths({ cwd: stackDir, invocation: ['compose', ...prefix] }));
+      } catch {
+        // The selection could not be worked out; its managed files are still asked.
+      }
+    }
+    const { prepareFileWorkAdmission } = await import('../helpers/composeArgvFence');
+    return (await prepareFileWorkAdmission([...new Set(paths)], stackDir)).admit();
   }
 
   async restoreStackFiles(stackName: string): Promise<void> {
