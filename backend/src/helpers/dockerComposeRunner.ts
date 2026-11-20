@@ -32,7 +32,19 @@ export async function runDockerCompose(
   let child: ChildProcessWithoutNullStreams;
   try {
     const admission = await prepareComposeAdmission({ cwd: resolvedCwd, args });
-    child = spawnUnderLease(admission, () => spawn('docker', args, { cwd: resolvedCwd }));
+    child = spawnUnderLease(admission, () => {
+      // The barrier above sits outside this closure, and CodeQL credits only a
+      // guard in the same scope as the sink, so it is repeated here.
+      const sinkCwd = path.resolve(resolvedCwd);
+      if (!sinkCwd.startsWith(managedBase + path.sep)) {
+        if (!sinkCwd.startsWith(secretsBase + path.sep)) {
+          if (!sinkCwd.startsWith(tmpBase + path.sep)) {
+            throw new Error('Invalid working directory');
+          }
+        }
+      }
+      return spawn('docker', args, { cwd: sinkCwd });
+    });
   } catch (err) {
     // The runner answers with an exit result, never a rejection: a refused
     // validation (or a spawn that threw) is a failed one, worded by its cause.

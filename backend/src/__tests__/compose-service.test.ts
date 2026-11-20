@@ -2214,7 +2214,7 @@ describe('ComposeService - deployStack', () => {
   it('withholds Compose output when the deploy runs against a decrypt overlay', async () => {
     const { error, streamed } = await runFailingDeploy({
       source: 'git_apply',
-      overlayDir: '/tmp/git-secrets/1/my-stack/op-1',
+      overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
     });
     expect(error?.message).toBe(WITHHELD_DECRYPTED_COMPOSE_OUTPUT);
     expect(streamed).not.toContain('audit-decrypted-value-marker');

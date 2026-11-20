@@ -880,12 +880,27 @@ export class ComposeService {
         reject(new Error('OPERATION_ABORTED: client disconnected'));
         return;
       }
+      // Canonical inline js/path-injection barrier at the spawn cwd sink: a
+      // Compose command runs in a stack directory under the compose root, a
+      // GitOps decrypt overlay under the git-secrets area, or a temporary
+      // directory. Sequential single-condition guards, because CodeQL's
+      // barrier-guard recognizer only credits that shape, and only when the
+      // guard sits in the same closure as the sink.
+      const sinkCwd = path.resolve(cwd);
+      if (!sinkCwd.startsWith(path.resolve(this.baseDir) + path.sep)) {
+        if (!sinkCwd.startsWith(path.resolve(gitSecretsAreaBase()) + path.sep)) {
+          if (!sinkCwd.startsWith(path.resolve(os.tmpdir()) + path.sep)) {
+            reject(new Error('Invalid working directory'));
+            return;
+          }
+        }
+      }
       let lease: FsWorkLeaseLike | null = null;
       let child: ChildProcessWithoutNullStreams;
       try {
         lease = ready ? ready.admit() : null;
         child = spawn(command, args, {
-          cwd,
+          cwd: sinkCwd,
           env: env ?? {
             ...process.env,
             PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
