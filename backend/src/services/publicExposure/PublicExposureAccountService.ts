@@ -268,7 +268,7 @@ export class PublicExposureAccountService {
           }
           const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
           if (cleanup.cleaned) continue;
-          // A 403 on the zone, for a zone the last complete listing by this token no longer showed, is taken as the zone being out of reach.
+          // A 403 on the zone, for a zone the last complete listing no longer showed, is taken as the zone being out of reach.
           const zoneGone = account.zonesListedAt !== null && zone.lastSeenAt !== account.zonesListedAt;
           if (zoneGone && cleanup.cause === 'zone_refused') {
             abandoned.push(record);

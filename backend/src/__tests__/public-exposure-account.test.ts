@@ -538,15 +538,18 @@ describe('account classification', () => {
       }
       return answer(fake, url, init ?? {});
     }));
-    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).not.toBe('ACCOUNT_NOT_ACCESSIBLE');
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
   });
 
-  it('reports an account-owned token with an invalid account id answer (400, 7003) as not accessible', async () => {
+  it.each([
+    [7003, 'Could not route to /accounts/x/tokens/verify, perhaps your object identifier is invalid?'],
+    [70503, "account with given Tag doesn't exist"],
+  ])('reports an account-owned token whose account verify answers 400 code %i as not accessible', async (code, message) => {
     fake.verifyUser = 401;
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname.includes('/accounts/') && url.pathname.endsWith('/tokens/verify')) {
-        return new Response(JSON.stringify({ success: false, errors: [{ code: 7003, message: 'Could not route to /accounts/x/tokens/verify, perhaps your object identifier is invalid?' }], messages: [], result: null }), { status: 400 });
+        return new Response(JSON.stringify({ success: false, errors: [{ code, message }], messages: [], result: null }), { status: 400 });
       }
       return answer(fake, url, init ?? {});
     }));

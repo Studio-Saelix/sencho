@@ -80,8 +80,9 @@ export interface ZoneProbeInput {
  * Why a check record cleanup did not finish. `zone_refused` is a 403 on the
  * zone's records that is not a location refusal; on its own it does not prove
  * the zone is out of reach, but together with the zone missing from the last
- * complete listing it does. `refused` is a rejected token (401) or a refused
- * location, which say nothing about the zone.
+ * complete listing it does. `refused` is a rejected token (401), a refused
+ * location, or a refused delete right after the DNS check's own create, none
+ * of which say the zone is out of reach.
  */
 export type CleanupCause = 'unreachable' | 'rate_limited' | 'refused' | 'zone_refused' | 'too_recent' | 'unexpected';
 
