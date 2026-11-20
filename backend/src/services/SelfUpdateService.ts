@@ -920,7 +920,10 @@ class SelfUpdateService {
       const content = await handle.readFile('utf8');
       return content.length > COMPOSE_READ_MAX_BYTES ? null : content;
     } finally {
-      await handle.close();
+      // A failed close of a read-only handle must not discard what was read.
+      await handle.close().catch(error => {
+        if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Closing the compose file failed', (error as Error).message);
+      });
     }
   }
 

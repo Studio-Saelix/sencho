@@ -106,8 +106,17 @@ function helperCalls(): unknown[][] {
 }
 
 /** A stand-in for an open file handle that serves `content`. */
-function fakeHandle(content: string): unknown {
-  return { stat: async () => ({ isFile: () => true, size: content.length }), readFile: async () => content, close: async () => undefined };
+function fakeHandle(content: string, over: {
+  isFile?: boolean;
+  size?: number;
+  readFile?: () => Promise<string>;
+  close?: () => Promise<void>;
+} = {}): unknown {
+  return {
+    stat: async () => ({ isFile: () => over.isFile ?? true, size: over.size ?? content.length }),
+    readFile: over.readFile ?? (async () => content),
+    close: over.close ?? (async () => undefined),
+  };
 }
 
 function writeCovered(image: string): void {
@@ -232,7 +241,7 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     expect(helperCalls()).toHaveLength(1);
   });
 
-  it('opens the file without following a symlink or waiting on a FIFO, then checks the open handle', async () => {
+  it('opens the file with the no-follow and non-blocking flags', async () => {
     writeCovered('saelix/sencho:0.99.0');
     const service = setup([coveredFile], [sameMount]);
     const open = vi.spyOn(fs.promises, 'open');
@@ -242,6 +251,60 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     const flags = open.mock.calls[0][1] as number;
     expect(flags & fs.constants.O_NOFOLLOW).toBe(fs.constants.O_NOFOLLOW);
     expect(flags & fs.constants.O_NONBLOCK).toBe(fs.constants.O_NONBLOCK);
+  });
+
+  describe('the open file handle', () => {
+    const setupCovered = () => {
+      writeCovered('saelix/sencho:0.99.0');
+      hostFiles.set(coveredFile, compose('saelix/sencho:0.99.1'));
+      return setup([coveredFile], [sameMount]);
+    };
+    const serve = (handle: unknown) => vi.spyOn(fs.promises, 'open').mockResolvedValue(handle as Awaited<ReturnType<typeof fs.promises.open>>);
+
+    it('is closed once after a successful read', async () => {
+      const close = vi.fn(async () => undefined);
+      serve(fakeHandle(compose('saelix/sencho:0.99.0'), { close }));
+
+      await expect(setupCovered().getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(helperCalls()).toHaveLength(0);
+    });
+
+    it('is closed when reading it throws, and the helper reads the file instead', async () => {
+      const close = vi.fn(async () => undefined);
+      serve(fakeHandle('', { close, readFile: async () => { throw Object.assign(new Error('io'), { code: 'EIO' }); } }));
+
+      await expect(setupCovered().getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(helperCalls()).toHaveLength(1);
+    });
+
+    it('keeps what was read when closing it fails', async () => {
+      serve(fakeHandle(compose('saelix/sencho:0.99.0'), { close: async () => { throw new Error('close failed'); } }));
+
+      await expect(setupCovered().getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+      expect(helperCalls()).toHaveLength(0);
+    });
+
+    it('is closed and treated as uncovered when it is not a plain file', async () => {
+      const close = vi.fn(async () => undefined);
+      const readFile = vi.fn(async () => compose('saelix/sencho:0.99.0'));
+      serve(fakeHandle('', { close, readFile, isFile: false }));
+      const service = setupCovered();
+
+      await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+      expect(readFile).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
+      expect((service as unknown as { pinCache: { needsHelper: boolean } }).pinCache.needsHelper).toBe(true);
+    });
+
+    it('is not read when its size is over the limit', async () => {
+      const readFile = vi.fn(async () => compose('saelix/sencho:0.99.0'));
+      serve(fakeHandle('', { readFile, size: 11 * 1024 * 1024 }));
+
+      await expect(setupCovered().getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+      expect(readFile).not.toHaveBeenCalled();
+    });
   });
 
   it('reads directly when the mount is the host root', async () => {
