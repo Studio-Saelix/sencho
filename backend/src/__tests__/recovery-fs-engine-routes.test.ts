@@ -3087,9 +3087,10 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
     const unrendered = { reason: 'unresolved' as const, service: null, message: 'could not render', renderFailed: true as const };
     const { ComposeService } = await import('../services/ComposeService');
     const rendering = ComposeService.getInstance();
+    const evaluate = vi.fn(async () => unrendered);
     vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
       ...rendering,
-      evaluateDockerEndpoint: async () => unrendered,
+      evaluateDockerEndpoint: evaluate,
       renderConfig: async () => ({
         rendered: JSON.stringify({ name: 'web', services: { app: { image: 'nginx:1' }, db: { image: 'postgres:16' } }, networks: {}, volumes: {} }),
         stderr: '', code: 0, timedOut: false,
@@ -3175,6 +3176,22 @@ describe('the Compose and env editors and the Secrets file sinks under a directo
           expect(res.status, `${label} ${kind}`).toBe(409);
           expect(res.body.code, `${label} ${kind}`).toBe(expected);
           if (kind === 'rollback' && expected === 'data_restore') expect(res.body.failureClass, label).toBe('pre_mutation');
+        }
+        // A deploy asks before its connection check renders the model, so a
+        // fenced file starts no render at all; a clear one keeps the check's answer.
+        evaluate.mockClear();
+        const deployed = await request(app).post('/api/stacks/web/deploy').set('Cookie', adminCookie);
+        expect(deployed.status, `${label} deploy`).toBe(409);
+        expect(deployed.body.code, `${label} deploy`).toBe(expected);
+        if (expected === 'data_restore') {
+          expect(deployed.body.failureClass, `${label} deploy`).toBe('pre_mutation');
+          expect(evaluate, `${label} deploy`).not.toHaveBeenCalled();
+          // An image pull asks before its update policy renders the model.
+          const pulled = await request(app).post('/api/stacks/web/pull-images').set('Cookie', adminCookie);
+          expect(pulled.status, `${label} pull`).toBe(409);
+          expect(pulled.body.code, `${label} pull`).toBe('data_restore');
+        } else {
+          expect(evaluate, `${label} deploy`).toHaveBeenCalled();
         }
         const current = vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-local', gitops_generation_id: 'gen-local' } as never);
         const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');

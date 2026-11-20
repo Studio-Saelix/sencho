@@ -269,7 +269,9 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
             console.warn('[Templates] Rollback of %s skips Docker down: %s', sanitizeForLog(stackName), sanitizeForLog(downErr.message));
           } else {
             dockerDownCompleted = false;
-            dockerDownRefused = isDockerEndpointProtectedError(downErr);
+            // The endpoint guard, or a data restore's fence on a file the down
+            // names: nothing was taken down, so the files stay.
+            dockerDownRefused = isDockerEndpointProtectedError(downErr) || isDataRestoreFenceError(downErr);
             console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
           }
         }

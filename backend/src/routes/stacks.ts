@@ -196,6 +196,24 @@ function updatePolicyReason(policy: { reason: string | null }): string {
 }
 
 /** A refusal sentence that never ends in two periods. */
+/**
+ * Answer 409 `data_restore` (and return true) when a compose file the stack's
+ * next Compose command opens is under a data restore's fence. Asked before a
+ * route's own connection check or policy render, which run Docker Compose over
+ * the same files. Any other failure of the check is left to the route's own
+ * reads, as `refuseIfComposeFenced` leaves it.
+ */
+async function refuseIfComposeFilesFenced(req: Request, res: Response, stackName: string): Promise<boolean> {
+  try {
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
+    return false;
+  } catch (error) {
+    if (!isDataRestoreFenceError(error)) throw error;
+    res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+    return true;
+  }
+}
+
 function updatePolicyRefusalText(prefix: string, policy: { reason: string | null }): string {
   const reason = updatePolicyReason(policy);
   return `${prefix}: ${reason}${reason.endsWith('.') ? '' : '.'}`;
@@ -2502,6 +2520,10 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  // A compose file the deploy opens that a data restore is overwriting refuses
+  // it before the connection check and the policy gate render the model: those
+  // renders are Docker Compose reading the same files.
+  if (await refuseIfComposeFilesFenced(req, res, stackName)) return;
   if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'up' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
@@ -2624,6 +2646,9 @@ stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response)
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'image_pull')) return;
   try {
+    // A compose file the pull opens that a data restore is overwriting refuses
+    // it before the update policy renders the model (the catch answers it).
+    await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName);
     // Pull images refreshes the stack's images, so the operator's own click is
     // still a manual update: it is refused when any rendered service is disabled.
     const policy = await evaluateUpdatePolicyFor(
@@ -3790,9 +3815,10 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       // under a data restore's fence after the pre-check: refused before
       // Compose ran. The backup path puts its restored files back here, and
       // the answer says whether they could be; a generation's restore reverts
-      // its own files and rethrows only once they are back (pre_mutation). The
-      // live gates were already ended by the generation's up callback, as for
-      // the Docker endpoint guard's refusal of the same up.
+      // its own files and rethrows only once they are back (pre_mutation). When
+      // the refusal came at the generation's up, the live gates were already
+      // ended by its callback, as for the Docker endpoint guard's refusal of
+      // the same up; one refused before the restore ended none.
       let failureClass: 'pre_mutation' | 'post_mutation' = 'pre_mutation';
       if (revertRestore) {
         try {

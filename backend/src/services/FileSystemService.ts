@@ -940,9 +940,10 @@ export class FileSystemService {
   /**
    * Throw the fence's refusal when a compose file the stack's next Compose
    * command opens sits in, or links into, a directory a data restore is
-   * overwriting: asked up front by an update or a rollback that would
-   * otherwise write gate evidence, restore files, or spend a checked
-   * observation before its own read is refused. Any other read failure is not
+   * overwriting: asked up front by an update, a deploy, an image pull, a
+   * rollback, and a recovery generation's restore, which would otherwise
+   * write gate evidence, start Compose, restore files, or spend a checked
+   * observation before their own read is refused. Any other read failure is not
    * this check's to answer: it is neither logged nor thrown here, and the
    * caller reports it from its own read. A fence recorded after this check is
    * still answered by that later read, and by the assembled argv
@@ -958,7 +959,7 @@ export class FileSystemService {
    *
    * `pinsComposeFiles` is set by a caller whose command names the discovered
    * files with `-f` whatever the stack's Mesh state: a recovery up, which
-   * layers the recovery override last.
+   * layers the recovery override last, and a digest-pinned deploy up.
    */
   async refuseIfComposeFenced(stackName: string, options: { pinsComposeFiles?: boolean } = {}): Promise<void> {
     let stackDir: string;

@@ -1,8 +1,9 @@
 /**
- * Every Compose argv Sencho assembles (an `up`, and equally the `config`,
+ * Every argv the Compose builders assemble (an `up`, and equally the `config`,
  * `pull` or `build` a deploy, an update or an image pull runs first) is asked
- * against a data restore's fence once it is assembled, and a deploy and an
- * image pull ask before they run any of them: the recovery, Mesh, Pilot and digest-pin layers
+ * against a data restore's fence once it is assembled, when it names files
+ * with `-f`. A deploy, an update and an image pull also ask up front, before
+ * they start any Compose process. The recovery, Mesh, Pilot and digest-pin layers
  * name the root file and the first override with `-f` themselves, which turns
  * COMPOSE_FILE off, so the file list a caller asked up front is not the one
  * Compose opens.
@@ -217,6 +218,22 @@ describe('the fence asks the files an assembled Compose argv names', () => {
         expect(spawns.capture).not.toHaveBeenCalled();
       });
 
+      it(`refuses an update with a ${kind} layer before any Compose process, capture or GitOps deploy`, async () => {
+        await withLayer(kind);
+        holdFence();
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        const capture = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCandidate');
+        const svc = ComposeService.getInstance(NODE);
+        const begin = vi.spyOn(svc as unknown as { beginGitOpsDeploy: () => null }, 'beginGitOpsDeploy');
+        const spawns = watchSpawns(svc);
+        const error = await refusal(svc.updateStack('app'));
+        expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+        expect(capture).not.toHaveBeenCalled();
+        expect(begin).not.toHaveBeenCalled();
+        expect(spawns.execute).not.toHaveBeenCalled();
+        expect(spawns.capture).not.toHaveBeenCalled();
+      });
+
       it(`refuses an image pull with a ${kind} layer before docker compose pull`, async () => {
         await withLayer(kind);
         holdFence();
@@ -246,10 +263,23 @@ describe('the fence asks the files an assembled Compose argv names', () => {
       // Past the connection check (its hash is asked above), a plain deploy
       // is refused at its up's argv.
       vi.spyOn(svc, 'evaluateDockerEndpoint').mockResolvedValue(null);
+      const begin = vi.spyOn(svc as unknown as { beginGitOpsDeploy: () => null }, 'beginGitOpsDeploy');
       const deployed = await refusal(svc.deployStack('app', undefined, false));
       expect(isDataRestoreFenceError(deployed), String(deployed)).toBe(true);
+      // The up's argv is built before a GitOps deploy is opened, so the refusal records none.
+      expect(begin).not.toHaveBeenCalled();
       expect(spawns.execute).not.toHaveBeenCalled();
       expect(spawns.capture).not.toHaveBeenCalled();
+    });
+
+    it('answers a fence refusal of the connection check as the fence, not as a check that could not run', async () => {
+      const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+      const svc = ComposeService.getInstance(NODE);
+      vi.spyOn(svc, 'evaluateDockerEndpoint').mockRejectedValue(new DataRestoreFenceError(fenced, 'browse', 'directory'));
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const inner = svc as unknown as { assertDockerEndpointSafe(stack: string, mutation: { kind: 'up' }): Promise<void> };
+      const error = await refusal(inner.assertDockerEndpointSafe('app', { kind: 'up' }));
+      expect(isDataRestoreFenceError(error), String(error)).toBe(true);
     });
 
     it('deploys a stack whose fence is on another directory', async () => {

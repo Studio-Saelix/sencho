@@ -1702,9 +1702,9 @@ export class BlueprintService {
                     // surfaces.
                     if (recoveryId !== null) {
                         try {
-                            // A compose file the restore's up names that a
-                            // data restore is overwriting refuses it before
-                            // any file moves (compensateWithCandidate asks).
+                            // A data restore overwriting a compose file the
+                            // restore's up names refuses it before any file
+                            // moves (compensateWithCandidate asks).
                             const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
                             const recovered = await StackUpdateRecoveryService.getInstance().compensateWithCandidate(
                                 recoveryId,

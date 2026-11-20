@@ -181,7 +181,13 @@ describe('a refused lifecycle request', () => {
     expect(res.body.failureClass).toBe('pre_mutation');
     // No recovery generation is current here (`getCurrent` answers undefined),
     // so the rollback restores a backup whose deploy names no recovery layer.
-    expect(fenced).toHaveBeenCalledWith('infra', url.endsWith('/rollback') ? { pinsComposeFiles: false } : {});
+    if (url.endsWith('/deploy')) {
+      // A deploy asks before its connection check renders anything.
+      expect(fenced).toHaveBeenCalledWith('infra');
+      expect(mockEvaluate).not.toHaveBeenCalled();
+    } else {
+      expect(fenced).toHaveBeenCalledWith('infra', url.endsWith('/rollback') ? { pinsComposeFiles: false } : {});
+    }
     expect(logged).not.toHaveBeenCalled();
     expect(mockDeployStack).not.toHaveBeenCalled();
     expect(mockUpdateStack).not.toHaveBeenCalled();

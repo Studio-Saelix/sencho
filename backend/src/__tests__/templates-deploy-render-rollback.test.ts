@@ -276,6 +276,33 @@ describe('POST /api/templates/deploy when the rollback teardown is refused', () 
   });
 });
 
+describe('POST /api/templates/deploy when a data restore fence refuses the rollback teardown', () => {
+  it('keeps the stack files, because nothing was taken down, and reports no rollback', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new DataRestoreFenceError('/srv/data', 'browse', 'directory'),
+    );
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'fenced-down',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'fenced-down', template: minimalTemplate });
+
+    expect(res.body.rolledBack).toBe(false);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).toContain('fenced-down');
+  });
+});
+
 describe('POST /api/templates/deploy refused by the alias-expansion guard', () => {
   const REFUSAL = 'Compose file "compose.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
 

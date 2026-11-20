@@ -530,7 +530,9 @@ export class ComposeService {
    * an image pull opens, before the operation starts any Compose process (the
    * required-env render, the endpoint guard's `config --hash`, the capture's
    * `config --quiet`, a pull) and before it opens a GitOps deploy operation, so
-   * a fence already held is a refusal that ran nothing and recorded nothing.
+   * a fence already held is refused before this method starts any Compose
+   * process or records anything. (The deploy and image-pull routes ask before
+   * their own connection check and policy render, too.)
    * On the live stack this is the fence's own file list for the command
    * (`FileSystemService.refuseIfComposeFenced`: an applied spec's files, the
    * root and overrides a Mesh or Pilot layer pins, or a COMPOSE_FILE
@@ -643,8 +645,8 @@ export class ComposeService {
     );
     args.push(...action);
     // Every command built here opens the files its argv names, a `config`
-    // render or a `pull` as much as an `up`, so each is asked against a data
-    // restore's fence before any Compose process starts.
+    // render or a `pull` as much as an `up`, so each argv that names files
+    // with `-f` is asked against a data restore's fence before it is spawned.
     await refuseIfComposeArgvFenced(stackDirOverride ?? path.join(this.baseDir, stackName), args);
     // Every command built here runs Compose, which expands YAML aliases with
     // no bound. The check is last, after every layer is appended, so it sees
@@ -1307,6 +1309,9 @@ export class ComposeService {
         )) {
           throw err;
         }
+        // A file the render names is under a data restore's fence: the
+        // render did not start, and the fence answers for the deploy.
+        if (isDataRestoreFenceError(err)) throw err;
         return; // a launch failure is not a missing variable
       }
       // A render that resolved reports no required-variable error at all, so
@@ -1804,7 +1809,11 @@ export class ComposeService {
     // at all), so recovery of an interrupted attempt finds this deploy's
     // rows by exact id; every other caller lets an id be minted here,
     // unchanged.
-    const gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
+    // Opened once the up's argv is assembled, as in updateStack: a data
+    // restore's fence refusing a file that argv names records no failed
+    // deploy, and neither does any other failure before it.
+    // Assigned inside the registry-auth callback, so the type is held open here.
+    let gitopsDeploy = null as GitOpsDeployHandle | null;
     let composeHandedOff = false;
 
     try {
@@ -1831,6 +1840,7 @@ export class ComposeService {
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
+          gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
           // The notice runs before the gates are superseded: a crash inside this
           // bounded, best-effort check must not leave a running workload with its
           // gate already retired.
@@ -3303,7 +3313,6 @@ export class ComposeService {
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, fileAndEnvPrefix);
     }
-    await refuseIfComposeArgvFenced(stackDir, fileAndEnvPrefix);
     await assertComposeInputsWithinExpansionLimits({
       cwd: stackDir,
       invocation: fileAndEnvPrefix,
