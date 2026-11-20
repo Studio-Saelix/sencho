@@ -34,8 +34,11 @@ const optionalCounter = (v: unknown): number | null =>
  * zero. The caller drops a rejected frame: it must neither publish a metric nor
  * count as proof that the stream recovered. Counters Docker omits on some
  * runtimes (system CPU time, online CPUs, per-interface byte counts) may be
- * absent or null and read as 0. A null network entry throws, which the caller
- * reports as a parse failure.
+ * absent or null and read as 0. A frame whose derived CPU percentage or network
+ * totals overflow to Infinity or NaN, although every counter is finite, is also
+ * rejected. A CPU total that went backwards (a counter reset or a restart) is a
+ * valid frame and reads 0%, never a negative percentage. A null network entry
+ * throws, which the caller reports as a parse failure.
  */
 function readStatsSample(data: {
   cpu_stats?: { cpu_usage?: { total_usage?: unknown }; system_cpu_usage?: unknown; online_cpus?: unknown };

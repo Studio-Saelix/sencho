@@ -574,6 +574,8 @@ describe('useContainerStats', () => {
       }));
       const rateRows: Array<[string, number, number, string]> = [
         ['under a byte', 0.5, 0.25, '0.5 B/s ↓ / 0.25 B/s ↑'],
+        ['a hundredth of a byte', 0.001, 0.01, '0 B/s ↓ / 0.01 B/s ↑'],
+        ['just under a megabyte', 1024 * 1024 - 1, 1024 * 1024 - 1, '1024 KB/s ↓ / 1024 KB/s ↑'],
         ['a kilobyte', 2048, 1024, '2 KB/s ↓ / 1 KB/s ↑'],
         ['a terabyte', 2 * 1024 ** 4, 1024 ** 4, '2 TB/s ↓ / 1 TB/s ↑'],
         ['a petabyte', 3 * 1024 ** 5, 1024 ** 5, '3 PB/s ↓ / 1 PB/s ↑'],
@@ -587,7 +589,6 @@ describe('useContainerStats', () => {
         act(() => { vi.advanceTimersByTime(1500); });
 
         expect(result.current.stats['c1'].net).toBe(net);
-        expect(result.current.stats['c1'].net).not.toMatch(/undefined|NaN|Infinity/);
         warnSpy.mockRestore();
       });
 
