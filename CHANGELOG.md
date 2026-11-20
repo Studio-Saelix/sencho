@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-20)
 
 
+### Highlights
+
+<!-- highlights-hash: 01e2786d0c1bcef4 -->
+
+Node bootstrap is now available as a read-only preflight followed by an approved plan that enrolls the Pilot, and a bootstrapped Pilot is verified as ready before it is reported that way. The node management menu ties this together. Recovery gains more control over saved points: you can browse and download a point's contents, and restore a point over its own volume. Secrets bundles mask their values by default with one key revealed at a time, and every dismissed findings list now opens in a sheet from its count, including fleet readiness.
+
+The assurance work adds a Compose source model that findings are located on, plus a canonical rule registry with normalized findings. Security scans lead the diff with a single answer and state each fact once, and an image's exposure intent can be set from its Network exposed label. Socket discovery now finds Docker socket proxies and direct consumers per node. The stack editor opens from tag-only update rows, and readiness facts there are stated once.
+
+Networking saw a cluster of corrections: upper-case port protocols are folded before comparison, ports with a templated host side are read correctly, topology container ports render from host port facts, tunnel badges are keyed by full path identity, and network references are validated before the legacy inspect call. The topology refresh control stays visible while reloading. GitOps now ranks a failed deploy as the row's urgent reason, reports refused Retry and Resume instead of success, and hides the update review from sessions without stack edit. A crash-looping stack can be stopped from the stack page with one alert per loop, and updates no longer claim an all-clear before the first readiness load answers.
+
+On the security side, registry credentials are redacted from Compose Doctor log lines and drift image warnings, and a redacted keyword secret keeps its closing parenthesis. Compose refuses files whose YAML aliases expand without bound. The recovery helper and source-built CLI binaries move to a newer x/net floor, and builds use Go 1.27.4 with a raised containerd floor. Smaller fixes cover audit naming for fleet restore-all, the protected service returned on stop and restart refusals, a cancelled recovery download no longer feeding its sink, the Encrypt archives switch showing on while its passphrase is pending, and fleet last seen shown as a real age on mobile.
+
 ### Added
 
 * **assurance:** author the Compose source model and locate findings on it ([#2253](https://github.com/Studio-Saelix/sencho/issues/2253)) ([a1e41f7](https://github.com/Studio-Saelix/sencho/commit/a1e41f7cda7df4c4ede974683379fe28e7c5d6ab))
