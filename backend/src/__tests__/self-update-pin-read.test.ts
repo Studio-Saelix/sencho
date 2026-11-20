@@ -52,6 +52,7 @@ const overrideFile = '/srv/uncovered/override.yaml';
 const FIVE_MIN = 5 * 60 * 1000;
 const TICK = 30_000;
 const HOUR = 60 * 60 * 1000;
+const T0 = 1_000_000;
 
 const sameMount = { source: coveredDir, destination: coveredDir };
 
@@ -63,7 +64,7 @@ function compose(image: string): string {
 
 /** Contents the fake helper container serves for a host path. */
 const hostFiles = new Map<string, string>();
-let clock = 1_000_000;
+let clock = T0;
 
 type Mount = { source: string; destination: string };
 type Internals = {
@@ -118,7 +119,7 @@ beforeEach(() => {
   fs.mkdirSync(siblingDir, { recursive: true });
   fs.mkdirSync(outsideDir, { recursive: true });
   hostFiles.clear();
-  clock = 1_000_000;
+  clock = T0;
   vi.spyOn(Date, 'now').mockImplementation(() => clock);
   mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
     if (args[0] === 'run' && args.includes('cat')) {
@@ -275,6 +276,7 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await service.getPinInfo({ fresh: true });
 
     const readFile = vi.spyOn(fs.promises, 'readFile').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     clock += FIVE_MIN;
     for (let tick = 0; tick < 5; tick++) {
       clock += TICK;
@@ -285,6 +287,9 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await service.getPinInfo();
     expect(readFile).toHaveBeenCalledTimes(2);
     expect(helperCalls()).toHaveLength(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(coveredFile));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
   });
 
   it('does not let a routine read that finishes late overwrite a newer fresh read', async () => {
@@ -312,6 +317,34 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.2' });
     release();
     await late;
+
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.2' });
+  });
+
+  it('does not let a failing routine re-read make an in-flight fresh read look stale', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    clock += FIVE_MIN;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(fs.promises, 'readFile').mockImplementation((async () => {
+      if (calls++ === 0) {
+        await gate;
+        return compose('saelix/sencho:0.99.2');
+      }
+      throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    }) as unknown as typeof fs.promises.readFile);
+
+    const fresh = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    clock += 1000;
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    release();
+    await fresh;
 
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.2' });
   });
@@ -369,13 +402,13 @@ describe('a Compose file no bind mount covers', () => {
     expect(helperCalls()).toHaveLength(1);
 
     for (let elapsed = TICK; elapsed < HOUR; elapsed += TICK * 20) {
-      clock = 1_000_000 + elapsed;
+      clock = T0 + elapsed;
       await expect(service.getPinInfo()).resolves.toBeNull();
     }
     expect(helperCalls()).toHaveLength(1);
 
     hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
-    clock = 1_000_000 + HOUR;
+    clock = T0 + HOUR;
     await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
     expect(helperCalls()).toHaveLength(2);
 
@@ -392,7 +425,9 @@ describe('a Compose file no bind mount covers', () => {
     await service.getPinInfo({ fresh: true });
 
     hostFiles.delete(uncoveredFile);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(uncoveredFile));
     clock += 2 * FIVE_MIN;
     await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     expect(helperCalls()).toHaveLength(2);

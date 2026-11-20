@@ -15,6 +15,7 @@ import {
 import { resolveDockerEndpointProvider, type DockerEndpointContainer } from './DockerEndpointProvider';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
   ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
   ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS,
@@ -97,7 +98,7 @@ type DirectRead =
   /** No usable mount exposes it: not mounted, a single-file mount, a path leaving the mount, or a file that is not plain or is oversized. */
   | { kind: 'uncovered' }
   /** A mount exposes it but this read failed (permissions, a file mid-rename). */
-  | { kind: 'failed' };
+  | { kind: 'failed'; reason: string };
 
 /** Result of reading every config file; `info` is null when none of the files it read sets the service image. */
 interface ComposeRead {
@@ -454,7 +455,7 @@ class SelfUpdateService {
     info: ResolvedComposeImage | null;
     /** When the read behind `info` started; a read that started earlier never replaces it. */
     at: number;
-    /** When a routine read last looked at the files, so a failing re-read is retried once per TTL. */
+    /** When the files were last read by any read; a failing routine re-read also stamps it, so it is retried once per TTL. */
     checkedAt: number;
     /** True when at least one config file cannot be read directly, so only the helper can refresh it. */
     needsHelper: boolean;
@@ -813,7 +814,8 @@ class SelfUpdateService {
     if (cache) {
       const expired = Date.now() - cache.checkedAt >= PIN_CACHE_TTL_MS;
       if (cacheOnly || !expired || cache.needsHelper) return cache.info;
-      return (await this.readComposeImage(false))?.info ?? cache.info;
+      const read = await this.readComposeImage(false);
+      return read ? read.info : cache.info;
     }
     if (cacheOnly) return null;
     if (this.pinInflight) return (await this.pinInflight)?.info ?? null;
@@ -845,8 +847,8 @@ class SelfUpdateService {
     const startedAt = Date.now();
     if (allowHelper) this.lastFullReadAt = startedAt;
     const files: { filePath: string; content: string }[] = [];
+    const unread: string[] = [];
     let needsHelper = false;
-    let complete = true;
     for (const raw of ctx.configFiles.split(',')) {
       const filePath = raw.trim();
       if (!filePath) continue;
@@ -856,17 +858,17 @@ class SelfUpdateService {
       if (content === null && allowHelper) content = await this.readConfigFileViaHelper(filePath, ctx);
       if (content === null) {
         if (!allowHelper) {
-          this.noteFailedRoutineRead(startedAt);
+          this.noteFailedRoutineRead(startedAt, filePath, direct.kind === 'failed' ? direct.reason : 'not readable directly');
           return null;
         }
-        complete = false;
+        unread.push(filePath);
         continue;
       }
       files.push({ filePath, content });
     }
     const info = resolveServiceImageFromContents(files, ctx.serviceName);
-    if (!complete) {
-      console.warn('[SelfUpdate] Could not read every Compose config file; the image pin was not updated from this read.');
+    if (unread.length > 0) {
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the image pin was not updated from this read.`);
     } else if (!this.pinCache || this.pinCache.at <= startedAt) {
       this.pinCache = { info, at: startedAt, checkedAt: startedAt, needsHelper };
       this.routineReadWarned = false;
@@ -875,11 +877,11 @@ class SelfUpdateService {
   }
 
   /** A routine read could not read a file directly: keep the cache, retry after the TTL, log once. */
-  private noteFailedRoutineRead(at: number): void {
-    if (this.pinCache) this.pinCache.checkedAt = at;
+  private noteFailedRoutineRead(startedAt: number, filePath: string, reason: string): void {
+    if (this.pinCache) this.pinCache.checkedAt = Math.max(this.pinCache.checkedAt, startedAt);
     if (this.routineReadWarned) return;
     this.routineReadWarned = true;
-    console.warn('[SelfUpdate] Could not re-read the Compose file directly; keeping the last known image pin until it can be read.');
+    console.warn(`[SelfUpdate] Could not re-read ${sanitizeForLog(filePath)} directly (${sanitizeForLog(reason)}); keeping the last known image pin until it can be read.`);
   }
 
   /** Read a config file through one of Sencho's own bind mounts. A single-file
@@ -900,7 +902,7 @@ class SelfUpdateService {
       return content.length > COMPOSE_READ_MAX_BYTES ? { kind: 'uncovered' } : { kind: 'read', content };
     } catch (error) {
       if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Direct compose read failed', filePath, (error as Error).message);
-      return { kind: 'failed' };
+      return { kind: 'failed', reason: (error as NodeJS.ErrnoException).code ?? (error as Error).message };
     }
   }
 

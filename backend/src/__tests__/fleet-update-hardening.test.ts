@@ -466,6 +466,17 @@ describe('a remote whose cached pin classification says the update is blocked', 
     expect(trackerStatus()).toBe('failed');
   });
 
+  it('reports a hardened peer that answers update_blocked as failed by update-all', async () => {
+    mockTarget();
+    staleBlocked({ imageChannel: 'hardened' });
+    mockRemoteUpdateAnswer(blockedAnswer);
+
+    const res = await updateAll();
+
+    expect(res.body.failed).toEqual([expect.objectContaining({ nodeId: proxyNodeId, code: 'update_blocked' })]);
+    expect(res.body.skipped).toEqual([]);
+  });
+
   it('is updated by update-all when the node accepts', async () => {
     mockTarget();
     staleBlocked();
@@ -522,6 +533,22 @@ describe('a remote whose cached pin classification says the update is blocked', 
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('update_blocked');
       expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(false);
+    });
+
+    it('still reaches a hardened peer, which answers for itself', async () => {
+      mockTarget();
+      staleBlocked({ imageChannel: 'hardened' });
+      const fetchSpy = await noTarget();
+
+      const single = await updateRemote();
+      expect(single.status).not.toBe(409);
+      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(true);
+
+      fetchSpy.mockClear();
+      FleetUpdateTrackerService.getInstance().delete(proxyNodeId);
+      const all = await updateAll();
+      expect(all.body.skipped).toEqual([]);
+      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(true);
     });
 
     it('skips the node in update-all from the cached flag without calling it', async () => {

@@ -335,7 +335,8 @@ function cachedPinBlocksUpdate(meta: RemotePinMeta, target: string | undefined):
 /**
  * A remote's own refusal because its pin blocks the update. Its other
  * `update_blocked` answers (compose file unreadable, self-update unavailable) are
- * real failures and keep their own reason, so the cached flag must agree.
+ * real failures and keep their own reason, so a refusal counts as a pin refusal
+ * only when the cached flag also says the pin blocks.
  */
 function isRemotePinRefusal(meta: RemotePinMeta, failure: { code?: string }): boolean {
   return failure.code === 'update_blocked' && meta.updateBlocked && meta.imageChannel !== 'hardened';
