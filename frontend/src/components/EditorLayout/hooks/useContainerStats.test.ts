@@ -352,6 +352,11 @@ describe('useContainerStats', () => {
           cpu_stats: { cpu_usage: { total_usage: 1e308 }, system_cpu_usage: 1e-300, online_cpus: 1 },
           precpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 0 },
         }))],
+        // The clamp of a backwards CPU total must not turn this overflow into 0%.
+        ['counters that overflow to a negative infinite CPU reading', JSON.stringify(frame({
+          cpu_stats: { cpu_usage: { total_usage: -1e308 }, system_cpu_usage: 1e-300, online_cpus: 1 },
+          precpu_stats: { cpu_usage: { total_usage: 1e308 }, system_cpu_usage: 0 },
+        }))],
         ['a nonnumeric online CPU count', JSON.stringify(frame({
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000, online_cpus: 'two' },
         }))],
@@ -510,6 +515,19 @@ describe('useContainerStats', () => {
         ['no current system CPU time beside a previous one', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, online_cpus: 4 },
         }, '0.00%'],
+        // A CPU total that went backwards (a counter reset or a restart) is an
+        // interval with no usage: it reads 0.00%, never a negative percentage, and
+        // a drop too small to show still must not render as -0.00%.
+        ['a CPU total that went backwards', {
+          cpu_stats: { cpu_usage: { total_usage: 50 }, system_cpu_usage: 2000, online_cpus: 1 },
+        }, '0.00%'],
+        ['a CPU total that went backwards on four online CPUs', {
+          cpu_stats: { cpu_usage: { total_usage: 0 }, system_cpu_usage: 2000, online_cpus: 4 },
+        }, '0.00%'],
+        ['a CPU total that dropped by less than a hundredth of a percent', {
+          cpu_stats: { cpu_usage: { total_usage: 99.99 }, system_cpu_usage: 2000000, online_cpus: 1 },
+          precpu_stats: { cpu_usage: { total_usage: 100 }, system_cpu_usage: 1000 },
+        }, '0.00%'],
         // The online CPU count is optional: absent, null or zero scales by one CPU.
         ['a positive CPU delta with no online CPU count', {
           cpu_stats: { cpu_usage: { total_usage: 200 }, system_cpu_usage: 2000 },
@@ -532,6 +550,44 @@ describe('useContainerStats', () => {
 
         expect(result.current.error).toBeNull();
         expect(result.current.stats['c1']).toMatchObject({ cpu, ram: '1.00 MB' });
+        warnSpy.mockRestore();
+      });
+
+      it('keeps a reset CPU total out of the history as a nonnegative point', () => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => {
+          MockWS.instances[0].onmessage?.({ data: JSON.stringify(frame({
+            cpu_stats: { cpu_usage: { total_usage: 50 }, system_cpu_usage: 2000, online_cpus: 1 },
+          })) });
+        });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.stats['c1'].history.cpu).toEqual([0]);
+        warnSpy.mockRestore();
+      });
+
+      // The network rate is the change in the byte counters between two frames, so
+      // each row sends a baseline frame and then a frame that moves the counters by
+      // the given amount. The unit must always be a real one.
+      const netFrame = (rx: number, tx: number) => JSON.stringify(frame({
+        networks: { eth0: { rx_bytes: rx, tx_bytes: tx } },
+      }));
+      const rateRows: Array<[string, number, number, string]> = [
+        ['under a byte', 0.5, 0.25, '0.5 B/s ↓ / 0.25 B/s ↑'],
+        ['a kilobyte', 2048, 1024, '2 KB/s ↓ / 1 KB/s ↑'],
+        ['a terabyte', 2 * 1024 ** 4, 1024 ** 4, '2 TB/s ↓ / 1 TB/s ↑'],
+        ['a petabyte', 3 * 1024 ** 5, 1024 ** 5, '3 PB/s ↓ / 1 PB/s ↑'],
+        ['an exabyte', 1024 ** 6, 1024 ** 6, '1 EB/s ↓ / 1 EB/s ↑'],
+        ['more than the largest unit', 2048 * 1024 ** 6, 1024 ** 6, '2048 EB/s ↓ / 1 EB/s ↑'],
+      ];
+      it.each(rateRows)('renders a network rate of %s with a unit', (_name, rxDelta, txDelta, net) => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onmessage?.({ data: netFrame(0, 0) }); });
+        act(() => { MockWS.instances[0].onmessage?.({ data: netFrame(rxDelta, txDelta) }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.stats['c1'].net).toBe(net);
+        expect(result.current.stats['c1'].net).not.toMatch(/undefined|NaN|Infinity/);
         warnSpy.mockRestore();
       });
 

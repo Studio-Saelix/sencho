@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContainerInfo, ContainerStatsEntry } from '../EditorView';
 
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  // The unit index is clamped: a fraction of a byte would index below B, and a
+  // rate past the last unit would index past it, so either rendered "undefined".
+  const i = Math.min(BYTE_UNITS.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + BYTE_UNITS[i];
 }
 
 interface StatsSample {
@@ -72,12 +75,17 @@ function readStatsSample(data: {
   }
 
   const systemDelta = systemNow - systemPrev;
-  const cpuPercent = systemDelta > 0
+  const rawCpuPercent = systemDelta > 0
     ? ((cpuTotal - preCpuTotal) / systemDelta) * (onlineCpus || 1) * 100
     : 0;
-  // cpuPercent, rx and tx are derived, so they can still overflow to Infinity or
-  // NaN although every input is finite.
-  if (![cpuPercent, rx, tx].every(Number.isFinite)) return null;
+  // rawCpuPercent, rx and tx are derived, so they can still overflow to Infinity
+  // or NaN although every input is finite.
+  if (![rawCpuPercent, rx, tx].every(Number.isFinite)) return null;
+  // A container restart or a counter reset makes the CPU total go backwards. That
+  // frame is a valid reading of "no usage this interval", so it reads as 0, as
+  // the byte rates do, instead of a negative percentage. The clamp follows the
+  // finiteness check so that an overflow is still rejected, not turned into 0.
+  const cpuPercent = Math.max(0, rawCpuPercent);
   return { cpuPercent, memBytes: memUsage, rx, tx };
 }
 
