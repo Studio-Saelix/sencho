@@ -13,18 +13,20 @@ import type { AccountScopes, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDn
  * It maps Cloudflare's answers to Sencho's named states and stores nothing;
  * the account service persists what it returns.
  *
- * Several mappings here are assumptions until the real-account run settles
- * them (ADR §9, Q1): the location-refusal code and message; that a token
- * whose account listing is refused can still be checked through the
- * account-scoped probes; that the account verify answers 404 for an account
- * id the token does not belong to (a 403 there is read as a rejected token);
- * and that a deleted zone answers 404.
+ * A real-account run settled two mappings (ADR §9, Q1). Cloudflare answers a
+ * plain missing permission with code 9109, the code its location refusal
+ * uses too, so only the message tells them apart. A token without account
+ * read gets an empty `/accounts` listing, not a refusal, so a missing id there
+ * proves nothing on its own; a mistyped account id makes the zone listing
+ * answer 400 with code 70503. Still assumed: that the account verify answers
+ * 404 for an account id the token does not belong to (a 403 there is read as
+ * a rejected token), and that a deleted zone answers 404.
  */
 
-/** Cloudflare error code for a token used from an address its IP filter does not allow (assumed; see Q1). */
-const LOCATION_REFUSED_CODE = 9109;
-/** The message Cloudflare sends with that refusal (assumed; see Q1). */
+/** The message Cloudflare sends with a token used from an address its IP filter does not allow. Its code, 9109, is shared with plain refusals. */
 const LOCATION_REFUSED_MESSAGE = /cannot use the access token from location/i;
+/** Cloudflare's code when a zone listing filters on an account id it does not know ("account with given Tag doesn't exist"). */
+const ACCOUNT_UNKNOWN_CODE = 70503;
 const MAX_PARALLEL_DNS_PROBES = 4;
 /** Cloudflare object ids are 32 hex characters; anything else never reaches a request path. */
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
@@ -119,7 +121,7 @@ function stop(outcome: FailedOutcome, detail: string | null): CheckStop {
 }
 
 function isLocationRefusal(error: CloudflareApiError): boolean {
-  return error.cfCodes.includes(LOCATION_REFUSED_CODE) || LOCATION_REFUSED_MESSAGE.test(error.message);
+  return LOCATION_REFUSED_MESSAGE.test(error.message);
 }
 
 /** The state a transport-level failure stops a check with, or null for a refusal the caller classifies. */
@@ -369,8 +371,9 @@ export class CloudflareAccountAdapter {
       if (isRefusal(error)) return { listed: false, name: null };
       throw error;
     }
+    // A token without account read lists no accounts: an id missing here is decided by the account-scoped probes.
     const match = accounts.find((a) => a.id === accountId);
-    if (!match) throw stop('account_not_accessible', null);
+    if (!match) return { listed: false, name: null };
     return { listed: true, name: typeof match.name === 'string' ? match.name : null };
   }
 
@@ -383,6 +386,9 @@ export class CloudflareAccountAdapter {
       return { refused: false, list };
     } catch (error: unknown) {
       if (isRefusal(error)) return { refused: true, list: [] };
+      if (error instanceof CloudflareApiError && error.kind === 'bad_request' && error.cfCodes.includes(ACCOUNT_UNKNOWN_CODE)) {
+        throw stop('account_not_accessible', null);
+      }
       throw error;
     }
   }

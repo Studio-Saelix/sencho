@@ -89,10 +89,11 @@ export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Respo
   if (path === '/accounts') return Array.isArray(fake.accounts) ? paged(fake.accounts, url) : refusal(fake.accounts);
   if (path === '/zones') {
     if (!Array.isArray(fake.zones)) return refusal(fake.zones);
-    // Cloudflare filters by account: a mistyped account id lists no zones.
+    // Cloudflare filters by account: an account id it does not know answers 400 with code 70503.
     const accountFilter = url.searchParams.get('account.id');
     const known = accountFilter === FAKE_ACCOUNT_ID || (Array.isArray(fake.accounts) && fake.accounts.some((a) => a.id === accountFilter));
-    return paged(accountFilter && !known ? [] : fake.zones, url);
+    if (accountFilter && !known) return json({ success: false, errors: [{ code: 70503, message: "account with given Tag doesn't exist" }], messages: [], result: null }, 400);
+    return paged(fake.zones, url);
   }
   if ((m = path.match(/^\/accounts\/([0-9a-f]+)\/cfd_tunnel$/))) {
     if (m[1] !== FAKE_ACCOUNT_ID && (!Array.isArray(fake.accounts) || !fake.accounts.some((a) => a.id === m![1]))) return refusal(403);

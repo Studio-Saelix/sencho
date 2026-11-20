@@ -512,15 +512,34 @@ describe('account classification', () => {
     expect((await refusal(service.connect(FAKE_TOKEN, OTHER_ACCOUNT_ID, actor))).code).toBe('ACCOUNT_NOT_ACCESSIBLE');
   });
 
-  it('recognises a location refusal by its code alone and by its message alone', async () => {
-    const answers = [
-      { code: 9109, message: 'Unauthorized' },
-      { code: 1000, message: 'Cannot use the access token from location: 203.0.113.9' },
-    ];
-    for (const body of answers) {
-      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [body], messages: [], result: null }), { status: 403 })));
-      expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('TOKEN_LOCATION_REFUSED');
-    }
+  it('recognises a location refusal by its message, whatever its code', async () => {
+    const body = { code: 1000, message: 'Cannot use the access token from location: 203.0.113.9' };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [body], messages: [], result: null }), { status: 403 })));
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('TOKEN_LOCATION_REFUSED');
+  });
+
+  it('reads a plain 9109 refusal as a missing permission, not a location refusal', async () => {
+    // Cloudflare answers a missing permission with the code its location refusal uses.
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/cfd_tunnel')) {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 9109, message: 'Unauthorized to access requested resource' }], messages: [], result: null }), { status: 403 });
+      }
+      return answer(fake, url, init ?? {});
+    }));
+    expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).scopes.tunnel).toBe('missing');
+  });
+
+  it('connects a token without account read, whose account listing comes back empty', async () => {
+    fake.accounts = [];
+    const view = connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor));
+    expect(view.accountName).toBeNull();
+    expect(view.scopes).toMatchObject({ zoneRead: 'confirmed', tunnel: 'unconfirmed' });
+  });
+
+  it('still reports a mistyped id as not accessible when the account listing comes back empty', async () => {
+    fake.accounts = [];
+    expect((await refusal(service.connect(FAKE_TOKEN, OTHER_ACCOUNT_ID, actor))).code).toBe('ACCOUNT_NOT_ACCESSIBLE');
   });
 
   it('does not treat an unrelated message that mentions a location as a location refusal', async () => {
