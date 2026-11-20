@@ -15,8 +15,10 @@ import { PublicExposureError } from '../services/publicExposure/types';
  * write is Admin and signed-in-session only, because the account holds a
  * provider credential; only the enabled-zone list is a global `node:read` read.
  *
- * A Cloudflare 401 or 403 is reported as 422, and transport failures as 502
- * or 503, never as 401: a local 401 signs the browser out.
+ * A refused connect (Cloudflare's 401 or 403 among them) is 422, a finished
+ * recheck is 200 with its outcome in the body, and an unfinished DNS check is
+ * 202. Transport failures are 502 or 503. None is ever 401: a local 401 signs
+ * the browser out.
  */
 
 const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
@@ -118,8 +120,9 @@ publicExposureRouter.post('/account/dns-check', async (req: Request, res: Respon
 publicExposureRouter.delete('/account', async (req: Request, res: Response): Promise<void> => {
   if (!guard(req, res)) return;
   try {
-    await PublicExposureAccountService.getInstance().disconnect(auditContext(req));
-    res.json({ connected: false });
+    const { leftInCloudflare } = await PublicExposureAccountService.getInstance().disconnect(auditContext(req));
+    // Names any permission-check record the disconnect had to leave in Cloudflare; empty when none.
+    res.json({ connected: false, leftInCloudflare });
   } catch (error: unknown) {
     sendError(res, error, 'disconnect the Cloudflare account');
   }

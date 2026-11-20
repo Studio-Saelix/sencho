@@ -128,7 +128,7 @@ export function usePublicExposureAccount(): PublicExposureAccount {
       if (mounted.current) setView(next);
       const zone = next.connected ? next.zones.find((z) => z.zoneRef === zoneRef) : undefined;
       if (zone?.cleanupPending) {
-        toast.warning(`The check did not finish. A permission-check record may be left in ${zone.name}; a later Recheck deletes it.`);
+        toast.warning(`The check did not finish. A permission-check record may be left in ${zone.name}. ${zone.cleanupPending.note ?? 'A later Recheck deletes it.'}`);
       }
     } catch (error: unknown) {
       toast.error(publicExposureErrorMessage(error, 'Could not check DNS write.'));
@@ -138,9 +138,14 @@ export function usePublicExposureAccount(): PublicExposureAccount {
 
   const disconnect = useCallback(() => run('disconnect', async () => {
     try {
-      await publicExposureApi.disconnect();
+      const { leftInCloudflare } = await publicExposureApi.disconnect();
       if (mounted.current) setView({ connected: false });
-      toast.success('Cloudflare account disconnected.');
+      if (leftInCloudflare.length > 0) {
+        // The disconnect went through, but a record is still in Cloudflare: say so instead of reporting a clean success.
+        toast.warning(`Cloudflare account disconnected, but a permission-check record is still in Cloudflare: ${leftInCloudflare.join(', ')}. Delete it there.`);
+      } else {
+        toast.success('Cloudflare account disconnected.');
+      }
       return true;
     } catch (error: unknown) {
       toast.error(publicExposureErrorMessage(error, 'Could not disconnect the Cloudflare account.'));

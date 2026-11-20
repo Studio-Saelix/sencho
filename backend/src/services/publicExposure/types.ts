@@ -48,6 +48,30 @@ export interface LastCheck {
   limitedBy?: 'cloudflare' | 'sencho';
 }
 
+/**
+ * Why a check record cleanup did not finish. `zone_refused` is a 403 on the
+ * zone's records that is not a location refusal; on its own it does not prove
+ * the zone is out of reach, but together with the zone missing from the last
+ * complete listing it does. `refused` is a rejected token (401), a refused
+ * location, or a refused delete right after the DNS check's own create, none
+ * of which say the zone is out of reach. `unmatched` is records at the check
+ * name that are none of the journaled one; `unreadable_journal` is a journal
+ * that cannot be read and cannot be rebuilt from the control identity.
+ */
+export type CleanupCause =
+  | 'unreachable'
+  | 'rate_limited'
+  | 'refused'
+  | 'zone_refused'
+  | 'too_recent'
+  | 'unexpected'
+  | 'unmatched'
+  | 'unreadable_journal';
+
+export const CLEANUP_CAUSES: readonly CleanupCause[] = [
+  'unreachable', 'rate_limited', 'refused', 'zone_refused', 'too_recent', 'unexpected', 'unmatched', 'unreadable_journal',
+];
+
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
 export interface PendingScopeCheck {
   name: string;
@@ -55,6 +79,8 @@ export interface PendingScopeCheck {
   recordId: string | null;
   /** When the intent was journaled. A create that may still land is not declared lost too early. */
   createdAt: number;
+  /** Why the latest attempt to delete the record did not finish; unset until one fails. */
+  cause?: CleanupCause;
 }
 
 export interface PublicExposureZoneView {
@@ -65,7 +91,8 @@ export interface PublicExposureZoneView {
   dns: ZoneDnsState;
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
-  cleanupPending: { recordName: string } | null;
+  /** `note` is the sentence for the latest cleanup attempt that did not finish; null before any attempt failed. */
+  cleanupPending: { recordName: string; note: string | null } | null;
   /** The TXT record the DNS write check creates and deletes, named in its preview. Null until this instance has an identity. */
   checkRecordName: string | null;
 }

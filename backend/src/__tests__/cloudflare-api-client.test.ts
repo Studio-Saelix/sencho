@@ -27,7 +27,7 @@ function fail(status: number, code: number, message: string, headers: Record<str
 
 type Handler = (url: URL, init: RequestInit) => Response | Promise<Response>;
 
-function clientWith(handlers: Handler[], extra: { now?: () => number } = {}) {
+function clientWith(handlers: Handler[], extra: { now?: () => number; random?: () => number } = {}) {
   const calls: Array<{ url: URL; init: RequestInit }> = [];
   const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -329,5 +329,56 @@ describe('CloudflareApiClient request budget', () => {
     now = 5 * 60_000 + 1;
     await client.request(TOKEN, { method: 'GET', path: '/x' });
     expect(calls).toHaveLength(301);
+  });
+});
+
+describe('CloudflareApiClient caller deadline', () => {
+  it.each(['GET', 'POST', 'DELETE'] as const)('sends no %s once the deadline has passed, and marks it as not sent', async (method) => {
+    const now = 1_000_000;
+    const { client, fetchImpl } = clientWith([() => ok({})], { now: () => now });
+    const error = await caught(client.request(TOKEN, { method, path: '/zones/z/dns_records', body: method === 'POST' ? { type: 'TXT' } : undefined, deadlineAt: now }));
+    expect(error.kind).toBe('timeout');
+    expect(error.preSend).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('sends no listing page once the deadline has passed', async () => {
+    const now = 1_000_000;
+    const { client, fetchImpl } = clientWith([() => ok([], { total_pages: 1 })], { now: () => now });
+    const error = await caught(client.paginate(TOKEN, '/zones', {}, 50, { deadlineAt: now - 1 }));
+    expect(error.kind).toBe('timeout');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // `random` runs inside the retry decision after the remaining time was read and before the wait, so a jump there
+  // is a clock that passes the deadline while an approved wait is running.
+  it('sends no further attempt when the clock passes the deadline during an approved retry wait', async () => {
+    let now = 1_000_000;
+    const { client, calls } = clientWith([() => fail(500, 1000, 'Internal error'), () => ok({})], {
+      now: () => now,
+      random: () => { now += 5_000; return 0; },
+    });
+    const error = await caught(client.request(TOKEN, { method: 'GET', path: '/zones', deadlineAt: 1_000_000 + 2_000 }));
+    expect(error.kind).toBe('timeout');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('sends no second POST when the clock passes the deadline during a rate-limit wait', async () => {
+    let now = 1_000_000;
+    const { client, calls } = clientWith([() => fail(429, 10000, 'slow down'), () => ok({ id: 'x' })], {
+      now: () => now,
+      random: () => { now += 5_000; return 0; },
+    });
+    const error = await caught(client.request(TOKEN, { method: 'POST', path: '/zones/z/dns_records', body: {}, deadlineAt: 1_000_000 + 2_000 }));
+    expect(error.kind).toBe('timeout');
+    expect(error.preSend).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('still sends while the deadline is ahead', async () => {
+    const now = 1_000_000;
+    const { client, calls } = clientWith([() => ok({ id: 'x' })], { now: () => now });
+    await client.request(TOKEN, { method: 'POST', path: '/zones/z/dns_records', body: {}, deadlineAt: now + 1 });
+    expect(calls).toHaveLength(1);
   });
 });

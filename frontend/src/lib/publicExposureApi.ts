@@ -28,7 +28,8 @@ export interface PublicExposureZone {
   dns: ZoneDnsState;
   dnsCheckedAt: number | null;
   seenAtLastCheck: boolean;
-  cleanupPending: { recordName: string } | null;
+  /** `note` is why the latest attempt to delete the record did not finish; null before any attempt failed. */
+  cleanupPending: { recordName: string; note: string | null } | null;
   /** The TXT record the DNS write check creates and deletes. Null until the control instance has an identity. */
   checkRecordName: string | null;
 }
@@ -56,6 +57,12 @@ export interface ConnectedAccountView {
 }
 
 export type PublicExposureAccountView = { connected: false } | ConnectedAccountView;
+
+/** The answer to a disconnect: the permission-check records it could not delete and left in Cloudflare. */
+export interface DisconnectResult {
+  connected: false;
+  leftInCloudflare: string[];
+}
 
 /** A refusal from the public exposure routes, carrying the route's error code. */
 export class PublicExposureApiError extends Error {
@@ -99,7 +106,11 @@ export const publicExposureApi = {
   recheck: () => call<PublicExposureAccountView>('/account/verify', { method: 'POST' }),
   dnsCheck: (zoneRef: string) =>
     call<PublicExposureAccountView>('/account/dns-check', { method: 'POST', body: JSON.stringify({ zoneRef }) }),
-  disconnect: () => call<PublicExposureAccountView>('/account', { method: 'DELETE' }),
+  disconnect: async (): Promise<DisconnectResult> => {
+    const body = await call<{ connected: false; leftInCloudflare?: unknown }>('/account', { method: 'DELETE' });
+    const left = Array.isArray(body.leftInCloudflare) ? body.leftInCloudflare.filter((name): name is string => typeof name === 'string') : [];
+    return { connected: false, leftInCloudflare: left };
+  },
   setZone: (zoneRef: string, enabled: boolean, allowedSuffixes: string[]) =>
     call<PublicExposureAccountView>(`/zones/${encodeURIComponent(zoneRef)}`, {
       method: 'PUT',

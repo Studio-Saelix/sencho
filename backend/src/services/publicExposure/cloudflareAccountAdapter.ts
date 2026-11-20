@@ -5,7 +5,9 @@ import {
   type CloudflareApiClient,
   type CloudflareCallOptions,
 } from './cloudflareApiClient';
-import type { AccountScopes, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDnsState } from './types';
+import type { AccountScopes, CleanupCause, FailedOutcome, LastCheck, PendingScopeCheck, ZoneDnsState } from './types';
+
+export type { CleanupCause };
 
 /**
  * The account part of the Cloudflare adapter: token verification, the account
@@ -76,16 +78,6 @@ export interface ZoneProbeInput {
   dns: ZoneDnsState;
 }
 
-/**
- * Why a check record cleanup did not finish. `zone_refused` is a 403 on the
- * zone's records that is not a location refusal; on its own it does not prove
- * the zone is out of reach, but together with the zone missing from the last
- * complete listing it does. `refused` is a rejected token (401), a refused
- * location, or a refused delete right after the DNS check's own create, none
- * of which say the zone is out of reach.
- */
-export type CleanupCause = 'unreachable' | 'rate_limited' | 'refused' | 'zone_refused' | 'too_recent' | 'unexpected';
-
 export type CleanupResult = { cleaned: true } | { cleaned: false; cause: CleanupCause };
 
 export type DnsWriteResult =
@@ -102,8 +94,21 @@ export interface ScopeCheckJournal {
 }
 
 interface TokenVerifyResult {
-  status?: unknown;
+  status: string;
   expires_on?: unknown;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTokenVerifyResult(value: unknown): value is TokenVerifyResult {
+  return isObject(value) && typeof value.status === 'string';
+}
+
+/** A Cloudflare success whose body Sencho cannot read stops a check as unexpected; nothing is reconciled from it. */
+function malformed(what: string): CloudflareApiError {
+  return new CloudflareApiError({ kind: 'invalid_response', message: `Cloudflare answered without ${what} Sencho could read.` });
 }
 
 interface DnsRecord {
@@ -249,6 +254,9 @@ export class CloudflareAccountAdapter {
         if (!match) {
           // A create that timed out a moment ago may still land; wait before declaring it lost.
           if (this.now() - pending.createdAt < LATE_CREATE_WINDOW_MS) return { cleaned: false, cause: 'too_recent' };
+          // The journal is the only handle on a record that may differ from what was journaled. Records
+          // at the name that are none of ours keep it; only an empty name proves nothing was created.
+          if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
           journal.write(null);
           return { cleaned: true };
         }
@@ -262,6 +270,29 @@ export class CloudflareAccountAdapter {
       if (error instanceof CloudflareApiError) return { cleaned: false, cause: cleanupCause(error) };
       throw error;
     }
+  }
+
+  /**
+   * Settle a zone whose journal column cannot be read. The record's name is
+   * rebuilt from the control identity (`name`, null when there is none); the
+   * journal is cleared only when Cloudflare lists nothing at that name. Records
+   * there are never deleted, since the journaled content that proves one is
+   * ours is gone.
+   */
+  async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {
+    if (name === null) return { cleaned: false, cause: 'unreadable_journal' };
+    try {
+      const records = await this.recordsAt(token, zoneRef, name, options);
+      if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
+    } catch (error: unknown) {
+      // A zone that is gone took its records with it.
+      if (!(error instanceof CloudflareApiError && error.kind === 'not_found' && !isLocationRefusal(error))) {
+        if (error instanceof CloudflareApiError) return { cleaned: false, cause: cleanupCause(error) };
+        throw error;
+      }
+    }
+    journal.write(null);
+    return { cleaned: true };
   }
 
   /**
@@ -346,16 +377,16 @@ export class CloudflareAccountAdapter {
   }
 
   private async verifyToken(token: string, accountId: string, options: CloudflareCallOptions): Promise<void> {
-    let verified: TokenVerifyResult;
+    let verified: unknown;
     try {
-      verified = (await this.client.request<TokenVerifyResult>(token, { ...options, method: 'GET', path: '/user/tokens/verify' })).result ?? {};
+      verified = (await this.client.request<unknown>(token, { ...options, method: 'GET', path: '/user/tokens/verify' })).result;
     } catch (userError: unknown) {
       if (!(userError instanceof CloudflareApiError)) throw userError;
       if (isLocationRefusal(userError)) throw stop('token_location_refused', userError.message);
       if (stopOutcomeFor(userError) !== null) throw userError;
       // An account-owned token verifies only at its account.
       try {
-        verified = (await this.client.request<TokenVerifyResult>(token, { ...options, method: 'GET', path: `/accounts/${accountId}/tokens/verify` })).result ?? {};
+        verified = (await this.client.request<unknown>(token, { ...options, method: 'GET', path: `/accounts/${accountId}/tokens/verify` })).result;
       } catch (accountError: unknown) {
         if (!(accountError instanceof CloudflareApiError)) throw accountError;
         if (isLocationRefusal(accountError)) throw stop('token_location_refused', accountError.message);
@@ -369,17 +400,20 @@ export class CloudflareAccountAdapter {
         throw stop('token_invalid', null);
       }
     }
+    // A success with no readable status says nothing about the token: unexpected, not inactive.
+    if (!isTokenVerifyResult(verified)) throw malformed('a token status');
     if (verified.status !== 'active') {
-      const status = typeof verified.status === 'string' ? verified.status : 'not active';
       const expires = typeof verified.expires_on === 'string' ? verified.expires_on : null;
-      throw stop('token_inactive', expires ? `Token is ${status}; it expires or expired on ${expires}.` : `Token is ${status}.`);
+      throw stop('token_inactive', expires ? `Token is ${verified.status}; it expires or expired on ${expires}.` : `Token is ${verified.status}.`);
     }
   }
 
   private async findAccount(token: string, accountId: string, options: CloudflareCallOptions): Promise<{ listed: boolean; name: string | null }> {
-    let accounts: Array<{ id?: unknown; name?: unknown }>;
+    let accounts: Array<{ id: string; name?: unknown }>;
     try {
-      accounts = await this.client.paginate(token, '/accounts', {}, 50, options);
+      const listed = await this.client.paginate<unknown>(token, '/accounts', {}, 50, options);
+      if (!listed.every((a): a is { id: string; name?: unknown } => isObject(a) && typeof a.id === 'string')) throw malformed('an account list');
+      accounts = listed;
     } catch (error: unknown) {
       if (isRefusal(error)) return { listed: false, name: null };
       throw error;
@@ -392,10 +426,12 @@ export class CloudflareAccountAdapter {
 
   private async listZonesOrRefusal(token: string, accountId: string, options: CloudflareCallOptions): Promise<{ refused: boolean; list: ListedZone[] }> {
     try {
-      const zones = await this.client.paginate<{ id?: unknown; name?: unknown }>(token, '/zones', { 'account.id': accountId }, 50, options);
-      const list = zones
-        .filter((z): z is { id: string; name: string } => typeof z.id === 'string' && CLOUDFLARE_ID.test(z.id) && typeof z.name === 'string')
-        .map((z) => ({ zoneRef: z.id, name: z.name.toLowerCase() }));
+      const zones = await this.client.paginate<unknown>(token, '/zones', { 'account.id': accountId }, 50, options);
+      // One unreadable element makes the whole listing unreadable: a filtered list would pass for a complete one.
+      const list = zones.map((z) => {
+        if (!isObject(z) || typeof z.id !== 'string' || !CLOUDFLARE_ID.test(z.id) || typeof z.name !== 'string') throw malformed('a zone list');
+        return { zoneRef: z.id, name: z.name.toLowerCase() };
+      });
       return { refused: false, list };
     } catch (error: unknown) {
       if (isRefusal(error)) return { refused: true, list: [] };
@@ -435,7 +471,9 @@ export class CloudflareAccountAdapter {
   }
 
   private async recordsAt(token: string, zoneRef: string, name: string, options: CloudflareCallOptions): Promise<DnsRecord[]> {
-    return this.client.paginate<DnsRecord>(token, `/zones/${zoneRef}/dns_records`, { name }, 100, options);
+    const records = await this.client.paginate<unknown>(token, `/zones/${zoneRef}/dns_records`, { name }, 100, options);
+    if (!records.every(isObject)) throw malformed('a record list');
+    return records as DnsRecord[];
   }
 
   private async deleteRecord(token: string, zoneRef: string, recordId: string, options: CloudflareCallOptions): Promise<void> {

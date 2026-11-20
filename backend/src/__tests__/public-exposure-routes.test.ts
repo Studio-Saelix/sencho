@@ -222,6 +222,30 @@ describe('route audit rows', () => {
   });
 });
 
+describe('disconnect response', () => {
+  const NAME = '_sencho-check-0123456789abcdef.example.com';
+
+  it('lists no leftover records after a clean disconnect', async () => {
+    await call('put', '/api/public-exposure/account', adminToken(), { token: FAKE_TOKEN, accountId: FAKE_ACCOUNT_ID });
+    const res = await call('delete', '/api/public-exposure/account', adminToken());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ connected: false, leftInCloudflare: [] });
+  });
+
+  it('names the check record it left in Cloudflare when the zone is out of reach', async () => {
+    await call('put', '/api/public-exposure/account', adminToken(), { token: FAKE_TOKEN, accountId: FAKE_ACCOUNT_ID });
+    await call('put', `/api/public-exposure/zones/${ZONE_A}`, adminToken(), { enabled: true, allowedSuffixes: [] });
+    fake.remove = 500;
+    await call('post', '/api/public-exposure/account/dns-check', adminToken(), { zoneRef: ZONE_A });
+    fake.zones = [{ id: 'd4'.repeat(16), name: 'example.net' }];
+    await call('post', '/api/public-exposure/account/verify', adminToken());
+    fake.remove = 403;
+    const res = await call('delete', '/api/public-exposure/account', adminToken());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ connected: false, leftInCloudflare: [NAME] });
+  });
+});
+
 describe('migration', () => {
   it('runs twice cleanly and creates the three tables with their columns', async () => {
     const db = DatabaseService.getInstance();

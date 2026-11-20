@@ -7,15 +7,16 @@ import {
   checkRecordName,
   type AccountFacts,
   type CheckFailure,
-  type CleanupCause,
+  type CleanupResult,
   type ScopeCheckJournal,
 } from './cloudflareAccountAdapter';
 import type { CloudflareCallOptions } from './cloudflareApiClient';
 import { validateAllowedSuffixes } from './exposureHostnames';
-import { publicExposureStore as store, type AccountRecord, type ZoneRecord } from './publicExposureStore';
+import { hasCheckRecord, publicExposureStore as store, type AccountRecord, type ZoneRecord } from './publicExposureStore';
 import {
   CLOUDFLARE_ADAPTER_ID,
   PublicExposureError,
+  type CleanupCause,
   type EnabledZoneView,
   type FailedOutcome,
   type LastCheck,
@@ -43,6 +44,8 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   too_recent: 'Its create may still be landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
+  unmatched: 'Other records sit at that name and none is the one Sencho created. Delete them in Cloudflare, then try again.',
+  unreadable_journal: 'Sencho cannot read what it kept about this record. Delete any record starting _sencho-check- in that zone in Cloudflare, then try again.',
 };
 
 function outcomeError(failure: CheckFailure): PublicExposureError {
@@ -65,7 +68,9 @@ function failedCheck(failure: CheckFailure, at: number): LastCheck {
  * The hub's public exposure account: connect, replace, recheck, the DNS write
  * check, zone enablement and disconnect. Every write runs one at a time under
  * one in-process lock and one operation deadline. The token is encrypted at
- * rest, decrypted only for a Cloudflare call, and never returned.
+ * rest and never returned. It is decrypted for a Cloudflare call, and on every
+ * read of the account, where the plaintext is dropped at once: a credential
+ * that cannot be decrypted shows as `credential_unreadable`.
  */
 export class PublicExposureAccountService {
   private static instance: PublicExposureAccountService | null = null;
@@ -87,6 +92,7 @@ export class PublicExposureAccountService {
     }
     const zones = store.listZones(account.id);
     const controlIdentity = FleetSyncService.getControlIdentity();
+    const checkName = (zone: ZoneRecord) => (controlIdentity ? checkRecordName(controlIdentity, zone.name) : null);
     const seen = (zone: ZoneRecord) => account.zonesListedAt !== null && zone.lastSeenAt === account.zonesListedAt;
     return {
       connected: true,
@@ -107,8 +113,8 @@ export class PublicExposureAccountService {
         dns: zone.dns,
         dnsCheckedAt: zone.dnsCheckedAt,
         seenAtLastCheck: seen(zone),
-        cleanupPending: zone.pending ? { recordName: zone.pending.name } : null,
-        checkRecordName: controlIdentity ? checkRecordName(controlIdentity, zone.name) : null,
+        cleanupPending: hasCheckRecord(zone) ? this.cleanupView(zone, checkName(zone)) : null,
+        checkRecordName: checkName(zone),
       })),
       nodeEndpointCount: store.countEndpoints(),
     };
@@ -182,8 +188,8 @@ export class PublicExposureAccountService {
       }
 
       const zones = store.listZones(account.id);
-      for (const zone of zones.filter((z) => z.pending)) {
-        const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+      for (const zone of zones.filter(hasCheckRecord)) {
+        const cleanup = await this.cleanupZone(token, account.id, zone, options);
         if (!cleanup.cleaned) console.warn(`[PublicExposure] Permission-check record cleanup in zone ${sanitizeForLog(zone.name)} did not finish (${cleanup.cause}); it stays pending.`);
       }
 
@@ -221,7 +227,11 @@ export class PublicExposureAccountService {
         throw new PublicExposureError('CONTROL_IDENTITY_MISSING', 409, 'This control instance has no identity yet, so the check record cannot be named. Restart Sencho and try again.');
       }
 
-      const result = await this.adapter.proveDnsWrite(token, zone, controlIdentity, this.journalFor(account.id, zone), options);
+      // An unreadable journal is settled first: a new check must not start over a record that may still exist.
+      const unsettled = zone.journalUnreadable ? await this.cleanupZone(token, account.id, zone, options) : null;
+      const result = unsettled && !unsettled.cleaned
+        ? { kind: 'cleanup_pending' as const, recordName: checkRecordName(controlIdentity, zone.name), cause: unsettled.cause }
+        : await this.adapter.proveDnsWrite(token, zone, controlIdentity, this.journalFor(account.id, zone), options);
       const at = Date.now();
       if (result.kind === 'confirmed' || result.kind === 'missing') {
         store.setZoneDns(account.id, zone.zoneRef, result.kind === 'confirmed' ? 'confirmed' : 'missing', at);
@@ -238,6 +248,7 @@ export class PublicExposureAccountService {
         throw error;
       }
       if (result.kind === 'cleanup_pending') {
+        this.noteCleanupCause(account.id, zone.zoneRef, result.cause);
         // The check did not finish: answered 202 so neither the route row nor this one reads as a success.
         recordPublicExposureAudit(actor, 'public_exposure.account.dns_checked', { ...facts, result: 'cleanup_pending', cause: result.cause }, 202);
         return { view: this.getView(), complete: false };
@@ -252,21 +263,21 @@ export class PublicExposureAccountService {
    * exists or a check record cannot be cleaned up. Deletes nothing else in
    * Cloudflare; the token stays valid there until it is revoked.
    */
-  async disconnect(actor: PublicExposureAuditContext): Promise<void> {
-    await this.exclusive(async (options) => {
+  async disconnect(actor: PublicExposureAuditContext): Promise<{ leftInCloudflare: string[] }> {
+    return this.exclusive(async (options) => {
       const account = this.requireAccount();
       if (store.countEndpoints() > 0) throw this.endpointsRefusal();
-      const pendingZones = store.listZones(account.id).filter((z) => z.pending);
+      const pendingZones = store.listZones(account.id).filter(hasCheckRecord);
       // Records left behind in zones the token can no longer reach; their journals are dropped with the account.
       const abandoned: string[] = [];
       if (pendingZones.length > 0) {
         const token = this.readToken(account);
         for (const zone of pendingZones) {
-          const record = zone.pending?.name ?? '';
+          const record = this.cleanupView(zone, this.checkNameFor(zone)).recordName;
           if (token === null) {
             throw new PublicExposureError('CLEANUP_PENDING', 409, `The permission-check record ${record} is still in Cloudflare and the stored token cannot be read to delete it. Replace the token, then disconnect.`);
           }
-          const cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, this.journalFor(account.id, zone), options);
+          const cleanup = await this.cleanupZone(token, account.id, zone, options);
           if (cleanup.cleaned) continue;
           // A 403 on the zone, for a zone the last complete listing no longer showed, is taken as the zone being out of reach.
           const zoneGone = account.zonesListedAt !== null && zone.lastSeenAt !== account.zonesListedAt;
@@ -289,6 +300,7 @@ export class PublicExposureAccountService {
       recordPublicExposureAudit(actor, 'public_exposure.account.removed', {
         account: account.accountId, left_in_cloudflare: abandoned.length > 0 ? abandoned.join(',') : null,
       });
+      return { leftInCloudflare: abandoned };
     });
   }
 
@@ -340,6 +352,40 @@ export class PublicExposureAccountService {
     return new PublicExposureError('ENDPOINTS_EXIST', 409, 'Nodes still use this Cloudflare account. Remove their Cloudflare Tunnel endpoints first.');
   }
 
+  private checkNameFor(zone: ZoneRecord): string | null {
+    const controlIdentity = FleetSyncService.getControlIdentity();
+    return controlIdentity ? checkRecordName(controlIdentity, zone.name) : null;
+  }
+
+  /** The pending record a zone shows: its journaled name, or the name the check would have used when the journal cannot be read. */
+  private cleanupView(zone: ZoneRecord, derivedName: string | null): { recordName: string; note: string | null } {
+    const recordName = zone.pending?.name ?? derivedName ?? `_sencho-check-*.${zone.name}`;
+    const cause = zone.pending ? zone.pending.cause : 'unreadable_journal';
+    return { recordName, note: cause ? CLEANUP_MESSAGE[cause] : null };
+  }
+
+  /** Try to delete a zone's check record, whether its journal is readable or not, and remember why a failed attempt failed. */
+  private async cleanupZone(token: string, accountRowId: number, zone: ZoneRecord, options: CloudflareCallOptions): Promise<CleanupResult> {
+    const journal = this.journalFor(accountRowId, zone);
+    let cleanup: CleanupResult;
+    if (zone.journalUnreadable) {
+      console.warn(`[PublicExposure] The permission-check journal of zone ${sanitizeForLog(zone.name)} cannot be read; looking for the record by its name.`);
+      cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, this.checkNameFor(zone), journal, options);
+    } else {
+      cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);
+    }
+    if (!cleanup.cleaned) this.noteCleanupCause(accountRowId, zone.zoneRef, cleanup.cause);
+    return cleanup;
+  }
+
+  /** Keep the cause on the zone's journal so the view can say why the record is still there. An unreadable journal has nowhere to keep it. */
+  private noteCleanupCause(accountRowId: number, zoneRef: string, cause: CleanupCause | 'ambiguous_create'): void {
+    const zone = store.getZone(accountRowId, zoneRef);
+    if (!zone?.pending) return;
+    const { cause: _previous, ...rest } = zone.pending;
+    store.setZonePending(accountRowId, zoneRef, cause === 'ambiguous_create' ? rest : { ...rest, cause });
+  }
+
   private journalFor(accountRowId: number, zone: ZoneRecord): ScopeCheckJournal {
     let current = zone.pending;
     return {
@@ -357,7 +403,7 @@ export class PublicExposureAccountService {
       const listed = new Set(facts.zones.map((z) => z.zoneRef));
       for (const zone of facts.zones) store.upsertListedZone(accountRowId, zone.zoneRef, zone.name, now);
       for (const zone of store.listZones(accountRowId)) {
-        if (!listed.has(zone.zoneRef) && !zone.enabled && !zone.pending) store.deleteZone(accountRowId, zone.zoneRef);
+        if (!listed.has(zone.zoneRef) && !zone.enabled && !hasCheckRecord(zone)) store.deleteZone(accountRowId, zone.zoneRef);
       }
     }
     for (const [zoneRef, dns] of Object.entries(facts.zoneDns)) {

@@ -139,7 +139,7 @@ describe('CloudflareAccountCard', () => {
     let state = connected();
     apiFetchMock.mockImplementation((path: string) => {
       if (path === '/public-exposure/account/dns-check') {
-        state = connected({ zones: [zone({ cleanupPending: { recordName: '_sencho-check-0123456789abcdef.example.com' } })] });
+        state = connected({ zones: [zone({ cleanupPending: { recordName: '_sencho-check-0123456789abcdef.example.com', note: null } })] });
         return Promise.resolve(new Response(JSON.stringify(state), { status: 202 }));
       }
       return json(state);
@@ -152,6 +152,27 @@ describe('CloudflareAccountCard', () => {
     await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
     await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('may be left in example.com')));
     expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'cleanup_pending');
+  });
+
+  it('says why a DNS check that left its record pending cannot be fixed by a recheck alone', async () => {
+    let state = connected();
+    const note = 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.';
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/public-exposure/account/dns-check') {
+        state = connected({ zones: [zone({ cleanupPending: { recordName: '_sencho-check-0123456789abcdef.example.com', note } })] });
+        return Promise.resolve(new Response(JSON.stringify(state), { status: 202 }));
+      }
+      return json(state);
+    });
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    const answer = await screen.findByTestId('cloudflare-account-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Check DNS write' }));
+    await screen.findByTestId('dns-check-preview');
+    await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('Cloudflare refused the delete')));
+    expect(toastMock.warning).not.toHaveBeenCalledWith(expect.stringContaining('a later Recheck deletes it'));
+    expect(await screen.findByText(/A permission-check record is left in example\.com\. Cloudflare refused the delete/)).toBeInTheDocument();
   });
 
   it('previews enabling a zone with what stack editors may claim, and disables in one click', async () => {
@@ -194,7 +215,7 @@ describe('CloudflareAccountCard', () => {
 
   it('says what stays in Cloudflare before disconnecting, then disconnects on confirm', async () => {
     apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => (
-      init?.method === 'DELETE' ? json({ connected: false }) : json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] }))
+      init?.method === 'DELETE' ? json({ connected: false, leftInCloudflare: [] }) : json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] }))
     ));
     const user = userEvent.setup();
     render(<CloudflareAccountCard />);
@@ -205,6 +226,26 @@ describe('CloudflareAccountCard', () => {
     expect(apiFetchMock).not.toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE' }));
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE', localOnly: true })));
+    expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'not_connected');
+    expect(toastMock.success).toHaveBeenCalledWith('Cloudflare account disconnected.');
+    expect(toastMock.warning).not.toHaveBeenCalled();
+  });
+
+  it('warns, naming the record, when the disconnect left a permission-check record in Cloudflare', async () => {
+    apiFetchMock.mockImplementation((_path: string, init?: RequestInit) => (
+      init?.method === 'DELETE'
+        ? json({ connected: false, leftInCloudflare: ['_sencho-check-0123456789abcdef.example.com'] })
+        : json(connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] }))
+    ));
+    const user = userEvent.setup();
+    render(<CloudflareAccountCard />);
+    await screen.findByTestId('cloudflare-account-answer');
+    await user.click(screen.getByRole('button', { name: 'Manage account' }));
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('_sencho-check-0123456789abcdef.example.com')));
+    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining('still in Cloudflare'));
+    expect(toastMock.success).not.toHaveBeenCalled();
     expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'not_connected');
   });
 

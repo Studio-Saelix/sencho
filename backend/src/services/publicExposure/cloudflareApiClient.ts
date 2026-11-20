@@ -87,7 +87,7 @@ export interface CloudflareResponse<T> {
 export interface CloudflareCallOptions {
   /** The caller's operation signal. An aborted signal ends the call; no retry wait outlives it. */
   signal?: AbortSignal;
-  /** Epoch ms the caller's operation must finish by; no retry wait runs past it. */
+  /** Epoch ms the caller's operation must finish by; no request is sent and no retry wait runs at or past it. */
   deadlineAt?: number;
 }
 
@@ -298,8 +298,9 @@ export class CloudflareApiClient {
   }
 
   private async attempt<T>(token: string, req: CloudflareRequest): Promise<CloudflareResponse<T>> {
-    if (req.signal?.aborted) {
-      // Nothing was sent, so a POST that stops here created nothing.
+    if (req.signal?.aborted || (req.deadlineAt !== undefined && this.now() >= req.deadlineAt)) {
+      // Nothing was sent, so a POST that stops here created nothing. Checked at every attempt, so a
+      // wait that was approved inside the deadline still cannot send once the deadline has passed.
       throw new CloudflareApiError({ kind: 'timeout', message: 'The Cloudflare operation was cancelled or ran out of time.', preSend: true });
     }
     this.takeBudget();

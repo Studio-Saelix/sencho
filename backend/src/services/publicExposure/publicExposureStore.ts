@@ -1,5 +1,5 @@
 import { DatabaseService } from '../DatabaseService';
-import { CHECK_OUTCOMES, type AccountScopes, type CheckOutcome, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
+import { CHECK_OUTCOMES, CLEANUP_CAUSES, type AccountScopes, type CheckOutcome, type CleanupCause, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
 
 /**
  * SQL for the public exposure hub tables. Rows are parsed into typed records
@@ -30,7 +30,18 @@ export interface ZoneRecord {
   dns: ZoneDnsState;
   dnsCheckedAt: number | null;
   pending: PendingScopeCheck | null;
+  /**
+   * The journal column holds something that is not a readable journal. The
+   * zone still has a check record that may be in Cloudflare, so it counts as
+   * pending (`hasCheckRecord`) even though there is no record to read.
+   */
+  journalUnreadable: boolean;
   lastSeenAt: number;
+}
+
+/** True while a permission-check record may still exist in Cloudflare for this zone. */
+export function hasCheckRecord(zone: ZoneRecord): boolean {
+  return zone.pending !== null || zone.journalUnreadable;
 }
 
 interface AccountRow {
@@ -94,17 +105,19 @@ function parseLastCheck(text: string): LastCheck {
   return check;
 }
 
-function parsePending(text: string | null): PendingScopeCheck | null {
-  const raw = parseJson(text);
-  if (raw === null) return null;
-  const record = asRecord(raw);
-  if (typeof record.name !== 'string' || typeof record.content !== 'string') return null;
-  return {
+/** A NULL column is no journal. Anything else that is not a name and content is an unreadable journal, never an empty one. */
+function parsePending(text: string | null): { pending: PendingScopeCheck | null; unreadable: boolean } {
+  if (text === null) return { pending: null, unreadable: false };
+  const record = asRecord(parseJson(text));
+  if (typeof record.name !== 'string' || typeof record.content !== 'string') return { pending: null, unreadable: true };
+  const pending: PendingScopeCheck = {
     name: record.name,
     content: record.content,
     recordId: typeof record.recordId === 'string' ? record.recordId : null,
     createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
   };
+  if (CLEANUP_CAUSES.includes(record.cause as CleanupCause)) pending.cause = record.cause as CleanupCause;
+  return { pending, unreadable: false };
 }
 
 function toAccount(row: AccountRow): AccountRecord {
@@ -127,6 +140,7 @@ function toAccount(row: AccountRow): AccountRecord {
 
 function toZone(row: ZoneRow): ZoneRecord {
   const suffixes = parseJson(row.allowed_suffixes_json);
+  const journal = parsePending(row.scope_check_pending_json);
   return {
     zoneRef: row.zone_ref,
     name: row.name,
@@ -134,7 +148,8 @@ function toZone(row: ZoneRow): ZoneRecord {
     allowedSuffixes: Array.isArray(suffixes) ? suffixes.filter((s): s is string => typeof s === 'string') : [],
     dns: dnsState(row.dns_scope),
     dnsCheckedAt: row.dns_checked_at,
-    pending: parsePending(row.scope_check_pending_json),
+    pending: journal.pending,
+    journalUnreadable: journal.unreadable,
     lastSeenAt: row.last_seen_at,
   };
 }

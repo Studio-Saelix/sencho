@@ -100,7 +100,7 @@ export function CloudflareAccountSheet({
         variant="destructive"
         kicker="Cloudflare · Disconnect"
         title="Disconnect the Cloudflare account"
-        description="Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending; nothing else is deleted there, and the token stays valid until you revoke it."
+        description="Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending (when its zone can no longer be reached, the disconnect still goes through and names the record that stays); nothing else is deleted there, and the token stays valid until you revoke it."
         confirmLabel="Disconnect"
         busyConfirmLabel="Disconnecting…"
         confirming={account.pending === 'disconnect'}

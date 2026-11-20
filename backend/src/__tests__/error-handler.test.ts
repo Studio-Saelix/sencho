@@ -1,7 +1,10 @@
 /**
- * The central error handler logs the message, type and status of an error,
- * never the error object: body-parser attaches the raw request body to a parse
- * error, and that body can carry a secret. The response is unchanged.
+ * The central error handler keeps a request body out of its log line and out
+ * of its response. It logs the message, type and status of an error, never the
+ * error object, and answers a body-parser parse or verify failure with a fixed
+ * sentence: body-parser attaches the raw body to the error and V8 quotes a
+ * slice of the input in a JSON parse message, so either could carry a secret
+ * the request held. Other errors keep their status and message.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { NextFunction, Request, Response } from 'express';
@@ -24,7 +27,7 @@ afterEach(() => {
 });
 
 describe('errorHandler', () => {
-  it('logs neither the parse error object nor its body, and answers as before', () => {
+  it('logs neither the parse error object nor its body, and answers with a fixed sentence', () => {
     const logged: unknown[][] = [];
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args); });
     const err = Object.assign(new SyntaxError('Unexpected end of JSON input'), {
@@ -34,7 +37,7 @@ describe('errorHandler', () => {
     errorHandler(err, {} as Request, res, vi.fn() as unknown as NextFunction);
 
     expect(state.statusCode).toBe(400);
-    expect(state.payload).toEqual({ error: 'Unexpected end of JSON input' });
+    expect(state.payload).toEqual({ error: 'The request body could not be parsed.' });
     expect(logged).toHaveLength(1);
     expect(logged[0].every((arg) => typeof arg === 'string')).toBe(true);
     expect(logged[0].join(' ')).not.toContain(SECRET);
@@ -53,9 +56,36 @@ describe('errorHandler', () => {
     }
     expect(String((parseError as Error).message)).toContain(SECRET.slice(0, 8));
     const err = Object.assign(parseError as Error, { type: 'entity.parse.failed', status: 400, expose: true });
-    errorHandler(err, {} as Request, mockResponse().res, vi.fn() as unknown as NextFunction);
+    const { res, state } = mockResponse();
+    errorHandler(err, {} as Request, res, vi.fn() as unknown as NextFunction);
     expect(logged[0].join(' ')).not.toContain(SECRET.slice(0, 8));
     expect(logged[0].join(' ')).toContain('request body could not be parsed');
+    // The response is checked as text: the parse message quotes the body's first characters.
+    expect(state.statusCode).toBe(400);
+    expect(JSON.stringify(state.payload)).not.toContain(SECRET.slice(0, 8));
+    expect(state.payload).toEqual({ error: 'The request body could not be parsed.' });
+  });
+
+  it('answers a body that failed verification with a fixed sentence too', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = Object.assign(new Error(`bad signature for ${SECRET}`), { type: 'entity.verify.failed', status: 403, expose: true });
+    const { res, state } = mockResponse();
+    errorHandler(err, {} as Request, res, vi.fn() as unknown as NextFunction);
+    expect(state.statusCode).toBe(403);
+    expect(JSON.stringify(state.payload)).not.toContain(SECRET);
+    expect(state.payload).toEqual({ error: 'The request body could not be verified.' });
+  });
+
+  it('still tells the client a body is too large, and keeps the message of an unrelated 4xx', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const tooLarge = Object.assign(new Error('request entity too large'), { type: 'entity.too.large', status: 413, expose: true });
+    const first = mockResponse();
+    errorHandler(tooLarge, {} as Request, first.res, vi.fn() as unknown as NextFunction);
+    expect(first.state.statusCode).toBe(413);
+    expect(first.state.payload).toEqual({ error: 'request entity too large' });
+    const other = mockResponse();
+    errorHandler(Object.assign(new Error('Not allowed by CORS'), { status: 403 }), {} as Request, other.res, vi.fn() as unknown as NextFunction);
+    expect(other.state.payload).toEqual({ error: 'Not allowed by CORS' });
   });
 
   it('keeps the message of an unrelated error that happens to carry a body', () => {

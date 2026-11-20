@@ -2,6 +2,12 @@ import type { Request, Response, NextFunction, ErrorRequestHandler } from 'expre
 import { getErrorMessage } from '../utils/errors';
 import { errorMessageForLog, redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
+/** What a body-parser error whose message can quote the request body is answered with. */
+const BODY_FAILURE_MESSAGES: Record<string, string> = {
+  'entity.parse.failed': 'The request body could not be parsed.',
+  'entity.verify.failed': 'The request body could not be verified.',
+};
+
 interface HttpError {
   type?: string;
   status?: number;
@@ -36,6 +42,9 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req: Request, r
     return;
   }
   const expose = e.expose === true || status < 500;
-  const message = expose ? getErrorMessage(err, 'Request failed') : 'Internal server error';
+  // The same rule as the log: a parse or verify failure of a body is answered with a fixed sentence,
+  // never its message, which quotes a slice of the body (a pasted token, a password).
+  const fixed = bodyParseFailure ? BODY_FAILURE_MESSAGES[e.type as string] : undefined;
+  const message = fixed ?? (expose ? getErrorMessage(err, 'Request failed') : 'Internal server error');
   res.status(status).json({ error: message });
 };

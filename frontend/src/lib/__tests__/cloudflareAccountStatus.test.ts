@@ -62,7 +62,7 @@ describe('cloudflareAccountStatus', () => {
     ['tunnel_missing', view({ scopes: { zoneRead: 'confirmed', tunnel: 'missing' } }), 'Cloudflare Tunnel: Edit', 'recheck'],
     ['zone_read_missing', view({ scopes: { zoneRead: 'missing', tunnel: 'unconfirmed' } }), 'Zone: Read', 'recheck'],
     ['dns_missing', view({ zones: [zone({ dns: 'missing' })] }), 'DNS: Edit for this zone', 'recheck'],
-    ['cleanup_pending', view({ zones: [zone({ cleanupPending: { recordName: 'r' } })] }), 'permission-check record is left in example.com', 'recheck'],
+    ['cleanup_pending', view({ zones: [zone({ cleanupPending: { recordName: 'r', note: null } })] }), 'permission-check record is left in example.com', 'recheck'],
     ['zone_not_visible', view({ zones: [zone({ seenAtLastCheck: false })] }), 'example.com is not visible', 'choose_zones'],
     ['no_zones_visible', view({ zonesVisible: 0, zones: [] }), 'sees no zones', 'recheck'],
     ['no_zone_enabled', view({ zones: [zone({ enabled: false })] }), 'Choose the zones', 'choose_zones'],
@@ -86,12 +86,21 @@ describe('cloudflareAccountStatus', () => {
 
   it('shows a leftover check record on a disabled zone, with the DNS stage', () => {
     const status = cloudflareAccountStatus(view({
-      zones: [zone({ dns: 'confirmed' }), zone({ zoneRef: 'd4'.repeat(16), name: 'example.net', enabled: false, cleanupPending: { recordName: 'r' } })],
+      zones: [zone({ dns: 'confirmed' }), zone({ zoneRef: 'd4'.repeat(16), name: 'example.net', enabled: false, cleanupPending: { recordName: 'r', note: null } })],
       zonesVisible: 2,
     }));
     expect(status.answer.status).toBe('cleanup_pending');
     expect(status.answer.line).toContain('example.net');
     expect(status.stages.find((s) => s.id === 'dns')?.word).toBe('cleanup pending');
+  });
+
+  it('carries the cause of the latest failed cleanup in the pending line, and nothing extra before one failed', () => {
+    const note = 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.';
+    const withNote = cloudflareAccountStatus(view({ zones: [zone({ cleanupPending: { recordName: 'r', note } })] }));
+    expect(withNote.answer.line).toBe(`A permission-check record is left in example.com. ${note}`);
+    expect(withNote.problems[0].detail).toBe('r');
+    const without = cloudflareAccountStatus(view({ zones: [zone({ cleanupPending: { recordName: 'r', note: null } })] }));
+    expect(without.answer.line).toBe('A permission-check record is left in example.com.');
   });
 
   it('reports an unseen zone as not visible rather than by its stale DNS state', () => {

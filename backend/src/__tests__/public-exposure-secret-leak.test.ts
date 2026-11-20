@@ -1,8 +1,9 @@
 /**
  * The Cloudflare token never leaves the hub's encrypted column: not in a
- * response, an audit row, a log line (including the central error handler on
- * a malformed body), or the diagnostics report. Drives every success and
- * failure path with a sentinel token and searches each surface for it.
+ * response (including the 400 for a body that fails to parse, whose parser
+ * message quotes the start of the body), an audit row, a log line, or the
+ * diagnostics report. Drives every success and failure path with a sentinel
+ * token and searches each surface for the token and for its first 8 characters.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -110,6 +111,7 @@ describe('Cloudflare token containment', () => {
       .set('Content-Type', 'application/json')
       .send(`{"token": ${FAKE_TOKEN}, "accountId": "x"}`);
     expect(unquoted.status).toBe(400);
+    bodies.push(unquoted.text);
 
     // An unexpected throw inside the route.
     const { PublicExposureAccountService } = await import('../services/publicExposure/PublicExposureAccountService');
@@ -125,6 +127,8 @@ describe('Cloudflare token containment', () => {
     const raw = db.getDb().prepare('SELECT * FROM exposure_accounts').all() as Array<{ credential_enc: string }>;
 
     expect(bodies.join('\n')).not.toContain(FAKE_TOKEN);
+    expect(bodies.join('\n')).not.toContain(FAKE_TOKEN.slice(0, 8));
+    expect(JSON.parse(unquoted.text)).toEqual({ error: 'The request body could not be parsed.' });
     expect(JSON.stringify(audit)).not.toContain(FAKE_TOKEN);
     expect(logged.join('\n')).not.toContain(FAKE_TOKEN);
     expect(logged.join('\n')).not.toContain(FAKE_TOKEN.slice(0, 8));

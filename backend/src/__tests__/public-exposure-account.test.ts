@@ -339,7 +339,7 @@ describe('DNS write check', () => {
     await connectWithZoneA();
     fake.create = 500;
     const { view } = await service.dnsCheck(ZONE_A, actor);
-    expect(zoneA(view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
     expect(fake.records.get(ZONE_A)).toHaveLength(1);
 
     fake.create = 'ok';
@@ -351,7 +351,7 @@ describe('DNS write check', () => {
   it('keeps the journal after a dropped connection on create', async () => {
     await connectWithZoneA();
     fake.create = 'reset';
-    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('clears the journal when the interrupted create never landed', async () => {
@@ -366,7 +366,7 @@ describe('DNS write check', () => {
   it('keeps the journal when the delete fails, and the next check deletes by record id', async () => {
     await connectWithZoneA();
     fake.remove = 500;
-    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
     const pending = db().prepare('SELECT scope_check_pending_json AS p FROM exposure_zones WHERE zone_ref = ?').get(ZONE_A) as { p: string };
     expect(JSON.parse(pending.p).recordId).toMatch(/^[0-9a-f]{32}$/);
     fake.remove = 'ok';
@@ -673,7 +673,7 @@ describe('DNS check journal edges', () => {
     await service.dnsCheck(ZONE_A, actor);
     fake.requests = [];
     const { view } = await service.dnsCheck(ZONE_A, actor);
-    expect(zoneA(view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
     expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
   });
 
@@ -710,7 +710,7 @@ describe('DNS check journal edges', () => {
       if (init?.method === 'POST') return new Response(JSON.stringify({ success: true, errors: [], messages: [], result: {} }));
       return res;
     }));
-    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
     installFakeCloudflare(fake);
     await service.recheck(actor);
     expect(fake.records.get(ZONE_A)).toEqual([]);
@@ -721,7 +721,7 @@ describe('DNS check journal edges', () => {
     db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?')
       .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:00', recordId: null, createdAt: Date.now() }), ZONE_A);
     await service.recheck(actor);
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('lets disconnect through when the zone holding the leftover record is gone from Cloudflare', async () => {
@@ -754,7 +754,7 @@ describe('DNS check journal edges', () => {
     const pending = service.dnsCheck(ZONE_A, actor);
     await vi.advanceTimersByTimeAsync(46_000);
     const { view } = await pending;
-    expect(zoneA(view).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
     const journal = db().prepare('SELECT scope_check_pending_json AS p FROM exposure_zones WHERE zone_ref = ?').get(ZONE_A) as { p: string };
     expect(JSON.parse(journal.p).recordId).toMatch(/^[0-9a-f]{32}$/);
   });
@@ -852,7 +852,8 @@ describe('round two edges', () => {
     const warn = vi.spyOn(console, 'warn');
     DatabaseService.getInstance().flushAuditLogBuffer();
     db().exec('DELETE FROM audit_log');
-    await service.disconnect(actor);
+    // The caller is told which record stays in Cloudflare.
+    expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
     expect(service.getView()).toEqual({ connected: false });
     expect(warn.mock.calls.some((call) => String(call[0]).includes(CHECK_NAME))).toBe(true);
     DatabaseService.getInstance().flushAuditLogBuffer();
@@ -870,7 +871,7 @@ describe('round two edges', () => {
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
     expect(error.message).toContain(message);
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('keeps refusing disconnect for a zone that left the account when Cloudflare rate limits the delete', async () => {
@@ -882,7 +883,7 @@ describe('round two edges', () => {
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
     expect(error.message).toContain('Cloudflare is limiting requests');
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('keeps refusing disconnect for a zone that left the account while a timed-out create may still land', async () => {
@@ -892,7 +893,7 @@ describe('round two edges', () => {
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
     expect(error.message).toContain('may still be landing');
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('keeps refusing disconnect for a zone that left the account when its record answer cannot be read', async () => {
@@ -902,7 +903,7 @@ describe('round two edges', () => {
       .run(JSON.stringify({ name: CHECK_NAME, content: 'sencho-scope-check:odd', recordId: null, createdAt: 0 }), ZONE_A);
     const error = await refusal(service.disconnect(actor));
     expect(error.code).toBe('CLEANUP_PENDING');
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('keeps the leftover record journal when an endpoint appears during a disconnect that would abandon it', async () => {
@@ -916,7 +917,7 @@ describe('round two edges', () => {
       return answer(fake, new URL(String(input)), init ?? {});
     }));
     expect((await refusal(service.disconnect(actor))).code).toBe('ENDPOINTS_EXIST');
-    expect(zoneA(service.getView()).cleanupPending).toEqual({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
   });
 
   it('names every record it leaves when several zones left the account', async () => {
@@ -986,3 +987,309 @@ describe('round two edges', () => {
   });
 });
 
+
+/** Answer these paths with a fixed success body and everything else from the fake. */
+function overrideAnswers(answers: Array<{ path: RegExp; method?: string; query?: (url: URL) => boolean; result: unknown }>): void {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const path = url.pathname.replace('/client/v4', '');
+    const hit = answers.find((a) => a.path.test(path) && (a.method ?? 'GET') === (init?.method ?? 'GET') && (a.query?.(url) ?? true));
+    if (hit) return new Response(JSON.stringify({ success: true, errors: [], messages: [], result: hit.result, result_info: { page: 1, total_pages: 1 } }));
+    return answer(fake, url, init ?? {});
+  }));
+}
+
+function journal(zoneRef: string): string | null {
+  return (db().prepare('SELECT scope_check_pending_json AS p FROM exposure_zones WHERE zone_ref = ?').get(zoneRef) as { p: string | null }).p;
+}
+
+function setJournal(value: string | null): void {
+  db().prepare('UPDATE exposure_zones SET scope_check_pending_json = ? WHERE zone_ref = ?').run(value, ZONE_A);
+}
+
+const OLD_JOURNAL = { name: CHECK_NAME, content: 'sencho-scope-check:00', recordId: null, createdAt: 0 };
+
+describe('an answer Cloudflare marks successful but Sencho cannot read', () => {
+  const GOOD_ZONE = { id: ZONE_A, name: 'example.com' };
+  it.each([
+    ['an object with no fields', [{}]],
+    ['a zone with a bad id', [{ id: 'not-hex', name: 'example.net' }]],
+    ['one good zone beside one bad zone', [GOOD_ZONE, { id: ZONE_B }]],
+    ['a null element', [GOOD_ZONE, null]],
+  ])('keeps the stored zones and records an unexpected answer when the zone page is %s', async (_label, page) => {
+    await connectWithZoneA();
+    const before = connected(service.getView());
+    expect(before.zones.map((z) => z.zoneRef)).toEqual([ZONE_A, ZONE_B]);
+    (fake as { zones: unknown }).zones = page;
+    const view = connected(await service.recheck(actor));
+    expect(view.lastCheck.outcome).toBe('unexpected_response');
+    // The disabled zone B is not in the bad page, and a partial page must not delete it or hide zone A.
+    expect(view.zones.map((z) => z.zoneRef)).toEqual([ZONE_A, ZONE_B]);
+    expect(view.zonesVisible).toBe(before.zonesVisible);
+    expect(view.zones.every((z) => z.seenAtLastCheck)).toBe(true);
+  });
+
+  it('refuses a connect from an unreadable zone page and stores nothing', async () => {
+    (fake as { zones: unknown }).zones = [GOOD_ZONE, null];
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+    expect(service.getView()).toEqual({ connected: false });
+  });
+
+  it.each([
+    ['a null element', [null]],
+    ['an element with no id', [{ name: 'Example Account' }]],
+  ])('reads an account list with %s as unexpected, not as a missing account', async (_label, accounts) => {
+    (fake as { accounts: unknown }).accounts = accounts;
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+  });
+
+  it.each([
+    ['no result', undefined],
+    ['a null result', null],
+    ['an empty result', {}],
+    ['a status that is not text', { status: 1 }],
+  ])('reads a token verify with %s as unexpected, not as an inactive token', async (_label, result) => {
+    overrideAnswers([{ path: /^\/user\/tokens\/verify$/, result }]);
+    const error = await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor));
+    expect(error.code).toBe('UNEXPECTED_RESPONSE');
+    expect(error.message).not.toContain('not active');
+    expect(service.getView()).toEqual({ connected: false });
+  });
+
+  it('reads an account-level verify without a status as unexpected too', async () => {
+    fake.verifyUser = 401;
+    overrideAnswers([{ path: /^\/accounts\/[0-9a-f]+\/tokens\/verify$/, result: {} }]);
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+  });
+
+  it('keeps a recheck from calling the token inactive on a verify without a status', async () => {
+    await connectWithZoneA();
+    overrideAnswers([{ path: /^\/user\/tokens\/verify$/, result: {} }]);
+    expect(connected(await service.recheck(actor)).lastCheck.outcome).toBe('unexpected_response');
+  });
+
+  describe('a record listing with an unreadable element', () => {
+    const atCheckName = (url: URL) => url.searchParams.get('name') === CHECK_NAME;
+    const bad = { path: /^\/zones\/[0-9a-f]+\/dns_records$/, query: atCheckName, result: [null] };
+
+    it('keeps the journal and names an unreadable answer when cleanup reads it', async () => {
+      await connectWithZoneA();
+      setJournal(JSON.stringify(OLD_JOURNAL));
+      overrideAnswers([bad]);
+      const view = connected(await service.recheck(actor));
+      expect(zoneA(view).cleanupPending?.note).toContain('could not read');
+      expect(journal(ZONE_A)).not.toBeNull();
+    });
+
+    it('refuses the DNS check as unexpected instead of a server error', async () => {
+      await connectWithZoneA();
+      overrideAnswers([bad]);
+      expect((await refusal(service.dnsCheck(ZONE_A, actor))).code).toBe('UNEXPECTED_RESPONSE');
+      expect(zoneA(service.getView()).dns).not.toBe('confirmed');
+    });
+
+    it('refuses disconnect while the record cannot be read', async () => {
+      await connectWithZoneA();
+      setJournal(JSON.stringify(OLD_JOURNAL));
+      overrideAnswers([bad]);
+      expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+      expect(service.getView().connected).toBe(true);
+    });
+  });
+});
+
+describe('a check record older than the late-create window', () => {
+  const stranger = (content: string, type = 'TXT') => ({ id: 'a'.repeat(32), type, name: CHECK_NAME, content });
+
+  it('stays journaled when other records sit at the name and none is ours, and deletes nothing', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    fake.records.set(ZONE_A, [stranger('"someone else"'), { ...stranger('"x"', 'CNAME'), id: 'b'.repeat(32) }]);
+    fake.requests = [];
+    const view = await service.recheck(actor);
+    expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
+    expect(zoneA(view).cleanupPending?.note).toContain('Other records sit at that name');
+    expect(journal(ZONE_A)).not.toBeNull();
+    expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+    expect(fake.records.get(ZONE_A)).toHaveLength(2);
+  });
+
+  it('refuses disconnect for those records, in the recheck path and the disconnect path alike', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    fake.records.set(ZONE_A, [stranger('"someone else"')]);
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain('Other records sit at that name');
+    expect(service.getView().connected).toBe(true);
+  });
+
+  it('does not run a new DNS check over them', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    fake.records.set(ZONE_A, [stranger('"someone else"')]);
+    fake.requests = [];
+    const { view, complete } = await service.dnsCheck(ZONE_A, actor);
+    expect(complete).toBe(false);
+    expect(zoneA(view).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
+    expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
+  });
+
+  it('deletes our record when it is among the others, and clears the journal only for an empty name', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    fake.records.set(ZONE_A, [stranger('"someone else"'), { ...stranger('"sencho-scope-check:00"'), id: 'c'.repeat(32) }]);
+    await service.recheck(actor);
+    expect(journal(ZONE_A)).toBeNull();
+    expect(fake.records.get(ZONE_A)).toEqual([stranger('"someone else"')]);
+    setJournal(JSON.stringify(OLD_JOURNAL));
+    await service.recheck(actor);
+    expect(journal(ZONE_A)).not.toBeNull();
+    fake.records.set(ZONE_A, []);
+    await service.recheck(actor);
+    expect(journal(ZONE_A)).toBeNull();
+  });
+});
+
+describe('disconnect names the check records it leaves behind', () => {
+  it('returns no names after a clean disconnect', async () => {
+    await connectWithZoneA();
+    expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+  });
+
+  it('returns the abandoned record name when the zone is out of reach', async () => {
+    await leftoverInGoneZone();
+    fake.remove = 403;
+    expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
+  });
+});
+
+describe('a recheck that cannot delete a leftover record says why', () => {
+  it.each([
+    ['a refused delete', { remove: 403 as const }, 'Cloudflare refused the delete'],
+    ['an unreachable Cloudflare', { remove: 'down' as const }, 'Could not reach api.cloudflare.com'],
+    ['a record that is too recent', { recent: true }, 'still be landing'],
+  ])('puts the cause on the pending zone after %s', async (_label, setup, sentence) => {
+    await connectWithZoneA();
+    if ('recent' in setup) {
+      setJournal(JSON.stringify({ ...OLD_JOURNAL, createdAt: Date.now() }));
+    } else {
+      fake.remove = 500;
+      await service.dnsCheck(ZONE_A, actor);
+      fake.remove = setup.remove;
+    }
+    const view = connected(await service.recheck(actor));
+    expect(zoneA(view).cleanupPending?.note).toContain(sentence);
+    // What a later read of the account shows is the same sentence, since it is kept with the journal.
+    expect(zoneA(service.getView()).cleanupPending?.note).toContain(sentence);
+    expect(journal(ZONE_A)).not.toBeNull();
+  });
+
+  it('uses the sentence disconnect refuses with', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    await service.dnsCheck(ZONE_A, actor);
+    fake.remove = 403;
+    const note = zoneA(await service.recheck(actor)).cleanupPending?.note;
+    expect((await refusal(service.disconnect(actor))).message).toContain(note);
+  });
+
+  it('shows no sentence for a check that never failed to clean up, and drops it once the record is gone', async () => {
+    await connectWithZoneA();
+    fake.remove = 500;
+    expect(zoneA((await service.dnsCheck(ZONE_A, actor)).view).cleanupPending?.note).toContain('Could not reach');
+    fake.remove = 'ok';
+    expect(zoneA(await service.recheck(actor)).cleanupPending).toBeNull();
+  });
+
+  it('tells a DNS check that left its record pending the cause too', async () => {
+    await connectWithZoneA();
+    fake.remove = 403;
+    const { view, complete } = await service.dnsCheck(ZONE_A, actor);
+    expect(complete).toBe(false);
+    expect(zoneA(view).cleanupPending?.note).toContain('Cloudflare refused the delete');
+  });
+
+  it('keeps no stale cause after an ambiguous create replaces the journal', async () => {
+    await connectWithZoneA();
+    setJournal(JSON.stringify({ ...OLD_JOURNAL, recordId: '9'.repeat(32), cause: 'refused' }));
+    fake.records.set(ZONE_A, []);
+    fake.create = 500;
+    // The leftover is cleaned (its delete answers 404), then the new create is ambiguous.
+    const { view } = await service.dnsCheck(ZONE_A, actor);
+    expect(zoneA(view).cleanupPending?.note ?? null).toBeNull();
+  });
+});
+
+describe('a journal column that cannot be read', () => {
+  it.each([['{'], ['{}'], ['null'], ['""'], ['[]'], ['{"name":"x"}']])('still counts as a pending record: %s', async (column) => {
+    await connectWithZoneA();
+    setJournal(column);
+    expect(zoneA(service.getView()).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
+    expect(zoneA(service.getView()).cleanupPending?.note).toContain('cannot read what it kept');
+  });
+
+  it('blocks disconnect while records sit at the check name, and recheck does not report the zone clear', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    fake.records.set(ZONE_A, [{ id: 'a'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"sencho-scope-check:00"' }]);
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain(CHECK_NAME);
+    expect(zoneA(await service.recheck(actor)).cleanupPending).toMatchObject({ recordName: CHECK_NAME });
+    expect(journal(ZONE_A)).toBe('{');
+    expect(fake.records.get(ZONE_A)).toHaveLength(1);
+  });
+
+  it('blocks disconnect while Cloudflare cannot be asked', async () => {
+    await connectWithZoneA();
+    setJournal('{}');
+    fake.dnsRead[ZONE_A] = 'down';
+    expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+    expect(service.getView().connected).toBe(true);
+  });
+
+  it('blocks disconnect when this instance has no identity to rebuild the record name from', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    vi.spyOn(FleetSyncService, 'getControlIdentity').mockReturnValue('');
+    const error = await refusal(service.disconnect(actor));
+    expect(error.code).toBe('CLEANUP_PENDING');
+    expect(error.message).toContain('Sencho cannot read what it kept');
+  });
+
+  it('does not start a DNS check over it', async () => {
+    await connectWithZoneA();
+    setJournal('{');
+    fake.records.set(ZONE_A, [{ id: 'a'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"x"' }]);
+    fake.requests = [];
+    const { complete } = await service.dnsCheck(ZONE_A, actor);
+    expect(complete).toBe(false);
+    expect(fake.requests.filter((r) => r.startsWith('POST'))).toEqual([]);
+  });
+
+  it('keeps a zone that left the listing instead of dropping its row', async () => {
+    await connectWithZoneA();
+    await service.setZone(ZONE_A, false, [], actor);
+    setJournal('{');
+    fake.records.set(ZONE_A, [{ id: 'a'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"x"' }]);
+    fake.zones = [{ id: ZONE_B, name: 'example.net' }];
+    await service.recheck(actor);
+    expect(connected(service.getView()).zones.map((z) => z.zoneRef)).toContain(ZONE_A);
+    setJournal(null);
+    await service.recheck(actor);
+    expect(connected(service.getView()).zones.map((z) => z.zoneRef)).not.toContain(ZONE_A);
+  });
+
+  it('settles once Cloudflare lists nothing at the name, and logs without the column text', async () => {
+    await connectWithZoneA();
+    setJournal('{"secret-looking":"cfsentinel_xyz');
+    const warn = vi.spyOn(console, 'warn');
+    const view = await service.recheck(actor);
+    expect(zoneA(view).cleanupPending).toBeNull();
+    expect(journal(ZONE_A)).toBeNull();
+    expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('cannot be read');
+    expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).not.toContain('cfsentinel_xyz');
+    expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+  });
+});
