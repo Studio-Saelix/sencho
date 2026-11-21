@@ -156,6 +156,26 @@ describe('detection identity chain', () => {
   });
 });
 
+describe('detection of the container mounts', () => {
+  it('records the destination of every mount, volumes and tmpfs included, so a mount over a bind-mounted path is seen', async () => {
+    state.inspect.mockResolvedValue({
+      ...inspectInfo(),
+      Mounts: [
+        { Type: 'bind', Source: '/srv/sencho/data', Destination: '/app/data' },
+        { Type: 'bind', Source: '/mnt/pool/apps', Destination: '/apps' },
+        { Type: 'volume', Name: 'inner', Source: '/var/lib/docker/volumes/inner/_data', Destination: '/apps/sencho' },
+        { Type: 'tmpfs', Source: '', Destination: '/apps/scratch' },
+      ],
+    });
+
+    await SelfUpdateService.getInstance().initialize();
+
+    const context = internals().composeContext as { hostBindMounts: unknown[]; mountDestinations: string[] };
+    expect(context.mountDestinations).toEqual(['/app/data', '/apps', '/apps/sencho', '/apps/scratch']);
+    expect(context.hostBindMounts).toHaveLength(2);
+  });
+});
+
 describe('refusal reasons', () => {
   it('reports not_compose_managed and schedules no retry when the labels are missing', async () => {
     state.inspect.mockResolvedValue(inspectInfo({ labels: null }));

@@ -93,7 +93,8 @@ export const CAPABILITIES = [
   'socket-inventory-v1',
   // A node that re-reads its own Compose image pin on request, so a hub's Recheck
   // can refresh the pin /api/meta reports without waiting for a restart. An older
-  // node lacks it and keeps the pin it last read.
+  // node lacks it, and a pin only its helper container can read stays as it was
+  // read until that node restarts or re-reads it itself.
   'image-pin-refresh-v1',
 ] as const;
 

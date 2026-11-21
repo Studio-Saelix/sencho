@@ -415,7 +415,7 @@ describe('a remote whose cached pin classification says the update is blocked', 
     const res = await updateRemote();
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('update_blocked');
+    expect(res.body).toEqual({ error: expect.stringContaining('pins its Sencho image to a digest'), code: 'update_blocked' });
     expect(updateCalls()).toBe(0);
   });
 
@@ -430,15 +430,38 @@ describe('a remote whose cached pin classification says the update is blocked', 
     expect(updateCalls()).toBe(0);
   });
 
-  it('is updated again once a Recheck has refreshed the flag', async () => {
+  it('keeps a hardened peer reachable, so its own typed refusal comes back', async () => {
     mockTarget();
-    mockMeta(ONLINE({ updateBlocked: false, imagePinKind: 'semver', imageChannel: 'community' }));
+    mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'hardened' }));
     const updateCalls = spyOnRemoteUpdateCalls();
 
-    const res = await updateRemote();
+    const res = await updateAll();
 
-    expect(res.status).toBe(202);
+    expect(res.body.skipped).toEqual([]);
     expect(updateCalls()).toBe(1);
+  });
+
+  it('records a node refusal for any other reason as a failure, on a single Update and on update-all', async () => {
+    mockTarget();
+    mockMeta(ONLINE({ updateBlocked: false, imagePinKind: 'semver', imageChannel: 'community' }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch { /* a non-URL input is not the release lookup */ }
+      return new Response(JSON.stringify({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' }), { status: 409 });
+    });
+
+    const single = await updateRemote();
+    expect(single.status).toBe(502);
+    expect(single.body).toEqual({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' });
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status).toBe('failed');
+
+    FleetUpdateTrackerService.getInstance().delete(proxyNodeId);
+    const all = await updateAll();
+    expect(all.body.failed).toEqual([expect.objectContaining({ nodeId: proxyNodeId, code: 'update_blocked' })]);
+    expect(all.body.skipped).toEqual([]);
   });
 });
 
@@ -578,14 +601,14 @@ describe('forced-recheck of the remote nodes\' Compose image pins', () => {
     ONLINE({ capabilities: ['stacks', 'self-update', REFRESH], ...over });
   const recheck = () => request(app).delete('/api/fleet/update-status?recheck=true').set('Authorization', adminAuth);
 
-  type Refresh = { url: string; headers: Record<string, string> };
+  type Refresh = { url: string; method?: string; body?: unknown; headers: Record<string, string> };
   /** Answers the release lookup and records each pin refresh the hub sends. */
   function spyOnRefreshes(answer: () => Response | Promise<Response> = () => new Response('{"refreshed":true}', { status: 200 })): Refresh[] {
     const refreshes: Refresh[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/system/image-pin-refresh')) {
-        refreshes.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+        refreshes.push({ url, method: init?.method, body: init?.body, headers: (init?.headers ?? {}) as Record<string, string> });
         return answer();
       }
       return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
@@ -606,11 +629,67 @@ describe('forced-recheck of the remote nodes\' Compose image pins', () => {
 
     const first = await recheck();
     expect(first.body.rechecked).toBe(true);
-    expect(refreshes).toEqual([{ url: 'http://192.168.1.99:1852/api/system/image-pin-refresh', headers: expect.objectContaining({ Authorization: 'Bearer proxy-token' }) }]);
+    expect(refreshes).toEqual([{
+      url: 'http://192.168.1.99:1852/api/system/image-pin-refresh',
+      method: 'POST',
+      body: '{}',
+      headers: expect.objectContaining({ Authorization: 'Bearer proxy-token' }),
+    }]);
 
     const second = await recheck();
     expect(second.body.rechecked).toBe(false);
     expect(refreshes).toHaveLength(1);
+  });
+
+  it('waits longer for the node answer than an update does, since the node answers after its own read', async () => {
+    mockTarget();
+    mockMeta(withRefresh());
+    spyOnRefreshes();
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+
+    await recheck();
+
+    expect(timeout).toHaveBeenCalledWith(45_000);
+  });
+
+  it('asks every remote node, so one that is offline or throws does not keep another from being asked', async () => {
+    const db = DatabaseService.getInstance();
+    const addRemote = (name: string, host: number) => db.addNode({
+      name, type: 'remote', mode: 'proxy', compose_dir: '/tmp', is_default: false,
+      api_url: `http://192.168.1.${host}:1852`, api_token: `token-${host}`,
+    });
+    const offlineId = addRemote('recheck-offline', 98);
+    const throwingId = addRemote('recheck-throwing', 97);
+    try {
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => {
+        if (id === proxyNodeId) return { apiUrl: 'http://192.168.1.99:1852', apiToken: 'proxy-token', trustedLoopback: false };
+        if (id === offlineId) return { apiUrl: 'http://192.168.1.98:1852', apiToken: 'token-98', trustedLoopback: false };
+        if (id === throwingId) return { apiUrl: 'http://192.168.1.97:1852', apiToken: 'token-97', trustedLoopback: false };
+        return null;
+      });
+      vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockImplementation(async (id: number) =>
+        id === offlineId ? withRefresh({ online: false }) : withRefresh());
+      const asked: string[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = String(input);
+        if (!url.endsWith('/api/system/image-pin-refresh')) return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        asked.push(url);
+        if (url.includes('192.168.1.97')) throw new Error('socket hang up');
+        return new Response('{"refreshed":true}', { status: 200 });
+      });
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const res = await recheck();
+
+      expect(res.body).toEqual({ rechecked: true });
+      expect(asked.sort()).toEqual([
+        'http://192.168.1.97:1852/api/system/image-pin-refresh',
+        'http://192.168.1.99:1852/api/system/image-pin-refresh',
+      ]);
+    } finally {
+      db.deleteNode(offlineId);
+      db.deleteNode(throwingId);
+    }
   });
 
   it('asks a Pilot tunnel node the same way, without a bearer header', async () => {
@@ -679,7 +758,7 @@ describe('forced-recheck of the remote nodes\' Compose image pins', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('proxy-hardening-test'), expect.stringContaining('socket hang up'));
   });
 
-  it('shows the refreshed flag in the next status read', async () => {
+  it('shows the refreshed flag in the next status read, and the node can then be updated', async () => {
     mockTarget();
     let blocked = true;
     vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockImplementation(async () =>
@@ -688,9 +767,13 @@ describe('forced-recheck of the remote nodes\' Compose image pins', () => {
     const flag = async () => (await request(app).get('/api/fleet/update-status').set('Authorization', adminAuth))
       .body.nodes.find((n: { nodeId: number }) => n.nodeId === proxyNodeId)?.updateBlocked;
 
+    const update = () => request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
+
     expect(await flag()).toBe(true);
+    expect((await update()).status).toBe(409);
     await recheck();
     expect(await flag()).toBe(false);
+    expect((await update()).status).toBe(202);
   });
 });
 

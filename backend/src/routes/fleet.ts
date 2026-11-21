@@ -1716,6 +1716,7 @@ function postSystemEndpoint(
   target: ProxyTarget,
   endpoint: '/api/system/update' | '/api/system/reapply-compose' | '/api/system/image-pin-refresh',
   body: Record<string, unknown> = {},
+  timeoutMs = 10000,
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
@@ -1723,7 +1724,7 @@ function postSystemEndpoint(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(timeoutMs),
   }, target.trustedLoopback);
 }
 
@@ -1734,8 +1735,13 @@ function postSystemUpdate(target: ProxyTarget, targetVersion: string | undefined
   });
 }
 
+// The node answers after it has re-read its Compose files, and a file only its
+// helper container can read takes up to 30 seconds, so this waits longer than the
+// 10 seconds an update or reapply needs just to be accepted.
+const IMAGE_PIN_REFRESH_TIMEOUT_MS = 45_000;
+
 function postSystemImagePinRefresh(target: ProxyTarget) {
-  return postSystemEndpoint(target, '/api/system/image-pin-refresh');
+  return postSystemEndpoint(target, '/api/system/image-pin-refresh', {}, IMAGE_PIN_REFRESH_TIMEOUT_MS);
 }
 
 function postSystemReapplyCompose(target: ProxyTarget, endpointProvider: EndpointProviderChoice) {
@@ -2394,12 +2400,14 @@ async function refreshLocalImagePin(): Promise<void> {
 
 /**
  * Ask every remote node to re-read its own Compose image pin as part of a
- * Recheck. A remote's `updateBlocked` is the pin it last read, and a node whose
- * Compose file only its helper container can read no longer re-reads it on a
- * timer, so this is how an edit shows up in Fleet without a restart. Only nodes
- * that advertise the capability are asked (an older node keeps the pin it
- * has), in parallel, through the same proxy or Pilot target as an update. A node
- * that is offline or refuses is logged and skipped; the Recheck never fails on it.
+ * Recheck. A remote's `updateBlocked` is the pin it last read, and a pin that only
+ * the helper container can read is not re-read on a timer, so this is how an edit
+ * to it shows up in Fleet without a restart. Only nodes that advertise the
+ * capability are asked (an older node is left to refresh by itself), in parallel,
+ * through the same proxy or Pilot target as an update. A node whose request fails
+ * or is refused is logged and skipped; an offline node, one without the
+ * capability, or one with no target is skipped without a log. The Recheck never
+ * fails on any of them.
  */
 async function refreshRemoteImagePins(): Promise<void> {
   const registry = NodeRegistry.getInstance();

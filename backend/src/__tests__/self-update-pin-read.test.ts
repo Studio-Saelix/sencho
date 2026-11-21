@@ -1,7 +1,7 @@
 /**
  * How SelfUpdateService reads Sencho's own Compose files to classify the image
  * pin. Routine status and monitor reads must never create a throwaway container
- * once a classification exists; fresh reads (update decisions) stay
+ * once every config file has been read; fresh reads (update decisions) stay
  * authoritative and read the current file, directly when a bind mount covers it
  * and through the helper otherwise.
  */
@@ -371,7 +371,12 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
       writeShadow();
       const service = setup([hostFile], [appsMount], [nested]);
 
-      await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toMatchObject({ ok: false });
+      // Read through the shadow it would be a digest pin (the blocked reason); the host file is what counts, and it is unreadable.
+      await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toEqual({
+        ok: false,
+        reason: expect.stringContaining('Could not read the Sencho compose file'),
+      });
+      expect(helperCalls()).toHaveLength(1);
       expect(stagedWrites).toHaveLength(0);
     });
 
@@ -683,6 +688,7 @@ describe('a Compose file that cannot be read at all', () => {
     for (let elapsed = TICK; elapsed <= span; elapsed += TICK) {
       clock = T0 + elapsed;
       await service.getPinInfo();
+      await (service as unknown as Internals).pinInflight;
       const now = helperCalls().length;
       if (now > seen) times.push(elapsed);
       seen = now;
@@ -723,8 +729,8 @@ describe('a Compose file that cannot be read at all', () => {
       expect(gap).toBeGreaterThanOrEqual(expected);
       expect(gap).toBeLessThanOrEqual(expected + TICK);
     });
-    expect(helperCalls().length).toBeLessThanOrEqual(11);
-    expect(helperCalls().length).toBeGreaterThanOrEqual(9);
+    // Reads about 0, 5, 15, 35, 75, 155, 315, 635, 1275 and 2555 minutes in.
+    expect(helperCalls()).toHaveLength(10);
   });
 
   it('settles at one helper read a day once the delay reaches its ceiling', async () => {
@@ -739,11 +745,12 @@ describe('a Compose file that cannot be read at all', () => {
     for (let elapsed = 3 * DAY + TICK; elapsed <= 6 * DAY; elapsed += 20 * TICK) {
       clock = T0 + elapsed;
       await service.getPinInfo();
+      await (service as unknown as Internals).pinInflight;
       if (helperCalls().length > seen) times.push(elapsed);
       seen = helperCalls().length;
     }
-    expect(times.length).toBeLessThanOrEqual(3);
-    expect(times.length).toBeGreaterThanOrEqual(2);
+    // One read a day: about 3.8, 4.8 and 5.8 days in.
+    expect(times).toHaveLength(3);
   });
 
   it('keeps the classification of the files it did read, for routine callers and cacheOnly', async () => {
@@ -766,7 +773,7 @@ describe('a Compose file that cannot be read at all', () => {
     await service.getPinInfo({ fresh: true });
 
     const times = await runTicks(service, 3 * HOUR);
-    // 5, 10, 20, 40, 80 minutes after the start, each to the next tick.
+    // After waits of 5, 10, 20, 40 and 80 minutes (about 5, 15, 35, 75 and 155 minutes in), each to the next tick.
     expect(times).toHaveLength(5);
     expect(helperCalls()).toHaveLength(6);
   });
@@ -800,7 +807,7 @@ describe('a Compose file that cannot be read at all', () => {
     expect(helperCalls()).toHaveLength(2);
   });
 
-  it('does not replace a partial classification with one that read fewer files', async () => {
+  it('does not replace a partial classification with one that found no image', async () => {
     warnSilently();
     writeCovered('saelix/sencho:0.99.0');
     const service = setup([coveredFile, uncoveredFile], [sameMount]);
@@ -810,6 +817,45 @@ describe('a Compose file that cannot be read at all', () => {
     await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
 
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+  });
+
+  it('answers from a partial classification at once and reads again in the background, then shows what that read found', async () => {
+    warnSilently();
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+    expect(helperCalls()).toHaveLength(1);
+    clock = T0 + FIVE_MIN;
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const base = mockExecFileAsync.getMockImplementation()!;
+    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
+      await gate;
+      return base(...(args as [string, string[]]));
+    });
+    writeCovered('saelix/sencho:0.99.7');
+
+    // The helper read is held back; a caller that waited for it would never return.
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    release();
+    await (service as unknown as Internals).pinInflight;
+
+    expect(helperCalls()).toHaveLength(2);
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.7' });
+  });
+
+  it('replaces a partial classification with a newer partial one that found a different image', async () => {
+    warnSilently();
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    writeCovered('saelix/sencho:0.99.1');
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
   });
 
   it('starts counting again after a complete read, and after a new detection', async () => {

@@ -181,9 +181,17 @@ describe('POST /api/system/image-pin-refresh', () => {
     expect(JSON.stringify(res.body)).not.toContain('/secret/path');
   });
 
-  it('requires authentication', async () => {
-    const res = await request(app).post('/api/system/image-pin-refresh');
-    expect(res.status).toBe(401);
+  it('requires authentication, and the license permission: a viewer is refused and nothing is read', async () => {
+    mockSelfUpdateAvailable();
+    DatabaseService.getInstance().addUser({ username: 'viewer-pin-refresh', password_hash: 'unused', role: 'viewer' });
+    const viewer = `Bearer ${jwt.sign({ username: 'viewer-pin-refresh' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+
+    const anonymous = await request(app).post('/api/system/image-pin-refresh');
+    const denied = await refresh(viewer);
+
+    expect(anonymous.status).toBe(401);
+    expect(denied.status).toBe(403);
+    expect(SelfUpdateService.getInstance().getPinInfo).not.toHaveBeenCalled();
   });
 
   it('is advertised as a capability', async () => {

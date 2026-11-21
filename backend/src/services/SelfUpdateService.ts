@@ -767,12 +767,13 @@ class SelfUpdateService {
 
   /**
    * Classify how this instance's compose image is pinned. Frequent status/meta
-   * callers are served from a cache and start a container only while the cached
-   * classification is missing or partial (a config file could not be read), on a
-   * backoff of 5 minutes up to a day; `cacheOnly` never reads. Pass
-   * `{ fresh: true }` for update decisions so a live compose edit is always
-   * reflected. Returns null when self-update is unavailable, the compose file
-   * could not be read, or no read has classified the pin yet.
+   * callers are served from a cache and start a container only after a first read
+   * was attempted and while the cached classification is missing or partial (a
+   * config file could not be read), on a backoff of 5 minutes up to a day;
+   * `cacheOnly` never reads. Pass `{ fresh: true }` for update decisions so a live
+   * compose edit is always reflected. A read that missed some files returns the
+   * classification of the files it did read. Returns null when self-update is
+   * unavailable, or no read has classified the pin yet.
    */
   async getPinInfo(opts?: { fresh?: boolean; cacheOnly?: boolean }): Promise<PinInfo | null> {
     const resolved = await this.resolveComposeImage(opts?.fresh ?? false, opts?.cacheOnly ?? false);
@@ -819,7 +820,9 @@ class SelfUpdateService {
    * older than the TTL it is re-read directly, and only when every file can be
    * read directly. A routine read starts the helper only while the cache is
    * missing or partial, after a first read was attempted and no more often than
-   * `incompleteReadRetryMs` allows. Returns null when nothing is classified.
+   * `incompleteReadRetryMs` allows; with a partial classification in hand it
+   * answers from it and reads in the background. Returns null when nothing is
+   * classified.
    */
   private async resolveComposeImage(fresh: boolean, cacheOnly = false): Promise<ResolvedComposeImage | null> {
     if (!this.composeContext) return null;
@@ -832,13 +835,24 @@ class SelfUpdateService {
       return read ? read.info : cache.info;
     }
     if (cacheOnly) return cache?.info ?? null;
+    // A partial cache that classified something answers at once; the retry runs
+    // in the background so a status request or monitor tick never waits on a
+    // helper container. With nothing classified there is no answer to give yet,
+    // so the caller waits for the read.
+    const background = cache?.info != null;
     if (this.pinInflight) {
+      if (background) return cache.info;
       await this.pinInflight;
       return this.pinCache?.info ?? null;
     }
     const sinceLastRead = Date.now() - this.lastFullReadAt;
     if (this.lastFullReadAt === 0 || sinceLastRead < this.incompleteReadRetryMs()) return cache?.info ?? null;
-    await this.startFullRead();
+    const read = this.startFullRead();
+    if (background) {
+      read.catch(error => console.warn('[SelfUpdate] Background Compose image pin read failed:', sanitizeForLog((error as Error).message)));
+      return cache.info;
+    }
+    await read;
     return this.pinCache?.info ?? null;
   }
 
@@ -861,10 +875,11 @@ class SelfUpdateService {
    * Read every config file and classify the image. A routine read (no helper)
    * returns null, keeping the cache, when a file cannot be read directly, and
    * records the attempt in `checkedAt` so it is not repeated on every tick. A read
-   * that got every file is cached, never over a newer entry. A read that missed a
-   * file caches what it did read as partial, but only when nothing better is
-   * cached: it never replaces a complete entry, and never replaces a partial one
-   * with a classification of fewer files.
+   * that got every file is cached. A read that missed a file caches what it did
+   * read as partial, but only when nothing better is cached: it never replaces a
+   * complete entry, and never replaces a partial entry that classified an image
+   * with one that classified none. No read replaces an entry that a read started
+   * later wrote.
    */
   private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
     const ctx = this.composeContext;
@@ -894,7 +909,7 @@ class SelfUpdateService {
     const partial = unread.length > 0;
     if (partial) {
       this.incompleteReads += 1;
-      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the image pin comes from the files that could be read, and routine checks retry the rest with a growing delay.`);
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; routine checks re-read the files with a growing delay while the cached pin is partial.`);
     } else {
       this.incompleteReads = 0;
     }
@@ -917,7 +932,8 @@ class SelfUpdateService {
 
   /** Read a config file through one of Sencho's own bind mounts. A single-file
    *  mount is uncovered: it keeps showing the old file after an editor replaces
-   *  it, so only a mounted folder is trusted. */
+   *  it, so only a mounted folder is trusted. So is a path another mount covers
+   *  more deeply, directly or through a symlink, which shows that mount's file. */
   private async readConfigFileDirect(
     filePath: string,
     mounts: ReadonlyArray<HostMount>,
