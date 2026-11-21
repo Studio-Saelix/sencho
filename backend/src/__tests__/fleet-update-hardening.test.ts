@@ -387,180 +387,58 @@ describe('POST /api/fleet/nodes/:id/update hardened digest pin', () => {
   });
 });
 
-/** Answers GitHub's release lookup, and every other fetch (the remote's update route) with `remote`. */
-function mockRemoteUpdateAnswer(remote: () => Response): { calls: () => number } {
-  let calls = 0;
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-    try {
-      if (new URL(String(input)).hostname === 'api.github.com') {
-        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
-      }
-    } catch {
-      // Non-URL fetch inputs fall through to the remote-update mock.
-    }
-    if (String(input).endsWith('/api/system/update')) calls++;
-    return remote();
-  });
-  return { calls: () => calls };
-}
-
-const PIN_BLOCKED_TEXT = 'This install pins the Sencho image to a digest or a value Fleet cannot resolve, so it cannot repin automatically.';
-const blockedAnswer = () => new Response(JSON.stringify({ error: PIN_BLOCKED_TEXT, code: 'update_blocked' }), { status: 409 });
-const unreadableAnswer = () => new Response(JSON.stringify({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' }), { status: 409 });
-const acceptedAnswer = () => new Response(JSON.stringify({ message: 'ok' }), { status: 202 });
-
 describe('a remote whose cached pin classification says the update is blocked', () => {
-  const staleBlocked = (over: Partial<RemoteMeta> = {}) =>
-    mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'community', ...over }));
+  // The Fleet UI hides Update on the same flag, so the hub must refuse it too:
+  // the two stay in step, and a Recheck is what refreshes the flag.
+  const staleBlocked = () =>
+    mockMeta(ONLINE({ updateBlocked: true, imagePinKind: 'digest', imageChannel: 'community' }));
   const updateRemote = () => request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth);
   const updateAll = () => request(app).post('/api/fleet/update-all').set('Authorization', adminAuth);
-  const trackerStatus = () => FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status;
 
-  beforeEach(() => FleetUpdateTrackerService.getInstance().delete(proxyNodeId));
+  function spyOnRemoteUpdateCalls(): () => number {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch { /* a non-URL input is not the release lookup */ }
+      return new Response(JSON.stringify({ message: 'ok' }), { status: 202 });
+    });
+    return () => fetchSpy.mock.calls.filter(call => String(call[0]).endsWith('/api/system/update')).length;
+  }
 
-  it('updates once the node itself accepts, because its own fresh read decides', async () => {
+  it('is refused by a single Update with the pin reason, without calling the node', async () => {
     mockTarget();
     staleBlocked();
-    const remote = mockRemoteUpdateAnswer(acceptedAnswer);
+    const updateCalls = spyOnRemoteUpdateCalls();
 
     const res = await updateRemote();
 
-    expect(res.status).toBe(202);
-    expect(remote.calls()).toBe(1);
-    expect(trackerStatus()).toBe('updating');
-  });
-
-  it('answers 409 with the node\'s own reason when it still refuses, without recording a failure', async () => {
-    mockTarget();
-    staleBlocked();
-    const remote = mockRemoteUpdateAnswer(blockedAnswer);
-
-    const res = await updateRemote();
-
-    expect(remote.calls()).toBe(1);
     expect(res.status).toBe(409);
-    expect(res.body).toEqual({ error: PIN_BLOCKED_TEXT, code: 'update_blocked' });
-    expect(trackerStatus()).toBeUndefined();
+    expect(res.body.code).toBe('update_blocked');
+    expect(updateCalls()).toBe(0);
   });
 
-  it('keeps a node\'s refusal for another reason a failure when its cached flag does not say blocked', async () => {
-    mockTarget();
-    staleBlocked({ updateBlocked: false, imagePinKind: null });
-    mockRemoteUpdateAnswer(unreadableAnswer);
-
-    const res = await updateRemote();
-
-    expect(res.status).toBe(502);
-    expect(res.body).toEqual({ error: 'Could not read the Sencho compose file.', code: 'update_blocked' });
-    expect(trackerStatus()).toBe('failed');
-  });
-
-  it('still reaches a hardened peer that answers update_blocked, as a failure', async () => {
-    mockTarget();
-    staleBlocked({ imageChannel: 'hardened' });
-    mockRemoteUpdateAnswer(blockedAnswer);
-
-    const res = await updateRemote();
-
-    expect(res.status).toBe(502);
-    expect(trackerStatus()).toBe('failed');
-  });
-
-  it('reports a hardened peer that answers update_blocked as failed by update-all', async () => {
-    mockTarget();
-    staleBlocked({ imageChannel: 'hardened' });
-    mockRemoteUpdateAnswer(blockedAnswer);
-
-    const res = await updateAll();
-
-    expect(res.body.failed).toEqual([expect.objectContaining({ nodeId: proxyNodeId, code: 'update_blocked' })]);
-    expect(res.body.skipped).toEqual([]);
-  });
-
-  it('is updated by update-all when the node accepts', async () => {
+  it('is skipped by update-all, without calling the node', async () => {
     mockTarget();
     staleBlocked();
-    mockRemoteUpdateAnswer(acceptedAnswer);
-
-    const res = await updateAll();
-
-    expect(res.body).toEqual({ updating: ['proxy-hardening-test'], skipped: [], failed: [] });
-    expect(trackerStatus()).toBe('updating');
-  });
-
-  it('is skipped by update-all when the node still refuses for its pin, with no failure recorded', async () => {
-    mockTarget();
-    staleBlocked();
-    mockRemoteUpdateAnswer(blockedAnswer);
+    const updateCalls = spyOnRemoteUpdateCalls();
 
     const res = await updateAll();
 
     expect(res.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
-    expect(trackerStatus()).toBeUndefined();
+    expect(updateCalls()).toBe(0);
   });
 
-  it('is reported failed by update-all when the node refuses for another reason', async () => {
+  it('is updated again once a Recheck has refreshed the flag', async () => {
     mockTarget();
-    staleBlocked({ updateBlocked: false, imagePinKind: null });
-    mockRemoteUpdateAnswer(unreadableAnswer);
+    mockMeta(ONLINE({ updateBlocked: false, imagePinKind: 'semver', imageChannel: 'community' }));
+    const updateCalls = spyOnRemoteUpdateCalls();
 
-    const res = await updateAll();
+    const res = await updateRemote();
 
-    expect(res.body.failed).toEqual([expect.objectContaining({ nodeId: proxyNodeId, code: 'update_blocked' })]);
-    expect(res.body.skipped).toEqual([]);
-  });
-
-  describe('when no release target can be resolved, so the node would skip its own pin check', () => {
-    // No release lookup answers and the hub's own version is not comparable (a dev build).
-    const noTarget = async () => {
-      const version = await import('../services/CapabilityRegistry');
-      vi.spyOn(version, 'getSenchoVersion').mockReturnValue('dev');
-      return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 500 }));
-    };
-
-    beforeEach(async () => {
-      const { CacheService } = await import('../services/CacheService');
-      CacheService.getInstance().invalidate('latest-version-info');
-    });
-
-    it('refuses an update from the cached flag without calling the node', async () => {
-      mockTarget();
-      staleBlocked();
-      const fetchSpy = await noTarget();
-
-      const res = await updateRemote();
-
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('update_blocked');
-      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(false);
-    });
-
-    it('still reaches a hardened peer, which answers for itself', async () => {
-      mockTarget();
-      staleBlocked({ imageChannel: 'hardened' });
-      const fetchSpy = await noTarget();
-
-      const single = await updateRemote();
-      expect(single.status).not.toBe(409);
-      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(true);
-
-      fetchSpy.mockClear();
-      FleetUpdateTrackerService.getInstance().delete(proxyNodeId);
-      const all = await updateAll();
-      expect(all.body.skipped).toEqual([]);
-      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(true);
-    });
-
-    it('skips the node in update-all from the cached flag without calling it', async () => {
-      mockTarget();
-      staleBlocked();
-      const fetchSpy = await noTarget();
-
-      const res = await updateAll();
-
-      expect(res.body).toEqual({ updating: [], skipped: ['proxy-hardening-test'], failed: [] });
-      expect(fetchSpy.mock.calls.some(call => String(call[0]).endsWith('/api/system/update'))).toBe(false);
-    });
+    expect(res.status).toBe(202);
+    expect(updateCalls()).toBe(1);
   });
 });
 
@@ -691,6 +569,128 @@ describe('forced-recheck throttle', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ rechecked: true });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Compose image pin'), expect.stringContaining('pin read failed'));
+  });
+});
+
+describe('forced-recheck of the remote nodes\' Compose image pins', () => {
+  const REFRESH = 'image-pin-refresh-v1';
+  const withRefresh = (over: Partial<RemoteMeta> = {}) =>
+    ONLINE({ capabilities: ['stacks', 'self-update', REFRESH], ...over });
+  const recheck = () => request(app).delete('/api/fleet/update-status?recheck=true').set('Authorization', adminAuth);
+
+  type Refresh = { url: string; headers: Record<string, string> };
+  /** Answers the release lookup and records each pin refresh the hub sends. */
+  function spyOnRefreshes(answer: () => Response | Promise<Response> = () => new Response('{"refreshed":true}', { status: 200 })): Refresh[] {
+    const refreshes: Refresh[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/system/image-pin-refresh')) {
+        refreshes.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+        return answer();
+      }
+      return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+    });
+    return refreshes;
+  }
+
+  beforeEach(async () => {
+    const { _resetForcedRecheckThrottleForTests } = await import('../routes/fleet');
+    _resetForcedRecheckThrottleForTests();
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockResolvedValue(null);
+  });
+
+  it('asks a proxy node that advertises the capability to re-read its pin, once per cooldown window', async () => {
+    mockTarget();
+    mockMeta(withRefresh());
+    const refreshes = spyOnRefreshes();
+
+    const first = await recheck();
+    expect(first.body.rechecked).toBe(true);
+    expect(refreshes).toEqual([{ url: 'http://192.168.1.99:1852/api/system/image-pin-refresh', headers: expect.objectContaining({ Authorization: 'Bearer proxy-token' }) }]);
+
+    const second = await recheck();
+    expect(second.body.rechecked).toBe(false);
+    expect(refreshes).toHaveLength(1);
+  });
+
+  it('asks a Pilot tunnel node the same way, without a bearer header', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) =>
+      id === proxyNodeId ? { apiUrl: 'http://127.0.0.1:41000', apiToken: '', trustedLoopback: true } : null,
+    );
+    mockMeta(withRefresh());
+    const refreshes = spyOnRefreshes();
+
+    await recheck();
+
+    expect(refreshes).toHaveLength(1);
+    expect(refreshes[0].url).toBe('http://127.0.0.1:41000/api/system/image-pin-refresh');
+    expect(refreshes[0].headers).not.toHaveProperty('Authorization');
+  });
+
+  it('leaves a node that does not advertise the capability alone', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    const refreshes = spyOnRefreshes();
+
+    const res = await recheck();
+
+    expect(res.body.rechecked).toBe(true);
+    expect(refreshes).toHaveLength(0);
+  });
+
+  it('leaves an offline node and a node with no reachable target alone', async () => {
+    mockTarget();
+    mockMeta(withRefresh({ online: false }));
+    const refreshes = spyOnRefreshes();
+    await recheck();
+    expect(refreshes).toHaveLength(0);
+
+    const { _resetForcedRecheckThrottleForTests } = await import('../routes/fleet');
+    _resetForcedRecheckThrottleForTests();
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+    mockMeta(withRefresh());
+    await recheck();
+    expect(refreshes).toHaveLength(0);
+  });
+
+  it('still answers 200 rechecked when the node refuses, and logs which node', async () => {
+    mockTarget();
+    mockMeta(withRefresh());
+    spyOnRefreshes(() => new Response('{"error":"nope"}', { status: 500 }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = await recheck();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ rechecked: true });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proxy-hardening-test'));
+  });
+
+  it('still answers 200 rechecked when the request to the node throws', async () => {
+    mockTarget();
+    mockMeta(withRefresh());
+    spyOnRefreshes(() => { throw new Error('socket hang up'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = await recheck();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ rechecked: true });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proxy-hardening-test'), expect.stringContaining('socket hang up'));
+  });
+
+  it('shows the refreshed flag in the next status read', async () => {
+    mockTarget();
+    let blocked = true;
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockImplementation(async () =>
+      withRefresh({ updateBlocked: blocked, imagePinKind: blocked ? 'digest' : 'semver', imageChannel: 'community' }));
+    spyOnRefreshes(() => { blocked = false; return new Response('{"refreshed":true}', { status: 200 }); });
+    const flag = async () => (await request(app).get('/api/fleet/update-status').set('Authorization', adminAuth))
+      .body.nodes.find((n: { nodeId: number }) => n.nodeId === proxyNodeId)?.updateBlocked;
+
+    expect(await flag()).toBe(true);
+    await recheck();
+    expect(await flag()).toBe(false);
   });
 });
 

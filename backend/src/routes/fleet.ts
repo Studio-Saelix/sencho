@@ -24,7 +24,7 @@ import {
   type SelfUpdateUnavailableCode,
 } from '../helpers/selfUpdateEligibility';
 import { MonitorService } from '../services/MonitorService';
-import { getSenchoVersion, isValidVersion, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
+import { getSenchoVersion, isValidVersion, IMAGE_PIN_REFRESH_CAPABILITY, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
 import { checkPermission, requirePermission } from '../middleware/permissions';
@@ -312,34 +312,6 @@ async function resolveUpdateTarget(requested?: string): Promise<string | undefin
   if (requested !== undefined) return requested;
   const { compareVersion, compareValid } = await getCompareTarget(getSenchoVersion());
   return pickCompareTarget(compareVersion, compareValid);
-}
-
-/** The slice of a remote's /api/meta that says whether its pin blocks an update. */
-interface RemotePinMeta {
-  updateBlocked: boolean;
-  imageChannel: string | null;
-}
-
-/**
- * A remote's `updateBlocked` is its cached pin classification, which can be older
- * than an edit the operator made to that node's compose file. The remote re-reads
- * the file before it accepts an update that names a target, so the hub only trusts
- * the cached flag alone when no target is sent (the remote then skips that check).
- * Hardened peers must still reach /api/system/update so machine creds get
- * HARDENED_REMOTE_UPDATE_UNSUPPORTED.
- */
-function cachedPinBlocksUpdate(meta: RemotePinMeta, target: string | undefined): boolean {
-  return target === undefined && meta.updateBlocked && meta.imageChannel !== 'hardened';
-}
-
-/**
- * A remote's own refusal because its pin blocks the update. Its other
- * `update_blocked` answers (compose file unreadable, self-update unavailable) are
- * real failures and keep their own reason, so a refusal counts as a pin refusal
- * only when the cached flag also says the pin blocks.
- */
-function isRemotePinRefusal(meta: RemotePinMeta, failure: { code?: string }): boolean {
-  return failure.code === 'update_blocked' && meta.updateBlocked && meta.imageChannel !== 'hardened';
 }
 
 async function fetchLocalNodeOverview(node: Node, allowUnknownHostUsage: boolean): Promise<FleetNodeOverview> {
@@ -1742,7 +1714,7 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
 // ignores the extra body key and behaves as before.
 function postSystemEndpoint(
   target: ProxyTarget,
-  endpoint: '/api/system/update' | '/api/system/reapply-compose',
+  endpoint: '/api/system/update' | '/api/system/reapply-compose' | '/api/system/image-pin-refresh',
   body: Record<string, unknown> = {},
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1760,6 +1732,10 @@ function postSystemUpdate(target: ProxyTarget, targetVersion: string | undefined
     ...(targetVersion ? { targetVersion } : {}),
     ...(replaceEndpointProvider ? { replaceEndpointProvider: true } : {}),
   });
+}
+
+function postSystemImagePinRefresh(target: ProxyTarget) {
+  return postSystemEndpoint(target, '/api/system/image-pin-refresh');
 }
 
 function postSystemReapplyCompose(target: ProxyTarget, endpointProvider: EndpointProviderChoice) {
@@ -2091,19 +2067,18 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
     if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
-    const resolvedTarget = await resolveUpdateTarget(requestedTarget);
-    if (cachedPinBlocksUpdate(meta, resolvedTarget)) {
+    // Hardened peers are digest-pinned (updateBlocked) but must still reach
+    // /api/system/update so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
+    if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
       res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
       return;
     }
+
+    const resolvedTarget = await resolveUpdateTarget(requestedTarget);
     const response = await postSystemUpdate(target, resolvedTarget, replaceEndpointProvider);
 
     if (!response.ok) {
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
-      if (isRemotePinRefusal(meta, failure)) {
-        res.status(409).json({ error: failure.error, code: 'update_blocked' });
-        return;
-      }
       updateTracker.set(nodeId, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
       res.status(502).json(failure);
       return;
@@ -2335,10 +2310,10 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (!meta.capabilities.includes('self-update')) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
+      if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      if (cachedPinBlocksUpdate(meta, updateAllTarget)) {
+      if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       const response = await postSystemUpdate(target, updateAllTarget, false);
@@ -2347,10 +2322,6 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
         return { nodeId: node.id, name: node.name, kind: 'updating' as const };
       }
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
-      // The node's own fresh read decided: a pin that blocks the update is skipped.
-      if (isRemotePinRefusal(meta, failure)) {
-        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
-      }
       updateTracker.set(node.id, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
       return { nodeId: node.id, name: node.name, kind: 'failed' as const, ...failure };
     }));
@@ -2421,6 +2392,34 @@ async function refreshLocalImagePin(): Promise<void> {
   }
 }
 
+/**
+ * Ask every remote node to re-read its own Compose image pin as part of a
+ * Recheck. A remote's `updateBlocked` is the pin it last read, and a node whose
+ * Compose file only its helper container can read no longer re-reads it on a
+ * timer, so this is how an edit shows up in Fleet without a restart. Only nodes
+ * that advertise the capability are asked (an older node keeps the pin it
+ * has), in parallel, through the same proxy or Pilot target as an update. A node
+ * that is offline or refuses is logged and skipped; the Recheck never fails on it.
+ */
+async function refreshRemoteImagePins(): Promise<void> {
+  const registry = NodeRegistry.getInstance();
+  const remotes = DatabaseService.getInstance().getNodes().filter(node => node.type === 'remote');
+  await Promise.allSettled(remotes.map(async node => {
+    const target = registry.getProxyTarget(node.id);
+    if (!target) return;
+    try {
+      const meta = await registry.fetchMetaForNode(node.id);
+      if (!meta.online || !meta.capabilities.includes(IMAGE_PIN_REFRESH_CAPABILITY)) return;
+      const response = await postSystemImagePinRefresh(target);
+      if (!response.ok) {
+        console.warn(`[Fleet] Node "${sanitizeForLog(node.name)}" (id ${node.id}) did not refresh its Compose image pin during recheck (status ${response.status}).`);
+      }
+    } catch (error) {
+      console.warn(`[Fleet] Could not refresh the Compose image pin on node "${sanitizeForLog(node.name)}" (id ${node.id}) during recheck:`, errorMessageForLog(error));
+    }
+  }));
+}
+
 fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   // Optionally pre-fetch a fresh latest version so the next GET compares against
@@ -2432,7 +2431,7 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
     if (now - lastForcedRecheckAt >= FORCED_RECHECK_COOLDOWN_MS) {
       lastForcedRecheckAt = now;
       await getLatestVersion(true);
-      await refreshLocalImagePin();
+      await Promise.all([refreshLocalImagePin(), refreshRemoteImagePins()]);
       rechecked = true;
     }
   }

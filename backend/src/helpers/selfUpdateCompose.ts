@@ -229,16 +229,41 @@ export function isSameOrChildPath(child: string, parent: string): boolean {
 }
 
 /**
+ * Whether another mount sits over `containerPath` inside Sencho's own container:
+ * its destination is the path or a parent of it, and deeper than the mount the
+ * path was mapped through. What Sencho reads there is then that mount's file, not
+ * the host file the label names (two mounts `/apps` and `/apps/sencho` show a
+ * different `/apps/sencho/compose.yaml` than the host path under `/apps`). Every
+ * mount counts, not only bind mounts: a volume or tmpfs shadows a path too.
+ */
+export function isShadowedByDeeperMount(
+  containerPath: string,
+  chosenDestination: string,
+  allDestinations: ReadonlyArray<string>,
+): boolean {
+  for (const raw of allDestinations) {
+    const destination = normalizeAbsolutePath(raw);
+    if (!destination || destination.length <= chosenDestination.length) continue;
+    if (isSameOrChildPath(containerPath, destination)) return true;
+  }
+  return false;
+}
+
+/**
  * Translate a host path into the path Sencho sees it at, through the bind mount
  * with the longest matching source. A prefix only matches on a whole path
  * segment (`/opt/dock` never covers `/opt/docker/x`). Relative paths and `..`
  * segments are refused rather than resolved, so a caller never reads a file the
- * mount did not expose. Returns the mount's destination too, so the caller can
- * confirm the resolved file still lives under it.
+ * mount did not expose. A path another mount covers more deeply (see
+ * `isShadowedByDeeperMount`, given every destination in the container) maps to
+ * null, so the caller reads the host file through the helper instead. Returns the
+ * mount's destination too, so the caller can confirm the resolved file still
+ * lives under it.
  */
 export function mapHostPathToContainerPath(
   hostPath: string,
   mounts: ReadonlyArray<PathMount>,
+  allDestinations: ReadonlyArray<string>,
 ): { containerPath: string; mountDestination: string } | null {
   const host = normalizeAbsolutePath(hostPath);
   if (!host) return null;
@@ -250,8 +275,7 @@ export function mapHostPathToContainerPath(
     if (!best || source.length > best.source.length) best = { source, destination };
   }
   if (!best) return null;
-  return {
-    containerPath: path.posix.join(best.destination, path.posix.relative(best.source, host)),
-    mountDestination: best.destination,
-  };
+  const containerPath = path.posix.join(best.destination, path.posix.relative(best.source, host));
+  if (isShadowedByDeeperMount(containerPath, best.destination, allDestinations)) return null;
+  return { containerPath, mountDestination: best.destination };
 }

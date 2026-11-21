@@ -16,6 +16,7 @@ import {
   classifyImagePin,
   buildTargetImageRef,
   isRepinBlocked,
+  isShadowedByDeeperMount,
   isValidImageRef,
   mapHostPathToContainerPath,
   resolveServiceImageFromContents,
@@ -244,18 +245,21 @@ describe('buildComposeReadArgs', () => {
 
 describe('mapHostPathToContainerPath', () => {
   const same = { source: '/opt/sencho', destination: '/opt/sencho' };
+  /** The mounts' own destinations, plus any further mount (a volume, say) of the container. */
+  const mapPath = (host: string, mounts: Array<{ source: string; destination: string }>, otherDestinations: string[] = []) =>
+    mapHostPathToContainerPath(host, mounts, [...mounts.map(m => m.destination), ...otherDestinations]);
 
   it('maps a file under a folder mount, at the same path or a different one', () => {
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [same])).toEqual({
+    expect(mapPath('/opt/sencho/compose.yaml', [same])).toEqual({
       containerPath: '/opt/sencho/compose.yaml', mountDestination: '/opt/sencho',
     });
-    expect(mapHostPathToContainerPath('/opt/sencho/sub/compose.yaml', [{ source: '/opt/sencho', destination: '/stacks/self' }])).toEqual({
+    expect(mapPath('/opt/sencho/sub/compose.yaml', [{ source: '/opt/sencho', destination: '/stacks/self' }])).toEqual({
       containerPath: '/stacks/self/sub/compose.yaml', mountDestination: '/stacks/self',
     });
   });
 
   it('maps an exact file mount to its destination', () => {
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/compose.yaml', destination: '/etc/self.yaml' }])).toEqual({
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/compose.yaml', destination: '/etc/self.yaml' }])).toEqual({
       containerPath: '/etc/self.yaml', mountDestination: '/etc/self.yaml',
     });
   });
@@ -266,36 +270,87 @@ describe('mapHostPathToContainerPath', () => {
       { source: '/opt/sencho', destination: '/self' },
       { source: '/opt/sencho/data', destination: '/data' },
     ];
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
-    expect(mapHostPathToContainerPath('/opt/other/compose.yaml', mounts)?.containerPath).toBe('/host-opt/other/compose.yaml');
+    expect(mapPath('/opt/sencho/compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+    expect(mapPath('/opt/other/compose.yaml', mounts)?.containerPath).toBe('/host-opt/other/compose.yaml');
   });
 
   it('matches whole path segments only', () => {
-    expect(mapHostPathToContainerPath('/opt/docker/x.yaml', [{ source: '/opt/dock', destination: '/d' }])).toBeNull();
-    expect(mapHostPathToContainerPath('/opt/sencho-two/x.yaml', [same])).toBeNull();
+    expect(mapPath('/opt/docker/x.yaml', [{ source: '/opt/dock', destination: '/d' }])).toBeNull();
+    expect(mapPath('/opt/sencho-two/x.yaml', [same])).toBeNull();
   });
 
   it('ignores trailing slashes on a mount and normalizes the host path', () => {
     const mounts = [{ source: '/opt/sencho/', destination: '/self/' }];
-    expect(mapHostPathToContainerPath('/opt/sencho//./compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+    expect(mapPath('/opt/sencho//./compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
   });
 
   it('refuses relative paths and any .. segment', () => {
-    expect(mapHostPathToContainerPath('opt/sencho/compose.yaml', [same])).toBeNull();
-    expect(mapHostPathToContainerPath('/opt/sencho/../../etc/passwd', [same])).toBeNull();
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/..', destination: '/x' }])).toBeNull();
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho', destination: 'relative' }])).toBeNull();
+    expect(mapPath('opt/sencho/compose.yaml', [same])).toBeNull();
+    expect(mapPath('/opt/sencho/../../etc/passwd', [same])).toBeNull();
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/..', destination: '/x' }])).toBeNull();
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho', destination: 'relative' }])).toBeNull();
   });
 
   it('maps through a mount of the host root', () => {
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [{ source: '/', destination: '/host' }])).toEqual({
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/', destination: '/host' }])).toEqual({
       containerPath: '/host/opt/sencho/compose.yaml', mountDestination: '/host',
     });
   });
 
+  describe('a mount nested over the mapped path', () => {
+    const apps = { source: '/mnt/pool/apps', destination: '/apps' };
+    const config = { source: '/mnt/pool/sencho-config', destination: '/apps/sencho' };
+
+    it('refuses a path another bind mount shows different contents at', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps, config])).toBeNull();
+      expect(mapPath('/mnt/pool/apps/sencho/deep/dir/compose.yaml', [apps, config])).toBeNull();
+    });
+
+    it('refuses a path a volume or tmpfs shadows, which is not a bind mount', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/apps/sencho'])).toBeNull();
+    });
+
+    it('refuses a single file another mount replaces', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/apps/sencho/compose.yaml'])).toBeNull();
+    });
+
+    it('still maps a sibling the nested mount does not cover', () => {
+      expect(mapPath('/mnt/pool/apps/other/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/other/compose.yaml', mountDestination: '/apps',
+      });
+      expect(mapPath('/mnt/pool/apps/sencho-two/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/sencho-two/compose.yaml', mountDestination: '/apps',
+      });
+    });
+
+    it('maps a path under the nested mount through that mount when its source matches', () => {
+      expect(mapPath('/mnt/pool/sencho-config/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/sencho/compose.yaml', mountDestination: '/apps/sencho',
+      });
+    });
+
+    it('ignores a mount elsewhere and unusable destinations', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/data', 'relative', '/apps/sencho/../x'])?.containerPath)
+        .toBe('/apps/sencho/compose.yaml');
+    });
+  });
+
   it('returns null with no mounts or no matching mount', () => {
-    expect(mapHostPathToContainerPath('/opt/sencho/compose.yaml', [])).toBeNull();
-    expect(mapHostPathToContainerPath('/srv/x/compose.yaml', [same])).toBeNull();
+    expect(mapPath('/opt/sencho/compose.yaml', [])).toBeNull();
+    expect(mapPath('/srv/x/compose.yaml', [same])).toBeNull();
+  });
+});
+
+describe('isShadowedByDeeperMount', () => {
+  it('is true for a deeper destination that is the path or a parent of it, compared by whole segment', () => {
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', ['/apps', '/apps/sencho'])).toBe(true);
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', ['/apps/sencho/compose.yaml'])).toBe(true);
+    expect(isShadowedByDeeperMount('/apps/sencho-two/compose.yaml', '/apps', ['/apps/sencho'])).toBe(false);
+  });
+
+  it('is false for the chosen mount, a shallower one, or none', () => {
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps/sencho', ['/apps/sencho', '/apps', '/'])).toBe(false);
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', [])).toBe(false);
   });
 });
 

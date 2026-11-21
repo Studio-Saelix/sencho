@@ -52,6 +52,7 @@ const overrideFile = '/srv/uncovered/override.yaml';
 const FIVE_MIN = 5 * 60 * 1000;
 const TICK = 30_000;
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const T0 = 1_000_000;
 
 const sameMount = { source: coveredDir, destination: coveredDir };
@@ -73,10 +74,12 @@ type Internals = {
   pinCache: unknown;
   pinInflight: unknown;
   lastFullReadAt: number;
+  incompleteReads: number;
   applyDetection(code: null): void;
 };
 
-function setup(configFiles: string[], mounts: Mount[]): SelfUpdateService {
+/** `otherDestinations` are further mounts of the container (a volume, or a bind mount that is not the config file's own). */
+function setup(configFiles: string[], mounts: Mount[], otherDestinations: string[] = []): SelfUpdateService {
   const instance = SelfUpdateService.getInstance();
   const internals = instance as unknown as Internals;
   internals.composeContext = {
@@ -86,6 +89,7 @@ function setup(configFiles: string[], mounts: Mount[]): SelfUpdateService {
     imageName: 'saelix/sencho:0.99.0',
     dataDirHost: '/srv/data',
     hostBindMounts: mounts,
+    mountDestinations: [...mounts.map(m => m.destination), ...otherDestinations],
     project: 'stack',
     runningImageId: 'sha256:running',
   };
@@ -93,6 +97,7 @@ function setup(configFiles: string[], mounts: Mount[]): SelfUpdateService {
   internals.pinCache = null;
   internals.pinInflight = null;
   internals.lastFullReadAt = 0;
+  internals.incompleteReads = 0;
   return instance;
 }
 
@@ -315,6 +320,99 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
     expect(helperCalls()).toHaveLength(0);
   });
 
+  describe('another mount shadows the mapped path', () => {
+    const hostApps = '/host/apps';
+    const hostFile = `${hostApps}/sencho/compose.yaml`;
+    const nested = path.join(coveredDir, 'sencho');
+    const appsMount = { source: hostApps, destination: coveredDir };
+    const shadowImage = 'saelix/sencho@sha256:' + 'a'.repeat(64);
+
+    /** What Sencho sees at the mapped path: the nested mount's file, not the host's. */
+    function writeShadow(): void {
+      fs.mkdirSync(nested, { recursive: true });
+      fs.writeFileSync(path.join(nested, 'compose.yaml'), compose(shadowImage));
+    }
+
+    it('reads the host file through the helper, not the nested mount\'s file', async () => {
+      writeShadow();
+      hostFiles.set(hostFile, compose('saelix/sencho:0.99.0'));
+      const service = setup([hostFile], [appsMount], [nested]);
+
+      await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({
+        pinKind: 'semver', composeImageRef: 'saelix/sencho:0.99.0', filePath: hostFile,
+      });
+      expect(helperCalls()).toHaveLength(1);
+      expect((helperCalls()[0][1] as string[]).at(-1)).toBe(hostFile);
+    });
+
+    it('uses the helper for every fresh caller: the update preflight and the update-time resolve', async () => {
+      writeShadow();
+      hostFiles.set(hostFile, compose('saelix/sencho:0.99.0'));
+      const service = setup([hostFile], [appsMount], [nested]);
+
+      await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toEqual({ ok: true });
+      await expect(service.getResolvedComposeImageForUpdate()).resolves.toMatchObject({ imageRef: 'saelix/sencho:0.99.0', filePath: hostFile });
+      expect(helperCalls()).toHaveLength(2);
+    });
+
+    it('stages a repin patched from the host file, never from the nested mount\'s file', async () => {
+      writeShadow();
+      hostFiles.set(hostFile, compose('saelix/sencho:0.99.0'));
+      const service = setup([hostFile], [appsMount], [nested]);
+
+      await service.triggerUpdate({ targetVersion: '0.99.1' });
+
+      expect(stagedWrites).toHaveLength(1);
+      expect(stagedWrites[0]).toBe(patchComposeServiceImage(compose('saelix/sencho:0.99.0'), 'sencho', 'saelix/sencho:0.99.1'));
+      expect(String(stagedWrites[0])).not.toContain('sha256');
+    });
+
+    it('refuses to update when only the shadowing file could be read as a digest pin and the host file cannot be read', async () => {
+      writeShadow();
+      const service = setup([hostFile], [appsMount], [nested]);
+
+      await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toMatchObject({ ok: false });
+      expect(stagedWrites).toHaveLength(0);
+    });
+
+    it('does not classify a routine read from the nested mount\'s file either', async () => {
+      writeShadow();
+      hostFiles.set(hostFile, compose('saelix/sencho:0.99.0'));
+      const service = setup([hostFile], [appsMount], [nested]);
+      await service.getPinInfo({ fresh: true });
+
+      clock += 3 * FIVE_MIN;
+      await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
+      await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ pinKind: 'semver' });
+      expect(helperCalls()).toHaveLength(1);
+    });
+
+    it('is treated as uncovered when a symlink inside the mount leads into the nested mount', async () => {
+      writeShadow();
+      fs.symlinkSync('sencho/compose.yaml', path.join(coveredDir, 'link.yaml'));
+      hostFiles.set(`${hostApps}/link.yaml`, compose('saelix/sencho:0.99.0'));
+      const service = setup([`${hostApps}/link.yaml`], [appsMount], [nested]);
+
+      await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ pinKind: 'semver', composeImageRef: 'saelix/sencho:0.99.0' });
+      expect(helperCalls()).toHaveLength(1);
+    });
+
+    it('still reads directly when the same layout has no mount over the file', async () => {
+      writeShadow();
+      hostFiles.set(hostFile, compose('saelix/sencho:0.99.9'));
+      fs.symlinkSync('sencho/compose.yaml', path.join(coveredDir, 'link.yaml'));
+      const unrelated = path.join(coveredDir, 'elsewhere');
+
+      const service = setup([hostFile], [appsMount], [unrelated]);
+      await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: shadowImage, pinKind: 'digest' });
+      expect(helperCalls()).toHaveLength(0);
+
+      const viaLink = setup([`${hostApps}/link.yaml`], [appsMount], [unrelated]);
+      await expect(viaLink.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: shadowImage });
+      expect(helperCalls()).toHaveLength(0);
+    });
+  });
+
   it('does not follow a symlink into a sibling folder that shares the mount name as a prefix', async () => {
     const evil = path.join(siblingDir, 'x.yaml');
     fs.writeFileSync(evil, compose('saelix/sencho:9.9.9'));
@@ -529,29 +627,6 @@ describe('a Compose file no bind mount covers', () => {
     expect(helperCalls()).toHaveLength(3);
   });
 
-  it('retries an unclassified pin at most once an hour, then keeps the classification it got', async () => {
-    const service = setup([uncoveredFile], []);
-    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
-    expect(helperCalls()).toHaveLength(1);
-
-    for (let elapsed = TICK; elapsed < HOUR; elapsed += TICK * 20) {
-      clock = T0 + elapsed;
-      await expect(service.getPinInfo()).resolves.toBeNull();
-    }
-    expect(helperCalls()).toHaveLength(1);
-
-    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
-    clock = T0 + HOUR;
-    await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
-    expect(helperCalls()).toHaveLength(2);
-
-    for (let tick = 0; tick < 240; tick++) {
-      clock += TICK;
-      await service.getPinInfo();
-    }
-    expect(helperCalls()).toHaveLength(2);
-  });
-
   it('keeps the last good classification when a later fresh read cannot read the file', async () => {
     hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
     const service = setup([uncoveredFile], []);
@@ -595,6 +670,189 @@ describe('a Compose file no bind mount covers', () => {
 
     await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     expect(helperCalls()).toHaveLength(0);
+  });
+});
+
+describe('a Compose file that cannot be read at all', () => {
+  const warnSilently = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+  /** Routine reads every 30 seconds for `span`, returning the times (ms after the start) the helper ran. */
+  async function runTicks(service: SelfUpdateService, span: number): Promise<number[]> {
+    const times: number[] = [];
+    let seen = helperCalls().length;
+    for (let elapsed = TICK; elapsed <= span; elapsed += TICK) {
+      clock = T0 + elapsed;
+      await service.getPinInfo();
+      const now = helperCalls().length;
+      if (now > seen) times.push(elapsed);
+      seen = now;
+    }
+    return times;
+  }
+
+  it('retries a transient startup failure within five minutes and then keeps the pin', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+    expect(helperCalls()).toHaveLength(1);
+
+    clock = T0 + FIVE_MIN - TICK;
+    await expect(service.getPinInfo()).resolves.toBeNull();
+    expect(helperCalls()).toHaveLength(1);
+
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    clock = T0 + FIVE_MIN;
+    await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
+    expect(helperCalls()).toHaveLength(2);
+
+    expect(await runTicks(service, 3 * HOUR)).toEqual([]);
+    expect(helperCalls()).toHaveLength(2);
+  });
+
+  it('backs off: each retry waits twice as long as the last, up to a day, over two simulated days', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await service.getPinInfo({ fresh: true });
+
+    const times = [0, ...await runTicks(service, 2 * DAY)];
+    const gaps = times.slice(1).map((time, i) => time - times[i]);
+
+    expect(gaps[0]).toBeGreaterThanOrEqual(FIVE_MIN);
+    gaps.forEach((gap, i) => {
+      const expected = Math.min(FIVE_MIN * 2 ** i, DAY);
+      expect(gap).toBeGreaterThanOrEqual(expected);
+      expect(gap).toBeLessThanOrEqual(expected + TICK);
+    });
+    expect(helperCalls().length).toBeLessThanOrEqual(11);
+    expect(helperCalls().length).toBeGreaterThanOrEqual(9);
+  });
+
+  it('settles at one helper read a day once the delay reaches its ceiling', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await service.getPinInfo({ fresh: true });
+    await runTicks(service, 3 * DAY);
+    const before = helperCalls().length;
+
+    const times: number[] = [];
+    let seen = before;
+    for (let elapsed = 3 * DAY + TICK; elapsed <= 6 * DAY; elapsed += 20 * TICK) {
+      clock = T0 + elapsed;
+      await service.getPinInfo();
+      if (helperCalls().length > seen) times.push(elapsed);
+      seen = helperCalls().length;
+    }
+    expect(times.length).toBeLessThanOrEqual(3);
+    expect(times.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('keeps the classification of the files it did read, for routine callers and cacheOnly', async () => {
+    warnSilently();
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    expect(helperCalls()).toHaveLength(1);
+
+    await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ pinKind: 'semver' });
+    expect(helperCalls()).toHaveLength(1);
+  });
+
+  it('starts no helper in a project with one unreadable file during a routine tick until the delay passes', async () => {
+    warnSilently();
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    const times = await runTicks(service, 3 * HOUR);
+    // 5, 10, 20, 40, 80 minutes after the start, each to the next tick.
+    expect(times).toHaveLength(5);
+    expect(helperCalls()).toHaveLength(6);
+  });
+
+  it('keeps reading every file on a fresh read, whatever the delay', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await service.getPinInfo({ fresh: true });
+    await service.getPinInfo({ fresh: true });
+    await service.getResolvedComposeImageForUpdate();
+    expect(helperCalls()).toHaveLength(3);
+
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.4'));
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.4' });
+  });
+
+  it('does not let a partial read replace a complete classification', async () => {
+    warnSilently();
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    writeCovered('saelix/sencho:0.99.0');
+    fs.writeFileSync(coveredFile, 'services:\n  other:\n    image: busybox\n');
+    const service = setup([uncoveredFile, coveredFile], [sameMount]);
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+
+    hostFiles.delete(uncoveredFile);
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+
+    clock += 10 * HOUR;
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    expect(helperCalls()).toHaveLength(2);
+  });
+
+  it('does not replace a partial classification with one that read fewer files', async () => {
+    warnSilently();
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+
+    fs.writeFileSync(coveredFile, 'services:\n  other:\n    image: busybox\n');
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+  });
+
+  it('starts counting again after a complete read, and after a new detection', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await service.getPinInfo({ fresh: true });
+    await service.getPinInfo({ fresh: true });
+    expect((service as unknown as Internals).incompleteReads).toBe(2);
+
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    await service.getPinInfo({ fresh: true });
+    expect((service as unknown as Internals).incompleteReads).toBe(0);
+
+    hostFiles.delete(uncoveredFile);
+    (service as unknown as Internals).pinCache = null;
+    await service.getPinInfo({ fresh: true });
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    (service as unknown as Internals).applyDetection(null);
+    expect((service as unknown as Internals).incompleteReads).toBe(0);
+  });
+
+  it('lets a routine read wait for the read in flight, not start a second one', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    await service.getPinInfo({ fresh: true });
+    clock = T0 + FIVE_MIN;
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const base = mockExecFileAsync.getMockImplementation()!;
+    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
+      await gate;
+      return base(...(args as [string, string[]]));
+    });
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+
+    const first = service.getPinInfo();
+    const second = service.getPinInfo();
+    release();
+
+    await expect(first).resolves.toMatchObject({ pinKind: 'semver' });
+    await expect(second).resolves.toMatchObject({ pinKind: 'semver' });
+    expect(helperCalls()).toHaveLength(2);
   });
 });
 

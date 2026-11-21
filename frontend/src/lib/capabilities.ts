@@ -66,6 +66,8 @@ export const CAPABILITIES = [
   // an older remote as "this node cannot report its socket access", not as a
   // clean inventory with nothing to show.
   'socket-inventory-v1',
+  // A node that re-reads its own Compose image pin on request, for a hub Recheck.
+  'image-pin-refresh-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

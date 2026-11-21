@@ -91,6 +91,10 @@ export const CAPABILITIES = [
   // an older remote as "this node cannot report its socket access", not as a
   // clean inventory with nothing to show.
   'socket-inventory-v1',
+  // A node that re-reads its own Compose image pin on request, so a hub's Recheck
+  // can refresh the pin /api/meta reports without waiting for a restart. An older
+  // node lacks it and keeps the pin it last read.
+  'image-pin-refresh-v1',
 ] as const;
 
 /**
@@ -103,6 +107,13 @@ export const CAPABILITIES = [
 export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/**
+ * Advertised by a node that answers `POST /api/system/image-pin-refresh`. The hub
+ * sends that request on a Fleet Recheck only to nodes that advertise this; an
+ * older node is left alone instead of being sent a path it does not serve.
+ */
+export const IMAGE_PIN_REFRESH_CAPABILITY = 'image-pin-refresh-v1' as const satisfies Capability;
 
 /**
  * Read-only observation projections for AI clients (`/api/stacks/platform/
