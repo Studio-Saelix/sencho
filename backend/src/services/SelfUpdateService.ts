@@ -920,7 +920,7 @@ class SelfUpdateService {
     if (newest) this.incompleteReadsAt = startedAt;
     if (partial) {
       if (newest) this.incompleteReads += 1;
-      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the files that were read set the cached pin only when no better one is cached. While the cached pin is partial, routine checks retry the rest with a growing delay.`);
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the files that were read set the cached pin only when no better one is cached. While the cached pin is partial, routine checks read the files again with a growing delay.`);
     } else if (newest || cache?.partial) {
       // A complete read ends the retries even when a partial read that started later finished first.
       this.incompleteReads = 0;
@@ -946,13 +946,14 @@ class SelfUpdateService {
 
   /** Read a config file through one of Sencho's own bind mounts. A single-file
    *  mount is uncovered: it keeps showing the old file after an editor replaces
-   *  it, so only a mounted folder is trusted. So is a path another mount covers
-   *  more deeply, directly or through a symlink, and a path that passes an
-   *  absolute symlink in a mount whose source and destination differ. Mount
-   *  destinations are compared where they really are (the live mount list),
-   *  because the runtime resolves a symlink in a destination
-   *  (`/apps/current/sencho` is mounted at `/apps/v2/sencho`) while Docker
-   *  records it as written. */
+   *  it, so only a mounted folder is trusted. So is a path another mount covers,
+   *  directly, through a symlink, or by being mounted over the folder's own root;
+   *  and so is a path that passes an absolute symlink (or one that leaves the
+   *  mount) when the folder is mounted at a different path than on the host.
+   *  Other mounts are located from the live mount list (the runtime resolves a
+   *  symlink in a destination, `/apps/current/sencho` is mounted at
+   *  `/apps/v2/sencho`, while Docker records it as written), with the recorded
+   *  destinations resolved instead where that list cannot be read. */
   private async readConfigFileDirect(
     filePath: string,
     mounts: ReadonlyArray<HostMount>,

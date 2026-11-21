@@ -327,7 +327,9 @@ const MAX_SYMLINK_HOPS = 40;
 
 /**
  * Whether resolving `containerPath` below the mount at `root` passes a symlink
- * whose target is absolute, or leaves the mount, or cannot be examined. An
+ * whose target is absolute, or leaves the mount, or cannot be examined (a link
+ * that cannot be read, or a chain of more than 40 links). A missing path is not
+ * a link; the read reports it. An
  * absolute target resolves in Sencho's own filesystem, but the host resolves it
  * in the host's, and when the mount's source and destination differ those are
  * different trees: Sencho would read a file the host path does not name.
