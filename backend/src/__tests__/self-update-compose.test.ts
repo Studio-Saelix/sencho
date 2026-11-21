@@ -653,6 +653,21 @@ describe('resolveMountDestinations', () => {
     expect((await resolveMountDestinations([plain, path.join(dir, 'nowhere')], info(plain, submount))).destinations).toContain(submount);
   });
 
+  it('says a mount is hidden when its own path is not a live mount point', async () => {
+    expect((await resolveMountDestinations([], info('/run'))).hides('/run/x')).toBe(true);
+    expect((await resolveMountDestinations([], none)).hides('/run/x')).toBe(false);
+  });
+
+  it('uses the live points when a recorded destination is not itself a live mount point', async () => {
+    fs.mkdirSync(path.join(dir, 'plain2', 'sencho'), { recursive: true });
+    const recorded = path.join(dir, 'plain2', 'sencho');
+    const moved = path.join(dir, 'v9', 'sencho');
+
+    // The recorded path resolves to itself, yet the mount is live elsewhere: the link was replaced by a folder after the start.
+    expect((await resolveMountDestinations([recorded], info(moved))).destinations).toContain(moved);
+    expect((await resolveMountDestinations([recorded], info(recorded, moved))).destinations).not.toContain(moved);
+  });
+
   it('keeps only the recorded form of a destination that does not exist or is not absolute', async () => {
     const missing = path.join(dir, 'missing', 'mount');
     const view = await resolveMountDestinations([missing, 'relative/path'], none);

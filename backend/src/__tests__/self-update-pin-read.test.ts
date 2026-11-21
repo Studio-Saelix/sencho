@@ -518,6 +518,27 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
         expect(helperCalls()).toHaveLength(2);
       });
 
+      it('reads the host file through the helper when the link was replaced by a folder after the start', async () => {
+        fs.rmSync(path.join(coveredDir, 'current'));
+        fs.mkdirSync(path.join(coveredDir, 'current', 'sencho'), { recursive: true });
+        mountinfo = [realCovered(), path.join(realCovered(), 'v2', 'sencho')].map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n');
+        const service = setup([v2File], [appsMount], [recorded]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0', filePath: v2File });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
+      it('reads the host file through the helper when the mount root is not a live mount point', async () => {
+        // The chosen mount was hidden by a later mount whose own link leads elsewhere.
+        mountinfo = `0 1 0:1 / ${path.dirname(realCovered())} rw - tmpfs tmpfs rw`;
+        fs.writeFileSync(path.join(coveredDir, 'compose.yaml'), compose(shadowImage));
+        hostFiles.set(`${hostApps}/compose.yaml`, compose('saelix/sencho:0.99.0'));
+        const service = setup([`${hostApps}/compose.yaml`], [appsMount]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
       it('reads the host file through the helper when the link is retargeted to a missing folder', async () => {
         fs.rmSync(path.join(coveredDir, 'current'));
         fs.symlinkSync('gone', path.join(coveredDir, 'current'));

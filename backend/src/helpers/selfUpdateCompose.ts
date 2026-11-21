@@ -279,12 +279,15 @@ export interface MountView {
  *
  * `destinations` holds the recorded destinations, where each resolves now, and
  * the live mount points. The live points are used only when a recorded
- * destination runs through a symlink or does not resolve, because only then can
- * a recorded mount sit somewhere the recorded form does not say. Without one,
- * every live mount that Docker did not record is a submount of a bound folder,
- * which shows the host's own file there and is not a shadow. Where mountinfo
- * cannot be read, only the recorded and resolved destinations are used, which is
- * right until a link on the way is retargeted.
+ * destination runs through a symlink, does not resolve, or is not itself a live
+ * mount point, because only then can a recorded mount sit somewhere the recorded
+ * form does not say (a link retargeted or replaced after the start). Without
+ * one, every live mount that Docker did not record is a submount of a bound
+ * folder, which shows the host's own file there and is not a shadow. A recorded
+ * mount's own path is always a live mount point, so a `root` that is not one has
+ * been hidden or replaced. Where mountinfo cannot be read, only the recorded and
+ * resolved destinations are used, which is right until a link on the way is
+ * retargeted.
  */
 export async function resolveMountDestinations(
   destinations: ReadonlyArray<string>,
@@ -311,11 +314,12 @@ export async function resolveMountDestinations(
     }
   }
   const placed = live.length > 0 ? live : resolved;
+  const unplaced = live.length > 0 && resolved.some(real => !live.includes(real));
   return {
-    destinations: [...destinations, ...resolved, ...(throughSymlink ? live : [])],
+    destinations: [...destinations, ...resolved, ...(throughSymlink || unplaced ? live : [])],
     hides(root) {
       const last = placed.lastIndexOf(root);
-      if (last === -1) return false;
+      if (last === -1) return live.length > 0;
       if (placed.indexOf(root) !== last) return true;
       // Only the live list has an order; resolved destinations do not say which mounted last.
       return live.length > 0 && live.slice(last + 1).some(point => isSameOrChildPath(root, point));
