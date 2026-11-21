@@ -476,6 +476,8 @@ class SelfUpdateService {
   private lastFullReadAt = 0;
   /** Consecutive full reads that could not read every config file. */
   private incompleteReads = 0;
+  /** When the read that last set `incompleteReads` started, so a read that finishes late does not rewind the count. */
+  private incompleteReadsAt = 0;
   /** Bounded reason the last detection refused, null while available. */
   private unavailableCode: SelfUpdateUnavailableCode = 'detecting';
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -615,7 +617,8 @@ class SelfUpdateService {
 
     this.composeContext = {
       workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts,
-      mountDestinations: rawMounts.map(m => m.Destination).filter(Boolean),
+      // A tmpfs mount is listed under HostConfig.Tmpfs, not under Mounts.
+      mountDestinations: [...rawMounts.map(m => m.Destination), ...Object.keys(info.HostConfig?.Tmpfs ?? {})].filter(Boolean),
       project: labels['com.docker.compose.project'] || null,
       runningImageId: typeof info.Image === 'string' && info.Image ? info.Image : null,
     };
@@ -630,6 +633,7 @@ class SelfUpdateService {
     this.routineReadWarned = false;
     this.lastFullReadAt = 0;
     this.incompleteReads = 0;
+    this.incompleteReadsAt = 0;
     if (code === null) {
       this.canSelfUpdate = true;
       this.unavailableCode = 'detecting';
@@ -907,10 +911,12 @@ class SelfUpdateService {
     }
     const info = resolveServiceImageFromContents(files, ctx.serviceName);
     const partial = unread.length > 0;
+    const newest = startedAt >= this.incompleteReadsAt;
+    if (newest) this.incompleteReadsAt = startedAt;
     if (partial) {
-      this.incompleteReads += 1;
+      if (newest) this.incompleteReads += 1;
       console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; routine checks re-read the files with a growing delay while the cached pin is partial.`);
-    } else {
+    } else if (newest) {
       this.incompleteReads = 0;
     }
     const cache = this.pinCache;

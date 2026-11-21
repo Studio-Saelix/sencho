@@ -157,15 +157,15 @@ describe('detection identity chain', () => {
 });
 
 describe('detection of the container mounts', () => {
-  it('records the destination of every mount, volumes and tmpfs included, so a mount over a bind-mounted path is seen', async () => {
+  it('records the destination of every mount, volumes and tmpfs (listed under HostConfig) included, so a mount over a bind-mounted path is seen', async () => {
     state.inspect.mockResolvedValue({
       ...inspectInfo(),
       Mounts: [
         { Type: 'bind', Source: '/srv/sencho/data', Destination: '/app/data' },
         { Type: 'bind', Source: '/mnt/pool/apps', Destination: '/apps' },
         { Type: 'volume', Name: 'inner', Source: '/var/lib/docker/volumes/inner/_data', Destination: '/apps/sencho' },
-        { Type: 'tmpfs', Source: '', Destination: '/apps/scratch' },
       ],
+      HostConfig: { Tmpfs: { '/apps/scratch': 'size=1m' } },
     });
 
     await SelfUpdateService.getInstance().initialize();

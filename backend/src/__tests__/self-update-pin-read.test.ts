@@ -75,6 +75,7 @@ type Internals = {
   pinInflight: unknown;
   lastFullReadAt: number;
   incompleteReads: number;
+  incompleteReadsAt: number;
   applyDetection(code: null): void;
 };
 
@@ -98,6 +99,7 @@ function setup(configFiles: string[], mounts: Mount[], otherDestinations: string
   internals.pinInflight = null;
   internals.lastFullReadAt = 0;
   internals.incompleteReads = 0;
+  internals.incompleteReadsAt = 0;
   return instance;
 }
 
@@ -856,6 +858,32 @@ describe('a Compose file that cannot be read at all', () => {
     await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
 
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+  });
+
+  it('does not let a partial read that finishes after a newer complete one rewind the retry count', async () => {
+    warnSilently();
+    const service = setup([uncoveredFile], []);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (first) {
+        first = false;
+        await gate;
+        throw new Error('No such file');
+      }
+      return { stdout: hostFiles.get(args[args.length - 1]) ?? '', stderr: '' };
+    });
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+
+    const older = service.getPinInfo({ fresh: true });
+    clock += 1000;
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ pinKind: 'semver' });
+    release();
+    await expect(older).resolves.toBeNull();
+
+    expect((service as unknown as Internals).incompleteReads).toBe(0);
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ pinKind: 'semver' });
   });
 
   it('starts counting again after a complete read, and after a new detection', async () => {
