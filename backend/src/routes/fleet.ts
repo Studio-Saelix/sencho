@@ -1735,9 +1735,12 @@ function postSystemUpdate(target: ProxyTarget, targetVersion: string | undefined
   });
 }
 
-// The node answers after it has re-read its Compose files, and a file only its
-// helper container can read takes up to 30 seconds, so this waits longer than the
-// 10 seconds an update or reapply needs just to be accepted.
+// The node answers after it has re-read its Compose files. Each file only its
+// helper container can read takes up to 30 seconds, and the files are read one
+// after another, so this bound covers one such file and a node that needs the
+// helper for several can take longer. The hub then logs the timeout and moves on
+// while the node finishes and caches the pin, and a Fleet status fetched right
+// after the Recheck can still show the old pin until the next one.
 const IMAGE_PIN_REFRESH_TIMEOUT_MS = 45_000;
 
 function postSystemImagePinRefresh(target: ProxyTarget) {

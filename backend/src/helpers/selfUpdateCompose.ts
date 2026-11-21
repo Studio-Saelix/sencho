@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import { parse, parseDocument } from 'yaml';
 import semver from 'semver';
@@ -245,6 +246,71 @@ export function isShadowedByDeeperMount(
     const destination = normalizeAbsolutePath(raw);
     if (!destination || destination.length <= chosenDestination.length) continue;
     if (isSameOrChildPath(containerPath, destination)) return true;
+  }
+  return false;
+}
+
+/**
+ * The destinations as the container's filesystem lays them out, not as Docker
+ * recorded them. Docker lists a mount at the path it was asked for, but the
+ * runtime resolves a symlink on the way (`/apps/current/sencho` with
+ * `current -> v2` lands at `/apps/v2/sencho`), so a path under the resolved
+ * location is the one that is shadowed. Returns the recorded destinations plus
+ * each one's resolved path; one that cannot be resolved (it does not exist, or
+ * cannot be read) keeps only its recorded form.
+ */
+export async function resolveMountDestinations(destinations: ReadonlyArray<string>): Promise<string[]> {
+  const resolved = await Promise.all(destinations.map(async raw => {
+    const destination = normalizeAbsolutePath(raw);
+    if (!destination) return null;
+    try {
+      return await fs.promises.realpath(destination);
+    } catch {
+      return null;
+    }
+  }));
+  return [...destinations, ...resolved.filter((value): value is string => value !== null)];
+}
+
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Whether resolving `containerPath` below the mount at `root` passes a symlink
+ * whose target is absolute, or leaves the mount, or cannot be examined. An
+ * absolute target resolves in Sencho's own filesystem, but the host resolves it
+ * in the host's, and when the mount's source and destination differ those are
+ * different trees: Sencho would read a file the host path does not name.
+ * Relative links that stay inside the mount resolve the same on both sides.
+ */
+export async function crossesAbsoluteSymlink(root: string, containerPath: string): Promise<boolean> {
+  if (!isSameOrChildPath(containerPath, root)) return true;
+  const pending = path.posix.relative(root, containerPath).split('/').filter(Boolean);
+  let current = root;
+  let hops = 0;
+  while (pending.length > 0) {
+    const part = pending.shift() as string;
+    if (part === '.') continue;
+    if (part === '..') {
+      current = path.posix.dirname(current);
+      if (!isSameOrChildPath(current, root)) return true;
+      continue;
+    }
+    const next = path.posix.join(current, part);
+    let target: string;
+    try {
+      target = await fs.promises.readlink(next);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // EINVAL: not a symlink. ENOENT: nothing there, so nothing to resolve; the read reports it.
+      if (code === 'EINVAL' || code === 'ENOENT') {
+        current = next;
+        continue;
+      }
+      return true;
+    }
+    hops += 1;
+    if (hops > MAX_SYMLINK_HOPS || target.startsWith('/')) return true;
+    pending.unshift(...target.split('/').filter(Boolean));
   }
   return false;
 }

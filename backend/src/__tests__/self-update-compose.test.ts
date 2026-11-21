@@ -11,9 +11,14 @@
  *   - the composeCopy branch of buildSelfUpdateComposeCmd,
  *   - the repinWritable branch of buildSelfUpdateRunArgs.
  */
-import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   classifyImagePin,
+  crossesAbsoluteSymlink,
+  resolveMountDestinations,
   buildTargetImageRef,
   isRepinBlocked,
   isShadowedByDeeperMount,
@@ -573,5 +578,57 @@ describe('isSenchoDevFloatingTag', () => {
   it('returns false for empty or malformed references', () => {
     expect(isSenchoDevFloatingTag('')).toBe(false);
     expect(isSenchoDevFloatingTag('   ')).toBe(false);
+  });
+});
+
+describe('resolveMountDestinations', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-mount-dest-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('adds where a destination that runs through a symlink really is, and keeps the recorded one', async () => {
+    fs.mkdirSync(path.join(dir, 'v2', 'sencho'), { recursive: true });
+    fs.symlinkSync('v2', path.join(dir, 'current'));
+    const recorded = path.join(dir, 'current', 'sencho');
+
+    const resolved = await resolveMountDestinations([recorded]);
+
+    expect(resolved).toContain(recorded);
+    expect(resolved).toContain(fs.realpathSync(path.join(dir, 'v2', 'sencho')));
+  });
+
+  it('keeps only the recorded form of a destination that does not exist or is not absolute', async () => {
+    const missing = path.join(dir, 'missing', 'mount');
+    expect(await resolveMountDestinations([missing, 'relative/path'])).toEqual([missing, 'relative/path']);
+  });
+});
+
+describe('crossesAbsoluteSymlink', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-abs-link-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const at = (...parts: string[]) => path.join(dir, ...parts);
+
+  it('is false for plain files and for relative links that stay inside the mount', async () => {
+    fs.mkdirSync(at('real'), { recursive: true });
+    fs.writeFileSync(at('real', 'compose.yaml'), 'x');
+    fs.symlinkSync('real', at('rel'));
+    expect(await crossesAbsoluteSymlink(dir, at('real', 'compose.yaml'))).toBe(false);
+    expect(await crossesAbsoluteSymlink(dir, at('rel', 'compose.yaml'))).toBe(false);
+    expect(await crossesAbsoluteSymlink(dir, at('absent', 'compose.yaml'))).toBe(false);
+  });
+
+  it('is true for an absolute link, including one reached through a relative link', async () => {
+    fs.symlinkSync(at('real'), at('abs'));
+    fs.symlinkSync('abs', at('chain'));
+    expect(await crossesAbsoluteSymlink(dir, at('abs', 'compose.yaml'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, at('chain', 'compose.yaml'))).toBe(true);
+  });
+
+  it('is true for a link that leaves the mount, a link loop, and a path outside the mount', async () => {
+    fs.symlinkSync('../..', at('up'));
+    fs.symlinkSync('loop2', at('loop1'));
+    fs.symlinkSync('loop1', at('loop2'));
+    expect(await crossesAbsoluteSymlink(dir, at('up', 'x'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, at('loop1'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, '/elsewhere/compose.yaml')).toBe(true);
   });
 });

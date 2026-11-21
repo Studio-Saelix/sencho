@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import path from 'path';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { disableCapability, enableCapability } from './CapabilityRegistry';
@@ -31,12 +32,14 @@ import {
 } from '../helpers/endpointProviderReplace';
 import {
   buildTargetImageRef,
+  crossesAbsoluteSymlink,
   isRepinBlocked,
   isSameOrChildPath,
   isShadowedByDeeperMount,
   isValidImageRef,
   mapHostPathToContainerPath,
   patchComposeServiceImage,
+  resolveMountDestinations,
   resolveServiceImageFromContents,
   type ImagePinKind,
   type PathMount,
@@ -882,7 +885,8 @@ class SelfUpdateService {
    * that got every file is cached. A read that missed a file caches what it did
    * read as partial, but only when nothing better is cached: it never replaces a
    * complete entry, and never replaces a partial entry that classified an image
-   * with one that classified none. No read replaces an entry that a read started
+   * with one that classified none. A complete read replaces a partial entry
+   * whenever it started; no other read replaces an entry that a read started
    * later wrote.
    */
   private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
@@ -911,16 +915,20 @@ class SelfUpdateService {
     }
     const info = resolveServiceImageFromContents(files, ctx.serviceName);
     const partial = unread.length > 0;
+    const cache = this.pinCache;
     const newest = startedAt >= this.incompleteReadsAt;
     if (newest) this.incompleteReadsAt = startedAt;
     if (partial) {
       if (newest) this.incompleteReads += 1;
-      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; routine checks re-read the files with a growing delay while the cached pin is partial.`);
-    } else if (newest) {
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the pin is kept from the files that were read only when no better one is cached, and while the cached pin is partial, routine checks re-read the rest with a growing delay.`);
+    } else if (newest || cache?.partial) {
+      // A complete read ends the retries even when a partial read that started later finished first.
       this.incompleteReads = 0;
     }
-    const cache = this.pinCache;
-    const replaces = !cache || (cache.at <= startedAt && (!partial || (cache.partial && (info !== null || cache.info === null))));
+    // A complete read replaces a partial entry whenever it started; otherwise a read replaces only an entry an earlier read wrote.
+    const replaces = !cache
+      || (cache.partial && !partial)
+      || (cache.at <= startedAt && (!partial || (cache.partial && (info !== null || cache.info === null))));
     if (replaces) {
       this.pinCache = { info, at: startedAt, checkedAt: startedAt, needsHelper, partial };
       if (!partial) this.routineReadWarned = false;
@@ -939,7 +947,11 @@ class SelfUpdateService {
   /** Read a config file through one of Sencho's own bind mounts. A single-file
    *  mount is uncovered: it keeps showing the old file after an editor replaces
    *  it, so only a mounted folder is trusted. So is a path another mount covers
-   *  more deeply, directly or through a symlink, which shows that mount's file. */
+   *  more deeply, directly or through a symlink, and a path that passes an
+   *  absolute symlink in a mount whose source and destination differ. Mount
+   *  destinations are compared where they really are, because the runtime
+   *  resolves a symlink in a destination (`/apps/current/sencho` is mounted at
+   *  `/apps/v2/sencho`) while Docker records it as written. */
   private async readConfigFileDirect(
     filePath: string,
     mounts: ReadonlyArray<HostMount>,
@@ -948,14 +960,18 @@ class SelfUpdateService {
     const mapped = mapHostPathToContainerPath(filePath, mounts, mountDestinations);
     if (!mapped) return { kind: 'uncovered' };
     try {
-      const [real, root] = await Promise.all([
+      const [real, root, destinations] = await Promise.all([
         fs.promises.realpath(mapped.containerPath),
         fs.promises.realpath(mapped.mountDestination),
+        resolveMountDestinations(mountDestinations),
       ]);
       if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
       // A symlink inside the mount can lead into another mount's folder, which
-      // holds a file the host path does not name.
-      if (isShadowedByDeeperMount(real, mapped.mountDestination, mountDestinations)) return { kind: 'uncovered' };
+      // holds a file the host path does not name; so can a nested mount whose
+      // recorded destination runs through a symlink.
+      if (isShadowedByDeeperMount(real, root, destinations)) return { kind: 'uncovered' };
+      const sameTree = path.posix.normalize(filePath) === mapped.containerPath;
+      if (!sameTree && await crossesAbsoluteSymlink(mapped.mountDestination, mapped.containerPath)) return { kind: 'uncovered' };
       if (!(await fs.promises.stat(root)).isDirectory()) return { kind: 'uncovered' };
       const content = await this.readPlainFile(real);
       return content === null ? { kind: 'uncovered' } : { kind: 'read', content };
