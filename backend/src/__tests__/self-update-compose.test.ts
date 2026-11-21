@@ -612,7 +612,7 @@ describe('resolveMountDestinations', () => {
 
     expect(view.destinations).toContain(recorded);
     expect(view.destinations).toContain(fs.realpathSync(path.join(dir, 'v2', 'sencho')));
-    expect(view.stacked).toEqual([]);
+    expect(view.hides(fs.realpathSync(path.join(dir, 'v2', 'sencho')))).toBe(false);
   });
 
   it('takes the live mount points, which a symlink retargeted after the start does not move', async () => {
@@ -626,12 +626,31 @@ describe('resolveMountDestinations', () => {
     expect(view.destinations).toContain(path.join(dir, 'v2', 'sencho'));
   });
 
-  it('reports a path with two mounts on it, from the live list or from the resolved destinations', async () => {
+  it('says a mount is hidden when another is on its path, or a parent path is mounted after it', async () => {
     fs.mkdirSync(path.join(dir, 'run'), { recursive: true });
     fs.symlinkSync('run', path.join(dir, 'var-run'));
 
-    expect((await resolveMountDestinations([], info('/a', '/a', '/b'))).stacked).toEqual(['/a']);
-    expect((await resolveMountDestinations([path.join(dir, 'run'), path.join(dir, 'var-run')], none)).stacked).toEqual([fs.realpathSync(path.join(dir, 'run'))]);
+    expect((await resolveMountDestinations([], info('/a', '/a', '/b'))).hides('/a')).toBe(true);
+    expect((await resolveMountDestinations([], info('/a', '/b'))).hides('/a')).toBe(false);
+    // From the live list: /run/sencho is mounted first, then /run over all of it.
+    expect((await resolveMountDestinations([], info('/run/sencho', '/run'))).hides('/run/sencho')).toBe(true);
+    expect((await resolveMountDestinations([], info('/run', '/run/sencho'))).hides('/run/sencho')).toBe(false);
+    // Without a live list: two recorded destinations that resolve to one path.
+    const run = fs.realpathSync(path.join(dir, 'run'));
+    expect((await resolveMountDestinations([path.join(dir, 'run'), path.join(dir, 'var-run')], none)).hides(run)).toBe(true);
+  });
+
+  it('uses live mount points that Docker did not record only when a recorded destination runs through a symlink', async () => {
+    fs.mkdirSync(path.join(dir, 'plain'), { recursive: true });
+    const plain = path.join(dir, 'plain');
+    const submount = path.join(plain, 'dataset');
+
+    // A recursive submount of a bound folder is not recorded and shows the host's own file.
+    expect((await resolveMountDestinations([plain], info(plain, submount))).destinations).not.toContain(submount);
+    // With a symlinked destination in the list, an unrecorded point may be where that mount really is.
+    const linked = path.join(dir, 'current', 'sencho');
+    expect((await resolveMountDestinations([plain, linked], info(plain, submount))).destinations).toContain(submount);
+    expect((await resolveMountDestinations([plain, path.join(dir, 'nowhere')], info(plain, submount))).destinations).toContain(submount);
   });
 
   it('keeps only the recorded form of a destination that does not exist or is not absolute', async () => {

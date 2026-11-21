@@ -262,10 +262,10 @@ export function parseMountPoints(mountinfo: string): string[] {
 
 /** Where Sencho's own mounts really are, for the shadow check. */
 export interface MountView {
-  /** Every path a mount may sit at: the recorded destinations, where each resolves now, and the live mount points. */
+  /** Every path a mount may sit at, to test a path against (see `resolveMountDestinations`). */
   destinations: string[];
-  /** Paths with more than one mount on them, where the later one hides the earlier. */
-  stacked: string[];
+  /** Whether a later mount hides the mount at `root`: another mount on the same path, or one on a parent path. */
+  hides(root: string): boolean;
 }
 
 /**
@@ -273,37 +273,53 @@ export interface MountView {
  * Docker lists a mount at the path it was asked for, but the runtime resolves a
  * symlink on the way (`/apps/current/sencho` with `current -> v2` lands at
  * `/apps/v2/sencho`), and two destinations can land on one path (`/run` and
- * `/var/run`). The kernel's own list in `/proc/self/mountinfo` is the truth, and
- * it does not move when a link is retargeted after the container started. Where
- * it cannot be read, each recorded destination is resolved with `realpath`
- * instead (one that does not resolve keeps its recorded form), which is right
- * until a link on the way is retargeted.
+ * `/var/run`). The kernel's own list in `/proc/self/mountinfo`, in mount order,
+ * is the truth, and it does not move when a link is retargeted after the
+ * container started.
+ *
+ * `destinations` holds the recorded destinations, where each resolves now, and
+ * the live mount points. The live points are used only when a recorded
+ * destination runs through a symlink or does not resolve, because only then can
+ * a recorded mount sit somewhere the recorded form does not say. Without one,
+ * every live mount that Docker did not record is a submount of a bound folder,
+ * which shows the host's own file there and is not a shadow. Where mountinfo
+ * cannot be read, only the recorded and resolved destinations are used, which is
+ * right until a link on the way is retargeted.
  */
 export async function resolveMountDestinations(
   destinations: ReadonlyArray<string>,
   mountinfoPath = '/proc/self/mountinfo',
 ): Promise<MountView> {
-  let livePoints: string[] = [];
+  let live: string[] = [];
   try {
-    livePoints = parseMountPoints(await fs.promises.readFile(mountinfoPath, 'utf8'));
+    live = parseMountPoints(await fs.promises.readFile(mountinfoPath, 'utf8'));
   } catch {
     // Not Linux, or /proc is hidden: resolve the recorded destinations below.
   }
-  const resolved = await Promise.all(destinations.map(async raw => {
+  let throughSymlink = false;
+  const resolved: string[] = [];
+  for (const raw of destinations) {
     const destination = normalizeAbsolutePath(raw);
-    if (!destination) return null;
+    if (!destination) continue;
     try {
-      return await fs.promises.realpath(destination);
+      const real = await fs.promises.realpath(destination);
+      if (real !== destination) throughSymlink = true;
+      resolved.push(real);
     } catch {
-      return destination;
+      throughSymlink = true;
+      resolved.push(destination);
     }
-  }));
-  const placed = livePoints.length > 0 ? livePoints : resolved.filter((value): value is string => value !== null);
-  const counts = new Map<string, number>();
-  for (const point of placed) counts.set(point, (counts.get(point) ?? 0) + 1);
+  }
+  const placed = live.length > 0 ? live : resolved;
   return {
-    destinations: [...destinations, ...resolved.filter((value): value is string => value !== null), ...livePoints],
-    stacked: [...counts].filter(([, count]) => count > 1).map(([point]) => point),
+    destinations: [...destinations, ...resolved, ...(throughSymlink ? live : [])],
+    hides(root) {
+      const last = placed.lastIndexOf(root);
+      if (last === -1) return false;
+      if (placed.indexOf(root) !== last) return true;
+      // Only the live list has an order; resolved destinations do not say which mounted last.
+      return live.length > 0 && live.slice(last + 1).some(point => isSameOrChildPath(root, point));
+    },
   };
 }
 

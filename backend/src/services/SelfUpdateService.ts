@@ -969,9 +969,9 @@ class SelfUpdateService {
       if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
       // A symlink inside the mount can lead into another mount's folder, which
       // holds a file the host path does not name; so can a nested mount whose
-      // recorded destination runs through a symlink, and one stacked on the
-      // mount's own root.
-      if (isShadowedByDeeperMount(real, root, view.destinations) || view.stacked.includes(root)) return { kind: 'uncovered' };
+      // recorded destination runs through a symlink, and one mounted over the
+      // mount's own root, on it or on a parent path, after it.
+      if (isShadowedByDeeperMount(real, root, view.destinations) || view.hides(root)) return { kind: 'uncovered' };
       const sameTree = path.posix.normalize(filePath) === mapped.containerPath;
       if (!sameTree && await crossesAbsoluteSymlink(mapped.mountDestination, mapped.containerPath)) return { kind: 'uncovered' };
       if (!(await fs.promises.stat(root)).isDirectory()) return { kind: 'uncovered' };
