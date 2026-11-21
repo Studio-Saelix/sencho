@@ -18,6 +18,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import {
   classifyImagePin,
   crossesAbsoluteSymlink,
+  parseMountPoints,
   resolveMountDestinations,
   buildTargetImageRef,
   isRepinBlocked,
@@ -581,24 +582,62 @@ describe('isSenchoDevFloatingTag', () => {
   });
 });
 
+describe('parseMountPoints', () => {
+  it('reads the mount point field and decodes its octal escapes', () => {
+    const text = [
+      '36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue',
+      '37 36 0:50 / /apps/with\\040space rw - overlay overlay rw',
+      '',
+    ].join('\n');
+    expect(parseMountPoints(text)).toEqual(['/mnt2', '/apps/with space']);
+  });
+});
+
 describe('resolveMountDestinations', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-mount-dest-'));
   afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const info = (...points: string[]) => {
+    const file = path.join(dir, `mountinfo-${Math.random().toString(36).slice(2)}`);
+    fs.writeFileSync(file, points.map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n'));
+    return file;
+  };
+  const none = path.join(dir, 'no-such-mountinfo');
 
   it('adds where a destination that runs through a symlink really is, and keeps the recorded one', async () => {
     fs.mkdirSync(path.join(dir, 'v2', 'sencho'), { recursive: true });
     fs.symlinkSync('v2', path.join(dir, 'current'));
     const recorded = path.join(dir, 'current', 'sencho');
 
-    const resolved = await resolveMountDestinations([recorded]);
+    const view = await resolveMountDestinations([recorded], none);
 
-    expect(resolved).toContain(recorded);
-    expect(resolved).toContain(fs.realpathSync(path.join(dir, 'v2', 'sencho')));
+    expect(view.destinations).toContain(recorded);
+    expect(view.destinations).toContain(fs.realpathSync(path.join(dir, 'v2', 'sencho')));
+    expect(view.stacked).toEqual([]);
+  });
+
+  it('takes the live mount points, which a symlink retargeted after the start does not move', async () => {
+    fs.mkdirSync(path.join(dir, 'v3', 'sencho'), { recursive: true });
+    fs.rmSync(path.join(dir, 'current'));
+    fs.symlinkSync('v3', path.join(dir, 'current'));
+    const recorded = path.join(dir, 'current', 'sencho');
+
+    const view = await resolveMountDestinations([recorded], info(path.join(dir, 'v2', 'sencho')));
+
+    expect(view.destinations).toContain(path.join(dir, 'v2', 'sencho'));
+  });
+
+  it('reports a path with two mounts on it, from the live list or from the resolved destinations', async () => {
+    fs.mkdirSync(path.join(dir, 'run'), { recursive: true });
+    fs.symlinkSync('run', path.join(dir, 'var-run'));
+
+    expect((await resolveMountDestinations([], info('/a', '/a', '/b'))).stacked).toEqual(['/a']);
+    expect((await resolveMountDestinations([path.join(dir, 'run'), path.join(dir, 'var-run')], none)).stacked).toEqual([fs.realpathSync(path.join(dir, 'run'))]);
   });
 
   it('keeps only the recorded form of a destination that does not exist or is not absolute', async () => {
     const missing = path.join(dir, 'missing', 'mount');
-    expect(await resolveMountDestinations([missing, 'relative/path'])).toEqual([missing, 'relative/path']);
+    const view = await resolveMountDestinations([missing, 'relative/path'], none);
+    expect(view.destinations).toEqual([missing, 'relative/path', missing]);
   });
 });
 

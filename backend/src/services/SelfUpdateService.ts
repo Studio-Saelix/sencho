@@ -920,7 +920,7 @@ class SelfUpdateService {
     if (newest) this.incompleteReadsAt = startedAt;
     if (partial) {
       if (newest) this.incompleteReads += 1;
-      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the pin is kept from the files that were read only when no better one is cached, and while the cached pin is partial, routine checks re-read the rest with a growing delay.`);
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the files that were read set the cached pin only when no better one is cached. While the cached pin is partial, routine checks retry the rest with a growing delay.`);
     } else if (newest || cache?.partial) {
       // A complete read ends the retries even when a partial read that started later finished first.
       this.incompleteReads = 0;
@@ -949,9 +949,10 @@ class SelfUpdateService {
    *  it, so only a mounted folder is trusted. So is a path another mount covers
    *  more deeply, directly or through a symlink, and a path that passes an
    *  absolute symlink in a mount whose source and destination differ. Mount
-   *  destinations are compared where they really are, because the runtime
-   *  resolves a symlink in a destination (`/apps/current/sencho` is mounted at
-   *  `/apps/v2/sencho`) while Docker records it as written. */
+   *  destinations are compared where they really are (the live mount list),
+   *  because the runtime resolves a symlink in a destination
+   *  (`/apps/current/sencho` is mounted at `/apps/v2/sencho`) while Docker
+   *  records it as written. */
   private async readConfigFileDirect(
     filePath: string,
     mounts: ReadonlyArray<HostMount>,
@@ -960,7 +961,7 @@ class SelfUpdateService {
     const mapped = mapHostPathToContainerPath(filePath, mounts, mountDestinations);
     if (!mapped) return { kind: 'uncovered' };
     try {
-      const [real, root, destinations] = await Promise.all([
+      const [real, root, view] = await Promise.all([
         fs.promises.realpath(mapped.containerPath),
         fs.promises.realpath(mapped.mountDestination),
         resolveMountDestinations(mountDestinations),
@@ -968,8 +969,9 @@ class SelfUpdateService {
       if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
       // A symlink inside the mount can lead into another mount's folder, which
       // holds a file the host path does not name; so can a nested mount whose
-      // recorded destination runs through a symlink.
-      if (isShadowedByDeeperMount(real, root, destinations)) return { kind: 'uncovered' };
+      // recorded destination runs through a symlink, and one stacked on the
+      // mount's own root.
+      if (isShadowedByDeeperMount(real, root, view.destinations) || view.stacked.includes(root)) return { kind: 'uncovered' };
       const sameTree = path.posix.normalize(filePath) === mapped.containerPath;
       if (!sameTree && await crossesAbsoluteSymlink(mapped.mountDestination, mapped.containerPath)) return { kind: 'uncovered' };
       if (!(await fs.promises.stat(root)).isDirectory()) return { kind: 'uncovered' };

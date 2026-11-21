@@ -66,6 +66,8 @@ function compose(image: string): string {
 /** Contents the fake helper container serves for a host path. */
 const hostFiles = new Map<string, string>();
 let clock = T0;
+/** What the container's `/proc/self/mountinfo` says; empty means unreadable, so recorded destinations are resolved instead. */
+let mountinfo = '';
 
 type Mount = { source: string; destination: string };
 type Internals = {
@@ -141,6 +143,12 @@ beforeEach(() => {
   fs.mkdirSync(outsideDir, { recursive: true });
   hostFiles.clear();
   clock = T0;
+  mountinfo = '';
+  const readFile = fs.promises.readFile;
+  vi.spyOn(fs.promises, 'readFile').mockImplementation(((file: unknown, ...rest: unknown[]) =>
+    file === '/proc/self/mountinfo'
+      ? Promise.resolve(mountinfo)
+      : (readFile as (...args: unknown[]) => Promise<unknown>).call(fs.promises, file, ...rest)) as typeof fs.promises.readFile);
   vi.spyOn(Date, 'now').mockImplementation(() => clock);
   mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
     if (args[0] === 'run' && args.includes('cat')) {
@@ -419,6 +427,8 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
       expect(helperCalls()).toHaveLength(0);
     });
 
+    const realCovered = () => fs.realpathSync(coveredDir);
+
     describe('whose recorded destination runs through a symlink', () => {
       // Docker lists the nested mount at `covered/current/sencho`; with `current -> v2`
       // the runtime mounts it at `covered/v2/sencho`, where the host label points.
@@ -466,6 +476,49 @@ describe('a Compose file covered by one of Sencho\'s bind mounts', () => {
         clock += 3 * FIVE_MIN;
         await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
         await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ pinKind: 'semver' });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
+      it('reads the host file through the helper after the link is retargeted, because the mount stayed where it was', async () => {
+        fs.mkdirSync(path.join(coveredDir, 'v3', 'sencho'), { recursive: true });
+        fs.rmSync(path.join(coveredDir, 'current'));
+        fs.symlinkSync('v3', path.join(coveredDir, 'current'));
+        mountinfo = [coveredDir, path.join(realCovered(), 'v2', 'sencho')].map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n');
+        const service = setup([v2File], [appsMount], [recorded]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0', filePath: v2File });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
+      it('reads the host file through the helper when the link is retargeted to a missing folder', async () => {
+        fs.rmSync(path.join(coveredDir, 'current'));
+        fs.symlinkSync('gone', path.join(coveredDir, 'current'));
+        mountinfo = [coveredDir, path.join(realCovered(), 'v2', 'sencho')].map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n');
+        const service = setup([v2File], [appsMount], [recorded]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0', filePath: v2File });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
+      it('reads the host file through the helper when a nested destination resolves onto the mount root', async () => {
+        // `covered/x/sencho -> ..`: the second mount lands on `covered` itself and hides the first.
+        fs.mkdirSync(path.join(coveredDir, 'x'), { recursive: true });
+        fs.symlinkSync('..', path.join(coveredDir, 'x', 'sencho'));
+        fs.writeFileSync(path.join(coveredDir, 'compose.yaml'), compose(shadowImage));
+        hostFiles.set(`${hostApps}/compose.yaml`, compose('saelix/sencho:0.99.0'));
+        const service = setup([`${hostApps}/compose.yaml`], [appsMount], [path.join(coveredDir, 'x', 'sencho')]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+        expect(helperCalls()).toHaveLength(1);
+      });
+
+      it('reads the host file through the helper when the live mount list has two mounts on the root', async () => {
+        mountinfo = [realCovered(), realCovered()].map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n');
+        fs.writeFileSync(path.join(coveredDir, 'compose.yaml'), compose(shadowImage));
+        hostFiles.set(`${hostApps}/compose.yaml`, compose('saelix/sencho:0.99.0'));
+        const service = setup([`${hostApps}/compose.yaml`], [appsMount]);
+
+        await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
         expect(helperCalls()).toHaveLength(1);
       });
 

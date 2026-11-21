@@ -250,26 +250,61 @@ export function isShadowedByDeeperMount(
   return false;
 }
 
+/** The mount points in a `/proc/self/mountinfo` text (field 5, with its octal escapes decoded). */
+export function parseMountPoints(mountinfo: string): string[] {
+  const points: string[] = [];
+  for (const line of mountinfo.split('\n')) {
+    const point = line.split(' ')[4];
+    if (point) points.push(point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8))));
+  }
+  return points;
+}
+
+/** Where Sencho's own mounts really are, for the shadow check. */
+export interface MountView {
+  /** Every path a mount may sit at: the recorded destinations, where each resolves now, and the live mount points. */
+  destinations: string[];
+  /** Paths with more than one mount on them, where the later one hides the earlier. */
+  stacked: string[];
+}
+
 /**
- * The destinations as the container's filesystem lays them out, not as Docker
- * recorded them. Docker lists a mount at the path it was asked for, but the
- * runtime resolves a symlink on the way (`/apps/current/sencho` with
- * `current -> v2` lands at `/apps/v2/sencho`), so a path under the resolved
- * location is the one that is shadowed. Returns the recorded destinations plus
- * each one's resolved path; one that cannot be resolved (it does not exist, or
- * cannot be read) keeps only its recorded form.
+ * Where the container's mounts really are, not only where Docker recorded them.
+ * Docker lists a mount at the path it was asked for, but the runtime resolves a
+ * symlink on the way (`/apps/current/sencho` with `current -> v2` lands at
+ * `/apps/v2/sencho`), and two destinations can land on one path (`/run` and
+ * `/var/run`). The kernel's own list in `/proc/self/mountinfo` is the truth, and
+ * it does not move when a link is retargeted after the container started. Where
+ * it cannot be read, each recorded destination is resolved with `realpath`
+ * instead (one that does not resolve keeps its recorded form), which is right
+ * until a link on the way is retargeted.
  */
-export async function resolveMountDestinations(destinations: ReadonlyArray<string>): Promise<string[]> {
+export async function resolveMountDestinations(
+  destinations: ReadonlyArray<string>,
+  mountinfoPath = '/proc/self/mountinfo',
+): Promise<MountView> {
+  let livePoints: string[] = [];
+  try {
+    livePoints = parseMountPoints(await fs.promises.readFile(mountinfoPath, 'utf8'));
+  } catch {
+    // Not Linux, or /proc is hidden: resolve the recorded destinations below.
+  }
   const resolved = await Promise.all(destinations.map(async raw => {
     const destination = normalizeAbsolutePath(raw);
     if (!destination) return null;
     try {
       return await fs.promises.realpath(destination);
     } catch {
-      return null;
+      return destination;
     }
   }));
-  return [...destinations, ...resolved.filter((value): value is string => value !== null)];
+  const placed = livePoints.length > 0 ? livePoints : resolved.filter((value): value is string => value !== null);
+  const counts = new Map<string, number>();
+  for (const point of placed) counts.set(point, (counts.get(point) ?? 0) + 1);
+  return {
+    destinations: [...destinations, ...resolved.filter((value): value is string => value !== null), ...livePoints],
+    stacked: [...counts].filter(([, count]) => count > 1).map(([point]) => point),
+  };
 }
 
 const MAX_SYMLINK_HOPS = 40;
