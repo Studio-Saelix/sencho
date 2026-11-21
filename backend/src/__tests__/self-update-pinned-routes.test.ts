@@ -143,6 +143,63 @@ describe('POST /api/system/update', () => {
   });
 });
 
+describe('POST /api/system/image-pin-refresh', () => {
+  const machineAuth = () => `Bearer ${jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+  const refresh = (auth: string) => request(app).post('/api/system/image-pin-refresh').set('Authorization', auth);
+
+  it('re-reads the pin fresh for an admin or the hub\'s node-proxy credential, and changes nothing else', async () => {
+    mockSelfUpdateAvailable({ pinInfo: { pinKind: 'semver', composeImageRef: 'saelix/sencho:0.99.0', filePath: '/opt/sencho/docker-compose.yml' } });
+    const svc = SelfUpdateService.getInstance();
+
+    for (const auth of [adminAuth, machineAuth()]) {
+      const res = await refresh(auth);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ refreshed: true });
+    }
+    expect(svc.getPinInfo).toHaveBeenCalledTimes(2);
+    expect(svc.getPinInfo).toHaveBeenCalledWith({ fresh: true });
+    expect(svc.triggerUpdate).not.toHaveBeenCalled();
+  });
+
+  it('reports refreshed false when no pin could be classified', async () => {
+    mockSelfUpdateAvailable({ pinInfo: null });
+
+    const res = await refresh(adminAuth);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ refreshed: false });
+  });
+
+  it('answers a bounded 500 when the read throws', async () => {
+    mockSelfUpdateAvailable();
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('/secret/path exploded'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await refresh(adminAuth);
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.body)).not.toContain('/secret/path');
+  });
+
+  it('requires authentication, and the license permission: a viewer is refused and nothing is read', async () => {
+    mockSelfUpdateAvailable();
+    DatabaseService.getInstance().addUser({ username: 'viewer-pin-refresh', password_hash: 'unused', role: 'viewer' });
+    const viewer = `Bearer ${jwt.sign({ username: 'viewer-pin-refresh' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+
+    const anonymous = await request(app).post('/api/system/image-pin-refresh');
+    const denied = await refresh(viewer);
+
+    expect(anonymous.status).toBe(401);
+    expect(denied.status).toBe(403);
+    expect(SelfUpdateService.getInstance().getPinInfo).not.toHaveBeenCalled();
+  });
+
+  it('is advertised as a capability', async () => {
+    const res = await request(app).get('/api/meta');
+    expect(res.body.capabilities).toContain('image-pin-refresh-v1');
+  });
+});
+
 describe('GET /api/meta pin subset', () => {
   it('does not expose a raw update error with a private image reference', async () => {
     mockSelfUpdateAvailable();

@@ -7,15 +7,24 @@
  *   - resolveServiceImageFromContents (reverse -f precedence),
  *   - patchComposeServiceImage (comment-preserving round-trip),
  *   - buildComposeReadArgs (throwaway cat container),
+ *   - mapHostPathToContainerPath (reading a covered file without a container),
  *   - the composeCopy branch of buildSelfUpdateComposeCmd,
  *   - the repinWritable branch of buildSelfUpdateRunArgs.
  */
-import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   classifyImagePin,
+  crossesAbsoluteSymlink,
+  parseMountPoints,
+  resolveMountDestinations,
   buildTargetImageRef,
   isRepinBlocked,
+  isShadowedByDeeperMount,
   isValidImageRef,
+  mapHostPathToContainerPath,
   resolveServiceImageFromContents,
   patchComposeServiceImage,
   isSenchoDevRepository,
@@ -224,6 +233,7 @@ describe('buildComposeReadArgs', () => {
     expect(args).toEqual([
       'run', '--rm',
       '--user', 'root',
+      '--label', 'io.sencho.helper=compose-read',
       '--entrypoint', 'cat',
       '-v', '/opt/sencho:/opt/sencho:ro',
       '-w', '/opt/sencho',
@@ -236,6 +246,117 @@ describe('buildComposeReadArgs', () => {
     const args = buildComposeReadArgs('/srv/$(touch pwned)', 'img', '/srv/$(touch pwned)/compose.yml');
     expect(args).toContain('/srv/$(touch pwned):/srv/$(touch pwned):ro');
     expect(args[args.length - 1]).toBe('/srv/$(touch pwned)/compose.yml');
+  });
+});
+
+describe('mapHostPathToContainerPath', () => {
+  const same = { source: '/opt/sencho', destination: '/opt/sencho' };
+  /** The mounts' own destinations, plus any further mount (a volume, say) of the container. */
+  const mapPath = (host: string, mounts: Array<{ source: string; destination: string }>, otherDestinations: string[] = []) =>
+    mapHostPathToContainerPath(host, mounts, [...mounts.map(m => m.destination), ...otherDestinations]);
+
+  it('maps a file under a folder mount, at the same path or a different one', () => {
+    expect(mapPath('/opt/sencho/compose.yaml', [same])).toEqual({
+      containerPath: '/opt/sencho/compose.yaml', mountDestination: '/opt/sencho',
+    });
+    expect(mapPath('/opt/sencho/sub/compose.yaml', [{ source: '/opt/sencho', destination: '/stacks/self' }])).toEqual({
+      containerPath: '/stacks/self/sub/compose.yaml', mountDestination: '/stacks/self',
+    });
+  });
+
+  it('maps an exact file mount to its destination', () => {
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/compose.yaml', destination: '/etc/self.yaml' }])).toEqual({
+      containerPath: '/etc/self.yaml', mountDestination: '/etc/self.yaml',
+    });
+  });
+
+  it('picks the mount with the longest source', () => {
+    const mounts = [
+      { source: '/opt', destination: '/host-opt' },
+      { source: '/opt/sencho', destination: '/self' },
+      { source: '/opt/sencho/data', destination: '/data' },
+    ];
+    expect(mapPath('/opt/sencho/compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+    expect(mapPath('/opt/other/compose.yaml', mounts)?.containerPath).toBe('/host-opt/other/compose.yaml');
+  });
+
+  it('matches whole path segments only', () => {
+    expect(mapPath('/opt/docker/x.yaml', [{ source: '/opt/dock', destination: '/d' }])).toBeNull();
+    expect(mapPath('/opt/sencho-two/x.yaml', [same])).toBeNull();
+  });
+
+  it('ignores trailing slashes on a mount and normalizes the host path', () => {
+    const mounts = [{ source: '/opt/sencho/', destination: '/self/' }];
+    expect(mapPath('/opt/sencho//./compose.yaml', mounts)?.containerPath).toBe('/self/compose.yaml');
+  });
+
+  it('refuses relative paths and any .. segment', () => {
+    expect(mapPath('opt/sencho/compose.yaml', [same])).toBeNull();
+    expect(mapPath('/opt/sencho/../../etc/passwd', [same])).toBeNull();
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho/..', destination: '/x' }])).toBeNull();
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/opt/sencho', destination: 'relative' }])).toBeNull();
+  });
+
+  it('maps through a mount of the host root', () => {
+    expect(mapPath('/opt/sencho/compose.yaml', [{ source: '/', destination: '/host' }])).toEqual({
+      containerPath: '/host/opt/sencho/compose.yaml', mountDestination: '/host',
+    });
+  });
+
+  describe('a mount nested over the mapped path', () => {
+    const apps = { source: '/mnt/pool/apps', destination: '/apps' };
+    const config = { source: '/mnt/pool/sencho-config', destination: '/apps/sencho' };
+
+    it('refuses a path another bind mount shows different contents at', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps, config])).toBeNull();
+      expect(mapPath('/mnt/pool/apps/sencho/deep/dir/compose.yaml', [apps, config])).toBeNull();
+    });
+
+    it('refuses a path a volume or tmpfs shadows, which is not a bind mount', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/apps/sencho'])).toBeNull();
+    });
+
+    it('refuses a single file another mount replaces', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/apps/sencho/compose.yaml'])).toBeNull();
+    });
+
+    it('still maps a sibling the nested mount does not cover', () => {
+      expect(mapPath('/mnt/pool/apps/other/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/other/compose.yaml', mountDestination: '/apps',
+      });
+      expect(mapPath('/mnt/pool/apps/sencho-two/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/sencho-two/compose.yaml', mountDestination: '/apps',
+      });
+    });
+
+    it('maps a path under the nested mount through that mount when its source matches', () => {
+      expect(mapPath('/mnt/pool/sencho-config/compose.yaml', [apps, config])).toEqual({
+        containerPath: '/apps/sencho/compose.yaml', mountDestination: '/apps/sencho',
+      });
+    });
+
+    it('ignores a mount elsewhere and unusable destinations', () => {
+      expect(mapPath('/mnt/pool/apps/sencho/compose.yaml', [apps], ['/data', 'relative', '/apps/sencho/../x'])?.containerPath)
+        .toBe('/apps/sencho/compose.yaml');
+    });
+  });
+
+  it('returns null with no mounts or no matching mount', () => {
+    expect(mapPath('/opt/sencho/compose.yaml', [])).toBeNull();
+    expect(mapPath('/srv/x/compose.yaml', [same])).toBeNull();
+  });
+});
+
+describe('isShadowedByDeeperMount', () => {
+  it('is true for a deeper destination that is the path or a parent of it, compared by whole segment', () => {
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', ['/apps', '/apps/sencho'])).toBe(true);
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', ['/apps/sencho/compose.yaml'])).toBe(true);
+    expect(isShadowedByDeeperMount('/apps/sencho-two/compose.yaml', '/apps', ['/apps/sencho'])).toBe(false);
+  });
+
+  it('is false for the chosen mount, a shallower one, or none', () => {
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps/sencho', ['/apps/sencho', '/apps', '/'])).toBe(false);
+    expect(isShadowedByDeeperMount('/apps/sencho/compose.yaml', '/apps', [])).toBe(false);
   });
 });
 
@@ -458,5 +579,129 @@ describe('isSenchoDevFloatingTag', () => {
   it('returns false for empty or malformed references', () => {
     expect(isSenchoDevFloatingTag('')).toBe(false);
     expect(isSenchoDevFloatingTag('   ')).toBe(false);
+  });
+});
+
+describe('parseMountPoints', () => {
+  it('reads the mount point field and decodes its octal escapes', () => {
+    const text = [
+      '36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue',
+      '37 36 0:50 / /apps/with\\040space rw - overlay overlay rw',
+      '',
+    ].join('\n');
+    expect(parseMountPoints(text)).toEqual(['/mnt2', '/apps/with space']);
+  });
+});
+
+describe('resolveMountDestinations', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-mount-dest-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const info = (...points: string[]) => {
+    const file = path.join(dir, `mountinfo-${Math.random().toString(36).slice(2)}`);
+    fs.writeFileSync(file, points.map((point, i) => `${i} 1 0:1 / ${point} rw - tmpfs tmpfs rw`).join('\n'));
+    return file;
+  };
+  const none = path.join(dir, 'no-such-mountinfo');
+
+  it('adds where a destination that runs through a symlink really is, and keeps the recorded one', async () => {
+    fs.mkdirSync(path.join(dir, 'v2', 'sencho'), { recursive: true });
+    fs.symlinkSync('v2', path.join(dir, 'current'));
+    const recorded = path.join(dir, 'current', 'sencho');
+
+    const view = await resolveMountDestinations([recorded], none);
+
+    expect(view.destinations).toContain(recorded);
+    expect(view.destinations).toContain(fs.realpathSync(path.join(dir, 'v2', 'sencho')));
+    expect(view.hides(fs.realpathSync(path.join(dir, 'v2', 'sencho')))).toBe(false);
+  });
+
+  it('takes the live mount points, which a symlink retargeted after the start does not move', async () => {
+    fs.mkdirSync(path.join(dir, 'v3', 'sencho'), { recursive: true });
+    fs.rmSync(path.join(dir, 'current'));
+    fs.symlinkSync('v3', path.join(dir, 'current'));
+    const recorded = path.join(dir, 'current', 'sencho');
+
+    const view = await resolveMountDestinations([recorded], info(path.join(dir, 'v2', 'sencho')));
+
+    expect(view.destinations).toContain(path.join(dir, 'v2', 'sencho'));
+  });
+
+  it('says a mount is hidden when another is on its path, or a parent path is mounted after it', async () => {
+    fs.mkdirSync(path.join(dir, 'run'), { recursive: true });
+    fs.symlinkSync('run', path.join(dir, 'var-run'));
+
+    expect((await resolveMountDestinations([], info('/a', '/a', '/b'))).hides('/a')).toBe(true);
+    expect((await resolveMountDestinations([], info('/a', '/b'))).hides('/a')).toBe(false);
+    // From the live list: /run/sencho is mounted first, then /run over all of it.
+    expect((await resolveMountDestinations([], info('/run/sencho', '/run'))).hides('/run/sencho')).toBe(true);
+    expect((await resolveMountDestinations([], info('/run', '/run/sencho'))).hides('/run/sencho')).toBe(false);
+    // Without a live list: two recorded destinations that resolve to one path.
+    const run = fs.realpathSync(path.join(dir, 'run'));
+    expect((await resolveMountDestinations([path.join(dir, 'run'), path.join(dir, 'var-run')], none)).hides(run)).toBe(true);
+  });
+
+  it('uses live mount points that Docker did not record only when a recorded destination runs through a symlink', async () => {
+    fs.mkdirSync(path.join(dir, 'plain'), { recursive: true });
+    const plain = path.join(dir, 'plain');
+    const submount = path.join(plain, 'dataset');
+
+    // A recursive submount of a bound folder is not recorded and shows the host's own file.
+    expect((await resolveMountDestinations([plain], info(plain, submount))).destinations).not.toContain(submount);
+    // With a symlinked destination in the list, an unrecorded point may be where that mount really is.
+    const linked = path.join(dir, 'current', 'sencho');
+    expect((await resolveMountDestinations([plain, linked], info(plain, submount))).destinations).toContain(submount);
+    expect((await resolveMountDestinations([plain, path.join(dir, 'nowhere')], info(plain, submount))).destinations).toContain(submount);
+  });
+
+  it('says a mount is hidden when its own path is not a live mount point', async () => {
+    expect((await resolveMountDestinations([], info('/run'))).hides('/run/x')).toBe(true);
+    expect((await resolveMountDestinations([], none)).hides('/run/x')).toBe(false);
+  });
+
+  it('uses the live points when a recorded destination is not itself a live mount point', async () => {
+    fs.mkdirSync(path.join(dir, 'plain2', 'sencho'), { recursive: true });
+    const recorded = path.join(dir, 'plain2', 'sencho');
+    const moved = path.join(dir, 'v9', 'sencho');
+
+    // The recorded path resolves to itself, yet the mount is live elsewhere: the link was replaced by a folder after the start.
+    expect((await resolveMountDestinations([recorded], info(moved))).destinations).toContain(moved);
+    expect((await resolveMountDestinations([recorded], info(recorded, moved))).destinations).not.toContain(moved);
+  });
+
+  it('keeps only the recorded form of a destination that does not exist or is not absolute', async () => {
+    const missing = path.join(dir, 'missing', 'mount');
+    const view = await resolveMountDestinations([missing, 'relative/path'], none);
+    expect(view.destinations).toEqual([missing, 'relative/path', missing]);
+  });
+});
+
+describe('crossesAbsoluteSymlink', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-abs-link-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const at = (...parts: string[]) => path.join(dir, ...parts);
+
+  it('is false for plain files and for relative links that stay inside the mount', async () => {
+    fs.mkdirSync(at('real'), { recursive: true });
+    fs.writeFileSync(at('real', 'compose.yaml'), 'x');
+    fs.symlinkSync('real', at('rel'));
+    expect(await crossesAbsoluteSymlink(dir, at('real', 'compose.yaml'))).toBe(false);
+    expect(await crossesAbsoluteSymlink(dir, at('rel', 'compose.yaml'))).toBe(false);
+    expect(await crossesAbsoluteSymlink(dir, at('absent', 'compose.yaml'))).toBe(false);
+  });
+
+  it('is true for an absolute link, including one reached through a relative link', async () => {
+    fs.symlinkSync(at('real'), at('abs'));
+    fs.symlinkSync('abs', at('chain'));
+    expect(await crossesAbsoluteSymlink(dir, at('abs', 'compose.yaml'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, at('chain', 'compose.yaml'))).toBe(true);
+  });
+
+  it('is true for a link that leaves the mount, a link loop, and a path outside the mount', async () => {
+    fs.symlinkSync('../..', at('up'));
+    fs.symlinkSync('loop2', at('loop1'));
+    fs.symlinkSync('loop1', at('loop2'));
+    expect(await crossesAbsoluteSymlink(dir, at('up', 'x'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, at('loop1'))).toBe(true);
+    expect(await crossesAbsoluteSymlink(dir, '/elsewhere/compose.yaml')).toBe(true);
   });
 });
