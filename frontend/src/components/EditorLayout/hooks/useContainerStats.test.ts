@@ -803,6 +803,17 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
+      it('logs the message an error frame carries', () => {
+        const { warnSpy } = setup([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ error: 'read: connection reset by peer' }) }); });
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          '[useContainerStats] stats stream failure:',
+          { kind: 'stream-error', containerId: 'c1', detail: 'read: connection reset by peer' },
+        );
+        warnSpy.mockRestore();
+      });
+
       it.each(stopFrames)('clears the warning raised by %s on the next valid sample from the same socket', (_name, stop) => {
         const { result, warnSpy } = setup([makeContainer('c1')]);
         const ws = MockWS.instances[0];
@@ -855,9 +866,9 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
-      it('does not read an end flag that is not true as the end of the stream', () => {
+      it.each([[false], [1], ['true']])('does not read an end flag of %j as the end of the stream', (end) => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
-        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: false }) }); });
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end }) }); });
         act(() => { vi.advanceTimersByTime(1500); });
 
         expect(result.current.error).toBeNull();

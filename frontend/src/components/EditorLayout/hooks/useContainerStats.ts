@@ -83,17 +83,21 @@ function readStatsSample(data: {
 }
 
 type StreamStop = 'stream-error' | 'stream-end';
+type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | StreamStop;
 
 /**
  * Names the frame the backend sends when the Docker stats stream itself fails
- * (`{error}`) or ends (`{end: true}`), or returns null for any other frame. The
- * backend keeps the socket open after either one, so neither reaches the
- * socket's error or close handler, and the stream delivers no more samples.
+ * (`{error: message}`) or ends (`{end: true}`), or returns null for any other
+ * frame. Any frame with an `error` key counts, even with an empty message; a
+ * Docker stats sample has no such key. The backend keeps the socket open after
+ * either frame, so neither reaches the socket's error or close handler, and the
+ * stream delivers no more samples. Docker ends the stream when the container is
+ * removed; a stop or restart keeps it open.
  */
-function readStreamStop(frame: unknown): StreamStop | null {
+function readStreamStop(frame: unknown): { kind: StreamStop; detail?: unknown } | null {
   if (typeof frame !== 'object' || frame === null) return null;
-  if ('error' in frame) return 'stream-error';
-  if ('end' in frame && frame.end === true) return 'stream-end';
+  if ('error' in frame) return { kind: 'stream-error', detail: frame.error };
+  if ('end' in frame && frame.end === true) return { kind: 'stream-end' };
   return null;
 }
 
@@ -163,14 +167,14 @@ export function useContainerStats(
     (containers || []).forEach(container => {
       if (!container?.Id) return;
 
-      const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | StreamStop) => {
+      const recordFailure = (kind: FailureKind, detail?: unknown) => {
         // This effect run belongs to the container's state in the list it was
         // given. A container that list shows as not running has no stream to
         // lose, and its failure would otherwise be carried into its next run.
         if (disposed || container.State !== 'running') return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
-          console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
+          console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id, ...(detail !== undefined ? { detail } : {}) });
         }
         setFailures(prev => {
           if (prev.nodeId === activeNodeId && prev.ids.has(container.Id)) return prev;
@@ -209,11 +213,12 @@ export function useContainerStats(
           if (disposed) return;
           try {
             const frame = JSON.parse(event.data);
-            // A stream that failed or ended keeps its last reading on screen,
-            // so the warning marks it as stale until a valid sample arrives.
+            // A stream that failed or ended keeps its last reading on screen
+            // (a sample already queued can still land on the next flush), so
+            // the warning marks the readings as stale until a valid sample arrives.
             const stop = readStreamStop(frame);
             if (stop) {
-              recordFailure(stop);
+              recordFailure(stop.kind, stop.detail);
               return;
             }
             const sample = readStatsSample(frame);
