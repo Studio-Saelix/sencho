@@ -809,15 +809,15 @@ describe('a journal whose description is damaged', () => {
   // unreadable evidence, not an absent record: it keeps the journal in every caller, in every journal form that looks in
   // the whole zone, and it survives a restart and the late-create window.
   describe('a zone-wide listing with a record whose name is text that does not read as a DNS name', () => {
-    // The first four never start with the check label, so a filter that dropped every other string name lost them;
+    // The first six never start with the check label, so a filter that dropped every other string name lost them;
     // the rest start with it or are not text, and are kept by any filter: controls for the readable-name rule.
     const MALFORMED_NAMES: Array<[string, unknown]> = [
       ['an empty name', ''], ['a blank name', '   '], ['text with spaces', 'not a dns name'],
       ['a check name with a leading space', ` ${OLD_NAME}`],
+      ['a label longer than 63 characters', `${'a'.repeat(64)}.example.com`],
+      ['many short labels past 254 characters in all', `${'a.'.repeat(130)}example.com`],
       ['a check name with a trailing newline', `${OLD_NAME}\n`],
       ['a name with a control character', `_sencho-check-0ld\u0000.example.com`], ['an empty label', `_sencho-check-0ld..example.com`],
-      ['a label longer than 63 characters', `_sencho-check-${'a'.repeat(300)}.example.com`],
-      ['many short labels past 254 characters in all', `_sencho-check-${'a.'.repeat(130)}example.com`],
       ['a null name', null], ['a numeric name', 42], ['an object name', { a: 1 }], ['a list name', ['x']],
     ];
     const INFO = { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 };
@@ -862,7 +862,7 @@ describe('a journal whose description is damaged', () => {
         else expect(journal()).toBeNull();
       });
 
-      it.each(['www.example.com', 'WWW.Example.COM.', '*.example.com', '_dmarc.example.com'])('still drops the readable name %s that is not a check name, so a provider that ignored the filter does not hold the journal', async (name) => {
+      it.each(['www.example.com', 'WWW.Example.COM.', '*.example.com', '_dmarc.example.com', `${'a'.repeat(63)}.example.com`, `${'a.'.repeat(120)}example.com`])('still drops the readable name %s that is not a check name, so a provider that ignored the filter does not hold the journal', async (name) => {
         await connectWithZoneA();
         fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'A', name, content: '192.0.2.1' }]);
         setJournal(mk(OLD_NAME, undefined, undefined));
