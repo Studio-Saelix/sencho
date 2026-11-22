@@ -56,7 +56,7 @@ describe('PruneItemRows', () => {
     for (const row of screen.getAllByRole('listitem')) expect(row).not.toHaveTextContent(/Bytes|KB|MB/);
     view.unmount();
     render(<PruneItemRows items={[empty]} />);
-    expect(screen.getByText('0 Bytes')).toBeInTheDocument();
+    expect(screen.getByText('0 B')).toBeInTheDocument();
   });
 
   it('colors a removed outcome as success and renders creation time, network facts and ownership labels', () => {
