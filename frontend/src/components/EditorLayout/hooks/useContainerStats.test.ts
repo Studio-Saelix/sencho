@@ -814,6 +814,17 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
+      it('logs an end frame with no detail', () => {
+        const { warnSpy } = setup([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: true }) }); });
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          '[useContainerStats] stats stream failure:',
+          { kind: 'stream-end', containerId: 'c1' },
+        );
+        warnSpy.mockRestore();
+      });
+
       it.each(stopFrames)('clears the warning raised by %s on the next valid sample from the same socket', (_name, stop) => {
         const { result, warnSpy } = setup([makeContainer('c1')]);
         const ws = MockWS.instances[0];
