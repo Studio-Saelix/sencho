@@ -82,6 +82,21 @@ function readStatsSample(data: {
   return { cpuPercent, memBytes: memUsage, rx, tx };
 }
 
+type StreamStop = 'stream-error' | 'stream-end';
+
+/**
+ * Names the frame the backend sends when the Docker stats stream itself fails
+ * (`{error}`) or ends (`{end: true}`), or returns null for any other frame. The
+ * backend keeps the socket open after either one, so neither reaches the
+ * socket's error or close handler, and the stream delivers no more samples.
+ */
+function readStreamStop(frame: unknown): StreamStop | null {
+  if (typeof frame !== 'object' || frame === null) return null;
+  if ('error' in frame) return 'stream-error';
+  if ('end' in frame && frame.end === true) return 'stream-end';
+  return null;
+}
+
 export interface ContainerStatsHookResult {
   stats: Record<string, ContainerStatsEntry>;
   error: string | null;
@@ -148,7 +163,7 @@ export function useContainerStats(
     (containers || []).forEach(container => {
       if (!container?.Id) return;
 
-      const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
+      const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | StreamStop) => {
         // This effect run belongs to the container's state in the list it was
         // given. A container that list shows as not running has no stream to
         // lose, and its failure would otherwise be carried into its next run.
@@ -193,7 +208,15 @@ export function useContainerStats(
         ws.onmessage = (event) => {
           if (disposed) return;
           try {
-            const sample = readStatsSample(JSON.parse(event.data));
+            const frame = JSON.parse(event.data);
+            // A stream that failed or ended keeps its last reading on screen,
+            // so the warning marks it as stale until a valid sample arrives.
+            const stop = readStreamStop(frame);
+            if (stop) {
+              recordFailure(stop);
+              return;
+            }
+            const sample = readStatsSample(frame);
             if (!sample) return;
 
             const cpuPercent = sample.cpuPercent.toFixed(2);

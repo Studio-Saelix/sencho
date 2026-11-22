@@ -772,6 +772,101 @@ describe('useContainerStats', () => {
       });
     });
 
+    // The backend reports the Docker stream's own failure or end as a frame and
+    // keeps the socket open, so these frames are the only signal that the
+    // stream has stopped delivering.
+    describe('stream failure and end frames on an open socket', () => {
+      const stopFrames: Array<[string, string, string]> = [
+        ['an error frame', JSON.stringify({ error: 'read: connection reset by peer' }), 'stream-error'],
+        ['an error frame with an empty message', JSON.stringify({ error: '' }), 'stream-error'],
+        ['an end frame', JSON.stringify({ end: true }), 'stream-end'],
+      ];
+
+      it.each(stopFrames)('raises the warning on %s and keeps the last reading on screen', (_name, stop, kind) => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        const ws = MockWS.instances[0];
+        act(() => { ws.onmessage?.({ data: validSample }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+        const reading = result.current.stats['c1'];
+        expect(reading.cpu).toBe('10.00%');
+        expect(result.current.error).toBeNull();
+
+        act(() => { ws.onmessage?.({ data: stop }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toMatch(/unavailable/);
+        expect(result.current.stats['c1']).toBe(reading);
+        expect(warnSpy).toHaveBeenCalledWith(
+          '[useContainerStats] stats stream failure:',
+          expect.objectContaining({ kind, containerId: 'c1' }),
+        );
+        warnSpy.mockRestore();
+      });
+
+      it.each(stopFrames)('clears the warning raised by %s on the next valid sample from the same socket', (_name, stop) => {
+        const { result, warnSpy } = setup([makeContainer('c1')]);
+        const ws = MockWS.instances[0];
+        act(() => { ws.onmessage?.({ data: stop }); });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { ws.onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it.each(stopFrames)('clears the warning raised by %s when the replacement socket delivers a sample', (_name, stop) => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: stop }); });
+
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+        expect(result.current.error).toMatch(/unavailable/);
+
+        act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+
+      it('keeps the warning while the stopped container has not recovered and a sibling streams', () => {
+        const { result, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: true }) }); });
+        act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
+
+        expect(result.current.error).toMatch(/unavailable/);
+        warnSpy.mockRestore();
+      });
+
+      it.each(stopFrames)('ignores %s for a container the list shows as not running', (_name, stop) => {
+        const { result, warnSpy } = setup([makeContainer('c1', 'exited')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: stop }); });
+
+        expect(result.current.error).toBeNull();
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+
+      it.each(stopFrames)('ignores %s from a torn-down socket', (_name, stop) => {
+        const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+        const { onmessage } = MockWS.instances[0];
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+        act(() => { onmessage?.({ data: stop }); });
+        expect(result.current.error).toBeNull();
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+
+      it('does not read an end flag that is not true as the end of the stream', () => {
+        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: false }) }); });
+        act(() => { vi.advanceTimersByTime(1500); });
+
+        expect(result.current.error).toBeNull();
+        expect(result.current.stats['c1']).toBeUndefined();
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+    });
+
     it('still resets the warning on a node switch', () => {
       const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
       act(() => { MockWS.instances[0].onerror?.(); });
