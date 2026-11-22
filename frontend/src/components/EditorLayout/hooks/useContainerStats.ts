@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/utils';
 import type { ContainerInfo, ContainerStatsEntry } from '../EditorView';
 
@@ -102,29 +102,51 @@ function readStreamStop(frame: unknown): { kind: StreamStop; detail?: unknown } 
   return null;
 }
 
+/**
+ * Why a container's stats are unavailable. `transport`: the socket failed to
+ * open, closed unexpectedly or sent a frame the browser could not parse, which
+ * usually means the node (or its Docker daemon) is unreachable. `stream`: the
+ * node answered on an open socket and reported that this container's Docker
+ * stats stream failed or ended, so the node is reachable.
+ */
+export type StatsFailureCause = 'transport' | 'stream';
+
+export type StatsFailures = ReadonlyMap<string, StatsFailureCause>;
+
 export interface ContainerStatsHookResult {
   stats: Record<string, ContainerStatsEntry>;
+  /** One sentence for the stack-level warning, worded for the causes in `failures`; null when nothing is failing. */
   error: string | null;
+  /** The running containers whose stats stream is failing on the active node, with the cause of each. */
+  failures: StatsFailures;
 }
 
-const STATS_UNAVAILABLE_MESSAGE = 'Container stats unavailable. The node may be unreachable.';
+const TRANSPORT_MESSAGE = 'Container stats unavailable. The node may be unreachable.';
+const STREAM_MESSAGE = 'Container stats unavailable. The node is reachable but reported that a container\'s stats stream failed or ended.';
+const MIXED_MESSAGE = 'Container stats unavailable. The node may be unreachable, or it reported that a container\'s stats stream failed or ended.';
+
+function statsUnavailableMessage(failures: StatsFailures): string {
+  const causes = new Set(failures.values());
+  if (causes.has('transport') && causes.has('stream')) return MIXED_MESSAGE;
+  return causes.has('transport') ? TRANSPORT_MESSAGE : STREAM_MESSAGE;
+}
 
 // Stream failures belong to one node: the failed IDs are stored with the node
 // they were raised on, so a read for another node sees none even in the render
 // before any effect has pruned them.
 interface StreamFailures {
   nodeId: number | null | undefined;
-  ids: ReadonlySet<string>;
+  ids: StatsFailures;
 }
-const NO_IDS: ReadonlySet<string> = new Set();
+const NO_IDS: StatsFailures = new Map();
 
 export function useContainerStats(
   containers: ContainerInfo[],
   activeNodeId: number | null | undefined,
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
-  // IDs of running containers whose current stats stream has failed, tagged with
-  // the node they belong to. A container leaves the set when it delivers a valid
+  // Running containers whose current stats stream has failed, each with its
+  // cause, tagged with the node they belong to. A container leaves the set when it delivers a valid
   // sample, when a list shows it stopped or gone, or when the active node changes.
   const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
   const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
@@ -177,9 +199,11 @@ export function useContainerStats(
     // persistently-flaky daemon, so a refresh drops only what the list contradicts.
     setFailures(prev => {
       const sameNode = prev.nodeId === activeNodeId;
-      const next = new Set([...(sameNode ? prev.ids : NO_IDS)].filter(id => runningIds.has(id)));
-      endedStillRunning.forEach(id => next.add(id));
-      if (sameNode && next.size === prev.ids.size && [...next].every(id => prev.ids.has(id))) return prev;
+      const next = new Map([...(sameNode ? prev.ids : NO_IDS)].filter(([id]) => runningIds.has(id)));
+      // A dead stream the node reported is a stream cause. It never replaces a
+      // transport failure already recorded for the container.
+      endedStillRunning.forEach(id => { if (!next.has(id)) next.set(id, 'stream'); });
+      if (sameNode && next.size === prev.ids.size && [...next].every(([id, cause]) => prev.ids.get(id) === cause)) return prev;
       return { nodeId: activeNodeId, ids: next.size > 0 ? next : NO_IDS };
     });
 
@@ -199,10 +223,14 @@ export function useContainerStats(
             ...(detail !== undefined ? { detail } : {}),
           });
         }
+        const cause: StatsFailureCause = kind === 'stream-error' || kind === 'stream-end' ? 'stream' : 'transport';
         setFailures(prev => {
-          if (prev.nodeId === activeNodeId && prev.ids.has(container.Id)) return prev;
-          const ids = new Set(prev.nodeId === activeNodeId ? prev.ids : NO_IDS);
-          return { nodeId: activeNodeId, ids: ids.add(container.Id) };
+          // A transport failure is the worse news (the node itself may be gone),
+          // so it replaces a stream cause and is never replaced by one.
+          const current = prev.nodeId === activeNodeId ? prev.ids.get(container.Id) : undefined;
+          if (current === 'transport' || current === cause) return prev;
+          const ids = new Map(prev.nodeId === activeNodeId ? prev.ids : NO_IDS);
+          return { nodeId: activeNodeId, ids: ids.set(container.Id, cause) };
         });
       };
 
@@ -211,7 +239,7 @@ export function useContainerStats(
         endedRef.current.ids.delete(container.Id);
         setFailures(prev => {
           if (prev.nodeId !== activeNodeId || !prev.ids.has(container.Id)) return prev;
-          const ids = new Set(prev.ids);
+          const ids = new Map(prev.ids);
           ids.delete(container.Id);
           return { nodeId: activeNodeId, ids };
         });
@@ -330,8 +358,19 @@ export function useContainerStats(
   // changes. The node tag above and this filter cover the render between a list
   // or node update and that effect, so the chip never shows for a container that
   // just stopped or for another node's failure.
-  const streamFailing = failedIds.size > 0
-    && (containers || []).some(c => c?.State === 'running' && failedIds.has(c.Id));
+  const activeFailures = useMemo<StatsFailures>(() => {
+    if (failedIds.size === 0) return NO_IDS;
+    const running = new Map<string, StatsFailureCause>();
+    for (const c of containers || []) {
+      const cause = c?.State === 'running' ? failedIds.get(c.Id) : undefined;
+      if (cause) running.set(c.Id, cause);
+    }
+    return running.size > 0 ? running : NO_IDS;
+  }, [failedIds, containers]);
 
-  return { stats: containerStats, error: streamFailing ? STATS_UNAVAILABLE_MESSAGE : null };
+  return {
+    stats: containerStats,
+    error: activeFailures.size > 0 ? statsUnavailableMessage(activeFailures) : null,
+    failures: activeFailures,
+  };
 }

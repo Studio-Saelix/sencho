@@ -1065,6 +1065,99 @@ describe('useContainerStats', () => {
       });
     });
 
+    // The warning has to say which containers lost their stats and whether the
+    // node itself is the suspect: a frame the node sent on an open socket proves
+    // it is reachable, a socket that failed or closed does not.
+    describe('which containers failed and why', () => {
+      const errorFrame = JSON.stringify({ error: 'stats read failed' });
+      const endFrame = JSON.stringify({ end: true });
+
+      it('names the container whose stream sent an error frame and blames the stream, not the node', () => {
+        const { result, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: errorFrame }); });
+
+        expect([...result.current.failures]).toEqual([['alpha', 'stream']]);
+        expect(result.current.error).toMatch(/unavailable/);
+        expect(result.current.error).toMatch(/reachable but reported/);
+        expect(result.current.error).not.toMatch(/may be unreachable/);
+        warnSpy.mockRestore();
+      });
+
+      it('names a container whose ended stream the next list still runs and blames the stream, not the node', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+        expect(result.current.failures.size).toBe(0);
+
+        rerender({ containers: [makeContainer('alpha'), makeContainer('beta')], nodeId: 1 });
+
+        expect([...result.current.failures]).toEqual([['alpha', 'stream']]);
+        expect(result.current.error).toMatch(/reachable but reported/);
+        expect(result.current.error).not.toMatch(/may be unreachable/);
+        warnSpy.mockRestore();
+      });
+
+      it.each([
+        ['a socket error', (ws: MockWS) => ws.onerror?.()],
+        ['an abnormal close', (ws: MockWS) => ws.onclose?.({ code: 1006 } as CloseEvent)],
+        ['a frame that cannot be parsed', (ws: MockWS) => ws.onmessage?.({ data: 'not json' })],
+      ])('names the container and blames the node after %s', (_name, fail) => {
+        const { result, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { fail(MockWS.instances[1]); });
+
+        expect([...result.current.failures]).toEqual([['beta', 'transport']]);
+        expect(result.current.error).toMatch(/node may be unreachable/);
+        warnSpy.mockRestore();
+      });
+
+      it('words the warning for both causes when containers fail in both ways', () => {
+        const { result, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: errorFrame }); });
+        act(() => { MockWS.instances[1].onerror?.(); });
+
+        expect(new Map(result.current.failures)).toEqual(new Map([['alpha', 'stream'], ['beta', 'transport']]));
+        expect(result.current.error).toMatch(/may be unreachable, or it reported/);
+        warnSpy.mockRestore();
+      });
+
+      it('lets a transport failure replace a stream cause on the same container, never the other way round', () => {
+        const { result, warnSpy } = setup([makeContainer('alpha')]);
+        const ws = MockWS.instances[0];
+        act(() => { ws.onmessage?.({ data: errorFrame }); });
+        act(() => { ws.onclose?.({ code: 1006 } as CloseEvent); });
+        expect(result.current.failures.get('alpha')).toBe('transport');
+
+        act(() => { ws.onmessage?.({ data: errorFrame }); });
+        expect(result.current.failures.get('alpha')).toBe('transport');
+        warnSpy.mockRestore();
+      });
+
+      it('drops a container from the failures when it delivers a valid sample, and keeps the other', () => {
+        const { result, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: errorFrame }); });
+        act(() => { MockWS.instances[1].onmessage?.({ data: errorFrame }); });
+        expect([...result.current.failures.keys()]).toEqual(['alpha', 'beta']);
+
+        act(() => { MockWS.instances[0].onmessage?.({ data: validSample }); });
+
+        expect([...result.current.failures.keys()]).toEqual(['beta']);
+        warnSpy.mockRestore();
+      });
+
+      it('lists no failure for a container the list shows stopped, or after a node switch', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
+        act(() => { MockWS.instances[0].onmessage?.({ data: errorFrame }); });
+        act(() => { MockWS.instances[1].onmessage?.({ data: errorFrame }); });
+
+        rerender({ containers: [makeContainer('alpha', 'exited'), makeContainer('beta')], nodeId: 1 });
+        expect([...result.current.failures.keys()]).toEqual(['beta']);
+
+        rerender({ containers: [makeContainer('alpha', 'exited'), makeContainer('beta')], nodeId: 2 });
+        expect(result.current.failures.size).toBe(0);
+        expect(result.current.error).toBeNull();
+        warnSpy.mockRestore();
+      });
+    });
+
     it('still resets the warning on a node switch', () => {
       const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
       act(() => { MockWS.instances[0].onerror?.(); });

@@ -1350,3 +1350,111 @@ describe('io.sencho.* labels on the container list', () => {
     expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();
   });
 });
+
+describe('stats failure warning', () => {
+  const reading = {
+    cpu: '0.00%',
+    ram: '70.00 MB',
+    net: '0 B/s ↓ / 0 B/s ↑',
+    history: { cpu: [0], mem: [70], netIn: [0], netOut: [0] },
+  };
+  const alpha = { Id: 'alpha-id', Names: ['/alpha'], State: 'running', Status: 'Up 1 hour', Image: 'busybox' } as unknown as ContainerInfo;
+  const beta = { Id: 'beta-id', Names: ['/beta'], State: 'running', Status: 'Up 1 hour', Image: 'busybox' } as unknown as ContainerInfo;
+
+  function renderFailing(
+    failures: ContainersHealthProps['containerStatsFailures'],
+    containers: ContainerInfo[] = [alpha, beta],
+  ) {
+    return render(
+      <ContainersHealth
+        safeContainers={containers}
+        containerStats={{ 'alpha-id': reading, 'beta-id': reading }}
+        containerStatsError="Container stats unavailable. The node is reachable but reported that a container's stats stream failed or ended."
+        containerStatsFailures={failures}
+        isAdmin
+        canDeploy
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+  }
+
+  it('names the failed container in the chip tooltip and not the healthy one', async () => {
+    const user = userEvent.setup();
+    renderFailing(new Map([['alpha-id', 'stream']]));
+
+    await user.hover(screen.getByText('Stats unavailable', { selector: 'span.font-mono.uppercase.tracking-wider' }));
+
+    const tooltip = await screen.findByRole('tooltip');
+    expect(tooltip).toHaveTextContent('Affected: alpha.');
+    expect(tooltip).not.toHaveTextContent('beta');
+    expect(tooltip).toHaveTextContent(/node is reachable/);
+  });
+
+  it('marks only the failed container card, in compact view too', () => {
+    renderFailing(new Map([['alpha-id', 'stream']]));
+
+    const marks = screen.getAllByTestId('container-stats-failed');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].closest('[class*="rounded-lg"]')).toHaveTextContent('alpha');
+    expect(marks[0].closest('[class*="rounded-lg"]')).not.toHaveTextContent('beta');
+  });
+
+  it('shows the failed card\'s last reading as stale and leaves the healthy card live', () => {
+    renderFailing(new Map([['alpha-id', 'stream']]));
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+
+    const stale = document.querySelectorAll('[data-stale="true"]');
+    expect(stale).toHaveLength(3);
+    expect(stale[1]).toHaveAttribute('title', 'Last reading, stats unavailable: 70.00 MB');
+    const live = screen.getAllByTitle('70.00 MB');
+    expect(live).toHaveLength(1);
+    expect(live[0]).not.toHaveAttribute('data-stale');
+  });
+
+  it('marks every failed container when several fail, each with its own cause', () => {
+    renderFailing(new Map([['alpha-id', 'stream'], ['beta-id', 'transport']]));
+
+    const marks = screen.getAllByTestId('container-stats-failed');
+    expect(marks).toHaveLength(2);
+    expect(marks[0]).toHaveAttribute('title', expect.stringMatching(/node reported/));
+    expect(marks[1]).toHaveAttribute('title', expect.stringMatching(/may be unreachable/));
+  });
+
+  it('marks a failed single-container service card, as the multi-service layout renders it', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[{ ...alpha, Service: 'alpha' } as ContainerInfo, { ...beta, Service: 'beta' } as ContainerInfo]}
+        containerStats={{ 'alpha-id': reading, 'beta-id': reading }}
+        containerStatsError="Container stats unavailable."
+        containerStatsFailures={new Map([['beta-id', 'stream']])}
+        effectiveServices={[
+          { name: 'alpha', expectedReplicas: 1, hasBuild: false } as unknown as EffectiveServiceSpec,
+          { name: 'beta', expectedReplicas: 1, hasBuild: false } as unknown as EffectiveServiceSpec,
+        ]}
+        isAdmin
+        canDeploy
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+
+    const marks = screen.getAllByTestId('container-stats-failed');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].closest('[class*="rounded-lg"]')).toHaveTextContent('beta');
+  });
+
+  it('marks no card and names nobody when nothing is failing', () => {
+    renderFailing(new Map(), [alpha, beta]);
+    expect(screen.queryAllByTestId('container-stats-failed')).toHaveLength(0);
+  });
+
+  it('does not mark a container that is not running', () => {
+    renderFailing(new Map([['alpha-id', 'stream']]), [{ ...alpha, State: 'exited' } as ContainerInfo, beta]);
+    expect(screen.queryAllByTestId('container-stats-failed')).toHaveLength(0);
+  });
+});
