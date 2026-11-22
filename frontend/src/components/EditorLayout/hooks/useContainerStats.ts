@@ -174,7 +174,11 @@ export function useContainerStats(
         if (disposed || container.State !== 'running') return;
         if (!warnedOnce.has(container.Id)) {
           warnedOnce.add(container.Id);
-          console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id, ...(detail !== undefined ? { detail } : {}) });
+          console.warn('[useContainerStats] stats stream failure:', {
+            kind,
+            containerId: container.Id,
+            ...(detail !== undefined ? { detail } : {}),
+          });
         }
         setFailures(prev => {
           if (prev.nodeId === activeNodeId && prev.ids.has(container.Id)) return prev;
