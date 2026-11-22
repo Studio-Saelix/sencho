@@ -53,10 +53,10 @@ describe('PruneItemRows', () => {
   it('leaves the size off a summary line for an item with none, and shows a zero size in full mode', () => {
     const empty: PrunePlanItem = { ...volume, id: 'e', name: 'empty', sizeBytes: 0 };
     const view = render(<PruneItemRows items={[volume, empty]} detail="summary" />);
-    for (const row of screen.getAllByRole('listitem')) expect(row).not.toHaveTextContent(/Bytes|KB|MB/);
+    for (const row of screen.getAllByRole('listitem')) expect(row).not.toHaveTextContent(/\d (B|KB|MB)\b/);
     view.unmount();
     render(<PruneItemRows items={[empty]} />);
-    expect(screen.getByText('0 Bytes')).toBeInTheDocument();
+    expect(screen.getByText('0 B')).toBeInTheDocument();
   });
 
   it('colors a removed outcome as success and renders creation time, network facts and ownership labels', () => {

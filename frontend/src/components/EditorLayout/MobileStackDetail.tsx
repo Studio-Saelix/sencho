@@ -34,6 +34,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         containers,
         containerStats,
         containerStatsError,
+        containerStatsFailures,
         content,
         envContent,
         envExists,
@@ -251,6 +252,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 safeContainers={safeContainers}
                                 containerStats={containerStats}
                                 containerStatsError={containerStatsError}
+                                containerStatsFailures={containerStatsFailures}
                                 isAdmin={isAdmin}
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}

@@ -50,3 +50,17 @@ describe('SystemSheet toolbar busy feedback', () => {
     expect(button.querySelector('svg')).not.toHaveClass('animate-spin');
   });
 });
+
+describe('SystemSheet breadcrumb', () => {
+  it('wraps a long breadcrumb and keeps it clear of the ESC keycap instead of running under it', () => {
+    render(
+      <SystemSheet open onOpenChange={vi.fn()} crumb={['Networking', 'Public exposure', 'Cloudflare']} name="Connect an account">
+        body
+      </SystemSheet>,
+    );
+    const nav = screen.getByRole('navigation', { name: 'Sheet location' });
+    // jsdom has no layout, so the guard is the classes that make the row wrap and reserve the keycap's room.
+    expect(nav).toHaveClass('flex-wrap');
+    expect(nav).toHaveClass('pr-7');
+  });
+});

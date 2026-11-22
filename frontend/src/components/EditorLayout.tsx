@@ -403,7 +403,7 @@ export default function EditorLayout() {
     onGitOpsChange: scheduleGitOpsRefresh,
   });
 
-  const { stats: containerStats, error: containerStatsError } = useContainerStats(
+  const { stats: containerStats, error: containerStatsError, failures: containerStatsFailures } = useContainerStats(
     containers,
     activeNode?.id ?? null,
   );
@@ -1208,6 +1208,7 @@ export default function EditorLayout() {
       onRetrySync={retryContainersSync}
       containerStats={containerStats}
       containerStatsError={containerStatsError}
+      containerStatsFailures={containerStatsFailures}
       content={content}
       envContent={envContent}
       envExists={envExists}

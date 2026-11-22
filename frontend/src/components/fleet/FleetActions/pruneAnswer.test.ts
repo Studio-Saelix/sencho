@@ -18,7 +18,7 @@ it('leads a sized plan with the bytes it frees', () => {
   expect(answer).toMatchObject({ tone: 'warning', title: '2 KB to reclaim', line: '1 item on 1 node' });
 });
 
-it('leads a plan of unsized items with the item count instead of 0 Bytes', () => {
+it('leads a plan of unsized items with the item count instead of 0 B', () => {
   const answer = planAnswer(summarizePlan([plan({ items: [volume('a'), volume('b')] })]), null);
   expect(answer.title).toBe('2 items to reclaim');
   expect(answer.detail).toBe('No size is reported for these items.');

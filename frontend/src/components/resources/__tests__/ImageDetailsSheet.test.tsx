@@ -96,7 +96,7 @@ describe('ImageDetailsSheet', () => {
     await waitFor(() => {
       expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
     });
-    expect(screen.queryByText(/0 Bytes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\b0 B\b/)).not.toBeInTheDocument();
   });
 
   it('renders Used by as a non-clickable badge when onOpenStack is omitted', async () => {

@@ -300,3 +300,35 @@ describe('ResourceGauges unknown usage', () => {
     expect(screen.getAllByRole('link', { name: /Show usage/i })).toHaveLength(1);
   });
 });
+
+describe('ResourceGauges byte units', () => {
+  const PiB = 1024 ** 5;
+
+  function tile(label: string): HTMLElement {
+    const tileEl = screen.getByText(label).parentElement;
+    if (!tileEl) throw new Error(`${label} tile parent missing`);
+    return tileEl;
+  }
+
+  it('shows a real unit for a host rate under one byte per second and a disk past a petabyte', () => {
+    render(
+      <ResourceGauges
+        systemStats={{
+          ...baseStats({ total: 8 * GiB, used: 2 * GiB, free: 6 * GiB, usagePercent: '25' }),
+          disk: { fs: '/', mount: '/', total: 2 * PiB, used: 1.5 * PiB, free: 0.5 * PiB, usagePercent: '75' },
+          network: { rxBytes: 10, txBytes: 10, rxSec: 0.5, txSec: 0.2 },
+        }}
+        cpuHistory={[]}
+        netHistory={[]}
+        historyEndAt={null}
+      />,
+    );
+
+    expect(tile('DISK').textContent).toContain('1.5 PB / 2 PB');
+    const network = tile('NETWORK').textContent ?? '';
+    expect(network).toContain('0.7 B/s');
+    expect(network).toContain('0.5 B/s');
+    expect(network).toContain('0.2 B/s');
+    expect(`${tile('DISK').textContent}${network}`).not.toMatch(/undefined|NaN/);
+  });
+});

@@ -45,10 +45,13 @@ vi.mock('@/lib/authoredLocation', async (importOriginal) => {
 let lastShowServiceChips: boolean | undefined;
 // Capture the scoped deploy permission handed to the service lifecycle menus.
 let lastContainersHealthCanDeploy: boolean | undefined;
+// Capture which containers' stats failures reach the health pane.
+let lastContainersHealthFailures: EditorViewProps['containerStatsFailures'];
 vi.mock('../editor-view-blocks', () => ({
   StackIdentityHeader: () => <div>identity-header</div>,
-  ContainersHealth: ({ canDeploy }: { canDeploy: boolean }) => {
+  ContainersHealth: ({ canDeploy, containerStatsFailures }: { canDeploy: boolean; containerStatsFailures?: EditorViewProps['containerStatsFailures'] }) => {
     lastContainersHealthCanDeploy = canDeploy;
+    lastContainersHealthFailures = containerStatsFailures;
     return <div>health-pane</div>;
   },
   StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
@@ -167,6 +170,22 @@ describe('EditorView service lifecycle permission', () => {
     const can = vi.fn().mockReturnValue(false);
     render(<EditorView {...makeProps({ can })} />);
     expect(lastContainersHealthCanDeploy).toBe(false);
+  });
+});
+
+describe('EditorView stats failures', () => {
+  afterEach(() => { lastContainersHealthFailures = undefined; });
+  const failures = new Map([['c1', 'stream' as const]]);
+  const running = (id: string) => ({ Id: id, Names: [`/${id}`], State: 'running', Status: 'Up', Image: 'img' }) as unknown as EditorViewProps['containers'][number];
+
+  it('hands the failed containers to the single-container health pane', () => {
+    render(<EditorView {...makeProps({ containers: [running('c1')], containerStatsFailures: failures })} />);
+    expect(lastContainersHealthFailures).toBe(failures);
+  });
+
+  it('hands the failed containers to the multi-container health pane', () => {
+    render(<EditorView {...makeProps({ containers: [running('c1'), running('c2')], containerStatsFailures: failures })} />);
+    expect(lastContainersHealthFailures).toBe(failures);
   });
 });
 

@@ -50,6 +50,8 @@ export function isProxyExemptPath(path: string): boolean {
 // proxied request would otherwise carry a plaintext secret to, or read stored
 // secret values from, the remote; the secrets routes' admin gate also lives in
 // the local route handler, which the proxy would skip).
+// The public exposure account follows the same rule: only the hub holds the
+// Cloudflare token, and every Cloudflare call starts on the hub.
 //
 // Entries are stored with a trailing slash; the matcher accepts the exact
 // collection path (without the trailing slash) AND any sub-path under it,
@@ -84,6 +86,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/user-preferences/',
   '/api/cloud-backup/',
   '/api/nodes/bootstrap/',
+  '/api/public-exposure/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

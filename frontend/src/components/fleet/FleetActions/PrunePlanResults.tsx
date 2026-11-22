@@ -20,7 +20,7 @@ interface Props {
   executeResults?: FleetPruneNodeResult[];
 }
 
-/** Volumes and networks report no size, so a node whose plan has none counts items instead of showing 0 Bytes. */
+/** Volumes and networks report no size, so a node whose plan has none counts items instead of showing 0 B. */
 function planSize(plan: FleetPruneNodeResult): string {
   const bytes = plan.reclaimableBytes ?? 0;
   const items = plan.items?.length ?? 0;
