@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import {
   CloudflareApiError,
   cloudflareApiClient,
+  LOCATION_REFUSED_MESSAGE,
   mentionsToken,
   type CloudflareApiClient,
   type CloudflareCallOptions,
@@ -26,8 +27,6 @@ export type { CleanupCause };
  * a rejected token), and that a deleted zone answers 404.
  */
 
-/** The message Cloudflare sends with a token used from an address its IP filter does not allow. Its code, 9109, is shared with plain refusals. */
-const LOCATION_REFUSED_MESSAGE = /cannot use the access token from location/i;
 /** Cloudflare's code when a zone listing filters on an account id it does not know ("account with given Tag doesn't exist"). */
 const ACCOUNT_UNKNOWN_CODE = 70503;
 /** 400 codes that name the account id itself as wrong: unknown account, or an invalid object identifier (7003). */
@@ -127,7 +126,11 @@ function assertReadableList(result: unknown, what: string): void {
   if (!Array.isArray(result) || !result.every(isObject)) throw malformed(what);
 }
 
-/** Text from a successful answer that Sencho keeps or shows. It never carries the credential: an answer that does is not used. */
+/**
+ * Text from a successful answer that Sencho keeps or shows. It never carries the credential: an answer that
+ * does is refused as unreadable (rather than quietly dropping the field) because a provider echoing the
+ * token is not an answer to build state from. The refusal names the kind of value, never its text.
+ */
 function withoutCredential(token: string, value: string, what: string): string {
   if (mentionsToken(value, token)) throw malformed(what);
   return value;

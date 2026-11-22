@@ -90,7 +90,7 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
 
   const reload = useCallback(() => load({ quiet: false }), [load]);
 
-  /** A view the control instance just answered with is fresh, so a failed refresh before it no longer applies. */
+  /** A view that replaces the old one (the control instance's answer to a verb, or a disconnect's empty account) is current, so a failed refresh before it no longer applies. */
   const adopt = useCallback((next: PublicExposureAccountView) => {
     setView(next);
     setLoadError(null);

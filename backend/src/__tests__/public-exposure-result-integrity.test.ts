@@ -6,8 +6,9 @@
  * Each of those must leave the stored facts, the journals and every outward
  * surface (responses, plaintext columns, audit rows, logs) as they were, and
  * must never read as a missing permission, a vanished zone or a record that
- * is gone. Journals whose description is damaged keep the record id, and a
- * zone's listing membership is its own identity, not the clock.
+ * is gone. Journals whose description is damaged keep the record id, a
+ * zone's listing membership is its own identity, not the clock, and the count
+ * and page-size rules reach every consumer of a listing.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -154,7 +155,7 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// B3: a successful answer that carries the credential
+// A successful answer that carries the credential
 // ---------------------------------------------------------------------------
 
 describe('a successful Cloudflare answer that carries the credential', () => {
@@ -184,22 +185,26 @@ describe('a successful Cloudflare answer that carries the credential', () => {
   describe.each(ECHOES)('echoed %s', (_how, echo) => {
     describe.each(ACTIONS)('on %s', (action) => {
       it.each([
-        ['the status of the user verification', () => [userVerify({ id: 't', status: echo })]],
-        ['the expiry of a disabled token on the user verification', () => [userVerify({ id: 't', status: 'disabled', expires_on: echo })]],
-        ['the status of the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: echo })]; }],
-        ['the expiry of an expired token on the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: 'expired', expires_on: `${echo}` })]; }],
-        ['the expiry of an active token', () => [userVerify({ id: 't', status: 'active', expires_on: echo })]],
-      ])('keeps it out of every surface when it is %s', async (_label, rules) => {
+        ['the status of the user verification', () => [userVerify({ id: 't', status: echo })], 'UNEXPECTED_RESPONSE', 'unexpected_response'],
+        ['the expiry of a disabled token on the user verification', () => [userVerify({ id: 't', status: 'disabled', expires_on: echo })], 'TOKEN_INACTIVE', 'token_inactive'],
+        ['the status of the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: echo })]; }, 'UNEXPECTED_RESPONSE', 'unexpected_response'],
+        ['the expiry of an expired token on the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: 'expired', expires_on: echo })]; }, 'TOKEN_INACTIVE', 'token_inactive'],
+        // A control: an active token's expiry is not read at all, so an echo there must change nothing.
+        ['the expiry of an active token', () => [userVerify({ id: 't', status: 'active', expires_on: echo })], null, 'ok'],
+      ])('keeps it out of every surface when it is %s, and answers as the state it is', async (_label, rules, code, outcome) => {
         if (action !== 'connect') await connectWithZoneA();
         // The account-endpoint rules flip the fake's user verification, so they are built after the setup above.
         intercept(...rules());
         let message = '';
+        let got: string;
         try {
-          if (action === 'recheck') await service.recheck(actor);
-          else await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor);
+          if (action === 'recheck') got = connected(await service.recheck(actor)).lastCheck.outcome;
+          else got = connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).lastCheck.outcome;
         } catch (error: unknown) {
           message = (error as Error).message;
+          got = (error as InstanceType<typeof PublicExposureError>).code;
         }
+        expect(got).toBe(action === 'recheck' || code === null ? outcome : code);
         expect(message.toLowerCase()).not.toContain(FAKE_TOKEN.toLowerCase());
         expect(leaks()).toEqual([]);
       });
@@ -273,7 +278,7 @@ describe('a successful Cloudflare answer that carries the credential', () => {
 });
 
 // ---------------------------------------------------------------------------
-// S3: a successful answer Sencho cannot read
+// A successful answer Sencho cannot read
 // ---------------------------------------------------------------------------
 
 describe('a successful answer that does not hold what a probe reads', () => {
@@ -362,7 +367,7 @@ describe('a successful answer that does not hold what a probe reads', () => {
 });
 
 // ---------------------------------------------------------------------------
-// B1: a refusal that arrives after the first page of a listing
+// A refusal that arrives after the first page of a listing
 // ---------------------------------------------------------------------------
 
 describe('a listing refused after its first page', () => {
@@ -495,7 +500,7 @@ describe('a listing refused after its first page', () => {
 });
 
 // ---------------------------------------------------------------------------
-// B2: a journal whose description is damaged
+// A journal whose description is damaged
 // ---------------------------------------------------------------------------
 
 describe('a journal whose description is damaged', () => {
@@ -531,8 +536,9 @@ describe('a journal whose description is damaged', () => {
           await run(caller);
           expect(hasRecord(RECORD_ID)).toBe(false);
           expect(fake.requests).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
-          if (caller === 'recheck') expect(journal()).toBeNull();
+          // The check record is gone and so is the journal: dropped with the account on a disconnect, cleared in place otherwise.
           if (caller === 'disconnect') expect(service.getView()).toEqual({ connected: false });
+          else expect(journal()).toBeNull();
         });
       });
     });
@@ -545,12 +551,15 @@ describe('a journal whose description is damaged', () => {
         // The record is where this instance would have put it; the journal's own name points nowhere useful.
         seed();
         setJournal(mk(name, CONTENT, recordId));
+        intercept();
         await run(caller);
         expect(journal()).not.toBeNull();
         expect(hasRecord(RECORD_ID)).toBe(true);
         expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
-        const asked = requested.concat(fake.requests);
-        expect(asked.some((r) => /name=(not|_sencho-check-0123456789abcdef\.example\.net)/.test(decodeURIComponent(r)))).toBe(false);
+        const lookups = requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes('name='));
+        expect(lookups.length).toBeGreaterThan(0);
+        // Only this instance's own name is looked up: the damaged name is never the place that settles the journal.
+        expect(lookups.every((r) => r.includes(`name=${CHECK_NAME}`))).toBe(true);
       });
 
       it('does not clear an aged journal on an empty lookup at a wrong name while the record exists at the right one', async () => {
@@ -570,7 +579,7 @@ describe('a journal whose description is damaged', () => {
         await run(caller);
         expect(journal()).not.toBeNull();
         expect(hasRecord(RECORD_ID)).toBe(true);
-        if (caller !== 'dnsCheck') expect(requested.some((r) => decodeURIComponent(r).includes(`name=${OLD_NAME}`))).toBe(true);
+        expect(requested.some((r) => decodeURIComponent(r).includes(`name=${OLD_NAME}`))).toBe(true);
       });
     });
 
@@ -589,6 +598,26 @@ describe('a journal whose description is damaged', () => {
       await run(caller);
       expect(hasRecord(RECORD_ID)).toBe(false);
     });
+  });
+
+  it.each(CALLERS)('settles an aged journal that kept a trusted name and lost its content once the name is empty, through %s', async (caller) => {
+    await connectWithZoneA();
+    setJournal(mk(OLD_NAME, ['x'], undefined));
+    if (caller === 'disconnect') {
+      expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+      return;
+    }
+    await run(caller);
+    expect(journal()).toBeNull();
+  });
+
+  it.each([['no createdAt', undefined], ['a text createdAt', 'yesterday'], ['a negative createdAt', -5]])('still deletes by the stored id when the journal has %s', async (_label, createdAt) => {
+    await connectWithZoneA();
+    seed();
+    setJournal(JSON.stringify({ name: CHECK_NAME, content: CONTENT, recordId: RECORD_ID, createdAt }));
+    await service.recheck(actor);
+    expect(hasRecord(RECORD_ID)).toBe(false);
+    expect(journal()).toBeNull();
   });
 
   it('keeps the stored id in the journal it rewrites after a refused delete, and deletes by it once the token may', async () => {
@@ -625,7 +654,7 @@ describe('a journal whose description is damaged', () => {
     expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
   });
 
-  it('keeps a trusted name when the rest of an unreadable journal is gone, and looks there', async () => {
+  it('keeps a trusted name when the rest of the journal is gone, looks there, and keeps the journal while another record sits there', async () => {
     await connectWithZoneA();
     fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: '"x"' }]);
     setJournal(JSON.stringify({ name: OLD_NAME }));
@@ -633,12 +662,86 @@ describe('a journal whose description is damaged', () => {
     const view = connected(await service.recheck(actor));
     expect(zoneA(view).cleanupPending).toMatchObject({ recordName: OLD_NAME });
     expect(requested.some((r) => decodeURIComponent(r).includes(`name=${OLD_NAME}`))).toBe(true);
-    expect(journal()).toBe(JSON.stringify({ name: OLD_NAME }));
+    expect(JSON.parse(journal() as string)).toMatchObject({ name: OLD_NAME, cause: 'unmatched' });
+    expect(hasRecord(RECORD_ID)).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// R2: which zones the latest listing showed
+// Count and page-size rules, through the consumers of a listing
+// ---------------------------------------------------------------------------
+
+describe('count and page-size rules reach every consumer of a listing', () => {
+  const info = (extra: Record<string, number>) => ({ page: 1, per_page: 50, ...extra });
+  const OURS = { id: RECORD_ID, type: 'TXT', name: CHECK_NAME, content: `"${CONTENT}"` };
+
+  it('reads a full count-only account page, with no total_pages, from its total_count', async () => {
+    const accounts = Array.from({ length: 50 }, (_, i) => ({ id: `${(i + 16).toString(16).padStart(2, '0')}`.repeat(16), name: `Account ${i}` }));
+    accounts[49] = { id: FAKE_ACCOUNT_ID, name: 'Example Account' };
+    intercept(once(on(/^\/accounts$/), success(accounts, info({ count: 50, total_count: 50 }))));
+    expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).accountName).toBe('Example Account');
+  });
+
+  it('reads the zones of one account when Cloudflare counts every zone the token sees', async () => {
+    intercept(once(on(/^\/zones$/), success([{ id: ZONE_A, name: 'example.com' }, { id: ZONE_B, name: 'example.net' }], info({ count: 2, total_pages: 1, total_count: 40 }))));
+    expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).zonesVisible).toBe(2);
+  });
+
+  it('settles a journal from the records at its name when Cloudflare counts every record in the zone', async () => {
+    await connectWithZoneA();
+    setJournal({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED });
+    fake.records.set(ZONE_A, [OURS]);
+    intercept(once(atCheckName(), success([OURS], info({ count: 1, total_pages: 1, total_count: 40 }))));
+    expect(zoneA(await service.recheck(actor)).cleanupPending).toBeNull();
+    expect(fake.requests).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
+  });
+
+  it.each([
+    ['declares a page size of zero', { page: 1, per_page: 0, count: 1, total_pages: 1, total_count: 1 }],
+    ['declares a page size above the one asked for', { page: 1, per_page: 500, count: 1, total_pages: 1, total_count: 1 }],
+  ])('refuses a zone listing that %s, on connect and recheck, and a record lookup that does, keeping its journal', async (_label, declared) => {
+    const zones = once(on(/^\/zones$/), success([{ id: ZONE_A, name: 'example.com' }], declared));
+    intercept(zones);
+    expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
+    vi.unstubAllGlobals();
+    installFakeCloudflare(fake);
+    await connectWithZoneA();
+    intercept(zones);
+    expect(connected(await service.recheck(actor)).lastCheck.outcome).toBe('unexpected_response');
+    setJournal({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED });
+    fake.records.set(ZONE_A, []);
+    intercept(once(atCheckName(), success([], declared)));
+    await service.recheck(actor);
+    expect(journal()).not.toBeNull();
+  });
+
+  it('refuses a record lookup whose page two declares a smaller page size than page one held, keeping its journal', async () => {
+    await connectWithZoneA();
+    const hundred = Array.from({ length: 100 }, (_, i) => ({ id: (i + 1).toString(16).padStart(32, 'a'), type: 'TXT', name: CHECK_NAME, content: '"other"' }));
+    setJournal({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED });
+    intercept(pages(atCheckName(), [
+      success(hundred, { page: 1, count: 100, total_pages: 2, total_count: 101 }),
+      success([{ ...OURS }], { page: 2, per_page: 50, count: 1, total_pages: 2, total_count: 101 }),
+    ]));
+    await service.recheck(actor);
+    expect(journal()).not.toBeNull();
+    expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+  });
+
+  it('audits a recheck whose zone listing was refused on page two as an unexpected answer, never as ok', async () => {
+    await connectWithZoneA();
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    db().exec('DELETE FROM audit_log');
+    intercept(pages(on(/^\/zones$/), [success([{ id: ZONE_A, name: 'example.com' }], { page: 1, per_page: 1, count: 1, total_pages: 2, total_count: 2 }), refused(403)]));
+    await service.recheck(actor);
+    DatabaseService.getInstance().flushAuditLogBuffer();
+    const row = db().prepare(`SELECT summary FROM audit_log WHERE summary LIKE 'public_exposure.account.rechecked%'`).get() as { summary: string };
+    expect(row.summary).toContain('result=unexpected_response');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which zones the latest listing showed
 // ---------------------------------------------------------------------------
 
 describe('zone visibility does not depend on the clock', () => {

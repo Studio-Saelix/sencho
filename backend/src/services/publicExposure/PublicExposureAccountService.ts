@@ -370,9 +370,9 @@ export class PublicExposureAccountService {
     return controlIdentity ? checkRecordName(controlIdentity, zone.name) : null;
   }
 
-  /** The pending record a zone shows: its journaled name, or the name the check would have used when the journal cannot be read. */
+  /** The pending record a zone shows: its journaled name, else the name the check would use now (a journal that kept no usable name, or none that can be read). */
   private cleanupView(zone: ZoneRecord, derivedName: string | null): { recordName: string; note: string | null } {
-    const recordName = zone.pending?.name ?? zone.salvagedName ?? derivedName ?? `_sencho-check-*.${zone.name}`;
+    const recordName = zone.pending?.name ?? derivedName ?? `_sencho-check-*.${zone.name}`;
     const cause = zone.pending ? zone.pending.cause : 'unreadable_journal';
     return { recordName, note: cause ? CLEANUP_MESSAGE[cause] : null };
   }
@@ -383,7 +383,7 @@ export class PublicExposureAccountService {
     let cleanup: CleanupResult;
     if (zone.journalUnreadable) {
       console.warn(`[PublicExposure] The permission-check journal of zone ${sanitizeForLog(zone.name)} cannot be read; looking for the record by its name.`);
-      cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, zone.salvagedName ?? this.checkNameFor(zone), journal, options);
+      cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, this.checkNameFor(zone), journal, options);
     } else {
       cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);
     }
@@ -415,7 +415,10 @@ export class PublicExposureAccountService {
     };
   }
 
-  /** Apply probe results to zone rows. Reconciles the zone list only after a complete listing. */
+  /**
+   * Apply probe results to zone rows. Reconciles the zone list only after a complete listing, which
+   * carries `zonesListedAt` as its stamp; `now` stamps only the DNS check times.
+   */
   private applyZoneFacts(accountRowId: number, facts: AccountFacts, now: number, zonesListedAt: number | null): void {
     if (facts.zones && zonesListedAt !== null) {
       const listed = new Set(facts.zones.map((z) => z.zoneRef));

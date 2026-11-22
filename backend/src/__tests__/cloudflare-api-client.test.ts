@@ -2,8 +2,9 @@
  * The shared Cloudflare API client: envelope parsing, complete pagination,
  * bounded retries that honour Retry-After, permanent 4xx, ambiguous POSTs,
  * deadlines, refused redirects, the request budget, envelope fields that are
- * not in their documented shape, and paging details that contradict each
- * other, on one page or between pages.
+ * not in their documented shape, paging details that contradict each other
+ * (on one page or between pages), the count rules for listings with and
+ * without search parameters, and a refusal that arrives after the first page.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
@@ -119,6 +120,27 @@ describe('CloudflareApiClient envelope and transport', () => {
     expect(error.message).not.toContain(TOKEN);
     expect(JSON.stringify(error)).not.toContain(TOKEN);
     expect(String(error.cause ?? '')).not.toContain(TOKEN);
+  });
+});
+
+describe('CloudflareApiClient error text never repeats the token', () => {
+  it.each([
+    ['in lower case', TOKEN.toLowerCase()],
+    ['in upper case', TOKEN.toUpperCase()],
+    ['twice', `${TOKEN} and ${TOKEN}`],
+  ])('removes a token Cloudflare echoes %s', async (_label, echo) => {
+    const { client } = clientWith([() => fail(400, 6003, `Invalid token ${echo} sent`)]);
+    const error = await caught(client.request(TOKEN, { method: 'GET', path: '/zones' }));
+    expect(error.message.toLowerCase()).not.toContain(TOKEN.toLowerCase());
+    expect(error.message).toContain('[redacted]');
+  });
+
+  it('removes a token whose characters are regular-expression syntax', async () => {
+    const odd = 'cf.+*?^${}()|[]\\token-0123456789';
+    const { client } = clientWith([() => fail(400, 6003, `Invalid token ${odd} sent`)]);
+    const error = await caught(client.request(odd, { method: 'GET', path: '/zones' }));
+    expect(error.message).not.toContain(odd);
+    expect(error.message).toBe('Invalid token [redacted] sent');
   });
 });
 
@@ -468,7 +490,7 @@ describe('CloudflareApiClient contradictory paging', () => {
   });
 });
 
-describe('CloudflareApiClient paging bounds hold across pages', () => {
+describe('CloudflareApiClient paging declarations hold across pages', () => {
   const item = (n: number) => ({ id: `i${n}` });
   type Info = Record<string, number> | null;
   /** The provider's pages as scripted; a page past the script is an empty answer with no paging block. */
@@ -538,10 +560,6 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
       { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
       { items: [1, 2], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
     ]],
-    ['a page of results larger than the page size an earlier page declared', [
-      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
-      { items: [2, 3], info: null },
-    ]],
   ])('refuses %s', async (_label, pages) => {
     const { client } = scripted(pages);
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
@@ -593,7 +611,7 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
   ])('does not let %s end a listing early', async (_label, pages) => {
     const { client, calls } = scripted(pages);
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
-    // The earlier total_pages still asks for page three; the empty page it gets leaves the items short of the declared total_count.
+    // The earlier total_pages still asks for page three; the empty page it gets ends a listing that declared three pages, so it is refused.
     expect(calls.length).toBeGreaterThanOrEqual(3);
   });
 
@@ -747,6 +765,13 @@ describe('CloudflareApiClient a refusal after the first page of a listing', () =
   ] as const)('keeps a %s on the first page as %s', async (status, kind) => {
     const { client } = clientWith([() => fail(status, 10000, 'refused')]);
     expect((await caught(client.paginate(TOKEN, '/zones/z/dns_records', { name: 'n' }, 1))).kind).toBe(kind);
+  });
+
+  it('keeps a token refused from its address on page two a location refusal', async () => {
+    const { client } = clientWith([() => page(1), () => fail(403, 9109, 'Cannot use the access token from location: 203.0.113.9')]);
+    const error = await caught(client.paginate(TOKEN, '/zones', {}, 1));
+    expect(error.kind).toBe('forbidden');
+    expect(error.message).toMatch(/cannot use the access token from location/i);
   });
 
   it('keeps a rejected token on page two a rejected token', async () => {

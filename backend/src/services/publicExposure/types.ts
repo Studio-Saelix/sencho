@@ -95,7 +95,7 @@ export function isCheckRecordNameIn(name: unknown, zoneName: string): name is st
   return lower.endsWith(suffix) && CHECK_NAME_LABEL.test(lower.slice(0, -suffix.length));
 }
 
-/** The content of a journal that kept no record content (one rebuilt from an unreadable column). Nothing is ever matched to it, so nothing is deleted by it. */
+/** The content of a journal that kept no record content (its stored content was missing or not text, or the journal was rebuilt from an unreadable column). Nothing is ever matched to it, so nothing is deleted by it. */
 export const UNKNOWN_CHECK_CONTENT = '';
 
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
@@ -104,7 +104,7 @@ export interface PendingScopeCheck {
   name: string | null;
   /** The journaled content; `UNKNOWN_CHECK_CONTENT` when the stored one is missing or not text (no record is then matched by content). */
   content: string;
-  /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by name and content). */
+  /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by name and content, when the journal kept both). */
   recordId: string | null;
   /**
    * When the intent was journaled; 0 when the stored value was missing or not a

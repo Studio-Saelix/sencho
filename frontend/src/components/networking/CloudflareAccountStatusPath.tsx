@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
@@ -22,6 +23,7 @@ export interface AccountStatusPathProps {
 
 /** Answer, path, proof for the account. Shared by the card and the sheet's Overview. */
 export function AccountStatusPath({ account, recheckWait, onVerb }: AccountStatusPathProps) {
+  const [retrying, setRetrying] = useState(false);
   if (!account.view) return null;
   const status = cloudflareAccountStatus(account.view);
   const view = account.view.connected ? account.view : null;
@@ -57,9 +59,15 @@ export function AccountStatusPath({ account, recheckWait, onVerb }: AccountStatu
       marker: view?.verifiedAt ? `last checked ${formatCheckDate(view.verifiedAt)}` : 'last answer kept',
       action: (
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" disabled={account.loading || account.pending !== null} onClick={() => void account.reload()}>
+          <BusyButton
+            size="sm"
+            variant="outline"
+            pending={retrying}
+            disabled={account.loading || account.pending !== null}
+            onClick={() => { setRetrying(true); void account.reload().finally(() => setRetrying(false)); }}
+          >
             <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.5} />Retry
-          </Button>
+          </BusyButton>
           {action}
         </div>
       ),

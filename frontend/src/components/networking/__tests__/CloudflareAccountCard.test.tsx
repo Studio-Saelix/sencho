@@ -352,6 +352,28 @@ describe('CloudflareAccountCard', () => {
       expect(screen.queryByText('Not refreshed')).toBeNull();
     });
 
+    it('shows the Retry as busy while it reloads, and cannot be pressed twice', async () => {
+      apiFetchMock.mockImplementation(() => json(settled()));
+      const user = userEvent.setup();
+      const { rerender } = render(<CloudflareAccountCard />);
+      await screen.findByTestId('cloudflare-account-answer');
+      apiFetchMock.mockImplementation(() => json({ error: 'down' }, 500));
+      flags.isAdmin = false;
+      rerender(<CloudflareAccountCard />);
+      flags.isAdmin = true;
+      rerender(<CloudflareAccountCard />);
+      await screen.findByText('Not refreshed');
+
+      let release: (response: Response) => void = () => undefined;
+      apiFetchMock.mockImplementation(() => new Promise<Response>((resolve) => { release = resolve; }));
+      const retry = within(screen.getByTestId('cloudflare-account-answer')).getByRole('button', { name: /retry/i });
+      await user.click(retry);
+      await waitFor(() => expect(retry).toHaveAttribute('aria-busy', 'true'));
+      expect(retry).toBeDisabled();
+      release(new Response(JSON.stringify(settled()), { status: 200 }));
+      await waitFor(() => expect(screen.queryByText('Not refreshed')).toBeNull());
+    });
+
     it('keeps the blocking answer and its verb beside the Retry when the token is already rejected', async () => {
       apiFetchMock.mockImplementation(() => json(connected({ lastCheck: { outcome: 'token_invalid', at: T, detail: null } })));
       const { rerender } = render(<CloudflareAccountCard />);

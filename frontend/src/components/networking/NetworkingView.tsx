@@ -668,12 +668,26 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as NetworkingTab)}>
         {isMobile ? (
+          <>
+          {accountTone && tab !== 'cloudflare' && (
+            // The tab row scrolls sideways and the Cloudflare tab is its last, so the dot on it can sit off screen.
+            <button
+              type="button"
+              data-testid="cloudflare-attention-notice"
+              className="mt-3 flex min-h-11 w-full items-center gap-2 rounded-lg border border-card-border bg-card/40 px-3 text-left font-mono text-[12px] text-stat-value"
+              onClick={() => setTab('cloudflare')}
+            >
+              <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT_CLASS[accountTone]}`} />
+              Cloudflare needs attention
+            </button>
+          )}
           <MobileSubTabs
             ariaLabel="Networking sections"
             active={tab}
             onSelect={(v) => setTab(v as NetworkingTab)}
             tabs={tabs.map(t => ({ value: t.value, label: t.label, indicator: t.value === 'cloudflare' ? attentionDot : undefined }))}
           />
+          </>
         ) : (
           <div className="flex items-center justify-between gap-3 mb-4 mt-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
             {tabControls}

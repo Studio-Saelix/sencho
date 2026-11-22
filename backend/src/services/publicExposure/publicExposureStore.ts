@@ -39,8 +39,6 @@ export interface ZoneRecord {
    * pending (`hasCheckRecord`) even though there is no record to read.
    */
   journalUnreadable: boolean;
-  /** For an unreadable journal: the check name it still holds for this zone, when that survived. Null otherwise. */
-  salvagedName: string | null;
   /** The listing stamp of the last complete listing that showed this zone (`AccountRecord.zonesListedAt`). */
   lastSeenAt: number;
 }
@@ -114,27 +112,27 @@ function parseLastCheck(text: string): LastCheck {
 /**
  * A NULL column is no journal. Each field of a stored journal is kept on its own merits, so a damaged
  * description never costs the record id: a valid id is a handle by itself, and a name counts only when it
- * is a check name in this zone. A journal with neither an id nor a usable name and content is unreadable,
- * never an empty one.
+ * is a check name in this zone. Content that is missing or not text becomes `UNKNOWN_CHECK_CONTENT`, which
+ * matches no record, so such a journal never deletes by content but still settles once its name is empty.
+ * A journal with neither an id nor a usable name is unreadable, never an empty one.
  */
-function parsePending(text: string | null, zoneName: string): { pending: PendingScopeCheck | null; unreadable: boolean; salvagedName: string | null } {
-  if (text === null) return { pending: null, unreadable: false, salvagedName: null };
+function parsePending(text: string | null, zoneName: string): { pending: PendingScopeCheck | null; unreadable: boolean } {
+  if (text === null) return { pending: null, unreadable: false };
   const parsed = parseJson(text);
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { pending: null, unreadable: true, salvagedName: null };
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { pending: null, unreadable: true };
   const record = parsed as Record<string, unknown>;
   // A stored id that is not a Cloudflare id is no handle: cleanup finds the record by name and content instead.
   const recordId = typeof record.recordId === 'string' && CLOUDFLARE_ID.test(record.recordId) ? record.recordId : null;
   const name = isCheckRecordNameIn(record.name, zoneName) ? record.name : null;
-  const content = typeof record.content === 'string' ? record.content : null;
-  if (recordId === null && (name === null || content === null)) return { pending: null, unreadable: true, salvagedName: name };
+  if (recordId === null && name === null) return { pending: null, unreadable: true };
   const pending: PendingScopeCheck = {
     name,
-    content: content ?? UNKNOWN_CHECK_CONTENT,
+    content: typeof record.content === 'string' ? record.content : UNKNOWN_CHECK_CONTENT,
     recordId,
     createdAt: typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) && record.createdAt > 0 ? record.createdAt : 0,
   };
   if (CLEANUP_CAUSES.includes(record.cause as CleanupCause)) pending.cause = record.cause as CleanupCause;
-  return { pending, unreadable: false, salvagedName: null };
+  return { pending, unreadable: false };
 }
 
 function toAccount(row: AccountRow): AccountRecord {
@@ -167,7 +165,6 @@ function toZone(row: ZoneRow): ZoneRecord {
     dnsCheckedAt: row.dns_checked_at,
     pending: journal.pending,
     journalUnreadable: journal.unreadable,
-    salvagedName: journal.salvagedName,
     lastSeenAt: row.last_seen_at,
   };
 }

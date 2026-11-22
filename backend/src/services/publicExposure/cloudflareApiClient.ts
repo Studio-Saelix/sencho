@@ -9,9 +9,12 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * a list or an object as documented and `result_info` holds whole counts (the text
  * of a `messages` entry is kept when it is a string, or an object with a string
  * `message`; `errors` on a success is checked for shape and its text is not read),
- * complete pagination that holds every page to the total_pages, total_count and
- * per_page the listing declared on any page of it (and refuses a repeated item, a page
- * longer than the declared page size, or a refusal that arrives after the first page),
+ * complete pagination (a listing without search parameters must reach the total_pages and
+ * total_count it declared, and one with search parameters is held to them as ceilings, since
+ * Cloudflare documents them without the search; either way the per_page, total_pages and total_count
+ * a listing declared on any page bind all of its pages, and a repeated item, a page longer than the
+ * page size or an empty last page after several declared pages is refused; a refusal on a page after
+ * the first is reported as an unreadable answer),
  * with a page cap, bounded retries with
  * full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
@@ -148,6 +151,9 @@ function readResultInfo(value: unknown): CloudflareResultInfo | null | undefined
   return info;
 }
 
+/** The message Cloudflare sends with a token used from an address its IP filter does not allow. Its code, 9109, is shared with plain refusals. */
+export const LOCATION_REFUSED_MESSAGE = /cannot use the access token from location/i;
+
 /** True when `text` holds the token, in any letter case: a provider string that carries the credential is never kept or shown. */
 export function mentionsToken(text: string, token: string): boolean {
   return token.length > 0 && text.toLowerCase().includes(token.toLowerCase());
@@ -281,10 +287,9 @@ function expectedPages(state: ListingState, pageSize: number): number | undefine
 }
 
 /**
- * Cloudflare documents `total_count` for a listing as it stands without its search parameters, so a
- * filtered listing (an account or zone filter, a record name) is held to it only as a ceiling; an
- * unfiltered listing must reach it exactly. Whatever the filter, total_pages and total_count describe
- * one count, so they must agree with each other and with the page size.
+ * Whatever the filter, a listing never holds more items than its total_count (Cloudflare documents the
+ * total as it stands without search parameters, so a filtered listing can hold fewer), and total_pages and
+ * total_count describe one count, so they must agree with each other and with the page size.
  */
 function assertCountsAgree(state: ListingState, collected: number, pageSize: number): void {
   const { totalPages, totalCount } = state;
@@ -295,7 +300,10 @@ function assertCountsAgree(state: ListingState, collected: number, pageSize: num
   if (totalPages !== Math.ceil(totalCount / pageSize) && !emptyListing) throw contradictoryPaging();
 }
 
-/** The collected items, once they match the total any page declared and no item came twice (a repeated page would otherwise stand in for the page it hid). */
+/**
+ * The collected items, once no item came twice (a repeated page would otherwise stand in for the page it hid)
+ * and, for a listing without search parameters, once they match the total any page declared.
+ */
 function completeListing<T>(items: T[], state: ListingState, filtered: boolean): T[] {
   if (!filtered && state.totalCount !== undefined && state.totalCount !== items.length) throw contradictoryPaging();
   const seen = new Set<string>();
@@ -316,6 +324,8 @@ function completeListing<T>(items: T[], state: ListingState, filtered: boolean):
 function interruptedListing(error: unknown, page: number): unknown {
   if (!(error instanceof CloudflareApiError)) return error;
   if (error.kind !== 'forbidden' && error.kind !== 'not_found' && error.kind !== 'bad_request') return error;
+  // A token refused from its address says the token cannot be used here, whichever page it was.
+  if (LOCATION_REFUSED_MESSAGE.test(error.message)) return error;
   return new CloudflareApiError({
     kind: 'invalid_response',
     status: error.status,
@@ -394,17 +404,19 @@ export class CloudflareApiClient {
       const full = response.result.length >= pageSize;
 
       if (filtered) {
+        // A short page that holds something is the last one: a page before the last is always full.
         if (response.result.length > 0 && !full) return completeListing(items, state, filtered);
         if (response.result.length === 0) {
-          // An empty page ends a listing only when it holds nothing (page one), or the declared totals say nothing more can follow.
+          // An empty first page is an empty listing. Later, an empty page ends the listing only when the declared totals say nothing more can follow.
           const exhausted = state.totalCount !== undefined ? items.length >= state.totalCount : state.totalPages !== undefined && page > state.totalPages;
           if (page === 1 || exhausted) return completeListing(items, state, filtered);
           throw contradictoryPaging();
         }
-        // A full page of a filtered listing is the last one only when a declared total says nothing more can follow.
+        // A full page says nothing about what follows, so it needs a declared total to rest on.
         if (state.totalCount === undefined && state.totalPages === undefined) {
           throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
         }
+        // The last page when a declared total says nothing more can follow; otherwise ask for the next one.
         if (state.totalCount !== undefined && items.length >= state.totalCount) return completeListing(items, state, filtered);
         if (state.totalPages !== undefined && page >= state.totalPages) return completeListing(items, state, filtered);
         continue;

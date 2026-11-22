@@ -15,6 +15,7 @@ import {
   FAKE_TOKEN,
   OTHER_ACCOUNT_ID,
   ZONE_A,
+  answer,
   installFakeCloudflare,
   makeFakeCloudflare,
   type Refusal,
@@ -148,5 +149,50 @@ describe('Cloudflare token containment', () => {
     // The surfaces were exercised: the logs saw the parse error and the forced throw.
     expect(logged.some((line) => line.includes('[Error]'))).toBe(true);
     expect(logged.some((line) => line.includes('database is locked'))).toBe(true);
+  });
+
+  it('keeps a token that a successful Cloudflare answer echoes out of the response, a later account read, the zone list and the audit rows', async () => {
+    const fake = makeFakeCloudflare();
+    const echoes: Array<[string, (path: string) => unknown | undefined]> = [
+      ['a verification status', (path) => (path === '/user/tokens/verify' ? { id: 't', status: FAKE_TOKEN } : undefined)],
+      ['a disabled token expiry', (path) => (path === '/user/tokens/verify' ? { id: 't', status: 'disabled', expires_on: FAKE_TOKEN } : undefined)],
+      ['an account name', (path) => (path === '/accounts' ? [{ id: FAKE_ACCOUNT_ID, name: FAKE_TOKEN.toLowerCase() }] : undefined)],
+      ['a zone name', (path) => (path === '/zones' ? [{ id: ZONE_A, name: `${FAKE_TOKEN}.example.com` }] : undefined)],
+    ];
+    const logged: string[] = [];
+    for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(' ')); });
+    }
+    const auth = `Bearer ${adminToken()}`;
+    const bodies: string[] = [];
+    for (const [, replace] of echoes) {
+      vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const result = replace(url.pathname.replace('/client/v4', ''));
+        if (result !== undefined) {
+          return new Response(JSON.stringify({ success: true, errors: [], messages: [], result, result_info: { page: 1, per_page: 50, count: Array.isArray(result) ? result.length : 0, total_pages: 1, total_count: Array.isArray(result) ? result.length : 0 } }), { status: 200 });
+        }
+        return answer(fake, url, init ?? {});
+      }));
+      for (const [method, path, body] of [
+        ['put', '/api/public-exposure/account', { token: FAKE_TOKEN, accountId: FAKE_ACCOUNT_ID }],
+        ['get', '/api/public-exposure/account', undefined],
+        ['get', '/api/public-exposure/zones', undefined],
+        ['post', '/api/public-exposure/account/verify', undefined],
+      ] as const) {
+        const req = request(app)[method](path).set('Authorization', auth);
+        const res = await (body ? req.send(body) : req);
+        bodies.push(`${res.status} ${res.text}`);
+      }
+    }
+    const db = DatabaseService.getInstance();
+    db.flushAuditLogBuffer();
+    const stored = db.getDb().prepare('SELECT adapter_id, config_json, scopes_json, last_check_json FROM exposure_accounts').all();
+    const zones = db.getDb().prepare('SELECT * FROM exposure_zones').all();
+    const audit = db.getDb().prepare('SELECT summary, path FROM audit_log').all();
+    const haystack = JSON.stringify({ bodies, stored, zones, audit, logged }).toLowerCase();
+    expect(haystack).not.toContain(FAKE_TOKEN.toLowerCase());
+    // The surfaces were exercised: every echo was refused, so each connect answered an error status.
+    expect(bodies.filter((b) => b.startsWith('502') || b.startsWith('422')).length).toBeGreaterThanOrEqual(echoes.length);
   });
 });

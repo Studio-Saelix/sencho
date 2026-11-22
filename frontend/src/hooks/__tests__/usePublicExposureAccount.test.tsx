@@ -49,6 +49,8 @@ describe('usePublicExposureAccount freshness', () => {
   it.each([
     ['a recheck', (r: ReturnType<typeof usePublicExposureAccount>) => r.recheck(), account],
     ['a zone change', (r: ReturnType<typeof usePublicExposureAccount>) => r.setZone('c3'.repeat(16), true, []), account],
+    ['a token replacement', (r: ReturnType<typeof usePublicExposureAccount>) => r.connect('t'.repeat(30), 'a1'.repeat(16)), account],
+    ['a DNS check', (r: ReturnType<typeof usePublicExposureAccount>) => r.dnsCheck('c3'.repeat(16)), account],
     ['a disconnect', (r: ReturnType<typeof usePublicExposureAccount>) => r.disconnect(), { leftInCloudflare: [] }],
   ])('clears a failed refresh once %s is answered with a fresh view', async (_label, verb, body) => {
     apiFetchMock.mockImplementation(() => answer(account));
@@ -72,5 +74,37 @@ describe('usePublicExposureAccount freshness', () => {
 
     await act(() => result.current.recheck());
     expect(result.current.loadError).toBe('down');
+  });
+
+  it.each([
+    ['a refused DNS check', (r: ReturnType<typeof usePublicExposureAccount>) => r.dnsCheck('c3'.repeat(16))],
+    ['a refused disconnect', (r: ReturnType<typeof usePublicExposureAccount>) => r.disconnect()],
+  ])('records the failure of the refetch that follows %s over a view on screen, with one toast', async (_label, verb) => {
+    apiFetchMock.mockImplementation(() => answer(account));
+    const { result } = renderHook(() => usePublicExposureAccount(true));
+    await waitFor(() => expect(result.current.view).toEqual(account));
+    expect(result.current.loadError).toBeNull();
+
+    apiFetchMock.mockImplementation(() => answer({ error: 'down' }, 500));
+    toastMock.error.mockReset();
+    await act(async () => { await verb(result.current); });
+    expect(result.current.view).toEqual(account);
+    expect(result.current.loadError).toBe('down');
+    // The verb's own failure is the one toast; its quiet refetch adds none.
+    expect(toastMock.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a fresh first load when the gate turns on late, and clears an earlier failure when it answers', async () => {
+    apiFetchMock.mockImplementation(() => answer({ error: 'down' }, 500));
+    const { result, rerender } = renderHook(({ on }) => usePublicExposureAccount(on), { initialProps: { on: false } });
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    rerender({ on: true });
+    await waitFor(() => expect(result.current.loadError).toBe('down'));
+
+    apiFetchMock.mockImplementation(() => answer(account));
+    rerender({ on: false });
+    rerender({ on: true });
+    await waitFor(() => expect(result.current.view).toEqual(account));
+    expect(result.current.loadError).toBeNull();
   });
 });
