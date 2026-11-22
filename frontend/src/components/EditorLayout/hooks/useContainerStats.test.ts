@@ -162,6 +162,23 @@ describe('useContainerStats', () => {
       return { ...hook, warnSpy };
     };
 
+    // Same as setup, recording the error of every render so a test can assert
+    // that the chip never showed, not only that it is gone at the end.
+    const setupEnded = (initial: ContainerInfo[]) => {
+      vi.useRealTimers();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errors: Array<string | null> = [];
+      const hook = renderHook(
+        ({ containers, nodeId }: Props) => {
+          const r = useContainerStats(containers, nodeId);
+          errors.push(r.error);
+          return r;
+        },
+        { initialProps: { containers: initial, nodeId: 1 } as Props },
+      );
+      return { ...hook, errors, warnSpy };
+    };
+
     it('ignores the error and close events a cleanup close provokes on a connecting socket', () => {
       const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
       const oldWs = MockWS.instances[0];
@@ -776,13 +793,14 @@ describe('useContainerStats', () => {
     // keeps the socket open, so these frames are the only signal that the
     // stream has stopped delivering.
     describe('stream failure and end frames on an open socket', () => {
-      const stopFrames: Array<[string, string, string]> = [
-        ['an error frame', JSON.stringify({ error: 'read: connection reset by peer' }), 'stream-error'],
-        ['an error frame with an empty message', JSON.stringify({ error: '' }), 'stream-error'],
-        ['an end frame', JSON.stringify({ end: true }), 'stream-end'],
+      const errorFrames: Array<[string, string]> = [
+        ['an error frame', JSON.stringify({ error: 'read: connection reset by peer' })],
+        ['an error frame with an empty message', JSON.stringify({ error: '' })],
       ];
+      const endFrame = JSON.stringify({ end: true });
+      const stopFrames: Array<[string, string]> = [...errorFrames, ['an end frame', endFrame]];
 
-      it.each(stopFrames)('raises the warning on %s and keeps the last reading on screen', (_name, stop, kind) => {
+      it.each(errorFrames)('raises the warning on %s and keeps the last reading on screen', (_name, stop) => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
         const ws = MockWS.instances[0];
         act(() => { ws.onmessage?.({ data: validSample }); });
@@ -798,7 +816,7 @@ describe('useContainerStats', () => {
         expect(result.current.stats['c1']).toBe(reading);
         expect(warnSpy).toHaveBeenCalledWith(
           '[useContainerStats] stats stream failure:',
-          expect.objectContaining({ kind, containerId: 'c1' }),
+          expect.objectContaining({ kind: 'stream-error', containerId: 'c1' }),
         );
         warnSpy.mockRestore();
       });
@@ -814,18 +832,7 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
-      it('logs an end frame with no detail', () => {
-        const { warnSpy } = setup([makeContainer('c1')]);
-        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: true }) }); });
-
-        expect(warnSpy).toHaveBeenCalledWith(
-          '[useContainerStats] stats stream failure:',
-          { kind: 'stream-end', containerId: 'c1' },
-        );
-        warnSpy.mockRestore();
-      });
-
-      it.each(stopFrames)('clears the warning raised by %s on the next valid sample from the same socket', (_name, stop) => {
+      it.each(errorFrames)('clears the warning raised by %s on the next valid sample from the same socket', (_name, stop) => {
         const { result, warnSpy } = setup([makeContainer('c1')]);
         const ws = MockWS.instances[0];
         act(() => { ws.onmessage?.({ data: stop }); });
@@ -836,7 +843,7 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
-      it.each(stopFrames)('clears the warning raised by %s when the replacement socket delivers a sample', (_name, stop) => {
+      it.each(errorFrames)('clears the warning raised by %s when the replacement socket delivers a sample', (_name, stop) => {
         const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
         act(() => { MockWS.instances[0].onmessage?.({ data: stop }); });
 
@@ -848,9 +855,9 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
-      it('keeps the warning while the stopped container has not recovered and a sibling streams', () => {
+      it('keeps the warning while the failed container has not recovered and a sibling streams', () => {
         const { result, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
-        act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end: true }) }); });
+        act(() => { MockWS.instances[0].onmessage?.({ data: errorFrames[0][1] }); });
         act(() => { MockWS.instances[1].onmessage?.({ data: validSample }); });
 
         expect(result.current.error).toMatch(/unavailable/);
@@ -858,8 +865,9 @@ describe('useContainerStats', () => {
       });
 
       it.each(stopFrames)('ignores %s for a container the list shows as not running', (_name, stop) => {
-        const { result, warnSpy } = setup([makeContainer('c1', 'exited')]);
+        const { result, rerender, warnSpy } = setup([makeContainer('c1', 'exited')]);
         act(() => { MockWS.instances[0].onmessage?.({ data: stop }); });
+        rerender({ containers: [makeContainer('c1', 'exited')], nodeId: 1 });
 
         expect(result.current.error).toBeNull();
         expect(warnSpy).not.toHaveBeenCalled();
@@ -872,20 +880,152 @@ describe('useContainerStats', () => {
         rerender({ containers: [makeContainer('c1')], nodeId: 1 });
 
         act(() => { onmessage?.({ data: stop }); });
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
         expect(result.current.error).toBeNull();
         expect(warnSpy).not.toHaveBeenCalled();
         warnSpy.mockRestore();
       });
 
       it.each([[false], [1], ['true']])('does not read an end flag of %j as the end of the stream', (end) => {
-        const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
+        const { result, rerender, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });
         act(() => { MockWS.instances[0].onmessage?.({ data: JSON.stringify({ end }) }); });
         act(() => { vi.advanceTimersByTime(1500); });
+        rerender({ containers: [makeContainer('c1')], nodeId: 1 });
 
         expect(result.current.error).toBeNull();
         expect(result.current.stats['c1']).toBeUndefined();
         expect(warnSpy).not.toHaveBeenCalled();
         warnSpy.mockRestore();
+      });
+
+      // Docker ends a container's stats stream when the container is removed, so
+      // every Take down, every Save & Deploy that recreates a running container,
+      // and every update, rollback or host-side removal sends an end frame for a
+      // healthy node. The chip is for a stream that died while its container
+      // lives, which only the next container list can tell.
+      describe('an end frame', () => {
+        it('shows no chip while the list has not caught up with the removal', () => {
+          const { result, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('never shows the chip when the next list no longer has the container (Take down)', () => {
+          const { result, rerender, errors, warnSpy } = setupEnded([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          act(() => { MockWS.instances[1].onmessage?.({ data: endFrame }); });
+
+          errors.length = 0;
+          rerender({ containers: [], nodeId: 1 });
+
+          expect(errors.every(e => e === null)).toBe(true);
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('never shows the chip when the next list holds a recreated container under a new ID (Save & Deploy)', () => {
+          const { result, rerender, errors, warnSpy } = setupEnded([makeContainer('old-web'), makeContainer('db')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
+          errors.length = 0;
+          rerender({ containers: [makeContainer('new-web'), makeContainer('db')], nodeId: 1 });
+          act(() => { MockWS.instances[3].onmessage?.({ data: validSample }); });
+
+          expect(errors.every(e => e === null)).toBe(true);
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it.each(['exited', 'created', 'removing', 'dead'])('never shows the chip when the next list shows the container as %s', (state) => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
+          rerender({ containers: [makeContainer('c1', state)], nodeId: 1 });
+          expect(result.current.error).toBeNull();
+
+          // Starting it again begins clean: the old end does not come back.
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('raises the chip when the next list still shows the container running, and says so in the console', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          expect(result.current.error).toBeNull();
+
+          rerender({ containers: [makeContainer('c1'), makeContainer('c2')], nodeId: 1 });
+
+          expect(result.current.error).toMatch(/unavailable/);
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+          expect(warnSpy).toHaveBeenCalledWith(
+            '[useContainerStats] stats stream failure:',
+            { kind: 'stream-end', containerId: 'c1' },
+          );
+          warnSpy.mockRestore();
+        });
+
+        it('keeps a raised chip across later refreshes until the replacement socket delivers a sample', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+          expect(result.current.error).toMatch(/unavailable/);
+
+          act(() => { MockWS.instances[MockWS.instances.length - 1].onmessage?.({ data: validSample }); });
+          expect(result.current.error).toBeNull();
+          warnSpy.mockRestore();
+        });
+
+        it('drops the pending end when the same socket delivers a valid sample afterwards', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          const ws = MockWS.instances[0];
+          act(() => { ws.onmessage?.({ data: endFrame }); });
+          act(() => { ws.onmessage?.({ data: validSample }); });
+
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('settles an end against the first list only, not later ones', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          rerender({ containers: [], nodeId: 1 });
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('does not carry a pending end over to another node', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
+          rerender({ containers: [makeContainer('c1')], nodeId: 2 });
+
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('does not settle an end seen on node 2 against a later list for node 1', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          rerender({ containers: [makeContainer('c1')], nodeId: 2 });
+          act(() => { MockWS.instances[1].onmessage?.({ data: endFrame }); });
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+          expect(result.current.error).toBeNull();
+          warnSpy.mockRestore();
+        });
       });
     });
 

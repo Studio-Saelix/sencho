@@ -83,7 +83,7 @@ function readStatsSample(data: {
 }
 
 type StreamStop = 'stream-error' | 'stream-end';
-type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | StreamStop;
+type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | 'stream-error';
 
 /**
  * Names the frame the backend sends when the Docker stats stream itself fails
@@ -92,7 +92,10 @@ type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | Stre
  * Docker stats sample has no such key. The backend keeps the socket open after
  * either frame, so neither reaches the socket's error or close handler, and the
  * stream delivers no more samples. Docker ends the stream when the container is
- * removed; a stop or restart keeps it open.
+ * removed; a stop or restart keeps it open. An error frame is a failure at once.
+ * An end frame is only a failure when the container is still listed as running
+ * once the list refreshes, because every removal (Take down, a recreate on Save &
+ * Deploy, an update or a rollback) ends the stream before the list catches up.
  */
 function readStreamStop(frame: unknown): { kind: StreamStop; detail?: unknown } | null {
   if (typeof frame !== 'object' || frame === null) return null;
@@ -127,6 +130,11 @@ export function useContainerStats(
   // sample, when a list shows it stopped or gone, or when the active node changes.
   const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
   const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
+  // IDs whose stream sent an end frame since the last list, with the node they
+  // were seen on. The next list decides what each one meant: gone or stopped is a
+  // removal and drops it, still running is a stream that died, which is promoted
+  // to a failure. Kept in a ref so the pending verdict never renders the chip.
+  const endedRef = useRef<{ nodeId: number | null | undefined; ids: Set<string> }>({ nodeId: activeNodeId, ids: new Set() });
 
   const pendingStatsRef = useRef<Record<string, {
     cpu: string; ram: string; net: string;
@@ -155,13 +163,24 @@ export function useContainerStats(
     // until a valid sample arrives, which also covers a restart (running to
     // running, same ID): the new stream's first valid sample clears it.
     const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
+    // An end frame seen since the last list is settled by this one: a container
+    // that is still running lost its stream and joins the failures, the rest were
+    // removed or stopped and are forgotten.
+    const ended = endedRef.current;
+    const endedStillRunning = ended.nodeId === activeNodeId ? [...ended.ids].filter(id => runningIds.has(id)) : [];
+    endedRef.current = { nodeId: activeNodeId, ids: new Set() };
+    for (const id of endedStillRunning) {
+      console.warn('[useContainerStats] stats stream failure:', { kind: 'stream-end', containerId: id });
+    }
     // Clearing everything on each containers-array identity change (the
     // dashboard's refresh cadence) would make the warning visibly flap against a
     // persistently-flaky daemon, so a refresh drops only what the list contradicts.
     setFailures(prev => {
-      if (prev.nodeId !== activeNodeId) return { nodeId: activeNodeId, ids: NO_IDS };
-      const kept = [...prev.ids].filter(id => runningIds.has(id));
-      return kept.length === prev.ids.size ? prev : { nodeId: activeNodeId, ids: new Set(kept) };
+      const sameNode = prev.nodeId === activeNodeId;
+      const next = new Set([...(sameNode ? prev.ids : NO_IDS)].filter(id => runningIds.has(id)));
+      endedStillRunning.forEach(id => next.add(id));
+      if (sameNode && next.size === prev.ids.size && [...next].every(id => prev.ids.has(id))) return prev;
+      return { nodeId: activeNodeId, ids: next.size > 0 ? next : NO_IDS };
     });
 
     (containers || []).forEach(container => {
@@ -187,7 +206,9 @@ export function useContainerStats(
         });
       };
 
+      // A sample proves the stream is alive, so it also withdraws a pending end.
       const clearFailure = () => {
+        endedRef.current.ids.delete(container.Id);
         setFailures(prev => {
           if (prev.nodeId !== activeNodeId || !prev.ids.has(container.Id)) return prev;
           const ids = new Set(prev.ids);
@@ -221,6 +242,15 @@ export function useContainerStats(
             // (a sample already queued can still land on the next flush), so
             // the warning marks the readings as stale until a valid sample arrives.
             const stop = readStreamStop(frame);
+            if (stop?.kind === 'stream-end') {
+              // Docker ends the stream on every removal, so this is only noted:
+              // the next list says whether the container is really gone.
+              if (container.State === 'running') {
+                if (endedRef.current.nodeId !== activeNodeId) endedRef.current = { nodeId: activeNodeId, ids: new Set() };
+                endedRef.current.ids.add(container.Id);
+              }
+              return;
+            }
             if (stop) {
               recordFailure(stop.kind, stop.detail);
               return;
