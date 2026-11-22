@@ -593,7 +593,7 @@ export function EditorView(props: EditorViewProps) {
                                     safeContainers={safeContainers}
                                     containerStats={containerStats}
                                     containerStatsError={containerStatsError}
-                                containerStatsFailures={containerStatsFailures}
+                                    containerStatsFailures={containerStatsFailures}
                                     isAdmin={isAdmin}
                                     activeNode={activeNode}
                                     openLogViewer={openLogViewer}

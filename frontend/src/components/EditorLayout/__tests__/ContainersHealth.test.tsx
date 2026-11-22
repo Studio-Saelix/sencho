@@ -1448,6 +1448,32 @@ describe('stats failure warning', () => {
     expect(marks[0].closest('[class*="rounded-lg"]')).toHaveTextContent('beta');
   });
 
+  it('marks only the failed replica card of a multi-replica service', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          { ...alpha, Id: 'web-1-id', Names: ['/web-1'], Service: 'web' } as ContainerInfo,
+          { ...alpha, Id: 'web-2-id', Names: ['/web-2'], Service: 'web' } as ContainerInfo,
+        ]}
+        containerStats={{ 'web-1-id': reading, 'web-2-id': reading }}
+        containerStatsError="Container stats unavailable."
+        containerStatsFailures={new Map([['web-2-id', 'stream']])}
+        effectiveServices={[{ name: 'web', expectedReplicas: 2, hasBuild: false } as unknown as EffectiveServiceSpec]}
+        isAdmin
+        canDeploy
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+
+    const marks = screen.getAllByTestId('container-stats-failed');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].closest('[class*="rounded-lg"]')).toHaveTextContent('web-2');
+    expect(marks[0].closest('[class*="rounded-lg"]')).not.toHaveTextContent('web-1');
+  });
+
   it('marks no card and names nobody when nothing is failing', () => {
     renderFailing(new Map(), [alpha, beta]);
     expect(screen.queryAllByTestId('container-stats-failed')).toHaveLength(0);
