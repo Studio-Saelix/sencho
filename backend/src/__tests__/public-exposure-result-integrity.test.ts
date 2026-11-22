@@ -93,6 +93,11 @@ let requested: string[];
 const pathOf = (url: URL) => url.pathname.replace('/client/v4', '');
 const on = (path: RegExp, method = 'GET', query?: (url: URL) => boolean) => (url: URL, m: string) => m === method && path.test(pathOf(url)) && (query ? query(url) : true);
 const atCheckName = (name = CHECK_NAME) => on(/^\/zones\/[0-9a-f]+\/dns_records$/, 'GET', (url) => url.searchParams.get('name') === name);
+/** The zone-wide lookup a journal without a trusted place makes: every record whose name starts with the check label. */
+const CHECK_PREFIX = '_sencho-check-';
+const atCheckPrefix = on(/^\/zones\/[0-9a-f]+\/dns_records$/, 'GET', (url) => url.searchParams.get('name.startswith') === CHECK_PREFIX);
+/** Either lookup: the record's own name, or the zone-wide one. */
+const atCheckRecords = (name = CHECK_NAME) => (url: URL, m: string) => atCheckName(name)(url, m) || atCheckPrefix(url, m);
 
 const success = (result: unknown, info?: Record<string, number>): Reply => ({ body: { success: true, errors: [], messages: [], result, ...(info ? { result_info: info } : {}) } });
 const refused = (status: number, code = 10000, message = 'refused'): Reply => ({ status, body: { success: false, errors: [{ code, message }], messages: [], result: null } });
@@ -162,7 +167,7 @@ describe('a successful Cloudflare answer that carries the credential', () => {
   const ECHOES = [['as sent', FAKE_TOKEN], ['in lower case', FAKE_TOKEN.toLowerCase()]] as const;
 
   /** Every place the credential must never reach, read after an action. */
-  function leaks(): string[] {
+  function leaks(token = FAKE_TOKEN): string[] {
     DatabaseService.getInstance().flushAuditLogBuffer();
     const surfaces = {
       view: service.getView(),
@@ -173,7 +178,7 @@ describe('a successful Cloudflare answer that carries the credential', () => {
       logs: logged,
     };
     const haystack = JSON.stringify(surfaces).toLowerCase();
-    return haystack.includes(FAKE_TOKEN.toLowerCase()) ? ['a surface holds the token'] : [];
+    return haystack.includes(token.toLowerCase()) ? ['a surface holds the token'] : [];
   }
 
   const userVerify = (result: unknown) => once(on(/^\/user\/tokens\/verify$/), success(result));
@@ -186,9 +191,9 @@ describe('a successful Cloudflare answer that carries the credential', () => {
     describe.each(ACTIONS)('on %s', (action) => {
       it.each([
         ['the status of the user verification', () => [userVerify({ id: 't', status: echo })], 'UNEXPECTED_RESPONSE', 'unexpected_response'],
-        ['the expiry of a disabled token on the user verification', () => [userVerify({ id: 't', status: 'disabled', expires_on: echo })], 'TOKEN_INACTIVE', 'token_inactive'],
+        ['the expiry of a disabled token on the user verification', () => [userVerify({ id: 't', status: 'disabled', expires_on: echo })], 'UNEXPECTED_RESPONSE', 'unexpected_response'],
         ['the status of the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: echo })]; }, 'UNEXPECTED_RESPONSE', 'unexpected_response'],
-        ['the expiry of an expired token on the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: 'expired', expires_on: echo })]; }, 'TOKEN_INACTIVE', 'token_inactive'],
+        ['the expiry of an expired token on the account verification', () => { fake.verifyUser = 401; return [accountVerify({ id: 't', status: 'expired', expires_on: echo })]; }, 'UNEXPECTED_RESPONSE', 'unexpected_response'],
         // A control: an active token's expiry is not read at all, so an echo there must change nothing.
         ['the expiry of an active token', () => [userVerify({ id: 't', status: 'active', expires_on: echo })], null, 'ok'],
       ])('keeps it out of every surface when it is %s, and answers as the state it is', async (_label, rules, code, outcome) => {
@@ -259,6 +264,58 @@ describe('a successful Cloudflare answer that carries the credential', () => {
       expect(error.message).toContain('A unknown record');
       expect(error.message.toLowerCase()).not.toContain(FAKE_TOKEN.toLowerCase());
       expect(leaks()).toEqual([]);
+    });
+  });
+
+  // An expiry the date grammar accepts can still carry the credential: fractional seconds take any digits,
+  // and a short enough token is itself a date. Date validation is a separate check from containment.
+  describe('a well-formed expiry that carries the credential', () => {
+    const NUMERIC = '4815162342'.repeat(4);
+    const DATE_TOKEN = '2026-01-01T00:00:00Z';
+    const VARIANTS: Array<[string, string, string]> = [
+      ['fractional seconds that are the credential', NUMERIC, `2026-01-01T00:00:00.${NUMERIC}Z`],
+      ['fractional seconds that are the credential, with an offset', NUMERIC, `2026-01-01T00:00:00.${NUMERIC}+00:00`],
+      ['fractional seconds that hold the credential after other digits', NUMERIC, `2026-01-01T00:00:00.99${NUMERIC}Z`],
+      ['a date that is the credential itself', DATE_TOKEN, DATE_TOKEN],
+      ['a date that is the credential in another letter case', DATE_TOKEN.toLowerCase(), DATE_TOKEN],
+      ['a lower-case date that is the credential', DATE_TOKEN, DATE_TOKEN.toLowerCase()],
+    ];
+    const ENDPOINTS: Array<[string, boolean]> = [['the user verification', false], ['the account verification', true]];
+
+    describe.each(ENDPOINTS)('on %s', (_endpoint, accountEndpoint) => {
+      describe.each(['disabled', 'expired'])('of a %s token', (status) => {
+        describe.each(ACTIONS)('on %s', (action) => {
+          it.each(VARIANTS)('refuses %s, and no surface holds it', async (_label, token, expiry) => {
+            if (action !== 'connect') await service.connect(token, FAKE_ACCOUNT_ID, actor);
+            // The account-endpoint rules flip the fake's user verification, so they are built after the setup above.
+            if (accountEndpoint) fake.verifyUser = 401;
+            intercept((accountEndpoint ? accountVerify : userVerify)({ id: 't', status, expires_on: expiry }));
+            const before = action === 'connect' ? null : JSON.stringify(connected(service.getView()).lastCheck);
+            let message = '';
+            let got: string;
+            try {
+              if (action === 'recheck') got = connected(await service.recheck(actor)).lastCheck.outcome;
+              else got = connected(await service.connect(token, FAKE_ACCOUNT_ID, actor)).lastCheck.outcome;
+            } catch (error: unknown) {
+              message = (error as Error).message;
+              got = (error as InstanceType<typeof PublicExposureError>).code;
+            }
+            // The answer is unreadable, as any other echo of the credential is; it is not a token state to report.
+            expect(got).toBe(action === 'recheck' ? 'unexpected_response' : 'UNEXPECTED_RESPONSE');
+            expect(message.toLowerCase()).not.toContain(token.toLowerCase());
+            // Immediate and later reads, the plaintext check column, the audit rows, the zone rows and the logs.
+            expect(JSON.stringify(service.getView()).toLowerCase()).not.toContain(token.toLowerCase());
+            expect(leaks(token)).toEqual([]);
+            if (action === 'connect') expect(service.getView()).toEqual({ connected: false });
+            else if (action === 'replace') expect(JSON.stringify(connected(service.getView()).lastCheck)).toBe(before);
+          });
+        });
+      });
+    });
+
+    it('keeps a real expiry date that merely sits next to digits of its own', async () => {
+      intercept(userVerify({ id: 't', status: 'expired', expires_on: '2026-01-01T00:00:00.123456Z' }));
+      expect((await refusal(service.connect(NUMERIC, FAKE_ACCOUNT_ID, actor))).message).toContain('2026-01-01T00:00:00.123456Z');
     });
   });
 
@@ -382,7 +439,7 @@ describe('a listing refused after its first page', () => {
   const aJournal = (extra: object = {}) => ({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED, ...extra });
 
   describe.each(CONTINUATIONS)('by %s', (_label, second) => {
-    const recordsRule = () => pages(atCheckName(), [PAGE_ONE([OURS]), second]);
+    const recordsRule = () => pages(atCheckRecords(), [PAGE_ONE([OURS]), second]);
 
     describe.each([['a readable journal', () => aJournal()], ['a journal column that cannot be read', () => '{']])('with %s', (_journal, make) => {
       it('keeps the journal through a recheck, and the zone and facts with it', async () => {
@@ -544,34 +601,50 @@ describe('a journal whose description is damaged', () => {
     });
   });
 
+  /** The lookups a journal makes when it cannot say where its record is: every check record in the zone. */
+  const zoneWideLookups = () => requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes(`name.startswith=${CHECK_PREFIX}`));
+  const nameLookups = () => requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes('&name=') || r.includes('?name='));
+
   describe.each(CALLERS)('with no usable id, through %s', (caller) => {
     describe.each([['no id', undefined], ['a malformed id', '../zones']])('and %s', (_i, recordId) => {
-      it.each(DAMAGED_NAMES)('does not trust %s: it never settles the journal from a lookup there, and never deletes by content', async (_label, name) => {
+      it.each(DAMAGED_NAMES)('does not trust %s: the column is unreadable, so it looks in the whole zone, settles nothing from an empty name, and never deletes by content', async (_label, name) => {
         await connectWithZoneA();
         // The record is where this instance would have put it; the journal's own name points nowhere useful.
         seed();
         setJournal(mk(name, CONTENT, recordId));
         intercept();
-        await run(caller);
+        for (let i = 0; i < 3; i += 1) await run(caller);
         expect(journal()).not.toBeNull();
         expect(hasRecord(RECORD_ID)).toBe(true);
         expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
-        const lookups = requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes('name='));
-        expect(lookups.length).toBeGreaterThan(0);
-        // Only this instance's own name is looked up: the damaged name is never the place that settles the journal.
-        expect(lookups.every((r) => r.includes(`name=${CHECK_NAME}`))).toBe(true);
+        expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+        expect(zoneWideLookups().length).toBeGreaterThan(0);
+        // The damaged name is never the place that settles the journal.
+        expect(nameLookups().every((r) => r.includes(`name=${CHECK_NAME}`))).toBe(true);
       });
 
-      it('does not clear an aged journal on an empty lookup at a wrong name while the record exists at the right one', async () => {
+      it('does not clear an aged journal when a valid-looking name of another identity points nowhere and the record sits at the current name', async () => {
         await connectWithZoneA();
+        // The journal kept a check name in this zone, but not this instance's, and lost its content.
         seed();
-        setJournal(mk(OTHER_ZONE_NAME, CONTENT, recordId));
+        setJournal(mk(OLD_NAME, undefined, recordId));
+        intercept();
         for (let i = 0; i < 3; i += 1) await run(caller);
         expect(journal()).not.toBeNull();
         expect(hasRecord(RECORD_ID)).toBe(true);
       });
 
-      it.each(DAMAGED_CONTENTS)('with %s, looks at the journal\'s own name when it is a check name in this zone, and keeps the journal while a record sits there', async (_label, content) => {
+      it('deletes the record at the current name by the journal\'s own content when the journal kept another identity\'s name', async () => {
+        await connectWithZoneA();
+        seed();
+        setJournal(mk(OLD_NAME, CONTENT, recordId));
+        intercept();
+        await run(caller);
+        expect(hasRecord(RECORD_ID)).toBe(false);
+        expect(zoneWideLookups().length).toBeGreaterThan(0);
+      });
+
+      it.each(DAMAGED_CONTENTS)('with %s, looks in the whole zone, and keeps the journal while a record sits at the journal\'s own name', async (_label, content) => {
         await connectWithZoneA();
         fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: `"${CONTENT}"` }]);
         setJournal(mk(OLD_NAME, content, recordId));
@@ -579,7 +652,27 @@ describe('a journal whose description is damaged', () => {
         await run(caller);
         expect(journal()).not.toBeNull();
         expect(hasRecord(RECORD_ID)).toBe(true);
-        expect(requested.some((r) => decodeURIComponent(r).includes(`name=${OLD_NAME}`))).toBe(true);
+        expect(zoneWideLookups().length).toBeGreaterThan(0);
+      });
+
+      it('keeps a journal that lost its name, content and id while a record sits at a name an earlier identity used, however old the journal is', async () => {
+        await connectWithZoneA();
+        fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: `"${CONTENT}"` }]);
+        // What an unreadable column is rewritten to: this instance's name, no content, no id.
+        setJournal(mk(CHECK_NAME, undefined, recordId));
+        intercept();
+        for (let i = 0; i < 3; i += 1) await run(caller);
+        expect(journal()).not.toBeNull();
+        expect(hasRecord(RECORD_ID)).toBe(true);
+        expect(zoneWideLookups().length).toBeGreaterThan(0);
+        // The record is gone from Cloudflare: now the zone proves the absence, and the journal settles.
+        fake.records.set(ZONE_A, []);
+        if (caller === 'disconnect') {
+          expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+        } else {
+          await run(caller);
+          expect(journal()).toBeNull();
+        }
       });
     });
 
@@ -600,7 +693,7 @@ describe('a journal whose description is damaged', () => {
     });
   });
 
-  it.each(CALLERS)('settles an aged journal that kept a trusted name and lost its content once the name is empty, through %s', async (caller) => {
+  it.each(CALLERS)('settles an aged journal that kept a trusted name and lost its content once the zone holds no check record, through %s', async (caller) => {
     await connectWithZoneA();
     setJournal(mk(OLD_NAME, ['x'], undefined));
     if (caller === 'disconnect') {
@@ -654,15 +747,36 @@ describe('a journal whose description is damaged', () => {
     expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
   });
 
-  it('keeps a trusted name when the rest of the journal is gone, looks there, and keeps the journal while another record sits there', async () => {
+  it('keeps a trusted name when the rest of the journal is gone, looks in the whole zone, and keeps the journal while another record sits there', async () => {
     await connectWithZoneA();
     fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: '"x"' }]);
     setJournal(JSON.stringify({ name: OLD_NAME }));
     intercept();
     const view = connected(await service.recheck(actor));
     expect(zoneA(view).cleanupPending).toMatchObject({ recordName: OLD_NAME });
-    expect(requested.some((r) => decodeURIComponent(r).includes(`name=${OLD_NAME}`))).toBe(true);
+    expect(zoneWideLookups().length).toBeGreaterThan(0);
     expect(JSON.parse(journal() as string)).toMatchObject({ name: OLD_NAME, cause: 'unmatched' });
+    expect(hasRecord(RECORD_ID)).toBe(true);
+  });
+
+  it('keeps an unreadable column while a record sits at a name an earlier identity used, and refuses disconnect instead of reporting a clean exit', async () => {
+    await connectWithZoneA();
+    fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: `"${CONTENT}"` }]);
+    setJournal('{');
+    for (let i = 0; i < 3; i += 1) await service.recheck(actor);
+    expect(journal()).toBe('{');
+    expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+    expect(service.getView().connected).toBe(true);
+    expect(hasRecord(RECORD_ID)).toBe(true);
+  });
+
+  it('does not let a provider that ignores the name filter make the zone\'s other records look like check records', async () => {
+    await connectWithZoneA();
+    fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'A', name: 'www.example.com', content: '192.0.2.1' }]);
+    setJournal(mk(OLD_NAME, undefined, undefined));
+    intercept(once(atCheckPrefix, success([{ id: RECORD_ID, type: 'A', name: 'www.example.com', content: '192.0.2.1' }], { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 })));
+    await service.recheck(actor);
+    expect(journal()).toBeNull();
     expect(hasRecord(RECORD_ID)).toBe(true);
   });
 });
@@ -809,5 +923,113 @@ describe('zone visibility does not depend on the clock', () => {
     await service.recheck(actor);
     fake.remove = 403;
     expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A short or empty page that declares more pages after it
+// ---------------------------------------------------------------------------
+
+describe('a filtered listing whose first pages are short or empty but declare more pages', () => {
+  const OURS = { id: RECORD_ID, type: 'TXT', name: CHECK_NAME, content: `"${CONTENT}"` };
+  const FOREIGN = { id: 'd'.repeat(32), type: 'TXT', name: CHECK_NAME, content: '"somebody-else"' };
+  const hasRecord = (id: string) => (fake.records.get(ZONE_A) ?? []).some((r) => r.id === id);
+  const info = (page: number, extra: Record<string, number> = {}) => ({ page, per_page: 100, total_pages: 2, ...extra });
+  /** What a recovery lookup reads: the first page shows nothing of ours (empty, or only a record that is not ours), the record is on page two. */
+  const LOOKUPS: Array<[string, (n: number) => Reply[]]> = [
+    ['an empty first page, no total_count', () => [success([], info(1)), success([OURS], info(2))]],
+    ['an empty first page, with a total_count', () => [success([], info(1, { total_count: 101 })), success([OURS], info(2, { total_count: 101 }))]],
+    ['a short first page of other records, no total_count', () => [success([FOREIGN], info(1)), success([OURS], info(2))]],
+    ['a short first page of other records, with a total_count', () => [success([FOREIGN], info(1, { total_count: 101 })), success([OURS], info(2, { total_count: 101 }))]],
+  ];
+
+  type Caller = 'recheck' | 'disconnect' | 'dnsCheck';
+  const CALLERS: Caller[] = ['recheck', 'disconnect', 'dnsCheck'];
+  async function run(caller: Caller): Promise<void> {
+    if (caller === 'recheck') await service.recheck(actor);
+    else if (caller === 'disconnect') await service.disconnect(actor).catch((error: unknown) => { if (!(error instanceof PublicExposureError)) throw error; });
+    else await service.dnsCheck(ZONE_A, actor).catch((error: unknown) => { if (!(error instanceof PublicExposureError)) throw error; });
+  }
+
+  describe.each(CALLERS)('recovery through %s', (caller) => {
+    describe.each(LOOKUPS)('with %s', (_label, script) => {
+      it.each([
+        ['a journal that names its record', { name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED }, atCheckName],
+        ['an unreadable column, which looks in the whole zone', '{', () => atCheckPrefix],
+      ])('reads on to page two for %s, and deletes the record it finds there before it lets go', async (_what, stored, match) => {
+        await connectWithZoneA();
+        fake.records.set(ZONE_A, [OURS]);
+        setJournal(stored);
+        // An unreadable column never deletes by content: the record on page two is only ever reported.
+        const unreadable = typeof stored === 'string';
+        intercept(pages(match(), script(0)));
+        await run(caller);
+        if (unreadable) {
+          expect(journal()).toBe('{');
+          expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+        } else {
+          expect(fake.requests).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
+          expect(hasRecord(RECORD_ID)).toBe(false);
+        }
+        // Either way the page-two record is never lost to an early "nothing there": the journal does not clear while it stands.
+        if (unreadable) expect(hasRecord(RECORD_ID)).toBe(true);
+        expect(requested.filter((r) => r.includes('page=2') && r.includes('/dns_records?')).length).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  it('keeps the journal and the record when the page it declared is refused, instead of settling on the empty first page', async () => {
+    await connectWithZoneA();
+    fake.records.set(ZONE_A, [OURS]);
+    setJournal({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED });
+    intercept(pages(atCheckName(), [success([], info(1)), refused(500)]));
+    await service.recheck(actor);
+    expect(journal()).not.toBeNull();
+    expect(hasRecord(RECORD_ID)).toBe(true);
+  });
+
+  it('tells a disconnect about the record on page two instead of reporting a clean exit', async () => {
+    await connectWithZoneA();
+    fake.records.set(ZONE_A, [OURS]);
+    fake.remove = 500;
+    setJournal({ name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED });
+    intercept(pages(atCheckName(), [success([], info(1)), success([OURS], info(2))]));
+    expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+    expect(service.getView().connected).toBe(true);
+    expect(journal()).not.toBeNull();
+    expect(hasRecord(RECORD_ID)).toBe(true);
+  });
+
+  it('refuses the DNS check preflight over a record that sits on page two, and creates nothing', async () => {
+    await connectWithZoneA();
+    intercept(pages(atCheckName(), [success([], info(1)), success([{ id: RECORD_ID, type: 'A', name: CHECK_NAME, content: '192.0.2.1' }], info(2))]));
+    expect((await refusal(service.dnsCheck(ZONE_A, actor))).code).toBe('SCOPE_CHECK_CONFLICT');
+    expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+  });
+
+  describe('zone listings', () => {
+    const ZONES_PAGES = [success([], info(1, { per_page: 50 })), success([{ id: ZONE_A, name: 'example.com' }, { id: ZONE_B, name: 'example.net' }], info(2, { per_page: 50 }))];
+
+    it('connects with the zones on page two, not with none', async () => {
+      intercept(pages(on(/^\/zones$/), ZONES_PAGES));
+      expect(connected(await service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor)).zonesVisible).toBe(2);
+    });
+
+    it('keeps zone B on a recheck whose first page is empty, because page two shows it', async () => {
+      await connectWithZoneA();
+      intercept(pages(on(/^\/zones$/), ZONES_PAGES));
+      const view = connected(await service.recheck(actor));
+      expect(view.zones.map((z) => z.zoneRef).sort()).toEqual([ZONE_A, ZONE_B].sort());
+      expect(view.zonesVisible).toBe(2);
+      expect(zoneA(view)).toMatchObject({ seenAtLastCheck: true, enabled: true });
+    });
+
+    it('keeps the facts of a replacement when the declared second page is refused, and stores nothing new', async () => {
+      await connectWithZoneA();
+      const before = connected(service.getView());
+      intercept(pages(on(/^\/zones$/), [success([], info(1, { per_page: 50 })), refused(500)]));
+      expect((await refusal(service.connect(`${FAKE_TOKEN}-new`, FAKE_ACCOUNT_ID, actor))).code).toBe('CLOUDFLARE_UNREACHABLE');
+      expect(connected(service.getView()).zones.map((z) => z.zoneRef)).toEqual(before.zones.map((z) => z.zoneRef));
+    });
   });
 });

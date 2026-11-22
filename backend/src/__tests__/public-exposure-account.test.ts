@@ -1362,10 +1362,10 @@ describe('journal edges after the audit round', () => {
     expect(zoneA(view).cleanupPending).toBeNull();
   });
 
-  it('reads an unreadable record list at the derived name as an unexpected answer', async () => {
+  it('reads an unreadable record list in the zone, where an unreadable column looks, as an unexpected answer', async () => {
     await connectWithZoneA();
     setJournal('{');
-    overrideAnswers([{ path: /^\/zones\/[0-9a-f]+\/dns_records$/, query: (url) => url.searchParams.get('name') === CHECK_NAME, result: [null] }]);
+    overrideAnswers([{ path: /^\/zones\/[0-9a-f]+\/dns_records$/, query: (url) => url.searchParams.get('name.startswith') === '_sencho-check-', result: [null] }]);
     expect(zoneA(await service.recheck(actor)).cleanupPending?.note).toContain('cannot read what it kept');
     expect(journal(ZONE_A)).toBe('{');
     expect((await refusal(service.disconnect(actor))).message).toContain('could not be deleted');
@@ -1494,8 +1494,9 @@ describe('a listing whose paging details contradict each other is never a comple
   });
 
   describe('a record listing at the check name', () => {
-    const atName = (url: URL, m: string) => m === 'GET' && /^\/zones\/[0-9a-f]+\/dns_records$/.test(url.pathname.replace('/client/v4', '')) && url.searchParams.get('name') === CHECK_NAME;
-    const hidesTheRecord = { success: true, result: [], result_info: { page: 1, per_page: 100, count: 0, total_pages: 0, total_count: 1 } };
+    const atName = (url: URL, m: string) => m === 'GET' && /^\/zones\/[0-9a-f]+\/dns_records$/.test(url.pathname.replace('/client/v4', '')) && (url.searchParams.get('name') === CHECK_NAME || url.searchParams.get('name.startswith') === '_sencho-check-');
+    // An empty first page that declares a second one: the record the journal waits for can be on it.
+    const hidesTheRecord = { success: true, result: [], result_info: { page: 1, per_page: 100, count: 0, total_pages: 2, total_count: 2 } };
 
     it('keeps a stored journal through recheck and refuses disconnect, even for an old one', async () => {
       await connectWithZoneA();
@@ -1550,17 +1551,9 @@ describe('a listing that contradicts what it declared, on one page or between pa
       { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
       { items: [i[1]], info: { page: 2, per_page: 1, total_pages: 2, total_count: 2 } },
     ]],
-    ['paging details that vanish on page two', (i) => [
-      { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
-      { items: [i[1]], info: null },
-    ]],
     ['a page size that changes on page two', (i) => [
       { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2, total_count: 3 } },
       { items: [i[2]], info: { page: 2, per_page: 3, total_pages: 2, total_count: 3 } },
-    ]],
-    ['an empty last page of a listing that declares two pages, with no total_count', (i) => [
-      { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2 } },
-      { items: [], info: { page: 2, per_page: 2, total_pages: 2, count: 0 } },
     ]],
     ['a page two that repeats page one, with counts that add up', (i) => [
       { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
@@ -1568,6 +1561,22 @@ describe('a listing that contradicts what it declared, on one page or between pa
     ]],
     ['more results than the page size it declared', (i) => [
       { items: i, info: { page: 1, per_page: 1, total_pages: 1 } },
+    ]],
+  ];
+
+  /**
+   * Contradictions only a listing without search parameters can show: its total_count is exact, so a listing
+   * that ends short of it is incomplete. A filtered listing's total_count is only a cap, so the same pages
+   * are a search that matched fewer records than the zone holds.
+   */
+  const UNFILTERED_SCRIPTS: Array<[string, (items: unknown[]) => Page[]]> = [
+    ['paging details that vanish on page two', (i) => [
+      { items: [i[0]], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [i[1]], info: null },
+    ]],
+    ['an empty last page of a listing that declares two pages, with no total_count', (i): Page[] => [
+      { items: [i[0], i[1]], info: { page: 1, per_page: 2, total_pages: 2 } },
+      { items: [], info: { page: 2, per_page: 2, total_pages: 2, count: 0 } },
     ]],
   ];
 
@@ -1581,7 +1590,7 @@ describe('a listing that contradicts what it declared, on one page or between pa
 
   const accountsList = onPath(/^\/accounts$/);
   const zonesList = onPath(/^\/zones$/);
-  const recordsAtCheckName = (url: URL, m: string) => onPath(/^\/zones\/[0-9a-f]+\/dns_records$/)(url, m) && url.searchParams.get('name') === CHECK_NAME;
+  const recordsAtCheckName = (url: URL, m: string) => onPath(/^\/zones\/[0-9a-f]+\/dns_records$/)(url, m) && (url.searchParams.get('name') === CHECK_NAME || url.searchParams.get('name.startswith') === '_sencho-check-');
 
   function expectZonesKept(view: PublicExposureAccountView, before: ReturnType<typeof connected>): void {
     const kept = connected(view);
@@ -1591,10 +1600,10 @@ describe('a listing that contradicts what it declared, on one page or between pa
   }
 
   describe.each([
-    ['the account listing', accountsList, ACCOUNTS],
-    ['the zone listing', zonesList, ZONES],
-  ])('in %s', (_name, matches, items) => {
-    describe.each(SCRIPTS)('with %s', (_label, script) => {
+    ['the account listing', accountsList, ACCOUNTS, [...SCRIPTS, ...UNFILTERED_SCRIPTS]],
+    ['the zone listing', zonesList, ZONES, SCRIPTS],
+  ])('in %s', (_name, matches, items, scripts) => {
+    describe.each(scripts)('with %s', (_label, script) => {
       it('refuses a first connect as an unexpected answer and stores nothing', async () => {
         overridePaged(matches, script(items));
         expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');

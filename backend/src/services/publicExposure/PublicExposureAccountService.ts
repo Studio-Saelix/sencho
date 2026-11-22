@@ -44,8 +44,8 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   too_recent: 'Sencho cannot yet rule out that its create is still landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
-  unmatched: 'Other records already sit at that name, and Sencho does not delete records it cannot prove it created. Delete them in Cloudflare, then try again.',
-  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a record sits at that name, delete it in Cloudflare. Then try again: Sencho lets go once the name has stayed empty for a couple of minutes.',
+  unmatched: 'Other records already sit at that name, or Sencho cannot tell which check record in the zone is its own, and it does not delete records it cannot prove it created. Delete them in Cloudflare, then try again.',
+  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a record named _sencho-check-… sits in the zone, delete it in Cloudflare. Then try again: Sencho lets go once the zone has held no such record for a couple of minutes.',
 };
 
 /**

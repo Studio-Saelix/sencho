@@ -80,6 +80,9 @@ export const CLEANUP_CAUSES: readonly CleanupCause[] = [
 /** Cloudflare object ids are 32 hex characters; anything else never reaches a request path or a stored handle. */
 export const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
 
+/** What every permission-check record name starts with; the control identity follows it. */
+export const CHECK_NAME_PREFIX = '_sencho-check-';
+
 /** The label a permission-check record name starts with, the control identity after it. */
 const CHECK_NAME_LABEL = /^_sencho-check-[a-z0-9-]{1,48}$/;
 

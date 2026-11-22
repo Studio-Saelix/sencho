@@ -195,4 +195,62 @@ describe('Cloudflare token containment', () => {
     // The surfaces were exercised: every echo was refused, so each connect answered an error status.
     expect(bodies.filter((b) => b.startsWith('502') || b.startsWith('422')).length).toBeGreaterThanOrEqual(echoes.length);
   });
+  it('keeps a credential that a well-formed expiry carries out of the response, a later account read and every stored surface, on both verification endpoints', async () => {
+    const NUMERIC = '4815162342'.repeat(4);
+    const DATE_TOKEN = '2026-01-01T00:00:00Z';
+    const fake = makeFakeCloudflare();
+    const logged: string[] = [];
+    for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(' ')); });
+    }
+    const auth = `Bearer ${adminToken()}`;
+    const db = DatabaseService.getInstance();
+    const cases: Array<[string, string, string, boolean]> = [
+      ['fractional seconds', NUMERIC, `2026-01-01T00:00:00.${NUMERIC}Z`, false],
+      ['fractional seconds on the account endpoint', NUMERIC, `2026-01-01T00:00:00.${NUMERIC}Z`, true],
+      ['a date that is the credential', DATE_TOKEN, DATE_TOKEN, false],
+      ['a date that is the credential on the account endpoint', DATE_TOKEN, DATE_TOKEN, true],
+    ];
+    for (const [, token, expiry, viaAccount] of cases) {
+      for (const status of ['disabled', 'expired']) {
+        for (const connectedFirst of [false, true]) {
+          db.getDb().exec('DELETE FROM exposure_zones; DELETE FROM exposure_accounts;');
+          const bodies: string[] = [];
+          installFakeCloudflare(fake);
+          if (connectedFirst) {
+            const first = await request(app).put('/api/public-exposure/account').set('Authorization', auth).send({ token, accountId: FAKE_ACCOUNT_ID });
+            expect(first.status).toBe(200);
+          }
+          vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+            const url = new URL(String(input));
+            const path = url.pathname.replace('/client/v4', '');
+            const verifies = viaAccount ? /^\/accounts\/[0-9a-f]+\/tokens\/verify$/.test(path) : path === '/user/tokens/verify';
+            if (viaAccount && path === '/user/tokens/verify') {
+              return new Response(JSON.stringify({ success: false, errors: [{ code: 1000, message: 'Invalid API Token' }], messages: [], result: null }), { status: 401 });
+            }
+            if (verifies) return new Response(JSON.stringify({ success: true, errors: [], messages: [], result: { id: 't', status, expires_on: expiry } }), { status: 200 });
+            return answer(fake, url, init ?? {});
+          }));
+          for (const [method, path, body] of [
+            ['put', '/api/public-exposure/account', { token, accountId: FAKE_ACCOUNT_ID }],
+            ['post', '/api/public-exposure/account/verify', undefined],
+            ['get', '/api/public-exposure/account', undefined],
+            ['get', '/api/public-exposure/zones', undefined],
+          ] as const) {
+            const req = request(app)[method](path).set('Authorization', auth);
+            const res = await (body ? req.send(body) : req);
+            bodies.push(`${res.status} ${res.text}`);
+          }
+          db.flushAuditLogBuffer();
+          const stored = db.getDb().prepare('SELECT adapter_id, config_json, scopes_json, last_check_json FROM exposure_accounts').all();
+          const zones = db.getDb().prepare('SELECT * FROM exposure_zones').all();
+          const audit = db.getDb().prepare('SELECT summary, path FROM audit_log').all();
+          const haystack = JSON.stringify({ bodies, stored, zones, audit, logged }).toLowerCase();
+          expect(haystack).not.toContain(token.toLowerCase());
+          // The connect was refused as an unreadable answer, not reported as the token state it echoed.
+          expect(bodies[0].startsWith('502') || bodies[0].startsWith('422')).toBe(true);
+        }
+      }
+    }
+  });
 });

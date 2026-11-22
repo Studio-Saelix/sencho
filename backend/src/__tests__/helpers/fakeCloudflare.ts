@@ -111,7 +111,9 @@ export function answer(fake: FakeCloudflare, url: URL, init: RequestInit): Respo
       const read = fake.dnsRead[zone] ?? 'ok';
       if (read !== 'ok') return refusal(read);
       const name = url.searchParams.get('name');
-      return paged(name ? records.filter((r) => r.name === name) : records, url);
+      const prefix = url.searchParams.get('name.startswith');
+      const matched = records.filter((r) => (name ? r.name === name : true) && (prefix ? r.name.toLowerCase().startsWith(prefix.toLowerCase()) : true));
+      return paged(matched, url);
     }
     if (method === 'POST') {
       if (fake.create === 'reset-late') {

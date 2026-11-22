@@ -7,7 +7,7 @@ import {
   type CloudflareApiClient,
   type CloudflareCallOptions,
 } from './cloudflareApiClient';
-import { CLOUDFLARE_ID, UNKNOWN_CHECK_CONTENT, type AccountScopes, type CleanupCause, type FailedOutcome, type LastCheck, type PendingScopeCheck, type ZoneDnsState } from './types';
+import { CHECK_NAME_PREFIX, CLOUDFLARE_ID, UNKNOWN_CHECK_CONTENT, type AccountScopes, type CleanupCause, type FailedOutcome, type LastCheck, type PendingScopeCheck, type ZoneDnsState } from './types';
 
 export type { CleanupCause };
 
@@ -47,7 +47,7 @@ const LATE_CREATE_WINDOW_MS = 2 * 60_000;
 
 /** The TXT name the DNS write check uses: the control identity keeps two hubs on one account apart. */
 export function checkRecordName(controlIdentity: string, zoneName: string): string {
-  return `_sencho-check-${controlIdentity}.${zoneName}`;
+  return `${CHECK_NAME_PREFIX}${controlIdentity}.${zoneName}`;
 }
 
 export interface ListedZone {
@@ -271,12 +271,10 @@ export class CloudflareAccountAdapter {
       // path in deleteRecord, so it is checked again here.
       let recordId = pending.recordId !== null && CLOUDFLARE_ID.test(pending.recordId) ? pending.recordId : null;
       if (!recordId) {
-        // No usable id: the record is found at the journaled name, or at the name this instance would use when the journal kept none.
-        const name = pending.name ?? journal.derivedName ?? null;
-        if (name === null) return { cleaned: false, cause: 'unreadable_journal' };
+        // No usable id: the record is found where the journal says it was, when that place is established, and otherwise anywhere in the zone a check record can be.
         let records: DnsRecord[];
         try {
-          records = await this.recordsAt(token, zoneRef, name, options);
+          records = await this.recordsForJournal(token, zoneRef, pending, journal.derivedName ?? null, options);
         } catch (error: unknown) {
           if (error instanceof CloudflareApiError && error.kind === 'not_found' && !isLocationRefusal(error)) {
             // The zone itself is gone, and the record with it.
@@ -324,19 +322,19 @@ export class CloudflareAccountAdapter {
   }
 
   /**
-   * Settle a zone whose journal column cannot be read. The record's name is
-   * rebuilt from the control identity (`name`, null when there is none). Records
-   * there are never deleted, since the journaled content that proves one is
-   * ours is gone. The column is settled only when the zone itself is gone, or
-   * when Cloudflare lists nothing at that name after the late-create window:
-   * the first empty listing replaces the column with a journal that has no
-   * content, stamped now, and the next cleanup past the window clears it.
+   * Settle a zone whose journal column cannot be read. Neither the record's name nor its content survived,
+   * so nothing proves where it is: every check record in the zone counts as a place it can be, and none of
+   * them is ever deleted, since the journaled content that proves one is ours is gone. `name` is the name the
+   * check would use now (null when there is no control identity); it only gives the replacement journal
+   * something readable to keep. The column is settled only when the zone itself is gone, or when the zone
+   * holds no check record after the late-create window: the first empty listing replaces the column with a
+   * journal that has no content, stamped now, and the next cleanup past the window clears it.
    */
   async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {
     if (name === null) return { cleaned: false, cause: 'unreadable_journal' };
     let records: DnsRecord[];
     try {
-      records = await this.recordsAt(token, zoneRef, name, options);
+      records = await this.checkRecordsInZone(token, zoneRef, options);
     } catch (error: unknown) {
       if (error instanceof CloudflareApiError && error.kind === 'not_found' && !isLocationRefusal(error)) {
         // A zone that is gone took its records with it.
@@ -458,7 +456,9 @@ export class CloudflareAccountAdapter {
     if (!isTokenVerifyResult(verified)) throw malformed('a token status');
     if (verified.status !== 'active') {
       // The date is shown only when it is a date-time; any other text in the field is never repeated.
-      const expires = typeof verified.expires_on === 'string' && DATE_TIME.test(verified.expires_on) && !Number.isNaN(Date.parse(verified.expires_on)) ? verified.expires_on : null;
+      // A string of any shape is checked for the credential first: a well-formed date can still carry it (fractional seconds take any digits).
+      const raw = typeof verified.expires_on === 'string' ? withoutCredential(token, verified.expires_on, 'an expiry date') : null;
+      const expires = raw !== null && DATE_TIME.test(raw) && !Number.isNaN(Date.parse(raw)) ? raw : null;
       throw stop('token_inactive', expires ? `Token is ${verified.status}; it expires or expired on ${expires}.` : `Token is ${verified.status}.`);
     }
   }
@@ -531,6 +531,26 @@ export class CloudflareAccountAdapter {
     const records = await this.client.paginate<unknown>(token, `/zones/${zoneRef}/dns_records`, { name }, 100, options);
     if (!records.every(isObject)) throw malformed('a record list');
     return records as DnsRecord[];
+  }
+
+  /**
+   * Where a journal without a usable id looks for its record. The journaled name is the place only when it
+   * is the name this instance uses now and the journal kept its content: any other name may be damaged text
+   * that still reads as a check name, or a name an earlier identity used, and an empty listing there would
+   * prove nothing. Anywhere else the whole zone's check records are the candidates.
+   */
+  private async recordsForJournal(token: string, zoneRef: string, pending: PendingScopeCheck, derivedName: string | null, options: CloudflareCallOptions): Promise<DnsRecord[]> {
+    const established = pending.name !== null && pending.content !== UNKNOWN_CHECK_CONTENT
+      && derivedName !== null && pending.name.toLowerCase() === derivedName.toLowerCase();
+    return established ? this.recordsAt(token, zoneRef, pending.name as string, options) : this.checkRecordsInZone(token, zoneRef, options);
+  }
+
+  /** Every record in the zone whose name is a check name, whichever control identity wrote it. */
+  private async checkRecordsInZone(token: string, zoneRef: string, options: CloudflareCallOptions): Promise<DnsRecord[]> {
+    const records = await this.client.paginate<unknown>(token, `/zones/${zoneRef}/dns_records`, { 'name.startswith': CHECK_NAME_PREFIX }, 100, options);
+    if (!records.every(isObject)) throw malformed('a record list');
+    // A provider that ignored the filter must not make every record in the zone look like a check record.
+    return (records as DnsRecord[]).filter((r) => typeof r.name !== 'string' || r.name.toLowerCase().startsWith(CHECK_NAME_PREFIX));
   }
 
   private async deleteRecord(token: string, zoneRef: string, recordId: string, options: CloudflareCallOptions): Promise<void> {

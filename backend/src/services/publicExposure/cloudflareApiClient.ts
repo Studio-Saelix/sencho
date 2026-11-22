@@ -287,14 +287,15 @@ function expectedPages(state: ListingState, pageSize: number): number | undefine
 }
 
 /**
- * Whatever the filter, a listing never holds more items than its total_count (Cloudflare documents the
- * total as it stands without search parameters, so a filtered listing can hold fewer), and total_pages and
- * total_count describe one count, so they must agree with each other and with the page size.
+ * A listing never holds more items than its total_count (Cloudflare documents the total as it stands without
+ * search parameters, so a filtered listing can hold fewer). Only a listing without search parameters also has
+ * total_pages and total_count describe one count, so they must agree with each other and with the page size;
+ * a filtered listing's total_pages counts what the search matched and total_count what it did not filter.
  */
-function assertCountsAgree(state: ListingState, collected: number, pageSize: number): void {
+function assertCountsAgree(state: ListingState, collected: number, pageSize: number, filtered: boolean): void {
   const { totalPages, totalCount } = state;
   if (totalCount !== undefined && collected > totalCount) throw contradictoryPaging();
-  if (totalPages === undefined || totalCount === undefined) return;
+  if (filtered || totalPages === undefined || totalCount === undefined) return;
   // An empty listing is reported as zero pages or as one empty page; both are legitimate.
   const emptyListing = totalCount === 0 && totalPages <= 1;
   if (totalPages !== Math.ceil(totalCount / pageSize) && !emptyListing) throw contradictoryPaging();
@@ -400,26 +401,12 @@ export class CloudflareApiClient {
       assertConsistentPage(state, response.resultInfo, response.result.length, page, perPage);
       items.push(...(response.result as T[]));
       const pageSize = state.perPage ?? perPage;
-      assertCountsAgree(state, items.length, pageSize);
+      assertCountsAgree(state, items.length, pageSize, filtered);
       const full = response.result.length >= pageSize;
 
       if (filtered) {
-        // A short page that holds something is the last one: a page before the last is always full.
-        if (response.result.length > 0 && !full) return completeListing(items, state, filtered);
-        if (response.result.length === 0) {
-          // An empty first page is an empty listing. Later, an empty page ends the listing only when the declared totals say nothing more can follow.
-          const exhausted = state.totalCount !== undefined ? items.length >= state.totalCount : state.totalPages !== undefined && page > state.totalPages;
-          if (page === 1 || exhausted) return completeListing(items, state, filtered);
-          throw contradictoryPaging();
-        }
-        // A full page says nothing about what follows, so it needs a declared total to rest on.
-        if (state.totalCount === undefined && state.totalPages === undefined) {
-          throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
-        }
-        // The last page when a declared total says nothing more can follow; otherwise ask for the next one.
-        if (state.totalCount !== undefined && items.length >= state.totalCount) return completeListing(items, state, filtered);
-        if (state.totalPages !== undefined && page >= state.totalPages) return completeListing(items, state, filtered);
-        continue;
+        if (this.filteredListingContinues(state, page, items.length, response.result.length, full)) continue;
+        return completeListing(items, state, filtered);
       }
 
       const pages = expectedPages(state, pageSize);
@@ -435,6 +422,27 @@ export class CloudflareApiClient {
       // A page before the last holds a full page, and never nothing.
       if (!full || response.result.length === 0) throw contradictoryPaging();
     }
+  }
+
+  /**
+   * Whether a filtered listing has a page after this one. Cloudflare documents total_count as it stands
+   * without the search, so it only caps a filtered listing, and a total_pages derived from it can claim
+   * pages the search never fills. A declared total_pages therefore decides only that more pages are worth
+   * asking for: a short or empty page before the last declared one is never taken for the end (an empty
+   * first page can hide matches on page two), and an empty page after the first is. Without total_pages a
+   * short or empty page is the last one, and a full page asks for the next.
+   */
+  private filteredListingContinues(state: ListingState, page: number, collected: number, pageLength: number, full: boolean): boolean {
+    const { totalPages, totalCount } = state;
+    // The most the search can match: nothing more can follow once it is collected.
+    if (totalCount !== undefined && collected >= totalCount) return false;
+    if (totalPages !== undefined) return page < totalPages && (page === 1 || pageLength > 0);
+    if (!full) return false;
+    // A full page says nothing about what follows, so it needs a declared total to rest on.
+    if (totalCount === undefined) {
+      throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
+    }
+    return true;
   }
 
   /** Milliseconds to wait before the next attempt, or null when the error is final. */

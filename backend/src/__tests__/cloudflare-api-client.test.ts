@@ -688,24 +688,17 @@ describe('CloudflareApiClient count semantics follow what Cloudflare documents',
   });
 
   describe('a listing with search parameters, whose totals Cloudflare documents without them', () => {
+    type Pages = Array<{ items: number[]; info: Record<string, number> | null }>;
+
     it('accepts a short page under a total_count that counts more than the search matched', async () => {
       const { client } = scripted([{ items: [1], info: { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 40 } }]);
       expect(await client.paginate(TOKEN, '/zones/z/dns_records', FILTER, 100)).toHaveLength(1);
     });
 
-    it('accepts a short page when the unfiltered total_pages is larger than the pages the search fills', async () => {
-      const { client, calls } = scripted([{ items: [1, 2, 3], info: { page: 1, per_page: 50, count: 3, total_pages: 8, total_count: 400 } }]);
+    it('accepts the one filtered page of a listing whose unfiltered total_count would fill two', async () => {
+      const { client, calls } = scripted([{ items: [1, 2, 3], info: { page: 1, per_page: 50, count: 3, total_pages: 1, total_count: 100 } }]);
       expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 50)).toHaveLength(3);
       expect(calls).toHaveLength(1);
-    });
-
-    it('continues a full page and ends on the short one after it', async () => {
-      const { client, calls } = scripted([
-        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 20, total_count: 40 } },
-        { items: [3], info: { page: 2, per_page: 2, total_pages: 20, total_count: 40 } },
-      ]);
-      expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 2)).toHaveLength(3);
-      expect(calls).toHaveLength(2);
     });
 
     it('accepts an empty search result under a total that counts more', async () => {
@@ -719,21 +712,83 @@ describe('CloudflareApiClient count semantics follow what Cloudflare documents',
       expect(calls).toHaveLength(1);
     });
 
-    it.each<[string, Array<{ items: number[]; info: Record<string, number> | null }>]>([
-      ['more items than the total_count', [{ items: [1, 2], info: { page: 1, per_page: 2, total_pages: 1, total_count: 1 } }]],
-      ['an empty page after a full one, short of the total_count', [
+    it('ends a full page on the empty page after it when only a total_count above it was declared', async () => {
+      const { client, calls } = scripted([
+        { items: [1, 2], info: { page: 1, per_page: 2, total_count: 40 } },
+        { items: [], info: { page: 2, per_page: 2, total_count: 40 } },
+      ]);
+      expect(await client.paginate(TOKEN, '/zones', FILTER, 2)).toHaveLength(2);
+      expect(calls).toHaveLength(2);
+    });
+
+    it('ends a full page on the empty page after it when the declared total_pages counts pages the search does not fill', async () => {
+      const { client, calls } = scripted([
         { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 20, total_count: 40 } },
         { items: [], info: { page: 2, per_page: 2, total_pages: 20, total_count: 40 } },
-      ]],
-      ['an empty last page of a listing that declares two pages', [
+      ]);
+      expect(await client.paginate(TOKEN, '/zones', FILTER, 2)).toHaveLength(2);
+      expect(calls).toHaveLength(2);
+    });
+
+    it('ends a full page on the empty last page of a listing that declares two pages', async () => {
+      const { client } = scripted([
         { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2 } },
         { items: [], info: { page: 2, per_page: 2, total_pages: 2 } },
-      ]],
+      ]);
+      expect(await client.paginate(TOKEN, '/zones', FILTER, 2)).toHaveLength(2);
+    });
+
+    // A short or empty page before the last declared one is never the end: the pages after it are asked for.
+    it.each<[string, Pages, string[]]>([
+      ['an empty first page, with no total_count', [
+        { items: [], info: { page: 1, per_page: 100, total_pages: 2 } },
+        { items: [7], info: { page: 2, per_page: 100, total_pages: 2 } },
+      ], ['i7']],
+      ['an empty first page, under a total_count that counts the record on page two', [
+        { items: [], info: { page: 1, per_page: 100, total_pages: 2, total_count: 101 } },
+        { items: [7], info: { page: 2, per_page: 100, total_pages: 2, total_count: 101 } },
+      ], ['i7']],
+      ['a short first page, with no total_count', [
+        { items: [1], info: { page: 1, per_page: 100, total_pages: 2 } },
+        { items: [7], info: { page: 2, per_page: 100, total_pages: 2 } },
+      ], ['i1', 'i7']],
+      ['a short middle page', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3 } },
+        { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
+        { items: [7], info: { page: 3, per_page: 2, total_pages: 3 } },
+      ], ['i1', 'i2', 'i3', 'i7']],
+      ['an empty first page of a listing that only declares a total_count', [
+        { items: [], info: { page: 1, per_page: 100, total_count: 1 } },
+      ], []],
+    ])('reads on past %s', async (_label, pages, ids) => {
+      const { client } = scripted(pages);
+      expect((await client.paginate<{ id: string }>(TOKEN, '/zones/z/dns_records', FILTER, pages[0].info?.per_page ?? 100)).map((i) => i.id)).toEqual(ids);
+    });
+
+    it('asks for the second page after an empty first one, and does not stop at the first', async () => {
+      const { client, calls } = scripted([
+        { items: [], info: { page: 1, per_page: 100, total_pages: 2 } },
+        { items: [7], info: { page: 2, per_page: 100, total_pages: 2 } },
+      ]);
+      await client.paginate(TOKEN, '/zones/z/dns_records', FILTER, 100);
+      expect(calls).toHaveLength(2);
+    });
+
+    it.each<[string, Pages]>([
+      ['more items than the total_count', [{ items: [1, 2], info: { page: 1, per_page: 2, total_pages: 1, total_count: 1 } }]],
       ['a full page and no paging details', [{ items: [1, 2], info: null }]],
-      ['a total_pages that does not follow from its total_count', [{ items: [], info: { page: 1, per_page: 100, total_pages: 0, total_count: 1 } }]],
+      ['a total_pages of zero over a page that holds items', [{ items: [1], info: { page: 1, per_page: 100, total_pages: 0, total_count: 1 } }]],
       ['a repeated item', [
         { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
         { items: [1, 2], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
+      ]],
+      ['a total_pages that changes on page two', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3 } },
+        { items: [3], info: { page: 2, per_page: 2, total_pages: 2 } },
+      ]],
+      ['a page size that changes on page two', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2 } },
+        { items: [3], info: { page: 2, per_page: 3, total_pages: 2 } },
       ]],
     ])('still refuses %s', async (_label, pages) => {
       const { client } = scripted(pages);
