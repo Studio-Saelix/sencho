@@ -541,9 +541,13 @@ export class CloudflareAccountAdapter {
    * prove nothing. Anywhere else the whole zone's check records are the candidates.
    */
   private async recordsForJournal(token: string, zoneRef: string, pending: PendingScopeCheck, derivedName: string | null, options: CloudflareCallOptions): Promise<DnsRecord[]> {
-    const established = pending.name !== null && pending.content !== UNKNOWN_CHECK_CONTENT
-      && derivedName !== null && pending.name.toLowerCase() === derivedName.toLowerCase();
-    return established ? this.recordsAt(token, zoneRef, pending.name as string, options) : this.checkRecordsInZone(token, zoneRef, options);
+    if (
+      pending.name !== null && pending.content !== UNKNOWN_CHECK_CONTENT
+      && derivedName !== null && pending.name.toLowerCase() === derivedName.toLowerCase()
+    ) {
+      return this.recordsAt(token, zoneRef, pending.name, options);
+    }
+    return this.checkRecordsInZone(token, zoneRef, options);
   }
 
   /** Every record in the zone whose name starts with the check label, whichever control identity wrote it; a record with no readable name is kept too, since it may be one. */
