@@ -201,6 +201,48 @@ describe('service-scoped restore', () => {
     expect(state.reactivate).toHaveBeenCalledWith('rec-1');
   });
 
+  it('retags the recovery image only through the recreate, which runs it once its up is admitted', async () => {
+    const order: string[] = [];
+    state.tag.mockImplementation(async () => { order.push('tag'); });
+    state.recreateServiceFromLocal.mockImplementation(async (_stack: string, _service: string, _ws: unknown, beforeUp?: () => Promise<void>) => {
+      order.push('admitted');
+      await beforeUp?.();
+      order.push('up');
+    });
+
+    await orch().restore(ctx, restoreOptions);
+
+    expect(order).toEqual(['admitted', 'tag', 'up']);
+  });
+
+  it('leaves the declared tag where it was when the recreate is refused before its retag step, the fence or a failed render', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const fence = new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    state.recreateServiceFromLocal.mockRejectedValue(fence);
+    await expect(orch().restore(ctx, restoreOptions)).rejects.toBe(fence);
+    state.recreateServiceFromLocal.mockRejectedValue(new Error('could not render'));
+    await expect(orch().restore(ctx, restoreOptions)).resolves.toMatchObject({ code: 'restore_compose_failed' });
+    expect(state.tag).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed retag as a retag failure, not as a compose failure, and gives the claimed recovery back', async () => {
+    state.tag.mockRejectedValue(new Error('image gone'));
+    state.recreateServiceFromLocal.mockImplementation(async (_stack: string, _service: string, _ws: unknown, beforeUp?: () => Promise<void>) => {
+      await beforeUp?.();
+    });
+
+    const result = await orch().restore(ctx, restoreOptions);
+
+    expect(result).toMatchObject({
+      kind: 'service_failed',
+      code: 'restore_retag_failed',
+      error: 'image gone',
+      mutationStage: 'retag',
+      recoveryId: 'rec-1',
+    });
+    expect(state.reactivate).toHaveBeenCalledWith('rec-1');
+  });
+
   it('still reports any other recreate error as a restore compose failure', async () => {
     state.recreateServiceFromLocal.mockRejectedValue(new Error('no such image'));
 

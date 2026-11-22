@@ -1833,14 +1833,11 @@ export class ComposeService {
         await recoverySvc.abandon(candidate.id);
         throw new Error('Failed to mark recovery generation as acquired');
       }
-      if (!recoverySvc.handoff(candidate.id, this.nodeId, stackName)) {
-        await recoverySvc.abandon(candidate.id);
-        throw new Error('Failed to hand off recovery generation');
-      }
-      handedOff = true;
-      if (!recoverySvc.markReconciling(candidate.id)) {
-        throw new Error('Failed to mark recovery generation as reconciling after handoff');
-      }
+      // The handoff comes later, after the verification pulls and the up's
+      // admission, as in updateStack: a handoff supersedes the stack's previous
+      // rollback point, so a refusal that comes first (a data restore's fence, a
+      // policy block) abandons a candidate that is still a candidate and leaves
+      // the previous point current.
     }
 
     // ComposeService is the only producer of deploy events: every deploy path
@@ -1932,15 +1929,38 @@ export class ComposeService {
           // the pulls is refused here with nothing changed; one recorded after
           // this waits for the up instead of landing under it.
           upLease = await admitComposeProcess({ cwd: stackDir, args, env });
-          gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
-          // Legacy orphans are removed only once the candidate check has passed,
-          // so a refused image leaves the running containers it found untouched.
+          // Legacy orphans are looked up here, read-only, and removed only once
+          // the candidate check has passed, so a refused image leaves the
+          // running containers it found untouched. The lookup's `compose ps` is
+          // fenced work too: a data restore's refusal of it leaves this method
+          // as the refusal, before the handoff and before the GitOps record,
+          // instead of being logged as a Compose error and read as no orphans.
+          let legacyOrphans: Array<{ Id: string }> = [];
           try {
-            const dockerController = DockerController.getInstance(this.nodeId);
-            const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
+            legacyOrphans = await DockerController.getInstance(this.nodeId)
+              .getLegacyOrphanContainersByStack(stackName);
+          } catch (e) {
+            if (isDataRestoreFenceError(e)) throw e;
+            console.warn('Failed to look up legacy containers for %s:', sanitizeForLog(stackName), e);
+          }
+          // Nothing has been refused past this point: the previous rollback point
+          // is superseded here and not earlier, once the deploy is committed to
+          // running.
+          if (atomic && recoverySvc && recoveryId) {
+            if (!recoverySvc.handoff(recoveryId, this.nodeId, stackName)) {
+              throw new Error('Failed to hand off recovery generation');
+            }
+            handedOff = true;
+            if (!recoverySvc.markReconciling(recoveryId)) {
+              throw new Error('Failed to mark recovery generation as reconciling after handoff');
+            }
+          }
+          gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
+          try {
             if (legacyOrphans.length > 0) {
               sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
-              await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
+              await DockerController.getInstance(this.nodeId)
+                .removeContainers(legacyOrphans.map((c) => c.Id));
             }
           } catch (e) {
             console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
@@ -2034,7 +2054,9 @@ export class ComposeService {
       // Compose was handed it: the previous runtime is still the one the
       // generation captured, so it is abandoned, not compensated (which would
       // restore files under the fence and be refused the same way), and the
-      // refusal leaves this method as itself.
+      // refusal leaves this method as itself. The handoff has not happened yet
+      // on this path, so the abandon takes effect and the stack's previous
+      // rollback point stays current.
       if (isDataRestoreFenceError(deployError) && !composeHandedOff) {
         if (atomic && recoverySvc && recoveryId) {
           await recoverySvc.abandon(recoveryId);
@@ -3323,7 +3345,16 @@ export class ComposeService {
    * uses the just-retagged local image). Always `--no-deps --force-recreate`,
    * never `--remove-orphans`.
    */
-  async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
+  async recreateServiceFromLocal(
+    stackName: string,
+    serviceName: string,
+    ws?: WebSocket,
+    // Runs once the up's argv is built and its files are admitted against a
+    // data restore's directory fences, immediately before Compose is started.
+    // The restore retags the recovery image here, so a refusal that comes first
+    // leaves the declared tag where it was.
+    beforeUp?: () => Promise<void>,
+  ): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
@@ -3334,7 +3365,14 @@ export class ComposeService {
     };
     await this.withRegistryAuth(async (env) => {
       sendOutput(`=== Restoring ${serviceName} ===\n`);
-      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', '--no-build', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', '--no-build', serviceName]);
+      const lease = await admitComposeProcess({ cwd: stackDir, args, env });
+      try {
+        if (beforeUp) await beforeUp();
+        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs(), undefined, lease);
+      } finally {
+        lease.release();
+      }
     }, sendOutput);
   }
 

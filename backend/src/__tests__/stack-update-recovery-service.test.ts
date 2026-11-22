@@ -380,6 +380,7 @@ describe('StackUpdateRecoveryService', () => {
       const outcome = StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(
         genId,
         async () => {
+          leaseEvents.push('up');
           if (opts.fence) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
           throw new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
         },
@@ -432,7 +433,11 @@ describe('StackUpdateRecoveryService', () => {
       // The context refuseRestoreUp hands every call; the restore asks for it only after the admission.
       const context = await (vi.mocked(resolveComposeProjectContextForGeneration).getMockImplementation() as unknown as () => Promise<{ restoreFromContext: () => Promise<void> }>)();
       vi.mocked(context.restoreFromContext).mockImplementation(async () => { leaseEvents.push('restore'); });
-      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockImplementation(async () => { leaseEvents.push('reconcile'); return true; });
+      // The first call is the pre-compensate reconcile; the next is the revert after the refused up.
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockReset();
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore)
+        .mockImplementationOnce(async () => { leaseEvents.push('reconcile'); return false; })
+        .mockImplementation(async () => { leaseEvents.push('revert'); return true; });
       await expect(outcome).rejects.toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
       expect(mockAdmitStackFileWork).toHaveBeenCalledWith(
         'my-stack',
@@ -442,9 +447,7 @@ describe('StackUpdateRecoveryService', () => {
       );
       // Admitted first, released last: the pre-compensate reconcile, the
       // restore, the refused up and the revert all ran under it.
-      expect(leaseEvents[0]).toBe('admit');
-      expect(leaseEvents.at(-1)).toBe('release');
-      expect(leaseEvents.filter((e) => e === 'admit')).toHaveLength(1);
+      expect(leaseEvents).toEqual(['admit', 'reconcile', 'restore', 'up', 'revert', 'release']);
     });
 
     it('moves nothing when a data restore holds a file of the transaction at its registration', async () => {

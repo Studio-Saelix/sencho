@@ -88,6 +88,7 @@ import { MeshService } from '../services/MeshService';
 import DockerController from '../services/DockerController';
 import { RestoreFenceStore, waitForFsWorkOn, fsWorkInFlightCountForTests } from '../services/recovery/restoreFence';
 import SelfIdentityService from '../services/SelfIdentityService';
+import * as composeArgvFence from '../helpers/composeArgvFence';
 import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { composeSelectedInputPaths } from '../helpers/composeExpansionGuard';
@@ -312,8 +313,8 @@ describe('a Compose process is admitted by the files it opens, and held until it
       const svc = ComposeService.getInstance(NODE);
       const { execute } = stubPreliminaries(svc);
       const begin = vi.spyOn(svc as unknown as { beginGitOpsDeploy: () => null }, 'beginGitOpsDeploy');
-      const orphans = vi.spyOn(DockerController.getInstance(NODE), 'getLegacyOrphanContainersByStack').mockResolvedValue([{ Id: 'old' }]);
-      const removed = vi.spyOn(DockerController.getInstance(NODE), 'removeContainers').mockResolvedValue([]);
+      const orphans = vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack').mockResolvedValue([{ Id: 'old' }]);
+      const removed = vi.spyOn(DockerController.prototype, 'removeContainers').mockResolvedValue([]);
       const error = await refusal(svc.deployStack('app', undefined, false, undefined, {
         pullServices: ['web'],
         pullRefs: [],
@@ -332,7 +333,7 @@ describe('a Compose process is admitted by the files it opens, and held until it
     it('a deploy admitted before the fence keeps its lease through the up, and the fence waits for it', async () => {
       const svc = ComposeService.getInstance(NODE);
       const { execute } = stubPreliminaries(svc);
-      vi.spyOn(DockerController.getInstance(NODE), 'getLegacyOrphanContainersByStack').mockImplementation(async () => {
+      vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack').mockImplementation(async () => {
         // Recorded after the up's admission: the drain finds the up and waits.
         holdFence();
         await expect(waitForFsWorkOn(fences[0], 20)).resolves.toBe(false);
@@ -360,18 +361,76 @@ describe('a Compose process is admitted by the files it opens, and held until it
       const abandon = vi.spyOn(recovery, 'abandon').mockResolvedValue(undefined as never);
       vi.spyOn(recovery, 'markAcquired').mockReturnValue(true);
       const handoff = vi.spyOn(recovery, 'handoff').mockReturnValue(true);
-      const classify = vi.spyOn(DockerController.getInstance(NODE), 'classifyLegacyOrphansForUpdate')
+      const classify = vi.spyOn(DockerController.prototype, 'classifyLegacyOrphansForUpdate')
         .mockResolvedValue({ status: 'orphans', ids: ['old'] });
-      const removed = vi.spyOn(DockerController.getInstance(NODE), 'removeContainers').mockResolvedValue([]);
+      const removed = vi.spyOn(DockerController.prototype, 'removeContainers').mockResolvedValue([]);
+      const admission = vi.spyOn(composeArgvFence, 'admitComposeProcess');
       // The fence lands while the pulls run, before the policy is confirmed.
       const error = await refusal(svc.updateStack('app', undefined, true, async () => { holdFence(); }));
       expect(isDataRestoreFenceError(error), String(error)).toBe(true);
-      expect((error as { stack?: string }).stack, 'refused at the up\'s admission').toContain('admitComposeProcess');
+      // Refused by the up's own admission, the one call to it, not by a later step.
+      expect(admission).toHaveBeenCalledTimes(1);
+      await expect(admission.mock.results[0].value).rejects.toBe(error);
       expect(classify).not.toHaveBeenCalled();
       expect(handoff).not.toHaveBeenCalled();
       expect(removed).not.toHaveBeenCalled();
       expect(abandon).toHaveBeenCalledWith('gen-1');
       expect(execute.mock.calls.every((call: unknown[]) => !(call[1] as string[]).includes('up'))).toBe(true);
+      expect(fsWorkInFlightCountForTests()).toBe(0);
+    });
+  });
+
+  describe('a single-service restore admits its up before it retags the recovery image', () => {
+    function stubRestorePreliminaries(svc: ComposeService): { execute: ReturnType<typeof vi.spyOn>; fenceAtLastCheck: () => void } {
+      const inner = svc as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+      vi.spyOn(inner, 'assertSopsOverlayOrRefuse').mockResolvedValue(undefined);
+      vi.spyOn(inner, 'assertRequiredEnvPresent').mockResolvedValue(undefined);
+      vi.spyOn(inner, 'assertDockerEndpointSafe').mockResolvedValue(undefined);
+      let atLastCheck: () => void = () => undefined;
+      // The last check before the up's argv is built: a fence recorded here is
+      // recorded after every early ask the restore made.
+      vi.spyOn(inner, 'assertSafePilotBindMapping').mockImplementation(async () => { atLastCheck(); });
+      return {
+        execute: vi.spyOn(inner, 'execute').mockResolvedValue(undefined),
+        fenceAtLastCheck: () => { atLastCheck = () => holdFence(); },
+      };
+    }
+
+    it('runs the retag after the up is admitted and right before Compose is started, under the lease, and releases it after', async () => {
+      const svc = ComposeService.getInstance(NODE);
+      const { execute } = stubRestorePreliminaries(svc);
+      const events: string[] = [];
+      execute.mockImplementation(async () => { events.push('up'); });
+      await svc.recreateServiceFromLocal('app', 'web', undefined, async () => {
+        events.push('retag');
+        // The restore's own lease is already held: a fence recorded now waits.
+        holdFence();
+        await expect(waitForFsWorkOn(fences[0], 20)).resolves.toBe(false);
+      });
+      expect(events).toEqual(['retag', 'up']);
+      expect(execute.mock.calls[0][8]).toEqual(expect.objectContaining({ release: expect.any(Function) }));
+      expect(fsWorkInFlightCountForTests()).toBe(0);
+      await expect(waitForFsWorkOn(fences[0], 20)).resolves.toBe(true);
+    });
+
+    it('refuses a fence recorded after the restore\'s early asks before the retag runs, and starts no up', async () => {
+      const svc = ComposeService.getInstance(NODE);
+      const { execute, fenceAtLastCheck } = stubRestorePreliminaries(svc);
+      fenceAtLastCheck();
+      const retag = vi.fn(async () => undefined);
+      const error = await refusal(svc.recreateServiceFromLocal('app', 'web', undefined, retag));
+      expect(isDataRestoreFenceError(error), String(error)).toBe(true);
+      expect(retag).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(fsWorkInFlightCountForTests()).toBe(0);
+    });
+
+    it('releases the lease and starts no up when the retag itself fails', async () => {
+      const svc = ComposeService.getInstance(NODE);
+      const { execute } = stubRestorePreliminaries(svc);
+      const error = await refusal(svc.recreateServiceFromLocal('app', 'web', undefined, async () => { throw new Error('no such image'); }));
+      expect(String(error)).toContain('no such image');
+      expect(execute).not.toHaveBeenCalled();
       expect(fsWorkInFlightCountForTests()).toBe(0);
     });
   });

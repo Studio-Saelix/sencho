@@ -542,22 +542,34 @@ export class StackUpdateOrchestrator {
 
       const previousImageId = (await this.snapshotServiceReplicas(nodeId, stackName, serviceName))[0]?.imageId ?? null;
 
-      try {
-        const { repo, tag } = splitImageRef(recovery.declared_image_ref);
-        await DockerController.getInstance(nodeId).getDocker()
-          .getImage(recovery.majority_image_id).tag({ repo, tag });
-      } catch (retagError) {
-        return serviceFailed(
-          'restore_retag_failed',
-          getErrorMessage(retagError, 'Could not retag the recovery image'),
-          { serviceName, mutationStage: 'retag', recoveryId },
-        );
-      }
+      // The retag is the recreate's last step before Compose starts, run by
+      // recreateServiceFromLocal once its files are admitted against a data
+      // restore's directory fences. A refusal or a failed render that comes
+      // first therefore leaves the declared tag untouched, and the stack's
+      // services running what they ran.
+      let retagFailure: { error: unknown } | null = null;
       try {
         await ComposeService.getInstance(nodeId).recreateServiceFromLocal(
           stackName, serviceName, options.terminalWs ?? undefined,
+          async () => {
+            try {
+              const { repo, tag } = splitImageRef(recovery.declared_image_ref);
+              await DockerController.getInstance(nodeId).getDocker()
+                .getImage(recovery.majority_image_id).tag({ repo, tag });
+            } catch (retagError) {
+              retagFailure = { error: retagError };
+              throw retagError;
+            }
+          },
         );
       } catch (composeError) {
+        if (retagFailure) {
+          return serviceFailed(
+            'restore_retag_failed',
+            getErrorMessage((retagFailure as { error: unknown }).error, 'Could not retag the recovery image'),
+            { serviceName, mutationStage: 'retag', recoveryId },
+          );
+        }
         // As for a service update: the fence's refusal is not a failed restore.
         if (isDataRestoreFenceError(composeError)) throw composeError;
         if (isDockerEndpointProtectedError(composeError)) {

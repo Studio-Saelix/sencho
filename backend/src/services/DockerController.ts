@@ -3340,7 +3340,8 @@ class DockerController {
    * deploy can rely on selective `compose up` recreation.
    * A thrown `compose ps` returns [] (fail closed): name-matched fallback must not
    * run, because those IDs may still be healthy Compose runtimes that deploy would
-   * then destroy before `compose up` (which often fails for the same reason).
+   * then destroy before `compose up` (which often fails for the same reason). A data
+   * restore's fence refusing the `ps` is rethrown as itself.
    */
   public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
@@ -3353,6 +3354,10 @@ class DockerController {
     try {
       composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
     } catch (error) {
+      // A data restore's fence refused the `ps`: the deploy answers with the
+      // fence, as the update's classification does, not as a Compose error
+      // that reads as no orphans.
+      if (isDataRestoreFenceError(error)) throw error;
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');

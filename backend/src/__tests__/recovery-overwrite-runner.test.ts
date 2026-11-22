@@ -2077,6 +2077,61 @@ describe('file work on a fenced directory', () => {
   });
 });
 
+describe('the dependents re-check of a directory overwrite runs as the restore itself', () => {
+  it('does not see the fence its own restore holds on the directory, while another restore\'s still applies', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'owner-dir-')));
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'other-dir-')));
+    vi.spyOn(SelfIdentityService.getInstance(), 'getBindMounts').mockResolvedValue(null);
+    const roots = await import('../services/recovery/fsRoots');
+    const stat = fs.statSync(dir, { bigint: true });
+    const probeLine = JSON.stringify({
+      dev: 1, ino: 1, uid: 0, gid: 0, mode: 16877, free: 10 ** 9,
+      dev_s: stat.dev.toString(), ino_s: stat.ino.toString(), btime: '1700000000.000000001',
+    });
+    const scripted = successHelper();
+    const helper = {
+      ...scripted.helper,
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        if (spec.profile !== 'probe') return scripted.helper.run(spec as never);
+        spec.onStdoutLine?.(probeLine);
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+    } as unknown as typeof scripted.helper;
+    const fake = fakeDocker({ volumes: [], containers: [] });
+    const generationToken = roots.fsGenerationToken(roots.parseFsProbeReport(probeLine)!);
+    const seeded = seed({ createdAt: '', members: [], directory: { path: dir, generationToken } });
+    // Another restore holds a fence on its own directory the whole time.
+    const otherSeeded = seed({ createdAt: '', members: [], directory: { path: other, generationToken } });
+    fence.RestoreFenceStore.getInstance().setFenceState(otherSeeded.intentId, 'held');
+    const seen: Array<{ ownLive: boolean; fenced: string[] }> = [];
+    const real = roots.resolveFsRootDependents;
+    vi.spyOn(roots, 'resolveFsRootDependents').mockImplementation(async (input) => {
+      if (input.render) {
+        const intent = intents.RestoreIntentStore.getInstance().get(seeded.intentId);
+        seen.push({
+          ownLive: intent?.fenceState === 'held',
+          fenced: fence.RestoreFenceStore.getInstance().liveFencedFsTargets().map((t) => t.senchoPath),
+        });
+      }
+      return real(input);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await run({ fake, helper: { ...scripted, helper }, engine: scriptedEngine(), seeded });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+    // The re-checks that run with the fence held: the restore's own directory is not listed.
+    const underOwnFence = seen.filter((entry) => entry.ownLive);
+    expect(underOwnFence.length).toBeGreaterThan(0);
+    for (const entry of underOwnFence) {
+      expect(entry.fenced).not.toContain(dir);
+      expect(entry.fenced).toContain(other);
+    }
+  });
+});
+
 describe('a container that cannot be placed by the time the fence goes up', () => {
   it('settles the restore rolled back with identity_unknown, stopping nothing, and leaves the directory free', async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(tmpDir, 'fence-step-dir-')));
