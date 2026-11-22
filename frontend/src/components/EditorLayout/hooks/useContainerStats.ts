@@ -115,7 +115,7 @@ export type StatsFailures = ReadonlyMap<string, StatsFailureCause>;
 
 export interface ContainerStatsHookResult {
   stats: Record<string, ContainerStatsEntry>;
-  /** One sentence for the stack-level warning, worded for the causes in `failures`; null when nothing is failing. */
+  /** The stack-level warning, worded for the causes in `failures`; null when nothing is failing. */
   error: string | null;
   /** The running containers whose stats stream is failing on the active node, with the cause of each. */
   failures: StatsFailures;
@@ -146,8 +146,9 @@ export function useContainerStats(
 ): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
   // Running containers whose current stats stream has failed, each with its
-  // cause, tagged with the node they belong to. A container leaves the set when it delivers a valid
-  // sample, when a list shows it stopped or gone, or when the active node changes.
+  // cause, tagged with the node they belong to. A container leaves the set when
+  // it delivers a valid sample, when a list shows it stopped or gone, or when
+  // the active node changes.
   const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
   const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
   // IDs whose stream sent an end frame since the last list, with the node they
@@ -356,8 +357,8 @@ export function useContainerStats(
 
   // The effect drops a container's flag once it is no longer running or the node
   // changes. The node tag above and this filter cover the render between a list
-  // or node update and that effect, so the chip never shows for a container that
-  // just stopped or for another node's failure.
+  // or node update and that effect, so neither the chip nor a card mark shows for
+  // a container that just stopped or for another node's failure.
   const activeFailures = useMemo<StatsFailures>(() => {
     if (failedIds.size === 0) return NO_IDS;
     const running = new Map<string, StatsFailureCause>();

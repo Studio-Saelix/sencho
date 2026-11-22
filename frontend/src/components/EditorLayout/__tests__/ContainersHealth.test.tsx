@@ -1408,6 +1408,7 @@ describe('stats failure warning', () => {
 
     const stale = document.querySelectorAll('[data-stale="true"]');
     expect(stale).toHaveLength(3);
+    expect(document.querySelectorAll('[data-stale-spark="true"]')).toHaveLength(3);
     expect(stale[1]).toHaveAttribute('title', 'Last reading, stats unavailable: 70.00 MB');
     const live = screen.getAllByTitle('70.00 MB');
     expect(live).toHaveLength(1);
@@ -1482,5 +1483,16 @@ describe('stats failure warning', () => {
   it('does not mark a container that is not running', () => {
     renderFailing(new Map([['alpha-id', 'stream']]), [{ ...alpha, State: 'exited' } as ContainerInfo, beta]);
     expect(screen.queryAllByTestId('container-stats-failed')).toHaveLength(0);
+  });
+
+  it('does not name a container that is not running in the chip tooltip', async () => {
+    const user = userEvent.setup();
+    renderFailing(new Map([['alpha-id', 'stream'], ['beta-id', 'stream']]), [{ ...alpha, State: 'exited' } as ContainerInfo, beta]);
+
+    await user.hover(screen.getByText('Stats unavailable', { selector: 'span.font-mono.uppercase.tracking-wider' }));
+
+    const tooltip = await screen.findByRole('tooltip');
+    expect(tooltip).toHaveTextContent('Affected: beta.');
+    expect(tooltip).not.toHaveTextContent('alpha');
   });
 });

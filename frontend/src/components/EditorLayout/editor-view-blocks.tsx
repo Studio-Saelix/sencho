@@ -749,7 +749,7 @@ export function ContainersHealth({
                                                         className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-warning-foreground"
                                                         title={statsFailure === 'stream'
                                                             ? 'The node reported that this container\'s stats stream failed or ended.'
-                                                            : 'Stats for this container stopped arriving. The node may be unreachable.'}
+                                                            : 'Stats for this container are not arriving. The node may be unreachable.'}
                                                         data-testid="container-stats-failed"
                                                     >
                                                         Stats unavailable
@@ -905,7 +905,7 @@ export function ContainersHealth({
                                                         {value}
                                                     </span>
                                                 </div>
-                                                <div className="ml-auto h-5 w-16 shrink min-w-8">
+                                                <div className={cn('ml-auto h-5 w-16 shrink min-w-8', statsFailure && 'opacity-40')} data-stale-spark={statsFailure ? 'true' : undefined}>
                                                     <Sparkline points={points} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
                                                 </div>
                                             </div>

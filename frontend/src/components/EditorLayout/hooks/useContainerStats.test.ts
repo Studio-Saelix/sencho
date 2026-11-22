@@ -1131,6 +1131,19 @@ describe('useContainerStats', () => {
         warnSpy.mockRestore();
       });
 
+      it('keeps a transport cause when an end frame is settled against a list that still runs the container', () => {
+        const { result, rerender, warnSpy } = setup([makeContainer('alpha')]);
+        const ws = MockWS.instances[0];
+        act(() => { ws.onerror?.(); });
+        act(() => { ws.onmessage?.({ data: endFrame }); });
+
+        rerender({ containers: [makeContainer('alpha')], nodeId: 1 });
+
+        expect(result.current.failures.get('alpha')).toBe('transport');
+        expect(result.current.error).toMatch(/node may be unreachable/);
+        warnSpy.mockRestore();
+      });
+
       it('drops a container from the failures when it delivers a valid sample, and keeps the other', () => {
         const { result, warnSpy } = setup([makeContainer('alpha'), makeContainer('beta')]);
         act(() => { MockWS.instances[0].onmessage?.({ data: errorFrame }); });
