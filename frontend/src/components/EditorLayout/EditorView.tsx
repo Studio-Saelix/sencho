@@ -36,6 +36,7 @@ import {
 } from '@/components/ui/select';
 import { springs } from '@/lib/motion';
 import ErrorBoundary from '../ErrorBoundary';
+import type { StatsFailures } from './hooks/useContainerStats';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { StackFileExplorer } from '@/components/files/StackFileExplorer';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -140,6 +141,8 @@ export interface EditorViewProps {
     containers: ContainerInfo[];
     containerStats: Record<string, ContainerStatsEntry>;
     containerStatsError: string | null;
+    /** Which running containers' stats are failing and why; names them in the warning and marks their cards. */
+    containerStatsFailures?: StatsFailures;
     content: string;
     envContent: string;
     envExists: boolean;
@@ -276,6 +279,7 @@ export function EditorView(props: EditorViewProps) {
         containers,
         containerStats,
         containerStatsError,
+        containerStatsFailures,
         content,
         envContent,
         envExists,
@@ -589,6 +593,7 @@ export function EditorView(props: EditorViewProps) {
                                     safeContainers={safeContainers}
                                     containerStats={containerStats}
                                     containerStatsError={containerStatsError}
+                                    containerStatsFailures={containerStatsFailures}
                                     isAdmin={isAdmin}
                                     activeNode={activeNode}
                                     openLogViewer={openLogViewer}
@@ -625,6 +630,7 @@ export function EditorView(props: EditorViewProps) {
                                 safeContainers={safeContainers}
                                 containerStats={containerStats}
                                 containerStatsError={containerStatsError}
+                                containerStatsFailures={containerStatsFailures}
                                 isAdmin={isAdmin}
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}

@@ -50,6 +50,7 @@ import StructuredLogViewer from '../StructuredLogViewer';
 import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { ContainerInfo, ContainerStatsEntry, StackAction } from './EditorView';
+import type { StatsFailures } from './hooks/useContainerStats';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 import { isConfirmedServiceUpdate } from '@/types/imageUpdates';
@@ -363,6 +364,8 @@ export interface ContainersHealthProps {
     safeContainers: ContainerInfo[];
     containerStats: Record<string, ContainerStatsEntry>;
     containerStatsError: string | null;
+    /** Running containers whose stats stream is failing, with the cause of each. */
+    containerStatsFailures?: StatsFailures;
     isAdmin: boolean;
     activeNode: Node | null;
     openLogViewer: (containerId: string, containerName: string) => void;
@@ -483,12 +486,18 @@ function hiddenServiceNeedsAttention(
     return group.length < expectedReplicas;
 }
 
+const NO_STATS_FAILURES: StatsFailures = new Map();
+
+const displayContainerName = (container: ContainerInfo): string =>
+    container?.Names?.[0]?.replace(/^\//, '') || container?.Id?.slice(0, 12) || 'container';
+
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
 // sparklines. Row action buttons grow to a 44px touch target below md.
 export function ContainersHealth({
     safeContainers,
     containerStats,
     containerStatsError,
+    containerStatsFailures = NO_STATS_FAILURES,
     isAdmin,
     activeNode,
     openLogViewer,
@@ -703,7 +712,7 @@ export function ContainersHealth({
                             ? `${mainPort} → ${mainPortPrivate}/${mainPortProto}`
                             : '';
 
-                        const containerName = container?.Names?.[0]?.replace(/^\//, '') || container?.Id?.slice(0, 12) || 'container';
+                        const containerName = displayContainerName(container);
                         const composeService = container.Service;
                         const isActive = container.State === 'running' || container.State === 'paused';
                         const health = container.healthStatus;
@@ -711,6 +720,9 @@ export function ContainersHealth({
                         const hcLabel = healthcheckLabel(health);
                         const stats = containerStats[container?.Id];
                         const history = stats?.history;
+                        // This container's stream failed: any reading on its card is the
+                        // last one received, not a live value.
+                        const statsFailure = isActive ? containerStatsFailures.get(container?.Id) : undefined;
 
                         const badgeClass = health === 'unhealthy' || !isActive
                             ? 'bg-destructive text-destructive-foreground'
@@ -732,6 +744,17 @@ export function ContainersHealth({
                                         <div className="flex min-w-0 max-w-full flex-col gap-0.5">
                                             <div className="flex min-w-0 items-center gap-2">
                                                 <div className="truncate font-mono text-sm text-foreground">{containerName}</div>
+                                                {statsFailure && (
+                                                    <span
+                                                        className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-warning-foreground"
+                                                        title={statsFailure === 'stream'
+                                                            ? 'The node reported that this container\'s stats stream failed or ended.'
+                                                            : 'Stats for this container are not arriving. The node may be unreachable.'}
+                                                        data-testid="container-stats-failed"
+                                                    >
+                                                        Stats unavailable
+                                                    </span>
+                                                )}
                                                 {updateAffordance?.hasUpdate && (
                                                     <span className="shrink-0 rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
                                                         Update
@@ -875,13 +898,14 @@ export function ContainersHealth({
                                                 <div className="min-w-0 flex flex-col">
                                                     <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">{label}</span>
                                                     <span
-                                                        className="font-mono text-xs tabular-nums truncate text-foreground"
-                                                        title={value === '-' ? undefined : value}
+                                                        className={cn('font-mono text-xs tabular-nums truncate', statsFailure ? 'text-muted-foreground' : 'text-foreground')}
+                                                        title={value === '-' ? undefined : statsFailure ? `Last reading, stats unavailable: ${value}` : value}
+                                                        data-stale={statsFailure && value !== '-' ? 'true' : undefined}
                                                     >
                                                         {value}
                                                     </span>
                                                 </div>
-                                                <div className="ml-auto h-5 w-16 shrink min-w-8">
+                                                <div className={cn('ml-auto h-5 w-16 shrink min-w-8', statsFailure && 'opacity-40')} data-stale-spark={statsFailure ? 'true' : undefined}>
                                                     <Sparkline points={points} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
                                                 </div>
                                             </div>
@@ -891,6 +915,10 @@ export function ContainersHealth({
                             </div>
                         );
     };
+
+    const failedStatsNames = safeContainers
+        .filter(c => c?.State === 'running' && containerStatsFailures.has(c.Id))
+        .map(displayContainerName);
 
     const showConfirmedEmpty = containersLoadStatus === 'success' && safeContainers.length === 0;
 
@@ -932,7 +960,10 @@ export function ContainersHealth({
                             Stats unavailable
                           </span>
                         </TooltipTrigger>
-                        <TooltipContent>{containerStatsError}</TooltipContent>
+                        <TooltipContent>
+                          {containerStatsError}
+                          {failedStatsNames.length > 0 && ` Affected: ${failedStatsNames.join(', ')}.`}
+                        </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                 </div>
