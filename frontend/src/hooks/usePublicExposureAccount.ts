@@ -38,6 +38,7 @@ export interface PublicExposureAccount {
   view: PublicExposureAccountView | null;
   /** True only until the first answer; a refetch keeps the last view on screen. */
   loading: boolean;
+  /** Why the last fetch failed; set while the view (if any) on screen may be out of date, cleared by the next answer. */
   loadError: string | null;
   pending: PublicExposurePending;
   reload: () => Promise<void>;
@@ -89,6 +90,12 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
 
   const reload = useCallback(() => load({ quiet: false }), [load]);
 
+  /** A view the control instance just answered with is fresh, so a failed refresh before it no longer applies. */
+  const adopt = useCallback((next: PublicExposureAccountView) => {
+    setView(next);
+    setLoadError(null);
+  }, []);
+
   useEffect(() => {
     if (!enabled) return;
     // A late enable (the experimental flag resolves after mount) starts a fresh first load.
@@ -109,27 +116,27 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
     const replacing = view?.connected === true;
     try {
       const next = await publicExposureApi.connect(token, accountId);
-      if (mounted.current) setView(next);
+      if (mounted.current) adopt(next);
       toast.success(replacing ? 'Cloudflare token replaced.' : 'Cloudflare account connected.');
       return null;
     } catch (error: unknown) {
       return publicExposureErrorMessage(error, 'Could not connect the Cloudflare account.');
     }
-  }), [run, view]);
+  }), [run, view, adopt]);
 
   const recheck = useCallback(() => run('recheck', async () => {
     try {
       const next = await publicExposureApi.recheck();
-      if (mounted.current) setView(next);
+      if (mounted.current) adopt(next);
     } catch (error: unknown) {
       toast.error(publicExposureErrorMessage(error, 'Could not recheck the Cloudflare account.'));
     }
-  }), [run]);
+  }), [run, adopt]);
 
   const dnsCheck = useCallback((zoneRef: string) => run('dns_check', async () => {
     try {
       const next = await publicExposureApi.dnsCheck(zoneRef);
-      if (mounted.current) setView(next);
+      if (mounted.current) adopt(next);
       const zone = next.connected ? next.zones.find((z) => z.zoneRef === zoneRef) : undefined;
       if (zone?.cleanupPending) {
         toast.warning(`The check did not finish. A permission-check record may be left in ${zone.name}. ${zone.cleanupPending.note ?? 'A later Recheck deletes it.'}`);
@@ -138,12 +145,12 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
       toast.error(publicExposureErrorMessage(error, 'Could not check DNS write.'));
       await load({ quiet: true });
     }
-  }), [run, load]);
+  }), [run, load, adopt]);
 
   const disconnect = useCallback(() => run('disconnect', async () => {
     try {
       const { leftInCloudflare } = await publicExposureApi.disconnect();
-      if (mounted.current) setView({ connected: false });
+      if (mounted.current) adopt({ connected: false });
       if (leftInCloudflare.length > 0) {
         // The disconnect went through, but a record may still be in Cloudflare: say so instead of reporting a clean success.
         toast.warning(`Cloudflare account disconnected, but a permission-check record may still be in Cloudflare: ${leftInCloudflare.join(', ')}. Delete ${leftInCloudflare.length === 1 ? 'it' : 'them'} there.`);
@@ -156,19 +163,19 @@ export function usePublicExposureAccount(enabled = true): PublicExposureAccount 
       await load({ quiet: true });
       return false;
     }
-  }), [run, load]);
+  }), [run, load, adopt]);
 
   const setZone = useCallback((zoneRef: string, zoneEnabled: boolean, allowedSuffixes: string[]) => run('zone', async () => {
     try {
       const next = await publicExposureApi.setZone(zoneRef, zoneEnabled, allowedSuffixes);
-      if (mounted.current) setView(next);
+      if (mounted.current) adopt(next);
       return null;
     } catch (error: unknown) {
       const message = publicExposureErrorMessage(error, 'Could not update the zone.');
       toast.error(message);
       return message;
     }
-  }), [run]);
+  }), [run, adopt]);
 
   return { view, loading, loadError, pending, reload, connect, recheck, dnsCheck, disconnect, setZone };
 }

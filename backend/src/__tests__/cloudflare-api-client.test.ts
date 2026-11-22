@@ -369,7 +369,8 @@ describe('CloudflareApiClient pagination', () => {
       () => ok([{ id: 1 }], { page: 1, total_pages: 2 }),
       () => fail(403, 9109, 'forbidden'),
     ]);
-    expect((await caught(client.paginate(TOKEN, '/zones', {}, 1))).kind).toBe('forbidden');
+    // The refusal is not the listing's own: the pages before it were read, so it is an unreadable answer.
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 1))).kind).toBe('invalid_response');
   });
 
   it('stops after 100 pages', async () => {
@@ -452,9 +453,9 @@ describe('CloudflareApiClient contradictory paging', () => {
     expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(45);
   });
 
-  it('falls back to the asked page size when Cloudflare reports a per_page of zero beside a total_count', async () => {
+  it('refuses a listing that declares a page size of zero', async () => {
     const { client } = list({ page: 1, per_page: 0, count: 1, total_pages: 1, total_count: 1 });
-    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(1);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
   });
 
   it('accepts a listing whose counts all agree across pages', async () => {
@@ -538,12 +539,50 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
       { items: [1, 2], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
     ]],
     ['a page of results larger than the page size an earlier page declared', [
-      { items: [1], info: { page: 1, per_page: 1, total_pages: 2, total_count: 3 } },
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
       { items: [2, 3], info: null },
     ]],
   ])('refuses %s', async (_label, pages) => {
     const { client } = scripted(pages);
     expect((await caught(client.paginate(TOKEN, '/zones', {}, 50))).kind).toBe('invalid_response');
+  });
+
+  // Each script below is whole and self-consistent on page one, so the only thing that can refuse it is what a
+  // later page does; the page count proves the listing got that far.
+  it.each<[string, Script, number]>([
+    ['a page size that page two declares smaller than page one was', [
+      { items: [1, 2], info: { page: 1, total_pages: 2 } },
+      { items: [3], info: { page: 2, per_page: 1, total_pages: 2 } },
+    ], 2],
+    ['a page size of zero declared on page two', [
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 3 } },
+      { items: [3], info: { page: 2, per_page: 0, total_pages: 2, total_count: 3 } },
+    ], 2],
+    ['a page size larger than the one asked for, declared on page two', [
+      { items: [1, 2], info: { page: 1, total_pages: 2, total_count: 3 } },
+      { items: [3], info: { page: 2, per_page: 5, total_pages: 2, total_count: 3 } },
+    ], 2],
+    ['a page of results larger than the page size an earlier page declared', [
+      { items: [1], info: { page: 1, per_page: 1, total_pages: 3, total_count: 3 } },
+      { items: [2, 3], info: null },
+    ], 2],
+  ])('refuses %s, after reading the page that contradicts it', async (_label, pages, reached) => {
+    const { client, calls } = scripted(pages);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
+    expect(calls).toHaveLength(reached);
+  });
+
+  it('refuses a page size above the one asked for, even on page one', async () => {
+    const { client } = scripted([{ items: [1], info: { page: 1, per_page: 5, total_pages: 1, total_count: 1 } }]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 2))).kind).toBe('invalid_response');
+  });
+
+  it('accepts a page size below the one asked for', async () => {
+    const { client } = scripted([
+      { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 3 } },
+      { items: [3], info: { page: 2, per_page: 2, total_pages: 2, total_count: 3 } },
+    ]);
+    expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(3);
   });
 
   it.each<[string, Script]>([
@@ -578,6 +617,146 @@ describe('CloudflareApiClient paging bounds hold across pages', () => {
       { items: [3], info: { page: 2, per_page: 2, count: 1, total_pages: 2, total_count: 3 } },
     ]);
     expect(await client.paginate(TOKEN, '/zones', {}, 50)).toHaveLength(3);
+  });
+});
+
+describe('CloudflareApiClient count semantics follow what Cloudflare documents', () => {
+  const item = (n: number) => ({ id: `i${n}` });
+  function scripted(pages: Array<{ items: number[]; info: Record<string, number> | null }>) {
+    return clientWith([
+      (url) => {
+        const page = pages[Number(url.searchParams.get('page')) - 1];
+        return ok((page?.items ?? []).map(item), page?.info ?? undefined);
+      },
+    ]);
+  }
+  const FILTER = { name: 'x.example.com' };
+
+  describe('a listing with no search parameters', () => {
+    it('accepts a full count-only page whose total_count it reaches', async () => {
+      const { client, calls } = scripted([{ items: [1, 2], info: { page: 1, per_page: 2, count: 2, total_count: 2 } }]);
+      expect(await client.paginate(TOKEN, '/accounts', {}, 2)).toHaveLength(2);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('asks for the next page of a count-only listing that has not reached its total_count', async () => {
+      const { client, calls } = scripted([
+        { items: [1, 2], info: { page: 1, per_page: 2, count: 2, total_count: 3 } },
+        { items: [3], info: { page: 2, per_page: 2, count: 1, total_count: 3 } },
+      ]);
+      expect((await client.paginate<{ id: string }>(TOKEN, '/accounts', {}, 2)).map((i) => i.id)).toEqual(['i1', 'i2', 'i3']);
+      expect(calls).toHaveLength(2);
+    });
+
+    it.each<[string, Array<{ items: number[]; info: Record<string, number> | null }>]>([
+      ['an empty last page', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_count: 3 } },
+        { items: [], info: { page: 2, per_page: 2, total_count: 3 } },
+      ]],
+      ['more items than its total_count', [{ items: [1, 2], info: { page: 1, per_page: 2, total_count: 1 } }]],
+      ['a short last page that leaves it under its total_count', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_count: 5 } },
+        { items: [3], info: { page: 2, per_page: 2, total_count: 5 } },
+      ]],
+    ])('refuses a count-only listing with %s', async (_label, pages) => {
+      const { client } = scripted(pages);
+      expect((await caught(client.paginate(TOKEN, '/accounts', {}, 2))).kind).toBe('invalid_response');
+    });
+
+    it('refuses a short listing that does not reach its total_count', async () => {
+      const { client } = scripted([{ items: [1], info: { page: 1, per_page: 50, total_pages: 1, total_count: 5 } }]);
+      expect((await caught(client.paginate(TOKEN, '/accounts', {}, 50))).kind).toBe('invalid_response');
+    });
+  });
+
+  describe('a listing with search parameters, whose totals Cloudflare documents without them', () => {
+    it('accepts a short page under a total_count that counts more than the search matched', async () => {
+      const { client } = scripted([{ items: [1], info: { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 40 } }]);
+      expect(await client.paginate(TOKEN, '/zones/z/dns_records', FILTER, 100)).toHaveLength(1);
+    });
+
+    it('accepts a short page when the unfiltered total_pages is larger than the pages the search fills', async () => {
+      const { client, calls } = scripted([{ items: [1, 2, 3], info: { page: 1, per_page: 50, count: 3, total_pages: 8, total_count: 400 } }]);
+      expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 50)).toHaveLength(3);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('continues a full page and ends on the short one after it', async () => {
+      const { client, calls } = scripted([
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 20, total_count: 40 } },
+        { items: [3], info: { page: 2, per_page: 2, total_pages: 20, total_count: 40 } },
+      ]);
+      expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 2)).toHaveLength(3);
+      expect(calls).toHaveLength(2);
+    });
+
+    it('accepts an empty search result under a total that counts more', async () => {
+      const { client } = scripted([{ items: [], info: { page: 1, per_page: 100, count: 0, total_pages: 1, total_count: 40 } }]);
+      expect(await client.paginate(TOKEN, '/zones/z/dns_records', FILTER, 100)).toEqual([]);
+    });
+
+    it('ends a full page that meets the total_count', async () => {
+      const { client, calls } = scripted([{ items: [1, 2], info: { page: 1, per_page: 2, total_pages: 1, total_count: 2 } }]);
+      expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 2)).toHaveLength(2);
+      expect(calls).toHaveLength(1);
+    });
+
+    it.each<[string, Array<{ items: number[]; info: Record<string, number> | null }>]>([
+      ['more items than the total_count', [{ items: [1, 2], info: { page: 1, per_page: 2, total_pages: 1, total_count: 1 } }]],
+      ['an empty page after a full one, short of the total_count', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 20, total_count: 40 } },
+        { items: [], info: { page: 2, per_page: 2, total_pages: 20, total_count: 40 } },
+      ]],
+      ['an empty last page of a listing that declares two pages', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2 } },
+        { items: [], info: { page: 2, per_page: 2, total_pages: 2 } },
+      ]],
+      ['a full page and no paging details', [{ items: [1, 2], info: null }]],
+      ['a total_pages that does not follow from its total_count', [{ items: [], info: { page: 1, per_page: 100, total_pages: 0, total_count: 1 } }]],
+      ['a repeated item', [
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 2, total_count: 4 } },
+        { items: [1, 2], info: { page: 2, per_page: 2, total_pages: 2, total_count: 4 } },
+      ]],
+    ])('still refuses %s', async (_label, pages) => {
+      const { client } = scripted(pages);
+      expect((await caught(client.paginate(TOKEN, '/zones', FILTER, 2))).kind).toBe('invalid_response');
+    });
+  });
+});
+
+describe('CloudflareApiClient a refusal after the first page of a listing', () => {
+  const page = (n: number) => ok([{ id: `i${n}` }], { page: n, per_page: 1, total_pages: 3, total_count: 3 });
+
+  it.each([
+    [403, 10000, 'forbidden-looking'],
+    [404, 7000, 'not-found-looking'],
+    [400, 70503, 'bad-request-looking'],
+  ])('reads a %s on page two as an unreadable answer, never as the listing\'s own refusal', async (status, code, message) => {
+    const { client, calls } = clientWith([() => page(1), () => fail(status, code, message)]);
+    const error = await caught(client.paginate(TOKEN, '/zones/z/dns_records', { name: 'n' }, 1));
+    expect(error.kind).toBe('invalid_response');
+    expect(error.cfCodes).toEqual([code]);
+    expect(error.message).not.toContain(message);
+    expect(calls).toHaveLength(2);
+  });
+
+  it.each([
+    [403, 'forbidden'],
+    [404, 'not_found'],
+    [400, 'bad_request'],
+  ] as const)('keeps a %s on the first page as %s', async (status, kind) => {
+    const { client } = clientWith([() => fail(status, 10000, 'refused')]);
+    expect((await caught(client.paginate(TOKEN, '/zones/z/dns_records', { name: 'n' }, 1))).kind).toBe(kind);
+  });
+
+  it('keeps a rejected token on page two a rejected token', async () => {
+    const { client } = clientWith([() => page(1), () => fail(401, 9103, 'Unknown X-Auth-Key')]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 1))).kind).toBe('unauthorized');
+  });
+
+  it('keeps an unreachable Cloudflare on page two unreachable', async () => {
+    const { client } = clientWith([() => page(1), () => fail(500, 1000, 'Internal error')]);
+    expect((await caught(client.paginate(TOKEN, '/zones', {}, 1))).kind).toBe('server');
   });
 });
 

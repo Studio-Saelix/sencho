@@ -1,7 +1,7 @@
 /**
  * The Cloudflare account is a tab of the Networking strip, not a block above it:
  * the tab exists only for an Admin with the experimental flag on, its label
- * carries a dot when the connection needs attention, and the network toolbar
+ * carries a dot, on a phone too, when the connection needs attention or a refresh failed, and the network toolbar
  * steps aside on it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -32,26 +32,45 @@ import { NetworkingView } from '../NetworkingView';
 
 const T = Date.UTC(2026, 10, 19);
 
+const OVERVIEW = {
+  schemaVersion: 3,
+  runtimeAvailable: true,
+  overview: {
+    networkCount: 0, exposedStackCount: 0, unknownExposureStackCount: 0, missingExternalCount: 0,
+    networkCollisionCount: 0, renderFailedStacks: [], needsActionCount: 0, reviewCount: 0, driftCount: 0,
+  },
+  networks: [],
+  findings: [],
+  recentActivity: [],
+};
+
 function respond(account: object) {
   apiFetchMock.mockImplementation((path: string) => Promise.resolve(new Response(JSON.stringify(
-    path === '/public-exposure/account' ? account : {
-      schemaVersion: 3,
-      runtimeAvailable: true,
-      overview: {
-        networkCount: 0, exposedStackCount: 0, unknownExposureStackCount: 0, missingExternalCount: 0,
-        networkCollisionCount: 0, renderFailedStacks: [], needsActionCount: 0, reviewCount: 0, driftCount: 0,
-      },
-      networks: [],
-      findings: [],
-      recentActivity: [],
-    },
+    path === '/public-exposure/account' ? account : OVERVIEW,
   ), { status: 200 })));
+}
+
+/** The account route fails; everything else answers. */
+function accountDown() {
+  apiFetchMock.mockImplementation((path: string) => Promise.resolve(path === '/public-exposure/account'
+    ? new Response(JSON.stringify({ error: 'down' }), { status: 500 })
+    : new Response(JSON.stringify(OVERVIEW), { status: 200 })));
 }
 
 const connected = (outcome: string) => ({
   connected: true, provider: 'cloudflare-tunnel', accountId: 'a1'.repeat(16), accountName: 'Example',
   scopes: { zoneRead: 'confirmed', tunnel: 'unconfirmed' }, lastCheck: { outcome, at: T, detail: null },
   verifiedAt: T, connectedBy: 'admin', connectedAt: T, zonesVisible: 0, zones: [], nodeEndpointCount: 0,
+});
+
+/** A connection with nothing open: one enabled zone whose DNS write is proven. */
+const settled = () => ({
+  ...connected('ok'),
+  zonesVisible: 1,
+  zones: [{
+    zoneRef: 'c3'.repeat(16), name: 'example.com', enabled: true, allowedSuffixes: [], dns: 'confirmed', dnsCheckedAt: T,
+    seenAtLastCheck: true, cleanupPending: null, checkRecordName: '_sencho-check-x.example.com',
+  }],
 });
 
 beforeEach(() => { apiFetchMock.mockReset(); flags.experimental = true; flags.isAdmin = true; flags.mobile = false; });
@@ -139,14 +158,65 @@ describe('NetworkingView Cloudflare tab', () => {
     expect(await screen.findByTestId('cloudflare-tab-attention')).toBeInTheDocument();
   });
 
-  it('offers the tab on a phone, without the dot', async () => {
+  it('offers the tab on a phone with the same dot, named, before the tab is opened', async () => {
     flags.mobile = true;
     respond(connected('token_invalid'));
     const user = userEvent.setup();
     render(<NetworkingView />);
 
-    await user.click(await screen.findByRole('tab', { name: 'Cloudflare' }));
+    const tab = await screen.findByRole('tab', { name: /Cloudflare/ });
+    expect(await screen.findByTestId('cloudflare-tab-attention')).toBeInTheDocument();
+    expect(tab).toContainElement(screen.getByRole('img', { name: 'Needs attention' }));
+    await user.click(tab);
     expect(await screen.findByTestId('cloudflare-account-card')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['a token Cloudflare rejects', connected('token_invalid')],
+    ['an unreachable Cloudflare', connected('cloudflare_unreachable')],
+  ])('marks the phone tab for %s', async (_label, account) => {
+    flags.mobile = true;
+    respond(account);
+    render(<NetworkingView />);
+
+    expect(await screen.findByTestId('cloudflare-tab-attention')).toBeInTheDocument();
+  });
+
+  it('marks the phone tab when the account could not be read, and leaves it plain for a settled one', async () => {
+    flags.mobile = true;
+    accountDown();
+    const { unmount } = render(<NetworkingView />);
+    expect(await screen.findByTestId('cloudflare-tab-attention')).toBeInTheDocument();
+    unmount();
+
+    respond(settled());
+    render(<NetworkingView />);
+    await screen.findByRole('tab', { name: 'Cloudflare' });
+    await waitFor(() => expect(screen.queryByTestId('cloudflare-tab-attention')).toBeNull());
+  });
+
+  it.each([['desktop', false], ['phone', true]])('marks the %s tab when a refresh fails over a settled account, and clears it once a refresh succeeds', async (_label, mobile) => {
+    flags.mobile = mobile;
+    respond(settled());
+    const { rerender } = render(<NetworkingView />);
+    await screen.findByRole('tab', { name: /Cloudflare/ });
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.anything()));
+    expect(screen.queryByTestId('cloudflare-tab-attention')).toBeNull();
+
+    // The gate drops and returns while the control instance cannot be reached: the old view is kept, so the tab must say it is stale.
+    accountDown();
+    flags.experimental = false;
+    rerender(<NetworkingView />);
+    flags.experimental = true;
+    rerender(<NetworkingView />);
+    expect(await screen.findByTestId('cloudflare-tab-attention')).toBeInTheDocument();
+
+    // Once it answers again the mark goes.
+    respond(settled());
+    flags.experimental = false;
+    rerender(<NetworkingView />);
+    flags.experimental = true;
+    rerender(<NetworkingView />);
     await waitFor(() => expect(screen.queryByTestId('cloudflare-tab-attention')).toBeNull());
   });
 });

@@ -105,6 +105,15 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const account = usePublicExposureAccount(showAccountCard);
   const accountTone = showAccountCard ? accountAttentionTone(account.view, account.loadError !== null) : null;
   const tabs = showAccountCard ? [...TABS, CLOUDFLARE_TAB] : TABS;
+  // One mark for both tab renderers: the desktop tab strip and the phone's tab row.
+  const attentionDot = accountTone ? (
+    <span
+      data-testid="cloudflare-tab-attention"
+      role="img"
+      aria-label="Needs attention"
+      className={`ml-1.5 inline-block h-1.5 w-1.5 rounded-full ${STATUS_DOT_CLASS[accountTone]}`}
+    />
+  ) : null;
   const isMobile = useIsMobile();
   const developerMode = useDeveloperMode(activeNode?.id);
   // Read the flag through a ref inside the load effect so flipping it does not
@@ -645,14 +654,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             <TabsTrigger value={t.value}>
               <t.icon className="mr-1.5 h-4 w-4" strokeWidth={1.5} />
               {t.label}
-              {t.value === 'cloudflare' && accountTone && (
-                <span
-                  data-testid="cloudflare-tab-attention"
-                  role="img"
-                  aria-label="Needs attention"
-                  className={`ml-1.5 h-1.5 w-1.5 rounded-full ${STATUS_DOT_CLASS[accountTone]}`}
-                />
-              )}
+              {t.value === 'cloudflare' && attentionDot}
             </TabsTrigger>
           </TabsHighlightItem>
         ))}
@@ -670,7 +672,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
             ariaLabel="Networking sections"
             active={tab}
             onSelect={(v) => setTab(v as NetworkingTab)}
-            tabs={tabs.map(t => ({ value: t.value, label: t.label }))}
+            tabs={tabs.map(t => ({ value: t.value, label: t.label, indicator: t.value === 'cloudflare' ? attentionDot : undefined }))}
           />
         ) : (
           <div className="flex items-center justify-between gap-3 mb-4 mt-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">

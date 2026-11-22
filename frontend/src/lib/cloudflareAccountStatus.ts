@@ -223,10 +223,12 @@ export function cloudflareAccountStatus(view: PublicExposureAccountView): Accoun
  * The tone a tab label carries for the account, or null when it needs no
  * attention. A connection that is not set up yet is a choice, not a problem,
  * so it stays quiet; a failed load or a destructive or warning answer does not.
+ * A failed refresh outranks the data it left on screen: what is shown may be
+ * out of date, so it is never settled, though a destructive answer stays destructive.
  */
 export function accountAttentionTone(view: PublicExposureAccountView | null, loadFailed: boolean): StatusTone | null {
-  if (!view) return loadFailed ? 'warning' : null;
-  if (!view.connected) return null;
-  const tone = cloudflareAccountStatus(view).answer.tone;
-  return tone === 'warning' || tone === 'destructive' ? tone : null;
+  const answered = view?.connected ? cloudflareAccountStatus(view).answer.tone : null;
+  const answerTone = answered === 'warning' || answered === 'destructive' ? answered : null;
+  if (loadFailed) return answerTone === 'destructive' ? 'destructive' : 'warning';
+  return answerTone;
 }

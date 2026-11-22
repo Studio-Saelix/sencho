@@ -10,8 +10,9 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * of a `messages` entry is kept when it is a string, or an object with a string
  * `message`; `errors` on a success is checked for shape and its text is not read),
  * complete pagination that holds every page to the total_pages, total_count and
- * per_page the listing declared before it (and refuses a repeated item or an empty last
- * page), with a page cap, bounded retries with
+ * per_page the listing declared on any page of it (and refuses a repeated item, a page
+ * longer than the declared page size, or a refusal that arrives after the first page),
+ * with a page cap, bounded retries with
  * full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
  * whole operation, refused redirects, and a process-wide request budget.
@@ -147,9 +148,14 @@ function readResultInfo(value: unknown): CloudflareResultInfo | null | undefined
   return info;
 }
 
+/** True when `text` holds the token, in any letter case: a provider string that carries the credential is never kept or shown. */
+export function mentionsToken(text: string, token: string): boolean {
+  return token.length > 0 && text.toLowerCase().includes(token.toLowerCase());
+}
+
 /** Remove the token (if Cloudflare ever echoed it) and any credential-looking text, then bound the length. */
 function safeMessage(text: string, token: string): string {
-  const withoutToken = token ? text.split(token).join('[redacted]') : text;
+  const withoutToken = token ? text.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[redacted]') : text;
   const redacted = redactSensitiveText(withoutToken);
   return redacted.length > MAX_MESSAGE_LENGTH ? `${redacted.slice(0, MAX_MESSAGE_LENGTH)}...` : redacted;
 }
@@ -230,43 +236,68 @@ function contradictoryPaging(): CloudflareApiError {
   return new CloudflareApiError({ kind: 'invalid_response', message: "Cloudflare's paging details do not match the listing it returned; Sencho did not use it." });
 }
 
-/** What a listing has declared about its own size so far. A later page can repeat a declaration or leave it out, but never change it: the first declaration stays the bound for every later page. */
-interface ListingBounds {
+/**
+ * What a listing has declared about its own size on any page so far, and how long each page was. A
+ * later page can repeat a declaration or leave it out, but never change it: the first declaration stays
+ * the bound for every page, earlier ones included.
+ */
+interface ListingState {
   totalPages?: number;
   totalCount?: number;
   perPage?: number;
+  /** The number of items on each page read so far, in order. */
+  lengths: number[];
 }
 
 /**
- * Check one page against its own paging block and against everything the pages before it declared.
- * A listing that changes its total_pages, total_count or per_page midway is not trusted: a page
- * that omits a declaration still answers to the earlier one, so no later page can make an incomplete
- * listing look whole.
+ * Check one page against its own paging block and against everything the whole listing declared.
+ * A listing that changes its total_pages, total_count or per_page midway is not trusted, a declared
+ * page size that is zero or larger than the size Sencho asked for is not trusted, and a size declared
+ * late binds the pages read before it: no page can make an incomplete listing look whole.
  */
-function assertConsistentPage(bounds: ListingBounds, info: CloudflareResultInfo | null, resultLength: number, page: number, perPage: number): void {
+function assertConsistentPage(state: ListingState, info: CloudflareResultInfo | null, resultLength: number, page: number, requestedPerPage: number): void {
   if (info) {
     if (info.page !== undefined && info.page !== page) throw contradictoryPaging();
     if (info.count !== undefined && info.count !== resultLength) throw contradictoryPaging();
-    for (const [key, declared] of [['totalPages', info.total_pages], ['totalCount', info.total_count], ['perPage', info.per_page && info.per_page > 0 ? info.per_page : undefined]] as const) {
+    // A page size of zero holds nothing, and one above the request would let a short page pass for a full one.
+    if (info.per_page !== undefined && (info.per_page < 1 || info.per_page > requestedPerPage)) throw contradictoryPaging();
+    for (const [key, declared] of [['totalPages', info.total_pages], ['totalCount', info.total_count], ['perPage', info.per_page]] as const) {
       if (declared === undefined) continue;
-      if (bounds[key] !== undefined && bounds[key] !== declared) throw contradictoryPaging();
-      bounds[key] = declared;
+      if (state[key] !== undefined && state[key] !== declared) throw contradictoryPaging();
+      state[key] = declared;
     }
   }
-  const pageSize = bounds.perPage ?? perPage;
-  if (resultLength > pageSize) throw contradictoryPaging();
-  const { totalPages, totalCount } = bounds;
-  if (totalPages === 0 && resultLength > 0) throw contradictoryPaging();
-  if (totalPages !== undefined && totalCount !== undefined) {
-    // An empty listing is reported as zero pages or as one empty page; both are legitimate.
-    const emptyListing = totalCount === 0 && totalPages <= 1;
-    if (totalPages !== Math.ceil(totalCount / pageSize) && !emptyListing) throw contradictoryPaging();
-  }
+  state.lengths.push(resultLength);
+  const pageSize = state.perPage ?? requestedPerPage;
+  // Every page so far, the earlier ones too, answers to the size declared on this one.
+  if (state.lengths.some((length) => length > pageSize)) throw contradictoryPaging();
+  if (state.totalPages === 0 && resultLength > 0) throw contradictoryPaging();
+}
+
+/** The pages an unfiltered listing has: the declared total_pages, or the count and page size when only total_count came. */
+function expectedPages(state: ListingState, pageSize: number): number | undefined {
+  if (state.totalPages !== undefined) return state.totalPages;
+  return state.totalCount === undefined ? undefined : Math.max(1, Math.ceil(state.totalCount / pageSize));
+}
+
+/**
+ * Cloudflare documents `total_count` for a listing as it stands without its search parameters, so a
+ * filtered listing (an account or zone filter, a record name) is held to it only as a ceiling; an
+ * unfiltered listing must reach it exactly. Whatever the filter, total_pages and total_count describe
+ * one count, so they must agree with each other and with the page size.
+ */
+function assertCountsAgree(state: ListingState, collected: number, pageSize: number): void {
+  const { totalPages, totalCount } = state;
+  if (totalCount !== undefined && collected > totalCount) throw contradictoryPaging();
+  if (totalPages === undefined || totalCount === undefined) return;
+  // An empty listing is reported as zero pages or as one empty page; both are legitimate.
+  const emptyListing = totalCount === 0 && totalPages <= 1;
+  if (totalPages !== Math.ceil(totalCount / pageSize) && !emptyListing) throw contradictoryPaging();
 }
 
 /** The collected items, once they match the total any page declared and no item came twice (a repeated page would otherwise stand in for the page it hid). */
-function completeListing<T>(items: T[], bounds: ListingBounds): T[] {
-  if (bounds.totalCount !== undefined && bounds.totalCount !== items.length) throw contradictoryPaging();
+function completeListing<T>(items: T[], state: ListingState, filtered: boolean): T[] {
+  if (!filtered && state.totalCount !== undefined && state.totalCount !== items.length) throw contradictoryPaging();
   const seen = new Set<string>();
   for (const item of items) {
     const id = isPlainObject(item) ? item.id : undefined;
@@ -275,6 +306,22 @@ function completeListing<T>(items: T[], bounds: ListingBounds): T[] {
     seen.add(id);
   }
   return items;
+}
+
+/**
+ * A refusal after the first page of a listing says nothing about the listing's own permission or
+ * existence: pages before it were read. It is reported as an unreadable answer, so no caller reads it
+ * as a missing permission, a vanished zone or a record that is gone.
+ */
+function interruptedListing(error: unknown, page: number): unknown {
+  if (!(error instanceof CloudflareApiError)) return error;
+  if (error.kind !== 'forbidden' && error.kind !== 'not_found' && error.kind !== 'bad_request') return error;
+  return new CloudflareApiError({
+    kind: 'invalid_response',
+    status: error.status,
+    cfCodes: error.cfCodes,
+    message: `Cloudflare refused page ${page} of a listing after answering the pages before it; Sencho did not use the partial listing.`,
+  });
 }
 
 export class CloudflareApiClient {
@@ -308,7 +355,10 @@ export class CloudflareApiClient {
     }
   }
 
-  /** Every page of a listing, or a throw. Never a partial list. */
+  /**
+   * Every page of a listing, or a throw. Never a partial list. A listing with search parameters in
+   * `query` is filtered: Cloudflare documents its totals without them, so they only cap it.
+   */
   async paginate<T>(
     token: string,
     path: string,
@@ -316,37 +366,62 @@ export class CloudflareApiClient {
     perPage = 50,
     options: CloudflareCallOptions = {},
   ): Promise<T[]> {
+    const filtered = Object.keys(query).length > 0;
     const items: T[] = [];
-    const bounds: ListingBounds = {};
+    const state: ListingState = { lengths: [] };
     for (let page = 1; ; page += 1) {
       if (page > MAX_PAGES) {
         throw new CloudflareApiError({ kind: 'invalid_response', message: `Cloudflare listed more than ${MAX_PAGES} pages; Sencho stopped reading.` });
       }
-      const response = await this.request<unknown>(token, {
-        ...options,
-        method: 'GET',
-        path,
-        query: { ...query, page, per_page: perPage },
-      });
+      let response: CloudflareResponse<unknown>;
+      try {
+        response = await this.request<unknown>(token, {
+          ...options,
+          method: 'GET',
+          path,
+          query: { ...query, page, per_page: perPage },
+        });
+      } catch (error: unknown) {
+        throw page > 1 ? interruptedListing(error, page) : error;
+      }
       if (!Array.isArray(response.result)) {
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a listing without a list.' });
       }
-      const info = response.resultInfo;
-      assertConsistentPage(bounds, info, response.result.length, page, perPage);
+      assertConsistentPage(state, response.resultInfo, response.result.length, page, perPage);
       items.push(...(response.result as T[]));
-      if (bounds.totalPages !== undefined) {
-        if (page >= bounds.totalPages) {
-          // A listing that declares several pages has items on the last of them.
-          if (bounds.totalPages >= 2 && response.result.length === 0) throw contradictoryPaging();
-          return completeListing(items, bounds);
+      const pageSize = state.perPage ?? perPage;
+      assertCountsAgree(state, items.length, pageSize);
+      const full = response.result.length >= pageSize;
+
+      if (filtered) {
+        if (response.result.length > 0 && !full) return completeListing(items, state, filtered);
+        if (response.result.length === 0) {
+          // An empty page ends a listing only when it holds nothing (page one), or the declared totals say nothing more can follow.
+          const exhausted = state.totalCount !== undefined ? items.length >= state.totalCount : state.totalPages !== undefined && page > state.totalPages;
+          if (page === 1 || exhausted) return completeListing(items, state, filtered);
+          throw contradictoryPaging();
         }
-        // A page before the last holds a full page: at least the declared page size, and never nothing.
-        if (response.result.length < Math.max(1, bounds.perPage ?? 1)) throw contradictoryPaging();
-      } else if (response.result.length < Math.min(perPage, bounds.perPage ?? perPage)) {
-        return completeListing(items, bounds);
-      } else {
+        // A full page of a filtered listing is the last one only when a declared total says nothing more can follow.
+        if (state.totalCount === undefined && state.totalPages === undefined) {
+          throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
+        }
+        if (state.totalCount !== undefined && items.length >= state.totalCount) return completeListing(items, state, filtered);
+        if (state.totalPages !== undefined && page >= state.totalPages) return completeListing(items, state, filtered);
+        continue;
+      }
+
+      const pages = expectedPages(state, pageSize);
+      if (pages === undefined) {
+        if (!full) return completeListing(items, state, filtered);
         throw new CloudflareApiError({ kind: 'invalid_response', message: 'Cloudflare answered a full page without paging details.' });
       }
+      if (page >= pages) {
+        // A listing that declares several pages has items on the last of them.
+        if (pages >= 2 && response.result.length === 0) throw contradictoryPaging();
+        return completeListing(items, state, filtered);
+      }
+      // A page before the last holds a full page, and never nothing.
+      if (!full || response.result.length === 0) throw contradictoryPaging();
     }
   }
 

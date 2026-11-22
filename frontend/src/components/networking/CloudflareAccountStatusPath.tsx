@@ -1,3 +1,4 @@
+import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
 import { StatusPath } from '@/components/ui/status-path';
@@ -43,10 +44,32 @@ export function AccountStatusPath({ account, recheckWait, onVerb }: AccountStatu
     )
   ) : undefined;
 
+  // A failed refresh outranks the answer the retained view would give: what is shown may be out of date.
+  const stale = account.loadError !== null;
+  const answer = stale
+    ? {
+      ...status.answer,
+      status: 'refresh_failed',
+      tone: status.answer.tone === 'destructive' ? status.answer.tone : 'warning' as const,
+      title: 'Not refreshed',
+      line: `Could not refresh the Cloudflare connection, so this may be out of date. Last answer: ${status.answer.line}`,
+      detail: account.loadError,
+      marker: view?.verifiedAt ? `last checked ${formatCheckDate(view.verifiedAt)}` : 'last answer kept',
+      action: (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" disabled={account.loading || account.pending !== null} onClick={() => void account.reload()}>
+            <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.5} />Retry
+          </Button>
+          {action}
+        </div>
+      ),
+    }
+    : { ...status.answer, action };
+
   return (
     <StatusPath
       data-testid="cloudflare-account-status"
-      answer={{ ...status.answer, action, 'data-testid': 'cloudflare-account-answer' }}
+      answer={{ ...answer, 'data-testid': 'cloudflare-account-answer' }}
       stages={status.stages}
       proof={view ? { label: 'Connection evidence', children: <AccountProof view={view} status={status} /> } : undefined}
     />

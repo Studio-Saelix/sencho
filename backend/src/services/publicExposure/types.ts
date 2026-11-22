@@ -80,12 +80,29 @@ export const CLEANUP_CAUSES: readonly CleanupCause[] = [
 /** Cloudflare object ids are 32 hex characters; anything else never reaches a request path or a stored handle. */
 export const CLOUDFLARE_ID = /^[0-9a-f]{32}$/;
 
+/** The label a permission-check record name starts with, the control identity after it. */
+const CHECK_NAME_LABEL = /^_sencho-check-[a-z0-9-]{1,48}$/;
+
+/**
+ * True when `name` is a permission-check record name inside this zone: the check label, then the zone's
+ * own name. A name that is blank, is not text, or belongs to another zone proves nothing when Cloudflare
+ * lists nothing at it, so it is never used to settle a journal.
+ */
+export function isCheckRecordNameIn(name: unknown, zoneName: string): name is string {
+  if (typeof name !== 'string') return false;
+  const lower = name.toLowerCase();
+  const suffix = `.${zoneName.toLowerCase()}`;
+  return lower.endsWith(suffix) && CHECK_NAME_LABEL.test(lower.slice(0, -suffix.length));
+}
+
 /** The content of a journal that kept no record content (one rebuilt from an unreadable column). Nothing is ever matched to it, so nothing is deleted by it. */
 export const UNKNOWN_CHECK_CONTENT = '';
 
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
 export interface PendingScopeCheck {
-  name: string;
+  /** The journaled record name, or null when the stored one is not a check name in this zone (cleanup then looks at the name this instance would use). */
+  name: string | null;
+  /** The journaled content; `UNKNOWN_CHECK_CONTENT` when the stored one is missing or not text (no record is then matched by content). */
   content: string;
   /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by name and content). */
   recordId: string | null;

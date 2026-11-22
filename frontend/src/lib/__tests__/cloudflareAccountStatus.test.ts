@@ -174,4 +174,14 @@ describe('accountAttentionTone', () => {
     expect(accountAttentionTone(null, true)).toBe('warning');
     expect(accountAttentionTone(null, false)).toBeNull();
   });
+
+  it('warns when a refresh failed, whatever settled view it left behind', () => {
+    expect(accountAttentionTone(view(), true)).toBe('warning');
+    expect(accountAttentionTone({ connected: false }, true)).toBe('warning');
+    expect(accountAttentionTone(failed('cloudflare_unreachable'), true)).toBe('warning');
+  });
+
+  it('keeps a blocking answer blocking when a refresh failed as well', () => {
+    expect(accountAttentionTone(failed('token_invalid'), true)).toBe('destructive');
+  });
 });

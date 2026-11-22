@@ -1,5 +1,5 @@
 import { DatabaseService } from '../DatabaseService';
-import { CHECK_OUTCOMES, CLEANUP_CAUSES, CLOUDFLARE_ID, type AccountScopes, type CheckOutcome, type CleanupCause, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
+import { CHECK_OUTCOMES, CLEANUP_CAUSES, CLOUDFLARE_ID, UNKNOWN_CHECK_CONTENT, isCheckRecordNameIn, type AccountScopes, type CheckOutcome, type CleanupCause, type LastCheck, type PendingScopeCheck, type ScopeState, type ZoneDnsState } from './types';
 
 /**
  * SQL for the public exposure hub tables. Rows are parsed into typed records
@@ -12,7 +12,10 @@ export interface AccountRecord {
   adapterId: string;
   accountId: string;
   accountName: string | null;
-  /** When the last complete zone listing ran; zones seen then carry this as their last_seen_at. */
+  /**
+   * The stamp of the last complete zone listing; zones it showed carry it as their last_seen_at. It is the
+   * identity of that listing, never compared with a clock: each listing gets a stamp above the one before.
+   */
   zonesListedAt: number | null;
   scopes: AccountScopes;
   lastCheck: LastCheck;
@@ -36,6 +39,9 @@ export interface ZoneRecord {
    * pending (`hasCheckRecord`) even though there is no record to read.
    */
   journalUnreadable: boolean;
+  /** For an unreadable journal: the check name it still holds for this zone, when that survived. Null otherwise. */
+  salvagedName: string | null;
+  /** The listing stamp of the last complete listing that showed this zone (`AccountRecord.zonesListedAt`). */
   lastSeenAt: number;
 }
 
@@ -105,20 +111,30 @@ function parseLastCheck(text: string): LastCheck {
   return check;
 }
 
-/** A NULL column is no journal. Anything else that is not a name and content is an unreadable journal, never an empty one. */
-function parsePending(text: string | null): { pending: PendingScopeCheck | null; unreadable: boolean } {
-  if (text === null) return { pending: null, unreadable: false };
-  const record = asRecord(parseJson(text));
-  if (typeof record.name !== 'string' || typeof record.content !== 'string') return { pending: null, unreadable: true };
+/**
+ * A NULL column is no journal. Each field of a stored journal is kept on its own merits, so a damaged
+ * description never costs the record id: a valid id is a handle by itself, and a name counts only when it
+ * is a check name in this zone. A journal with neither an id nor a usable name and content is unreadable,
+ * never an empty one.
+ */
+function parsePending(text: string | null, zoneName: string): { pending: PendingScopeCheck | null; unreadable: boolean; salvagedName: string | null } {
+  if (text === null) return { pending: null, unreadable: false, salvagedName: null };
+  const parsed = parseJson(text);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { pending: null, unreadable: true, salvagedName: null };
+  const record = parsed as Record<string, unknown>;
+  // A stored id that is not a Cloudflare id is no handle: cleanup finds the record by name and content instead.
+  const recordId = typeof record.recordId === 'string' && CLOUDFLARE_ID.test(record.recordId) ? record.recordId : null;
+  const name = isCheckRecordNameIn(record.name, zoneName) ? record.name : null;
+  const content = typeof record.content === 'string' ? record.content : null;
+  if (recordId === null && (name === null || content === null)) return { pending: null, unreadable: true, salvagedName: name };
   const pending: PendingScopeCheck = {
-    name: record.name,
-    content: record.content,
-    // A stored id that is not a Cloudflare id is no handle: cleanup finds the record by name and content instead.
-    recordId: typeof record.recordId === 'string' && CLOUDFLARE_ID.test(record.recordId) ? record.recordId : null,
+    name,
+    content: content ?? UNKNOWN_CHECK_CONTENT,
+    recordId,
     createdAt: typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) && record.createdAt > 0 ? record.createdAt : 0,
   };
   if (CLEANUP_CAUSES.includes(record.cause as CleanupCause)) pending.cause = record.cause as CleanupCause;
-  return { pending, unreadable: false };
+  return { pending, unreadable: false, salvagedName: null };
 }
 
 function toAccount(row: AccountRow): AccountRecord {
@@ -141,7 +157,7 @@ function toAccount(row: AccountRow): AccountRecord {
 
 function toZone(row: ZoneRow): ZoneRecord {
   const suffixes = parseJson(row.allowed_suffixes_json);
-  const journal = parsePending(row.scope_check_pending_json);
+  const journal = parsePending(row.scope_check_pending_json, row.name);
   return {
     zoneRef: row.zone_ref,
     name: row.name,
@@ -151,6 +167,7 @@ function toZone(row: ZoneRow): ZoneRecord {
     dnsCheckedAt: row.dns_checked_at,
     pending: journal.pending,
     journalUnreadable: journal.unreadable,
+    salvagedName: journal.salvagedName,
     lastSeenAt: row.last_seen_at,
   };
 }

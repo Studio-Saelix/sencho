@@ -317,4 +317,55 @@ describe('CloudflareAccountCard', () => {
     await user.click(within(answer).getByRole('button', { name: /retry/i }));
     expect(await screen.findByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', 'not_connected');
   });
+
+  describe('a refresh that fails over a view already on screen', () => {
+    /** An account with nothing open: one enabled zone whose DNS write is proven. */
+    const settled = () => connected({ zones: [zone({ dns: 'confirmed', dnsCheckedAt: T })] });
+
+    it.each([
+      ['a settled connection', settled, 'connected'],
+      ['no connection', () => ({ connected: false }), 'not_connected'],
+    ])('does not leave %s looking current, and a successful retry restores it', async (_label, body, state) => {
+      apiFetchMock.mockImplementation(() => json(body()));
+      const user = userEvent.setup();
+      const { rerender } = render(<CloudflareAccountCard />);
+      const settledAnswer = await screen.findByTestId('cloudflare-account-answer');
+      expect(settledAnswer).toHaveAttribute('data-state', state);
+
+      // The gate closes and opens again while the control instance cannot answer: the old view stays, and says it is stale.
+      apiFetchMock.mockImplementation(() => json({ error: 'The control instance is restarting.' }, 500));
+      flags.isAdmin = false;
+      rerender(<CloudflareAccountCard />);
+      flags.isAdmin = true;
+      rerender(<CloudflareAccountCard />);
+
+      const stale = await screen.findByText('Not refreshed');
+      expect(stale).toBeInTheDocument();
+      const answer = screen.getByTestId('cloudflare-account-answer');
+      expect(answer).toHaveAttribute('data-state', 'refresh_failed');
+      expect(answer).toHaveTextContent('may be out of date');
+      expect(answer).toHaveTextContent('The control instance is restarting.');
+
+      apiFetchMock.mockImplementation(() => json(body()));
+      await user.click(within(answer).getByRole('button', { name: /retry/i }));
+      await waitFor(() => expect(screen.getByTestId('cloudflare-account-answer')).toHaveAttribute('data-state', state));
+      expect(screen.queryByText('Not refreshed')).toBeNull();
+    });
+
+    it('keeps the blocking answer and its verb beside the Retry when the token is already rejected', async () => {
+      apiFetchMock.mockImplementation(() => json(connected({ lastCheck: { outcome: 'token_invalid', at: T, detail: null } })));
+      const { rerender } = render(<CloudflareAccountCard />);
+      await screen.findByTestId('cloudflare-account-answer');
+
+      apiFetchMock.mockImplementation(() => json({ error: 'down' }, 500));
+      flags.isAdmin = false;
+      rerender(<CloudflareAccountCard />);
+      flags.isAdmin = true;
+      rerender(<CloudflareAccountCard />);
+
+      const answer = await screen.findByText('Not refreshed').then(() => screen.getByTestId('cloudflare-account-answer'));
+      expect(within(answer).getByRole('button', { name: /retry/i })).toBeInTheDocument();
+      expect(within(answer).getByRole('button', { name: 'Replace token' })).toBeInTheDocument();
+    });
+  });
 });

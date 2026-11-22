@@ -48,6 +48,15 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a record sits at that name, delete it in Cloudflare. Then try again: Sencho lets go once the name has stayed empty for a couple of minutes.',
 };
 
+/**
+ * The stamp a complete zone listing carries: the clock, but always above the stamp of the listing before
+ * it. Zones are compared with it for equality ("did the latest listing show this zone"), so two listings
+ * in one millisecond, or after the clock stepped back, must not share one.
+ */
+function nextListingStamp(previous: number | null, now: number): number {
+  return previous === null ? now : Math.max(now, previous + 1);
+}
+
 function outcomeError(failure: CheckFailure): PublicExposureError {
   const mapped = OUTCOME_ERRORS[failure.outcome];
   if (failure.outcome === 'rate_limited' && failure.limitedBy === 'sencho') {
@@ -151,7 +160,7 @@ export class PublicExposureAccountService {
         const current = store.getAccount(CLOUDFLARE_ADAPTER_ID);
         if (current && current.accountId !== accountId) throw this.accountChangeRefusal(current);
         const lastCheck: LastCheck = { outcome: 'ok', at: now, detail: null };
-        const zonesListedAt = facts.zones ? now : current?.zonesListedAt ?? null;
+        const zonesListedAt = facts.zones ? nextListingStamp(current?.zonesListedAt ?? null, now) : current?.zonesListedAt ?? null;
         let rowId: number;
         if (current) {
           rowId = current.id;
@@ -165,7 +174,7 @@ export class PublicExposureAccountService {
             scopes: facts.scopes, lastCheck, verifiedAt: now, createdBy: actor.username, now,
           });
         }
-        this.applyZoneFacts(rowId, facts, now);
+        this.applyZoneFacts(rowId, facts, now, zonesListedAt);
         return current !== null;
       });
 
@@ -199,12 +208,13 @@ export class PublicExposureAccountService {
       const at = Date.now();
       store.transaction(() => {
         if (result.outcome === 'ok') {
+          const zonesListedAt = result.facts.zones ? nextListingStamp(account.zonesListedAt, at) : account.zonesListedAt;
           store.updateCheck(account.id, {
             accountId: account.accountId, accountName: result.facts.accountName,
-            zonesListedAt: result.facts.zones ? at : account.zonesListedAt, scopes: result.facts.scopes,
+            zonesListedAt, scopes: result.facts.scopes,
             lastCheck: { outcome: 'ok', at, detail: null }, verifiedAt: at, now: at,
           });
-          this.applyZoneFacts(account.id, result.facts, at);
+          this.applyZoneFacts(account.id, result.facts, at, zonesListedAt);
         } else {
           store.updateLastCheck(account.id, failedCheck(result, at), at);
         }
@@ -362,7 +372,7 @@ export class PublicExposureAccountService {
 
   /** The pending record a zone shows: its journaled name, or the name the check would have used when the journal cannot be read. */
   private cleanupView(zone: ZoneRecord, derivedName: string | null): { recordName: string; note: string | null } {
-    const recordName = zone.pending?.name ?? derivedName ?? `_sencho-check-*.${zone.name}`;
+    const recordName = zone.pending?.name ?? zone.salvagedName ?? derivedName ?? `_sencho-check-*.${zone.name}`;
     const cause = zone.pending ? zone.pending.cause : 'unreadable_journal';
     return { recordName, note: cause ? CLEANUP_MESSAGE[cause] : null };
   }
@@ -373,7 +383,7 @@ export class PublicExposureAccountService {
     let cleanup: CleanupResult;
     if (zone.journalUnreadable) {
       console.warn(`[PublicExposure] The permission-check journal of zone ${sanitizeForLog(zone.name)} cannot be read; looking for the record by its name.`);
-      cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, this.checkNameFor(zone), journal, options);
+      cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, zone.salvagedName ?? this.checkNameFor(zone), journal, options);
     } else {
       cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);
     }
@@ -396,6 +406,7 @@ export class PublicExposureAccountService {
   private journalFor(accountRowId: number, zone: ZoneRecord): ScopeCheckJournal {
     let current = zone.pending;
     return {
+      derivedName: this.checkNameFor(zone),
       current: () => current,
       write: (pending) => {
         current = pending;
@@ -405,10 +416,10 @@ export class PublicExposureAccountService {
   }
 
   /** Apply probe results to zone rows. Reconciles the zone list only after a complete listing. */
-  private applyZoneFacts(accountRowId: number, facts: AccountFacts, now: number): void {
-    if (facts.zones) {
+  private applyZoneFacts(accountRowId: number, facts: AccountFacts, now: number, zonesListedAt: number | null): void {
+    if (facts.zones && zonesListedAt !== null) {
       const listed = new Set(facts.zones.map((z) => z.zoneRef));
-      for (const zone of facts.zones) store.upsertListedZone(accountRowId, zone.zoneRef, zone.name, now);
+      for (const zone of facts.zones) store.upsertListedZone(accountRowId, zone.zoneRef, zone.name, zonesListedAt);
       for (const zone of store.listZones(accountRowId)) {
         if (!listed.has(zone.zoneRef) && !zone.enabled && !hasCheckRecord(zone)) store.deleteZone(accountRowId, zone.zoneRef);
       }

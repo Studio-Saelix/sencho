@@ -1913,7 +1913,7 @@ describe('a stored record id that is not a Cloudflare id is not used as a delete
   it('is enforced by the adapter itself, not only by the store', async () => {
     const realId = 'c'.repeat(32);
     fake.records.set(ZONE_A, [{ id: realId, type: 'TXT', name: CHECK_NAME, content: '"sencho-scope-check:00"' }]);
-    let current: { name: string; content: string; recordId: string | null; createdAt: number } | null = { ...OLD_JOURNAL, recordId: '../zones' };
+    let current: import('../services/publicExposure/types').PendingScopeCheck | null = { ...OLD_JOURNAL, recordId: '../zones' };
     const result = await new Adapter(cloudflareApiClient).resumeCleanup(FAKE_TOKEN, ZONE_A, { current: () => current, write: (p) => { current = p; } }, {});
     expect(result).toEqual({ cleaned: true });
     expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([`DELETE /zones/${ZONE_A}/dns_records/${realId}`]);
