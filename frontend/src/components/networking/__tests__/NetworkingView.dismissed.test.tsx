@@ -9,6 +9,10 @@ const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
+// The public exposure card reads the experimental flag; it is off here.
+vi.mock('@/hooks/useExperimental', () => ({
+  useExperimental: () => ({ experimental: false, experimentalReady: true }),
+}));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true, can: () => true }),
 }));
