@@ -809,22 +809,26 @@ describe('a journal whose description is damaged', () => {
   // unreadable evidence, not an absent record: it keeps the journal in every caller, in every journal form that looks in
   // the whole zone, and it survives a restart and the late-create window.
   describe('a zone-wide listing with a record whose name is text that does not read as a DNS name', () => {
-    const MALFORMED_NAMES: Array<[string, string]> = [
+    // The first four never start with the check label, so a filter that dropped every other string name lost them;
+    // the rest start with it or are not text, and are kept by any filter: controls for the readable-name rule.
+    const MALFORMED_NAMES: Array<[string, unknown]> = [
       ['an empty name', ''], ['a blank name', '   '], ['text with spaces', 'not a dns name'],
-      ['a check name with a leading space', ` ${OLD_NAME}`], ['a check name with a trailing newline', `${OLD_NAME}\n`],
+      ['a check name with a leading space', ` ${OLD_NAME}`],
+      ['a check name with a trailing newline', `${OLD_NAME}\n`],
       ['a name with a control character', `_sencho-check-0ld\u0000.example.com`], ['an empty label', `_sencho-check-0ld..example.com`],
-      ['a name longer than any DNS name', `_sencho-check-${'a'.repeat(300)}.example.com`],
+      ['a label longer than 63 characters', `_sencho-check-${'a'.repeat(300)}.example.com`],
+      ['many short labels past 254 characters in all', `_sencho-check-${'a.'.repeat(130)}example.com`],
+      ['a null name', null], ['a numeric name', 42], ['an object name', { a: 1 }], ['a list name', ['x']],
     ];
     const INFO = { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 };
     const seedAtOld = (content = '"x"') => fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content }]);
     const deletes = () => fake.requests.filter((r) => r.startsWith('DELETE'));
 
-    /** Each form of a journal that has to look in the whole zone and carries no content that proves a record is ours. */
+    /** Each readable form of a journal that has to look in the whole zone and carries no content that proves a record is ours. An unreadable column is the restart test below. */
     const FORMS: Array<[string, () => string]> = [
       ['a historical name with no content', () => mk(OLD_NAME, undefined, undefined)],
       ['a historical name with content no record carries', () => mk(OLD_NAME, 'sencho-scope-check:ffffffffffffffff', undefined)],
       ['the current name with no content', () => mk(CHECK_NAME, undefined, undefined)],
-      ['a damaged name', () => mk(['x'], CONTENT, undefined)],
     ];
 
     describe.each(CALLERS)('through %s', (caller) => {
@@ -852,7 +856,7 @@ describe('a journal whose description is damaged', () => {
         intercept(pages(atCheckPrefix, [success([{ id: RECORD_ID, type: 'TXT', name, content: `"${CONTENT}"` }], INFO)]));
         await run(caller);
         expect(hasRecord(RECORD_ID)).toBe(false);
-        // A DNS check goes on to create and delete its own record once the journal is settled; no other old record is touched.
+        // A DNS check goes on to create and delete its own record once the journal is settled.
         expect(deletes()).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
         if (caller === 'disconnect') expect(service.getView()).toEqual({ connected: false });
         else expect(journal()).toBeNull();

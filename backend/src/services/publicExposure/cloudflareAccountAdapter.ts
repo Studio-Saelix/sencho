@@ -279,7 +279,7 @@ export class CloudflareAccountAdapter {
       // path in deleteRecord, so it is checked again here.
       let recordId = pending.recordId !== null && CLOUDFLARE_ID.test(pending.recordId) ? pending.recordId : null;
       if (!recordId) {
-        // No usable id: the record is found where the journal says it was, when that place is established, and otherwise anywhere in the zone a check record can be.
+        // No usable id: the record is found where the journal says it was, when that place is established, and otherwise anywhere in the zone a check record can be (`checkRecordsInZone`, which also counts a record whose name cannot be read).
         let records: DnsRecord[];
         try {
           records = await this.recordsForJournal(token, zoneRef, pending, journal.derivedName ?? null, options);
@@ -310,7 +310,7 @@ export class CloudflareAccountAdapter {
   /**
    * A journaled record that is not in the listing. It is declared lost only
    * when nothing sits where the record can be (its own name, or every check
-   * name in the zone) and the late-create window has passed since
+   * name in the zone and every record whose name cannot be read) and the late-create window has passed since
    * the journal was written. A journal with no usable timestamp is stamped now
    * and kept: that stamp is persisted, so the window survives a restart and
    * one empty listing never settles a create that may still land.
@@ -332,11 +332,11 @@ export class CloudflareAccountAdapter {
 
   /**
    * Settle a zone whose journal column cannot be read. Neither the record's name nor its content survived,
-   * so nothing proves where it is: every check record in the zone counts as a place it can be, and none of
-   * them is ever deleted, since the journaled content that proves one is ours is gone. `name` is the name the
-   * check would use now (null when there is no control identity); it only gives the replacement journal
+   * so nothing proves where it is: every check record in the zone, and every record whose name cannot be read,
+   * counts as a place it can be, and none of them is ever deleted, since the journaled content that proves one
+   * is ours is gone. `name` is the name the check would use now (null when there is no control identity); it only gives the replacement journal
    * something readable to keep. The column is settled only when the zone itself is gone, or when the zone
-   * holds no check record after the late-create window: the first empty listing replaces the column with a
+   * holds no such record after the late-create window: the first empty listing replaces the column with a
    * journal that has no content, stamped now, and the next cleanup past the window clears it.
    */
   async resumeUnreadableCleanup(token: string, zoneRef: string, name: string | null, journal: ScopeCheckJournal, options: CloudflareCallOptions): Promise<CleanupResult> {
@@ -546,7 +546,7 @@ export class CloudflareAccountAdapter {
    * Where a journal without a usable id looks for its record. The journaled name is the place only when it
    * is the name this instance uses now and the journal kept its content: any other name may be damaged text
    * that still reads as a check name, or a name an earlier identity used, and an empty listing there would
-   * prove nothing. Anywhere else the whole zone's check records are the candidates.
+   * prove nothing. Anywhere else the whole zone's check records (and records whose name cannot be read) are the candidates.
    */
   private async recordsForJournal(token: string, zoneRef: string, pending: PendingScopeCheck, derivedName: string | null, options: CloudflareCallOptions): Promise<DnsRecord[]> {
     if (
