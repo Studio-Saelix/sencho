@@ -603,7 +603,7 @@ describe('a journal whose description is damaged', () => {
 
   /** The lookups a journal makes when it cannot say where its record is: every check record in the zone. */
   const zoneWideLookups = () => requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes(`name.startswith=${CHECK_PREFIX}`));
-  const nameLookups = () => requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && r.includes('&name=') || r.includes('?name='));
+  const nameLookups = () => requested.map((r) => decodeURIComponent(r)).filter((r) => r.includes('/dns_records?') && (r.includes('&name=') || r.includes('?name=')));
 
   describe.each(CALLERS)('with no usable id, through %s', (caller) => {
     describe.each([['no id', undefined], ['a malformed id', '../zones']])('and %s', (_i, recordId) => {
@@ -745,6 +745,62 @@ describe('a journal whose description is damaged', () => {
     fake.zones = [{ id: ZONE_B, name: 'example.net' }];
     await service.recheck(actor);
     expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [CHECK_NAME] });
+  });
+
+  describe.each(CALLERS)('with another hub\'s check record in the zone, through %s', (caller) => {
+    const FOREIGN_ID = 'd'.repeat(32);
+    const foreign = { id: FOREIGN_ID, type: 'TXT', name: `_sencho-check-0th3r1d.example.com`, content: '"sencho-scope-check:feedfacefeedface"' };
+
+    it('deletes only the record that carries the journal\'s content, and leaves the other hub\'s record alone', async () => {
+      await connectWithZoneA();
+      fake.records.set(ZONE_A, [foreign, { id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: `"${CONTENT}"` }]);
+      setJournal(mk(OLD_NAME, CONTENT, undefined));
+      intercept();
+      await run(caller);
+      expect(hasRecord(RECORD_ID)).toBe(false);
+      expect(hasRecord(FOREIGN_ID)).toBe(true);
+      expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
+      expect(fake.requests).not.toContain(`DELETE /zones/${ZONE_A}/dns_records/${FOREIGN_ID}`);
+    });
+
+    it('keeps the journal and deletes nothing when only the other hub\'s record sits there', async () => {
+      await connectWithZoneA();
+      fake.records.set(ZONE_A, [foreign]);
+      setJournal(mk(OLD_NAME, CONTENT, undefined));
+      intercept();
+      await run(caller);
+      expect(journal()).not.toBeNull();
+      expect(hasRecord(FOREIGN_ID)).toBe(true);
+      expect(fake.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+    });
+
+    it('finds a record whose check name is written in capitals', async () => {
+      await connectWithZoneA();
+      fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME.toUpperCase(), content: `"${CONTENT}"` }]);
+      setJournal(mk(OLD_NAME, CONTENT, undefined));
+      intercept();
+      await run(caller);
+      expect(hasRecord(RECORD_ID)).toBe(false);
+    });
+
+    it('counts a record with no readable name as one that may be a check record, and keeps the journal', async () => {
+      await connectWithZoneA();
+      fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: '"x"' }]);
+      setJournal(mk(OLD_NAME, undefined, undefined));
+      intercept(once(atCheckPrefix, success([{ id: RECORD_ID, type: 'TXT', content: '"x"' }], { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 })));
+      await run(caller);
+      expect(journal()).not.toBeNull();
+      expect(hasRecord(RECORD_ID)).toBe(true);
+    });
+
+    it('reads a zone-wide listing with an unreadable element as an unexpected answer and keeps the journal', async () => {
+      await connectWithZoneA();
+      setJournal('{');
+      intercept(once(atCheckPrefix, success([null], { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 })));
+      await run(caller);
+      expect(journal()).toBe('{');
+      expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+    });
   });
 
   it('keeps a trusted name when the rest of the journal is gone, looks in the whole zone, and keeps the journal while another record sits there', async () => {
@@ -936,11 +992,12 @@ describe('a filtered listing whose first pages are short or empty but declare mo
   const hasRecord = (id: string) => (fake.records.get(ZONE_A) ?? []).some((r) => r.id === id);
   const info = (page: number, extra: Record<string, number> = {}) => ({ page, per_page: 100, total_pages: 2, ...extra });
   /** What a recovery lookup reads: the first page shows nothing of ours (empty, or only a record that is not ours), the record is on page two. */
-  const LOOKUPS: Array<[string, (n: number) => Reply[]]> = [
+  const LOOKUPS: Array<[string, () => Reply[]]> = [
     ['an empty first page, no total_count', () => [success([], info(1)), success([OURS], info(2))]],
     ['an empty first page, with a total_count', () => [success([], info(1, { total_count: 101 })), success([OURS], info(2, { total_count: 101 }))]],
     ['a short first page of other records, no total_count', () => [success([FOREIGN], info(1)), success([OURS], info(2))]],
     ['a short first page of other records, with a total_count', () => [success([FOREIGN], info(1, { total_count: 101 })), success([OURS], info(2, { total_count: 101 }))]],
+    ['two empty pages before the record, three declared', () => [success([], info(1, { total_pages: 3 })), success([], info(2, { total_pages: 3 })), success([OURS], info(3, { total_pages: 3 }))]],
   ];
 
   type Caller = 'recheck' | 'disconnect' | 'dnsCheck';
@@ -956,13 +1013,13 @@ describe('a filtered listing whose first pages are short or empty but declare mo
       it.each([
         ['a journal that names its record', { name: CHECK_NAME, content: CONTENT, recordId: null, createdAt: AGED }, atCheckName],
         ['an unreadable column, which looks in the whole zone', '{', () => atCheckPrefix],
-      ])('reads on to page two for %s, and deletes the record it finds there before it lets go', async (_what, stored, match) => {
+      ])('reads on to the declared page for %s: a readable journal deletes the record it finds there, an unreadable column keeps the journal', async (_what, stored, match) => {
         await connectWithZoneA();
         fake.records.set(ZONE_A, [OURS]);
         setJournal(stored);
         // An unreadable column never deletes by content: the record on page two is only ever reported.
         const unreadable = typeof stored === 'string';
-        intercept(pages(match(), script(0)));
+        intercept(pages(match(), script()));
         await run(caller);
         if (unreadable) {
           expect(journal()).toBe('{');
@@ -971,7 +1028,6 @@ describe('a filtered listing whose first pages are short or empty but declare mo
           expect(fake.requests).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
           expect(hasRecord(RECORD_ID)).toBe(false);
         }
-        // Either way the page-two record is never lost to an early "nothing there": the journal does not clear while it stands.
         if (unreadable) expect(hasRecord(RECORD_ID)).toBe(true);
         expect(requested.filter((r) => r.includes('page=2') && r.includes('/dns_records?')).length).toBeGreaterThan(0);
       });

@@ -1493,10 +1493,10 @@ describe('a listing whose paging details contradict each other is never a comple
     expect((await refusal(service.connect(FAKE_TOKEN, FAKE_ACCOUNT_ID, actor))).code).toBe('UNEXPECTED_RESPONSE');
   });
 
-  describe('a record listing at the check name', () => {
+  describe('a record listing at the check name, or in the zone for a column that cannot be read', () => {
     const atName = (url: URL, m: string) => m === 'GET' && /^\/zones\/[0-9a-f]+\/dns_records$/.test(url.pathname.replace('/client/v4', '')) && (url.searchParams.get('name') === CHECK_NAME || url.searchParams.get('name.startswith') === '_sencho-check-');
-    // An empty first page that declares a second one: the record the journal waits for can be on it.
-    const hidesTheRecord = { success: true, result: [], result_info: { page: 1, per_page: 100, count: 0, total_pages: 2, total_count: 2 } };
+    // A page that holds nothing while its own paging block counts three records: a listing that contradicts itself, whichever page is asked for.
+    const hidesTheRecord = { success: true, result: [], result_info: { page: 1, per_page: 100, count: 3, total_pages: 1, total_count: 3 } };
 
     it('keeps a stored journal through recheck and refuses disconnect, even for an old one', async () => {
       await connectWithZoneA();
@@ -1565,8 +1565,9 @@ describe('a listing that contradicts what it declared, on one page or between pa
   ];
 
   /**
-   * Contradictions only a listing without search parameters can show: its total_count is exact, so a listing
-   * that ends short of it is incomplete. A filtered listing's total_count is only a cap, so the same pages
+   * Contradictions only a listing without search parameters can show: its totals are exact, so a listing
+   * that ends short of its total_count, or ends on an empty page after declaring several, is incomplete.
+   * A filtered listing's total_count is only a cap and its declared pages are all read, so the same pages
    * are a search that matched fewer records than the zone holds.
    */
   const UNFILTERED_SCRIPTS: Array<[string, (items: unknown[]) => Page[]]> = [

@@ -44,8 +44,8 @@ const CLEANUP_MESSAGE: Record<CleanupCause, string> = {
   zone_refused: 'Cloudflare refused the delete. Fix the token, or delete the record in Cloudflare, then try again.',
   too_recent: 'Sencho cannot yet rule out that its create is still landing. Try again in a couple of minutes.',
   unexpected: 'Cloudflare sent a response Sencho could not read. Delete the record in Cloudflare, then try again.',
-  unmatched: 'Other records already sit at that name, or Sencho cannot tell which check record in the zone is its own, and it does not delete records it cannot prove it created. Delete them in Cloudflare, then try again.',
-  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a record named _sencho-check-… sits in the zone, delete it in Cloudflare. Then try again: Sencho lets go once the zone has held no such record for a couple of minutes.',
+  unmatched: 'Other records already sit at that name, or Sencho cannot tell which check record in the zone is its own (a TXT record whose name starts with _sencho-check- may belong to another Sencho instance on this account), and it does not delete records it cannot prove it created. Delete the ones that are not in use, then try again.',
+  unreadable_journal: 'Sencho cannot read what it kept about this record, so it cannot tell whether it is gone. If a TXT record whose name starts with _sencho-check- sits in the zone and no other Sencho instance on this account uses it, delete it in Cloudflare. Then try again: Sencho lets go once the zone has held no such record for a couple of minutes.',
 };
 
 /**
@@ -382,7 +382,7 @@ export class PublicExposureAccountService {
     const journal = this.journalFor(accountRowId, zone);
     let cleanup: CleanupResult;
     if (zone.journalUnreadable) {
-      console.warn(`[PublicExposure] The permission-check journal of zone ${sanitizeForLog(zone.name)} cannot be read; looking for the record by its name.`);
+      console.warn(`[PublicExposure] The permission-check journal of zone ${sanitizeForLog(zone.name)} cannot be read; looking for check records in the zone.`);
       cleanup = await this.adapter.resumeUnreadableCleanup(token, zone.zoneRef, this.checkNameFor(zone), journal, options);
     } else {
       cleanup = await this.adapter.resumeCleanup(token, zone.zoneRef, journal, options);

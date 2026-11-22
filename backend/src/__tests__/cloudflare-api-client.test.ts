@@ -721,12 +721,38 @@ describe('CloudflareApiClient count semantics follow what Cloudflare documents',
       expect(calls).toHaveLength(2);
     });
 
-    it('ends a full page on the empty page after it when the declared total_pages counts pages the search does not fill', async () => {
+    it('reads every page a total_pages declares when the search leaves the later ones empty, and accepts what it collected', async () => {
       const { client, calls } = scripted([
-        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 20, total_count: 40 } },
-        { items: [], info: { page: 2, per_page: 2, total_pages: 20, total_count: 40 } },
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 3, total_count: 40 } },
+        { items: [], info: { page: 2, per_page: 2, total_pages: 3, total_count: 40 } },
+        { items: [], info: { page: 3, per_page: 2, total_pages: 3, total_count: 40 } },
       ]);
       expect(await client.paginate(TOKEN, '/zones', FILTER, 2)).toHaveLength(2);
+      expect(calls).toHaveLength(3);
+    });
+
+    it('reads the match that sits behind two empty pages of a listing that declares three', async () => {
+      const { client, calls } = scripted([
+        { items: [], info: { page: 1, per_page: 100, total_pages: 3 } },
+        { items: [], info: { page: 2, per_page: 100, total_pages: 3 } },
+        { items: [7], info: { page: 3, per_page: 100, total_pages: 3 } },
+      ]);
+      expect((await client.paginate<{ id: string }>(TOKEN, '/zones/z/dns_records', FILTER, 100)).map((i) => i.id)).toEqual(['i7']);
+      expect(calls).toHaveLength(3);
+    });
+
+    it('reads every declared page after a short first page when the unfiltered totals overstate what the search holds', async () => {
+      const { client, calls } = scripted([{ items: [1, 2, 3], info: { page: 1, per_page: 50, count: 3, total_pages: 8, total_count: 400 } }]);
+      expect(await client.paginate(TOKEN, '/zones', { 'account.id': 'a' }, 50)).toHaveLength(3);
+      expect(calls).toHaveLength(8);
+    });
+
+    it('stops reading declared pages once the total_count ceiling is collected', async () => {
+      const { client, calls } = scripted([
+        { items: [1, 2], info: { page: 1, per_page: 2, total_pages: 5, total_count: 3 } },
+        { items: [3], info: { page: 2, per_page: 2, total_pages: 5, total_count: 3 } },
+      ]);
+      expect(await client.paginate(TOKEN, '/zones', FILTER, 2)).toHaveLength(3);
       expect(calls).toHaveLength(2);
     });
 
@@ -757,12 +783,15 @@ describe('CloudflareApiClient count semantics follow what Cloudflare documents',
         { items: [3], info: { page: 2, per_page: 2, total_pages: 3 } },
         { items: [7], info: { page: 3, per_page: 2, total_pages: 3 } },
       ], ['i1', 'i2', 'i3', 'i7']],
-      ['an empty first page of a listing that only declares a total_count', [
-        { items: [], info: { page: 1, per_page: 100, total_count: 1 } },
-      ], []],
     ])('reads on past %s', async (_label, pages, ids) => {
       const { client } = scripted(pages);
       expect((await client.paginate<{ id: string }>(TOKEN, '/zones/z/dns_records', FILTER, pages[0].info?.per_page ?? 100)).map((i) => i.id)).toEqual(ids);
+    });
+
+    it('ends on an empty first page when only a total_count was declared', async () => {
+      const { client, calls } = scripted([{ items: [], info: { page: 1, per_page: 100, total_count: 1 } }]);
+      expect(await client.paginate(TOKEN, '/zones/z/dns_records', FILTER, 100)).toEqual([]);
+      expect(calls).toHaveLength(1);
     });
 
     it('asks for the second page after an empty first one, and does not stop at the first', async () => {

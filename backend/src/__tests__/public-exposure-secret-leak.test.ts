@@ -195,6 +195,7 @@ describe('Cloudflare token containment', () => {
     // The surfaces were exercised: every echo was refused, so each connect answered an error status.
     expect(bodies.filter((b) => b.startsWith('502') || b.startsWith('422')).length).toBeGreaterThanOrEqual(echoes.length);
   });
+
   it('keeps a credential that a well-formed expiry carries out of the response, a later account read and every stored surface, on both verification endpoints', async () => {
     const NUMERIC = '4815162342'.repeat(4);
     const DATE_TOKEN = '2026-01-01T00:00:00Z';

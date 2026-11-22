@@ -37,7 +37,7 @@ const CHECK_RECORD_COMMENT = 'Sencho permission check, deleted right away';
  * A create that timed out can still land on Cloudflare's side. A journal
  * younger than this is not declared lost when the record is not there yet.
  * A journal whose age is unknown (no readable timestamp, or one more than this
- * window in the future) is, when nothing sits at its name, stamped with the
+ * window in the future) is, when no check record sits where its record can be, stamped with the
  * time it was first examined. That stamp starts the same window, so one empty
  * listing never settles it. A timestamp ahead of now by no more than the window
  * (clock skew) is a known age: the journal stays pending until now has passed
@@ -95,7 +95,7 @@ export type DnsWriteResult =
 export interface ScopeCheckJournal {
   current(): PendingScopeCheck | null;
   write(pending: PendingScopeCheck | null): void;
-  /** The name the check would use in this zone now; where cleanup looks when the journal kept no usable name. */
+  /** The name the check would use in this zone now. A journal's own name is trusted as the record's place only when it is this name; the replacement journal of an unreadable column keeps it. */
   derivedName?: string | null;
 }
 
@@ -301,7 +301,8 @@ export class CloudflareAccountAdapter {
 
   /**
    * A journaled record that is not in the listing. It is declared lost only
-   * when nothing sits at the name and the late-create window has passed since
+   * when nothing sits where the record can be (its own name, or every check
+   * name in the zone) and the late-create window has passed since
    * the journal was written. A journal with no usable timestamp is stamped now
    * and kept: that stamp is persisted, so the window survives a restart and
    * one empty listing never settles a create that may still land.
@@ -310,8 +311,8 @@ export class CloudflareAccountAdapter {
     const now = this.now();
     const timingKnown = pending.createdAt > 0 && pending.createdAt <= now + LATE_CREATE_WINDOW_MS;
     if (timingKnown && now - pending.createdAt < LATE_CREATE_WINDOW_MS) return { cleaned: false, cause: 'too_recent' };
-    // Records at the name that are none of ours keep the journal: it is the only handle on a record that
-    // may differ from what was journaled. Only an empty name proves nothing was created.
+    // Records where ours can be that are none of ours keep the journal: it is the only handle on a record that
+    // may differ from what was journaled. Only an empty lookup of every place it can be proves nothing was created.
     if (records.length > 0) return { cleaned: false, cause: 'unmatched' };
     if (!timingKnown) {
       journal.write({ ...pending, createdAt: now });
@@ -455,8 +456,8 @@ export class CloudflareAccountAdapter {
     // A success with no status Cloudflare documents says nothing about the token: unexpected, not inactive.
     if (!isTokenVerifyResult(verified)) throw malformed('a token status');
     if (verified.status !== 'active') {
-      // The date is shown only when it is a date-time; any other text in the field is never repeated.
       // A string of any shape is checked for the credential first: a well-formed date can still carry it (fractional seconds take any digits).
+      // Then the date is shown only when it is a date-time; any other text in the field is never repeated.
       const raw = typeof verified.expires_on === 'string' ? withoutCredential(token, verified.expires_on, 'an expiry date') : null;
       const expires = raw !== null && DATE_TIME.test(raw) && !Number.isNaN(Date.parse(raw)) ? raw : null;
       throw stop('token_inactive', expires ? `Token is ${verified.status}; it expires or expired on ${expires}.` : `Token is ${verified.status}.`);
@@ -545,7 +546,7 @@ export class CloudflareAccountAdapter {
     return established ? this.recordsAt(token, zoneRef, pending.name as string, options) : this.checkRecordsInZone(token, zoneRef, options);
   }
 
-  /** Every record in the zone whose name is a check name, whichever control identity wrote it. */
+  /** Every record in the zone whose name starts with the check label, whichever control identity wrote it; a record with no readable name is kept too, since it may be one. */
   private async checkRecordsInZone(token: string, zoneRef: string, options: CloudflareCallOptions): Promise<DnsRecord[]> {
     const records = await this.client.paginate<unknown>(token, `/zones/${zoneRef}/dns_records`, { 'name.startswith': CHECK_NAME_PREFIX }, 100, options);
     if (!records.every(isObject)) throw malformed('a record list');

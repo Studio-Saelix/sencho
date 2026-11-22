@@ -113,7 +113,8 @@ function parseLastCheck(text: string): LastCheck {
  * A NULL column is no journal. Each field of a stored journal is kept on its own merits, so a damaged
  * description never costs the record id: a valid id is a handle by itself, and a name counts only when it
  * is a check name in this zone. Content that is missing or not text becomes `UNKNOWN_CHECK_CONTENT`, which
- * matches no record, so such a journal never deletes by content but still settles once its name is empty.
+ * matches no record, so such a journal never deletes by content but still settles once the zone holds no
+ * check record.
  * A journal with neither an id nor a usable name is unreadable, never an empty one.
  */
 function parsePending(text: string | null, zoneName: string): { pending: PendingScopeCheck | null; unreadable: boolean } {

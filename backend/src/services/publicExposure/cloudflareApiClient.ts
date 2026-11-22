@@ -10,11 +10,12 @@ import { redactSensitiveText } from '../../utils/safeLog';
  * of a `messages` entry is kept when it is a string, or an object with a string
  * `message`; `errors` on a success is checked for shape and its text is not read),
  * complete pagination (a listing without search parameters must reach the total_pages and
- * total_count it declared, and one with search parameters is held to them as ceilings, since
- * Cloudflare documents them without the search; either way the per_page, total_pages and total_count
- * a listing declared on any page bind all of its pages, and a repeated item, a page longer than the
- * page size or an empty last page after several declared pages is refused; a refusal on a page after
- * the first is reported as an unreadable answer),
+ * total_count it declared, and they must agree; one with search parameters reads every page its
+ * total_pages declares, since a search can leave pages empty, and holds total_count only as a
+ * ceiling, since Cloudflare documents it without the search; either way the per_page, total_pages and
+ * total_count a listing declared on any page bind all of its pages, and a repeated item or a page longer
+ * than the page size is refused, as is, without search parameters, an empty last page after several
+ * declared pages; a refusal on a page after the first is reported as an unreadable answer),
  * with a page cap, bounded retries with
  * full jitter that honour `Retry-After`,
  * permanent non-429 4xx, a timeout for each attempt and for the caller's
@@ -290,7 +291,7 @@ function expectedPages(state: ListingState, pageSize: number): number | undefine
  * A listing never holds more items than its total_count (Cloudflare documents the total as it stands without
  * search parameters, so a filtered listing can hold fewer). Only a listing without search parameters also has
  * total_pages and total_count describe one count, so they must agree with each other and with the page size;
- * a filtered listing's total_pages counts what the search matched and total_count what it did not filter.
+ * a filtered listing's totals are not taken to describe the same set, so they are not compared.
  */
 function assertCountsAgree(state: ListingState, collected: number, pageSize: number, filtered: boolean): void {
   const { totalPages, totalCount } = state;
@@ -405,7 +406,7 @@ export class CloudflareApiClient {
       const full = response.result.length >= pageSize;
 
       if (filtered) {
-        if (this.filteredListingContinues(state, page, items.length, response.result.length, full)) continue;
+        if (this.filteredListingContinues(state, page, items.length, full)) continue;
         return completeListing(items, state, filtered);
       }
 
@@ -427,16 +428,15 @@ export class CloudflareApiClient {
   /**
    * Whether a filtered listing has a page after this one. Cloudflare documents total_count as it stands
    * without the search, so it only caps a filtered listing, and a total_pages derived from it can claim
-   * pages the search never fills. A declared total_pages therefore decides only that more pages are worth
-   * asking for: a short or empty page before the last declared one is never taken for the end (an empty
-   * first page can hide matches on page two), and an empty page after the first is. Without total_pages a
-   * short or empty page is the last one, and a full page asks for the next.
+   * pages the search never fills. A declared total_pages is therefore read in full: a short or empty page,
+   * the first or a later one, can sit before a page that holds a match, and no page stands in for the pages
+   * after it. Without total_pages, a short or empty page is the last one, and a full page asks for the next.
    */
-  private filteredListingContinues(state: ListingState, page: number, collected: number, pageLength: number, full: boolean): boolean {
+  private filteredListingContinues(state: ListingState, page: number, collected: number, full: boolean): boolean {
     const { totalPages, totalCount } = state;
     // The most the search can match: nothing more can follow once it is collected.
     if (totalCount !== undefined && collected >= totalCount) return false;
-    if (totalPages !== undefined) return page < totalPages && (page === 1 || pageLength > 0);
+    if (totalPages !== undefined) return page < totalPages;
     if (!full) return false;
     // A full page says nothing about what follows, so it needs a declared total to rest on.
     if (totalCount === undefined) {

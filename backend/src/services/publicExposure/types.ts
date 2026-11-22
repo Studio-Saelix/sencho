@@ -103,11 +103,11 @@ export const UNKNOWN_CHECK_CONTENT = '';
 
 /** Journaled intent of a permission-check TXT record, kept until its delete is proven. */
 export interface PendingScopeCheck {
-  /** The journaled record name, or null when the stored one is not a check name in this zone (cleanup then looks at the name this instance would use). */
+  /** The journaled record name, or null when the stored one is not a check name in this zone (only a journal that kept a valid id has none; with no id either, the column counts as unreadable). */
   name: string | null;
   /** The journaled content; `UNKNOWN_CHECK_CONTENT` when the stored one is missing or not text (no record is then matched by content). */
   content: string;
-  /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by name and content, when the journal kept both). */
+  /** A valid Cloudflare id, or null when none was kept or the stored one was not a valid id (the record is then found by content among the check records at the journaled name when that is the name this instance uses now, and among every check record in the zone otherwise). */
   recordId: string | null;
   /**
    * When the intent was journaled; 0 when the stored value was missing or not a
