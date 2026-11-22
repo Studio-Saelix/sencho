@@ -83,7 +83,7 @@ function readStatsSample(data: {
 }
 
 type StreamStop = 'stream-error' | 'stream-end';
-type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | 'stream-error';
+type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | StreamStop;
 
 /**
  * Names the frame the backend sends when the Docker stats stream itself fails
@@ -92,10 +92,8 @@ type FailureKind = 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create' | 'str
  * Docker stats sample has no such key. The backend keeps the socket open after
  * either frame, so neither reaches the socket's error or close handler, and the
  * stream delivers no more samples. Docker ends the stream when the container is
- * removed; a stop or restart keeps it open. An error frame is a failure at once.
- * An end frame is only a failure when the container is still listed as running
- * once the list refreshes, because every removal (Take down, a recreate on Save &
- * Deploy, an update or a rollback) ends the stream before the list catches up.
+ * removed; a stop or restart keeps it open. The caller decides what each kind
+ * means: see the frame handler.
  */
 function readStreamStop(frame: unknown): { kind: StreamStop; detail?: unknown } | null {
   if (typeof frame !== 'object' || frame === null) return null;
@@ -131,9 +129,9 @@ export function useContainerStats(
   const [failures, setFailures] = useState<StreamFailures>({ nodeId: activeNodeId, ids: NO_IDS });
   const failedIds = failures.nodeId === activeNodeId ? failures.ids : NO_IDS;
   // IDs whose stream sent an end frame since the last list, with the node they
-  // were seen on. The next list decides what each one meant: gone or stopped is a
-  // removal and drops it, still running is a stream that died, which is promoted
-  // to a failure. Kept in a ref so the pending verdict never renders the chip.
+  // were seen on. The next list decides what each one meant: gone or no longer
+  // running is a removal and drops it, still running is a stream that died, which
+  // is promoted to a failure. Kept in a ref so a pending end never renders the chip.
   const endedRef = useRef<{ nodeId: number | null | undefined; ids: Set<string> }>({ nodeId: activeNodeId, ids: new Set() });
 
   const pendingStatsRef = useRef<Record<string, {
@@ -153,25 +151,27 @@ export function useContainerStats(
     let disposed = false;
     // Track which WSs have already emitted a console.warn for the lifetime of
     // this effect, so a flaky daemon does not spam the console at message rate.
+    // A settled end logs once more, at most once per end, outside this set.
     const warnedOnce = new Set<string>();
 
     const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
-    // A node switch drops every failure. Opening another stack starts clean, and
-    // a container this list shows as stopped or gone loses its flag, so its next
-    // run starts clean. A container that stays listed as running keeps its flag
-    // until a valid sample arrives, which also covers a restart (running to
-    // running, same ID): the new stream's first valid sample clears it.
     const runningIds = new Set((containers || []).flatMap(c => (c?.Id && c.State === 'running' ? [c.Id] : [])));
     // An end frame seen since the last list is settled by this one: a container
-    // that is still running lost its stream and joins the failures, the rest were
-    // removed or stopped and are forgotten.
+    // that is still running has no live stream and joins the failures, the rest
+    // were removed or are no longer running and are forgotten, as is an end seen
+    // on another node.
     const ended = endedRef.current;
     const endedStillRunning = ended.nodeId === activeNodeId ? [...ended.ids].filter(id => runningIds.has(id)) : [];
     endedRef.current = { nodeId: activeNodeId, ids: new Set() };
     for (const id of endedStillRunning) {
       console.warn('[useContainerStats] stats stream failure:', { kind: 'stream-end', containerId: id });
     }
+    // A node switch drops every failure. Opening another stack starts clean, and
+    // a container this list shows as stopped or gone loses its flag, so its next
+    // run starts clean. A container that stays listed as running keeps its flag
+    // until a valid sample arrives, which also covers a restart (running to
+    // running, same ID): the new stream's first valid sample clears it.
     // Clearing everything on each containers-array identity change (the
     // dashboard's refresh cadence) would make the warning visibly flap against a
     // persistently-flaky daemon, so a refresh drops only what the list contradicts.
@@ -238,20 +238,17 @@ export function useContainerStats(
           if (disposed) return;
           try {
             const frame = JSON.parse(event.data);
-            // A stream that failed or ended keeps its last reading on screen
-            // (a sample already queued can still land on the next flush), so
-            // the warning marks the readings as stale until a valid sample arrives.
             const stop = readStreamStop(frame);
             if (stop?.kind === 'stream-end') {
               // Docker ends the stream on every removal, so this is only noted:
               // the next list says whether the container is really gone.
-              if (container.State === 'running') {
-                if (endedRef.current.nodeId !== activeNodeId) endedRef.current = { nodeId: activeNodeId, ids: new Set() };
-                endedRef.current.ids.add(container.Id);
-              }
+              if (container.State === 'running') endedRef.current.ids.add(container.Id);
               return;
             }
             if (stop) {
+              // A stream that failed keeps its last reading on screen (a sample
+              // already queued can still land on the next flush), so the warning
+              // marks the readings as stale until a valid sample arrives.
               recordFailure(stop.kind, stop.detail);
               return;
             }

@@ -163,8 +163,10 @@ describe('useContainerStats', () => {
     };
 
     // Same as setup, recording the error of every render so a test can assert
-    // that the chip never showed, not only that it is gone at the end.
-    const setupEnded = (initial: ContainerInfo[]) => {
+    // that the chip never showed, not only that it is gone at the end. The
+    // effects that drop a stale flag run after the render, so errors[0] after a
+    // rerender is the first render, before any effect has pruned the flag.
+    const setupRecording = (initial: ContainerInfo[]) => {
       vi.useRealTimers();
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const errors: Array<string | null> = [];
@@ -627,26 +629,8 @@ describe('useContainerStats', () => {
     });
 
     describe('container state changes', () => {
-      // The effects that drop a stale flag run after the render, so only the
-      // render-time guards (the running-state filter and the node tag) keep the chip
-      // out of the first render after a list or node change. Record every render's
-      // error: errors[0] after the rerender is that first render, before any effect
-      // has pruned the flag.
-      const setupRecording = (initial: ContainerInfo[]) => {
-        vi.useRealTimers();
-        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        const errors: Array<string | null> = [];
-        const hook = renderHook(
-          ({ containers, nodeId }: Props) => {
-            const r = useContainerStats(containers, nodeId);
-            errors.push(r.error);
-            return r;
-          },
-          { initialProps: { containers: initial, nodeId: 1 } as Props },
-        );
-        return { ...hook, errors, warnSpy };
-      };
-
+      // Only the render-time guards (the running-state filter and the node tag)
+      // keep the chip out of the first render after a list or node change.
       it.each(['created', 'restarting', 'removing', 'paused', 'exited', 'dead'])(
         'shows no chip on the first render after a failed running container is listed as %s',
         (state) => {
@@ -899,8 +883,8 @@ describe('useContainerStats', () => {
       });
 
       // Docker ends a container's stats stream when the container is removed, so
-      // every Take down, every Save & Deploy that recreates a running container,
-      // and every update, rollback or host-side removal sends an end frame for a
+      // every Take down, every Save & Deploy, update or rollback that recreates a
+      // running container, and every host-side removal sends an end frame for a
       // healthy node. The chip is for a stream that died while its container
       // lives, which only the next container list can tell.
       describe('an end frame', () => {
@@ -914,11 +898,10 @@ describe('useContainerStats', () => {
         });
 
         it('never shows the chip when the next list no longer has the container (Take down)', () => {
-          const { result, rerender, errors, warnSpy } = setupEnded([makeContainer('c1'), makeContainer('c2')]);
+          const { result, rerender, errors, warnSpy } = setupRecording([makeContainer('c1'), makeContainer('c2')]);
           act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
           act(() => { MockWS.instances[1].onmessage?.({ data: endFrame }); });
 
-          errors.length = 0;
           rerender({ containers: [], nodeId: 1 });
 
           expect(errors.every(e => e === null)).toBe(true);
@@ -928,12 +911,11 @@ describe('useContainerStats', () => {
         });
 
         it('never shows the chip when the next list holds a recreated container under a new ID (Save & Deploy)', () => {
-          const { result, rerender, errors, warnSpy } = setupEnded([makeContainer('old-web'), makeContainer('db')]);
+          const { result, rerender, errors, warnSpy } = setupRecording([makeContainer('old-web'), makeContainer('db')]);
           act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
 
-          errors.length = 0;
           rerender({ containers: [makeContainer('new-web'), makeContainer('db')], nodeId: 1 });
-          act(() => { MockWS.instances[3].onmessage?.({ data: validSample }); });
+          act(() => { MockWS.instances[2].onmessage?.({ data: validSample }); });
 
           expect(errors.every(e => e === null)).toBe(true);
           expect(result.current.error).toBeNull();
@@ -1017,11 +999,65 @@ describe('useContainerStats', () => {
           warnSpy.mockRestore();
         });
 
-        it('does not settle an end seen on node 2 against a later list for node 1', () => {
-          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
-          rerender({ containers: [makeContainer('c1')], nodeId: 2 });
-          act(() => { MockWS.instances[1].onmessage?.({ data: endFrame }); });
+        it('ignores an end frame from a container that was not running, even when the next list runs it', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1', 'exited')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
           rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+          expect(result.current.error).toBeNull();
+          expect(warnSpy).not.toHaveBeenCalled();
+          warnSpy.mockRestore();
+        });
+
+        it('keeps a pending end through a frame that is not a valid sample', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1')]);
+          const ws = MockWS.instances[0];
+          act(() => { ws.onmessage?.({ data: endFrame }); });
+          act(() => { ws.onmessage?.({ data: noMemorySample }); });
+
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+          expect(result.current.error).toMatch(/unavailable/);
+          warnSpy.mockRestore();
+        });
+
+        it('logs one warning for a container whose end frame arrives twice', () => {
+          const { rerender, warnSpy } = setup([makeContainer('c1')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+
+          rerender({ containers: [makeContainer('c1')], nodeId: 1 });
+
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+          warnSpy.mockRestore();
+        });
+
+        it('raises the chip only for the ended container the list still runs', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          act(() => { MockWS.instances[1].onmessage?.({ data: endFrame }); });
+
+          rerender({ containers: [makeContainer('c2')], nodeId: 1 });
+
+          expect(result.current.error).toMatch(/unavailable/);
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+          expect(warnSpy).toHaveBeenCalledWith(
+            '[useContainerStats] stats stream failure:',
+            { kind: 'stream-end', containerId: 'c2' },
+          );
+          warnSpy.mockRestore();
+        });
+
+        // A list fetched before the removal can land after the end frame. The
+        // chip then shows until the next list, which no longer has the container.
+        it('clears a chip a stale list raised once the next list drops the container', () => {
+          const { result, rerender, warnSpy } = setup([makeContainer('c1'), makeContainer('c2')]);
+          act(() => { MockWS.instances[0].onmessage?.({ data: endFrame }); });
+          rerender({ containers: [makeContainer('c1'), makeContainer('c2')], nodeId: 1 });
+          expect(result.current.error).toMatch(/unavailable/);
+
+          rerender({ containers: [makeContainer('c2')], nodeId: 1 });
 
           expect(result.current.error).toBeNull();
           warnSpy.mockRestore();
