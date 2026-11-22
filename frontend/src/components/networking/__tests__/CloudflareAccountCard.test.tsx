@@ -68,13 +68,13 @@ beforeEach(() => {
   flags.isAdmin = true;
 });
 
-/** The dialog's accessible description is `sr-only`: a consequence a sighted operator must read has to live outside it. */
+/**
+ * ConfirmModal renders `description` in an `sr-only` node for screen readers. A consequence a sighted
+ * operator must read also has to sit in the dialog body, so at least one match must be outside `.sr-only`.
+ */
 function expectVisibleInDialog(text: string | RegExp, dialog: HTMLElement) {
-  const found = within(dialog).getAllByText(text);
-  expect(found.length).toBeGreaterThan(0);
-  for (const node of found) {
-    expect(node.closest('.sr-only')).toBeNull();
-  }
+  const visible = within(dialog).getAllByText(text).filter((node) => node.closest('.sr-only') === null);
+  expect(visible.length).toBeGreaterThan(0);
 }
 
 describe('CloudflareAccountCard', () => {
@@ -209,8 +209,7 @@ describe('CloudflareAccountCard', () => {
     await user.click(within(answer).getByRole('button', { name: 'Choose zones' }));
 
     await user.click(await screen.findByRole('switch', { name: 'Enable example.com' }));
-    expect(await screen.findByText(/any unclaimed name in example.com, including example.com itself/)).toBeInTheDocument();
-    expectVisibleInDialog(/Stack editors can then claim any unclaimed name in example.com/, screen.getByRole('alertdialog'));
+    expectVisibleInDialog(/Stack editors can then claim any unclaimed name in example.com/, await screen.findByRole('alertdialog'));
     expect(apiFetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/public-exposure/zones/'), expect.anything());
 
     await user.click(screen.getByRole('button', { name: /add suffix/i }));
@@ -242,8 +241,7 @@ describe('CloudflareAccountCard', () => {
     await screen.findByTestId('cloudflare-account-answer');
     await user.click(screen.getByRole('button', { name: 'Manage account' }));
     await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
-    expect(await screen.findByText(/nothing else is deleted there, and the token stays valid until you revoke it/)).toBeInTheDocument();
-    expectVisibleInDialog(/nothing else is deleted there, and the token stays valid until you revoke it/, screen.getByRole('alertdialog'));
+    expectVisibleInDialog(/nothing else is deleted there, and the token stays valid until you revoke it/, await screen.findByRole('alertdialog'));
     expect(apiFetchMock).not.toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE' }));
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE', localOnly: true })));

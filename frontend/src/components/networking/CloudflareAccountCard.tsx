@@ -14,6 +14,9 @@ import { CloudflareAccountSheet, type CloudflareSheetMode, type CloudflareSheetT
 
 const KICKER = 'Public exposure · Control instance';
 
+/** ConfirmModal's `description` is screen-reader-only, so the same sentence is also a visible body child. */
+const DNS_CHECK_CONSEQUENCE = 'Sencho proves the token can edit DNS by creating one record and deleting it right away.';
+
 /** Seconds until a rate-limited Recheck may run again, counting down once a second while it waits. */
 function useRecheckWait(account: PublicExposureAccount): number {
   const view = account.view;
@@ -130,6 +133,7 @@ export function CloudflareAccountCard({ account, className }: { account: PublicE
         onOpenChange={(open) => { if (!open) setDnsCheckZone(null); }}
         kicker="Cloudflare · DNS write check"
         title={dnsCheckZone ? `Check DNS write in ${dnsCheckZone.name}` : 'Check DNS write'}
+        description={DNS_CHECK_CONSEQUENCE}
         confirmLabel="Check DNS write"
         busyConfirmLabel="Checking…"
         confirmDisabled={!dnsCheckZone?.checkRecordName}
@@ -140,9 +144,7 @@ export function CloudflareAccountCard({ account, className }: { account: PublicE
           setDnsCheckZone(null);
         }}
       >
-        <p className="text-sm text-stat-subtitle" data-testid="dns-check-consequence">
-          Sencho proves the token can edit DNS by creating one record and deleting it right away.
-        </p>
+        <p className="text-sm text-stat-subtitle" data-testid="dns-check-consequence">{DNS_CHECK_CONSEQUENCE}</p>
         {dnsCheckZone && (
           <dl data-testid="dns-check-preview" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-[11px]">
             <dt className="text-stat-subtitle">Record</dt>

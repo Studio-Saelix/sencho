@@ -61,6 +61,6 @@ describe('SystemSheet breadcrumb', () => {
     const nav = screen.getByRole('navigation', { name: 'Sheet location' });
     // jsdom has no layout, so the guard is the classes that make the row wrap and reserve the keycap's room.
     expect(nav).toHaveClass('flex-wrap');
-    expect(nav).toHaveClass('pr-10');
+    expect(nav).toHaveClass('pr-7');
   });
 });

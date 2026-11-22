@@ -15,6 +15,13 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { suffixProblem } from '@/lib/exposureHostnames';
 import { AccountStatusPath } from './CloudflareAccountStatusPath';
 
+/**
+ * ConfirmModal renders `description` only for screen readers, so each consequence is also a visible body
+ * child; both read from one constant so the two cannot drift.
+ */
+const DISCONNECT_CONSEQUENCE =
+  'Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending (when its zone can no longer be reached, the disconnect still goes through and names the record that stays); nothing else is deleted there, and the token stays valid until you revoke it.';
+
 export type CloudflareSheetMode = 'view' | 'connect' | 'replace';
 export type CloudflareSheetTab = 'overview' | 'zones';
 
@@ -100,6 +107,7 @@ export function CloudflareAccountSheet({
         variant="destructive"
         kicker="Cloudflare · Disconnect"
         title="Disconnect the Cloudflare account"
+        description={DISCONNECT_CONSEQUENCE}
         confirmLabel="Disconnect"
         busyConfirmLabel="Disconnecting…"
         confirming={account.pending === 'disconnect'}
@@ -109,9 +117,7 @@ export function CloudflareAccountSheet({
           if (done) onOpenChange(false);
         }}
       >
-        <p className="text-sm text-stat-subtitle" data-testid="disconnect-consequence">
-          Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending (when its zone can no longer be reached, the disconnect still goes through and names the record that stays); nothing else is deleted there, and the token stays valid until you revoke it.
-        </p>
+        <p className="text-sm text-stat-subtitle" data-testid="disconnect-consequence">{DISCONNECT_CONSEQUENCE}</p>
       </ConfirmModal>
     </>
   );
@@ -290,6 +296,8 @@ function ZoneEnableModal({ zone, account, onClose }: ZoneEnableModalProps) {
   const invalid = problems.some(Boolean);
   const claimable = cleaned.length > 0 ? `names under: ${[...new Set(cleaned)].join(', ')}` : `any unclaimed name in ${zone.name}, including ${zone.name} itself`;
 
+  const consequence = `Stack editors can then claim ${claimable}.`;
+
   return (
     <ConfirmModal
       open
@@ -297,6 +305,7 @@ function ZoneEnableModal({ zone, account, onClose }: ZoneEnableModalProps) {
       size="md"
       kicker="Cloudflare · Zone"
       title={zone.enabled ? `Suffixes for ${zone.name}` : `Enable ${zone.name}`}
+      description={consequence}
       confirmLabel={zone.enabled ? 'Save suffixes' : 'Enable zone'}
       busyConfirmLabel="Saving…"
       confirming={account.pending === 'zone'}
@@ -306,7 +315,7 @@ function ZoneEnableModal({ zone, account, onClose }: ZoneEnableModalProps) {
         if (!failed) onClose();
       }}
     >
-      <p className="text-sm text-stat-subtitle" data-testid="zone-enable-consequence">Stack editors can then claim {claimable}.</p>
+      <p className="text-sm text-stat-subtitle" data-testid="zone-enable-consequence">{consequence}</p>
       <div className="flex flex-col gap-2" data-testid="zone-suffix-editor">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">Hostname suffixes (optional)</span>
         {suffixes.map((suffix, index) => (
