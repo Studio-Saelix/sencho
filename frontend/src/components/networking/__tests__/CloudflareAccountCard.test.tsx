@@ -68,6 +68,15 @@ beforeEach(() => {
   flags.isAdmin = true;
 });
 
+/** The dialog's accessible description is `sr-only`: a consequence a sighted operator must read has to live outside it. */
+function expectVisibleInDialog(text: string | RegExp, dialog: HTMLElement) {
+  const found = within(dialog).getAllByText(text);
+  expect(found.length).toBeGreaterThan(0);
+  for (const node of found) {
+    expect(node.closest('.sr-only')).toBeNull();
+  }
+}
+
 describe('CloudflareAccountCard', () => {
   it('renders nothing and fetches nothing without the experimental flag', () => {
     flags.experimental = false;
@@ -134,6 +143,7 @@ describe('CloudflareAccountCard', () => {
     expect(preview).toHaveTextContent('_sencho-check-0123456789abcdef.example.com');
     expect(preview).toHaveTextContent('TXT · TTL 60');
     expect(preview).toHaveTextContent('Deleted right away');
+    expectVisibleInDialog(/creating one record and deleting it right away/, screen.getByRole('alertdialog'));
     expect(apiFetchMock).not.toHaveBeenCalledWith('/public-exposure/account/dns-check', expect.anything());
 
     await user.click(screen.getByRole('button', { name: 'Check DNS write' }));
@@ -200,6 +210,7 @@ describe('CloudflareAccountCard', () => {
 
     await user.click(await screen.findByRole('switch', { name: 'Enable example.com' }));
     expect(await screen.findByText(/any unclaimed name in example.com, including example.com itself/)).toBeInTheDocument();
+    expectVisibleInDialog(/Stack editors can then claim any unclaimed name in example.com/, screen.getByRole('alertdialog'));
     expect(apiFetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/public-exposure/zones/'), expect.anything());
 
     await user.click(screen.getByRole('button', { name: /add suffix/i }));
@@ -208,7 +219,7 @@ describe('CloudflareAccountCard', () => {
     expect(screen.getByRole('button', { name: 'Enable zone' })).toBeDisabled();
     await user.clear(screen.getByLabelText('Suffix 1'));
     await user.type(screen.getByLabelText('Suffix 1'), 'Apps.Example.com');
-    expect(screen.getByText(/names under: apps.example.com/)).toBeInTheDocument();
+    expectVisibleInDialog(/names under: apps.example.com/, screen.getByRole('alertdialog'));
     await user.click(screen.getByRole('button', { name: 'Enable zone' }));
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith(
       `/public-exposure/zones/${ZONE}`,
@@ -232,6 +243,7 @@ describe('CloudflareAccountCard', () => {
     await user.click(screen.getByRole('button', { name: 'Manage account' }));
     await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
     expect(await screen.findByText(/nothing else is deleted there, and the token stays valid until you revoke it/)).toBeInTheDocument();
+    expectVisibleInDialog(/nothing else is deleted there, and the token stays valid until you revoke it/, screen.getByRole('alertdialog'));
     expect(apiFetchMock).not.toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE' }));
     await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/public-exposure/account', expect.objectContaining({ method: 'DELETE', localOnly: true })));

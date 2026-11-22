@@ -171,7 +171,7 @@ function SheetHeaderBand({ crumb, name, meta, onDismiss }: SheetHeaderBandProps)
     <div className="relative bg-popover/95 backdrop-blur-md border-b border-card-border/60 px-6 pt-5 pb-4 pr-14" data-sn-glass="panel">
       <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" />
 
-      <nav aria-label="Sheet location" className={cn(CRUMB_CLASS, 'flex items-center gap-1.5 leading-none')}>
+      <nav aria-label="Sheet location" className={cn(CRUMB_CLASS, 'flex flex-wrap items-center gap-x-1.5 gap-y-1.5 pr-10 leading-none')}>
         {crumb.map((segment, idx) => {
           const isFirst = idx === 0;
           const isLast = idx === lastIdx;

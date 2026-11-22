@@ -130,7 +130,6 @@ export function CloudflareAccountCard({ account, className }: { account: PublicE
         onOpenChange={(open) => { if (!open) setDnsCheckZone(null); }}
         kicker="Cloudflare · DNS write check"
         title={dnsCheckZone ? `Check DNS write in ${dnsCheckZone.name}` : 'Check DNS write'}
-        description="Sencho proves the token can edit DNS by creating one record and deleting it right away."
         confirmLabel="Check DNS write"
         busyConfirmLabel="Checking…"
         confirmDisabled={!dnsCheckZone?.checkRecordName}
@@ -141,6 +140,9 @@ export function CloudflareAccountCard({ account, className }: { account: PublicE
           setDnsCheckZone(null);
         }}
       >
+        <p className="text-sm text-stat-subtitle" data-testid="dns-check-consequence">
+          Sencho proves the token can edit DNS by creating one record and deleting it right away.
+        </p>
         {dnsCheckZone && (
           <dl data-testid="dns-check-preview" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-[11px]">
             <dt className="text-stat-subtitle">Record</dt>

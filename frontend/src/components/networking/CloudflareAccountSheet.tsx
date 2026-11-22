@@ -100,7 +100,6 @@ export function CloudflareAccountSheet({
         variant="destructive"
         kicker="Cloudflare · Disconnect"
         title="Disconnect the Cloudflare account"
-        description="Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending (when its zone can no longer be reached, the disconnect still goes through and names the record that stays); nothing else is deleted there, and the token stays valid until you revoke it."
         confirmLabel="Disconnect"
         busyConfirmLabel="Disconnecting…"
         confirming={account.pending === 'disconnect'}
@@ -109,7 +108,11 @@ export function CloudflareAccountSheet({
           setConfirmDisconnect(false);
           if (done) onOpenChange(false);
         }}
-      />
+      >
+        <p className="text-sm text-stat-subtitle" data-testid="disconnect-consequence">
+          Sencho removes the token and the zone choices from this control instance. In Cloudflare it deletes only a leftover permission-check record, if one is pending (when its zone can no longer be reached, the disconnect still goes through and names the record that stays); nothing else is deleted there, and the token stays valid until you revoke it.
+        </p>
+      </ConfirmModal>
     </>
   );
 }
@@ -294,7 +297,6 @@ function ZoneEnableModal({ zone, account, onClose }: ZoneEnableModalProps) {
       size="md"
       kicker="Cloudflare · Zone"
       title={zone.enabled ? `Suffixes for ${zone.name}` : `Enable ${zone.name}`}
-      description={`Stack editors can then claim ${claimable}.`}
       confirmLabel={zone.enabled ? 'Save suffixes' : 'Enable zone'}
       busyConfirmLabel="Saving…"
       confirming={account.pending === 'zone'}
@@ -304,6 +306,7 @@ function ZoneEnableModal({ zone, account, onClose }: ZoneEnableModalProps) {
         if (!failed) onClose();
       }}
     >
+      <p className="text-sm text-stat-subtitle" data-testid="zone-enable-consequence">Stack editors can then claim {claimable}.</p>
       <div className="flex flex-col gap-2" data-testid="zone-suffix-editor">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">Hostname suffixes (optional)</span>
         {suffixes.map((suffix, index) => (
