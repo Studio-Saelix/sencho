@@ -141,6 +141,14 @@ function malformed(what: string): CloudflareApiError {
   return new CloudflareApiError({ kind: 'invalid_response', message: `Cloudflare answered without ${what} Sencho could read.` });
 }
 
+/** A DNS name as a zone lists it: dot-separated labels of letters, digits, `_`, `*` and `-`, with at most one trailing dot. Blank text, spaces and every other shape do not read as a name. */
+const DNS_NAME = /^(?:[a-z0-9_*-]{1,63}\.)*[a-z0-9_*-]{1,63}\.?$/i;
+const MAX_DNS_NAME_LENGTH = 254;
+
+function isReadableDnsName(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_DNS_NAME_LENGTH && DNS_NAME.test(value);
+}
+
 interface DnsRecord {
   id?: unknown;
   type?: unknown;
@@ -550,12 +558,17 @@ export class CloudflareAccountAdapter {
     return this.checkRecordsInZone(token, zoneRef, options);
   }
 
-  /** Every record in the zone whose name starts with the check label, whichever control identity wrote it; a record with no readable name is kept too, since it may be one. */
+  /**
+   * Every record in the zone whose name starts with the check label, whichever control identity wrote it. A
+   * record whose name cannot be read as a DNS name (missing, not text, empty, blank or not shaped like a name)
+   * is kept too, since it may be one: only a readable name that plainly is not a check name is dropped, so a
+   * provider that ignored the filter cannot make every record in the zone look like a check record, and an
+   * unreadable name can never turn a surviving record into an empty listing.
+   */
   private async checkRecordsInZone(token: string, zoneRef: string, options: CloudflareCallOptions): Promise<DnsRecord[]> {
     const records = await this.client.paginate<unknown>(token, `/zones/${zoneRef}/dns_records`, { 'name.startswith': CHECK_NAME_PREFIX }, 100, options);
     if (!records.every(isObject)) throw malformed('a record list');
-    // A provider that ignored the filter must not make every record in the zone look like a check record.
-    return (records as DnsRecord[]).filter((r) => typeof r.name !== 'string' || r.name.toLowerCase().startsWith(CHECK_NAME_PREFIX));
+    return (records as DnsRecord[]).filter((r) => !isReadableDnsName(r.name) || r.name.toLowerCase().startsWith(CHECK_NAME_PREFIX));
   }
 
   private async deleteRecord(token: string, zoneRef: string, recordId: string, options: CloudflareCallOptions): Promise<void> {

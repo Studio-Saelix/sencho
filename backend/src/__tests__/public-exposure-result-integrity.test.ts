@@ -30,6 +30,7 @@ let Service: typeof import('../services/publicExposure/PublicExposureAccountServ
 let PublicExposureError: typeof import('../services/publicExposure/types').PublicExposureError;
 let cloudflareApiClient: typeof import('../services/publicExposure/cloudflareApiClient').cloudflareApiClient;
 let FleetSyncService: typeof import('../services/FleetSyncService').FleetSyncService;
+let Adapter: typeof import('../services/publicExposure/cloudflareAccountAdapter').CloudflareAccountAdapter;
 
 const actor = { username: 'admin', ip: '127.0.0.1', method: 'PUT', path: '/api/public-exposure/account' };
 const CONTROL_ID = '0123456789abcdef';
@@ -133,6 +134,7 @@ beforeAll(async () => {
   ({ PublicExposureError } = await import('../services/publicExposure/types'));
   ({ cloudflareApiClient } = await import('../services/publicExposure/cloudflareApiClient'));
   ({ FleetSyncService } = await import('../services/FleetSyncService'));
+  ({ CloudflareAccountAdapter: Adapter } = await import('../services/publicExposure/cloudflareAccountAdapter'));
 });
 
 afterAll(() => {
@@ -800,6 +802,118 @@ describe('a journal whose description is damaged', () => {
       await run(caller);
       expect(journal()).toBe('{');
       expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+    });
+  });
+
+  // A zone-wide listing can carry a record whose name is text that does not read as a DNS name. Such an entry is
+  // unreadable evidence, not an absent record: it keeps the journal in every caller, in every journal form that looks in
+  // the whole zone, and it survives a restart and the late-create window.
+  describe('a zone-wide listing with a record whose name is text that does not read as a DNS name', () => {
+    const MALFORMED_NAMES: Array<[string, string]> = [
+      ['an empty name', ''], ['a blank name', '   '], ['text with spaces', 'not a dns name'],
+      ['a check name with a leading space', ` ${OLD_NAME}`], ['a check name with a trailing newline', `${OLD_NAME}\n`],
+      ['a name with a control character', `_sencho-check-0ld\u0000.example.com`], ['an empty label', `_sencho-check-0ld..example.com`],
+      ['a name longer than any DNS name', `_sencho-check-${'a'.repeat(300)}.example.com`],
+    ];
+    const INFO = { page: 1, per_page: 100, count: 1, total_pages: 1, total_count: 1 };
+    const seedAtOld = (content = '"x"') => fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content }]);
+    const deletes = () => fake.requests.filter((r) => r.startsWith('DELETE'));
+
+    /** Each form of a journal that has to look in the whole zone and carries no content that proves a record is ours. */
+    const FORMS: Array<[string, () => string]> = [
+      ['a historical name with no content', () => mk(OLD_NAME, undefined, undefined)],
+      ['a historical name with content no record carries', () => mk(OLD_NAME, 'sencho-scope-check:ffffffffffffffff', undefined)],
+      ['the current name with no content', () => mk(CHECK_NAME, undefined, undefined)],
+      ['a damaged name', () => mk(['x'], CONTENT, undefined)],
+    ];
+
+    describe.each(CALLERS)('through %s', (caller) => {
+      describe.each(FORMS)('with a journal that has %s', (_form, makeJournal) => {
+        it.each(MALFORMED_NAMES)('keeps the journal, the record and the account when the record has %s', async (_label, name) => {
+          await connectWithZoneA();
+          seedAtOld();
+          setJournal(makeJournal());
+          intercept(pages(atCheckPrefix, [success([{ id: RECORD_ID, type: 'TXT', name, content: '"x"' }], INFO)]));
+          for (let i = 0; i < 3; i += 1) await run(caller);
+          expect(journal()).not.toBeNull();
+          expect(hasRecord(RECORD_ID)).toBe(true);
+          expect(deletes()).toEqual([]);
+          // No new check record is created over cleanup that did not finish, and Disconnect did not drop the account.
+          expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+          expect(service.getView().connected).toBe(true);
+          if (caller === 'disconnect') expect((await refusal(service.disconnect(actor))).code).toBe('CLEANUP_PENDING');
+        });
+      });
+
+      it.each(MALFORMED_NAMES)('deletes the record by the journal\'s own content when it has %s and carries that content', async (_label, name) => {
+        await connectWithZoneA();
+        seedAtOld(`"${CONTENT}"`);
+        setJournal(mk(OLD_NAME, CONTENT, undefined));
+        intercept(pages(atCheckPrefix, [success([{ id: RECORD_ID, type: 'TXT', name, content: `"${CONTENT}"` }], INFO)]));
+        await run(caller);
+        expect(hasRecord(RECORD_ID)).toBe(false);
+        // A DNS check goes on to create and delete its own record once the journal is settled; no other old record is touched.
+        expect(deletes()).toContain(`DELETE /zones/${ZONE_A}/dns_records/${RECORD_ID}`);
+        if (caller === 'disconnect') expect(service.getView()).toEqual({ connected: false });
+        else expect(journal()).toBeNull();
+      });
+
+      it.each(['www.example.com', 'WWW.Example.COM.', '*.example.com', '_dmarc.example.com'])('still drops the readable name %s that is not a check name, so a provider that ignored the filter does not hold the journal', async (name) => {
+        await connectWithZoneA();
+        fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'A', name, content: '192.0.2.1' }]);
+        setJournal(mk(OLD_NAME, undefined, undefined));
+        intercept(pages(atCheckPrefix, [success([{ id: RECORD_ID, type: 'A', name, content: '192.0.2.1' }], INFO)]));
+        if (caller === 'disconnect') expect(await service.disconnect(actor)).toEqual({ leftInCloudflare: [] });
+        else { await run(caller); expect(journal()).toBeNull(); }
+        expect(hasRecord(RECORD_ID)).toBe(true);
+      });
+
+      it.each(MALFORMED_NAMES)('keeps an unreadable column across a restart and past the late-create window when the record has %s, and settles once the record is gone', async (_label, name) => {
+        await connectWithZoneA();
+        seedAtOld();
+        setJournal('{');
+        let clock = Date.now();
+        const restarted = () => new Service(new Adapter(cloudflareApiClient, () => clock));
+        const runOn = async (svc: InstanceType<typeof Service>) => {
+          if (caller === 'recheck') await svc.recheck(actor);
+          else if (caller === 'disconnect') await svc.disconnect(actor).catch((error: unknown) => { if (!(error instanceof PublicExposureError)) throw error; });
+          else await svc.dnsCheck(ZONE_A, actor).catch((error: unknown) => { if (!(error instanceof PublicExposureError)) throw error; });
+        };
+        intercept(pages(atCheckPrefix, [success([{ id: RECORD_ID, type: 'TXT', name, content: '"x"' }], INFO)]));
+        await runOn(restarted());
+        for (let i = 0; i < 3; i += 1) {
+          clock += 4 * 60_000;
+          await runOn(restarted());
+        }
+        expect(journal()).toBe('{');
+        expect(hasRecord(RECORD_ID)).toBe(true);
+        expect(deletes()).toEqual([]);
+        expect(requested.filter((r) => r.startsWith('POST'))).toEqual([]);
+        expect(service.getView().connected).toBe(true);
+
+        // The record is gone: the zone proves it, the window starts, and the column settles once it has passed.
+        fake.records.set(ZONE_A, []);
+        intercept();
+        await runOn(restarted());
+        clock += 4 * 60_000;
+        await runOn(restarted());
+        if (caller === 'disconnect') expect(service.getView().connected).toBe(false);
+        else expect(journal()).toBeNull();
+      });
+    });
+
+    it('keeps the journal of one zone while the other zone settles, when only the first has such a record', async () => {
+      await connectWithZoneA();
+      await service.setZone(ZONE_B, true, [], actor);
+      const OLD_B = '_sencho-check-0ld1d3nt1ty.example.net';
+      fake.records.set(ZONE_A, [{ id: RECORD_ID, type: 'TXT', name: OLD_NAME, content: '"x"' }]);
+      setJournal(mk(OLD_NAME, undefined, undefined), ZONE_A);
+      setJournal(mk(OLD_B, undefined, undefined), ZONE_B);
+      intercept(pages(on(/^\/zones\/[0-9a-f]+\/dns_records$/, 'GET', (url) => url.pathname.includes(ZONE_A) && url.searchParams.get('name.startswith') === CHECK_PREFIX), [success([{ id: RECORD_ID, type: 'TXT', name: '', content: '"x"' }], INFO)]));
+      await service.recheck(actor);
+      expect(journal(ZONE_A)).not.toBeNull();
+      expect(journal(ZONE_B)).toBeNull();
+      expect(hasRecord(RECORD_ID)).toBe(true);
     });
   });
 
