@@ -345,6 +345,6 @@ describe('NodeCard host usage unknown', () => {
 
   it('still reports the disk bar, which is measured locally', () => {
     render(<NodeCard {...baseProps(unknownNode())} />);
-    expect(screen.getByText('30 Bytes / 100 Bytes')).toBeInTheDocument();
+    expect(screen.getByText('30 B / 100 B')).toBeInTheDocument();
   });
 });

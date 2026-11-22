@@ -580,7 +580,7 @@ describe('useContainerStats', () => {
         ['a terabyte', 2 * 1024 ** 4, 1024 ** 4, '2 TB/s ↓ / 1 TB/s ↑'],
         ['a petabyte', 3 * 1024 ** 5, 1024 ** 5, '3 PB/s ↓ / 1 PB/s ↑'],
         ['an exabyte', 1024 ** 6, 1024 ** 6, '1 EB/s ↓ / 1 EB/s ↑'],
-        ['more than the largest unit', 2048 * 1024 ** 6, 1024 ** 6, '2048 EB/s ↓ / 1 EB/s ↑'],
+        ['more than the largest unit', 2048 * 1024 ** 8, 1024 ** 8, '2048 YB/s ↓ / 1 YB/s ↑'],
       ];
       it.each(rateRows)('renders a network rate of %s with a unit', (_name, rxDelta, txDelta, net) => {
         const { result, warnSpy } = setup([makeContainer('c1')], { fakeTimers: true });

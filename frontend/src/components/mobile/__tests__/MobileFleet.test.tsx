@@ -472,7 +472,7 @@ describe('MobileFleet host usage unknown', () => {
     expect(await screen.findByText('resources')).toBeInTheDocument();
     // CPU has no measurable value; memory keeps its known total.
     expect(screen.getByText('--')).toBeInTheDocument();
-    expect(screen.getByText('400 Bytes total')).toBeInTheDocument();
+    expect(screen.getByText('400 B total')).toBeInTheDocument();
     expect(screen.getAllByText('Show usage…')).toHaveLength(2);
   });
 });

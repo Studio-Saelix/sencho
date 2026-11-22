@@ -16,6 +16,7 @@ import { useStackHealthScopePreference } from '@/components/dashboard/useStackHe
 import type { RowState } from '@/components/dashboard/classifyRow';
 import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { parseHostUsage } from '@/lib/hostUsage';
+import { formatBytes } from '@/lib/utils';
 import { Bar, Kicker, Masthead, MSparkline, StateDot, type Tone } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
 
@@ -36,14 +37,6 @@ const LEVEL_TONE: Record<HealthLevel, 'success' | 'warning' | 'destructive'> = {
   degraded: 'warning',
   critical: 'destructive',
 };
-
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
 
 function formatAgo(ms: number): string {
   const c = Math.max(0, ms);
@@ -298,7 +291,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
           />
           <StripCell
             label="net"
-            value={data.systemStats?.network ? `${formatBytes(netPerSec)}/s` : '--'}
+            value={data.systemStats?.network ? `${formatBytes(netPerSec, 1)}/s` : '--'}
           />
         </div>
 

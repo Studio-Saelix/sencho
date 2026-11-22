@@ -1,16 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { formatBytes } from '@/lib/utils';
 import type { ContainerInfo, ContainerStatsEntry } from '../EditorView';
-
-const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  // The unit index is clamped: a fraction of a byte would index below B, and a
-  // rate past the last unit would index past it, so either rendered "undefined".
-  const i = Math.min(BYTE_UNITS.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + BYTE_UNITS[i];
-}
 
 interface StatsSample {
   cpuPercent: number;
