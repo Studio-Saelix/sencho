@@ -8,9 +8,10 @@ export function cn(...inputs: ClassValue[]) {
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
 
 /**
- * Formats a byte count (or a per-second rate) with a binary unit. Zero, a
- * negative value and a non-finite value read as "0 B". The unit index is
- * clamped to the table, so a fraction of a byte stays in B and a value past
+ * Formats a byte count (or a per-second rate) in 1024-based units labeled B,
+ * KB, MB and so on, rounded to `decimals` places with trailing zeros dropped.
+ * Zero, a negative value and a non-finite value read as "0 B". The unit index
+ * is clamped to the table, so a fraction of a byte stays in B and a value past
  * the largest unit stays in YB instead of rendering "undefined".
  */
 export function formatBytes(bytes: number, decimals = 2): string {

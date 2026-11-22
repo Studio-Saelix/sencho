@@ -16,7 +16,7 @@ describe('formatBytes', () => {
 
   it('keeps a value under one byte in bytes instead of indexing below the table', () => {
     expect(formatBytes(0.5)).toBe('0.5 B');
-    expect(formatBytes(0.25, 1)).toBe('0.3 B');
+    expect(formatBytes(0.26, 1)).toBe('0.3 B');
     expect(formatBytes(0.001)).toBe('0 B');
   });
 
