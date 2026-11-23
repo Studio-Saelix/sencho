@@ -28,6 +28,8 @@ const HELPER_DIGEST_REF = `ghcr.io/studio-saelix/sencho-recovery-helper@sha256:$
 const HELPER_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
 // Longer than the wait boot gives a pull, whatever that is set to.
 const PAST_THE_WAIT_MS = 10 * 60_000;
+const PRESENT_IMAGE_ID = 'sha256:helper';
+const HELPER_UNAVAILABLE = { state: 'unavailable', reason: 'helper_unavailable' } as const;
 let previousHelperEnv: string | undefined;
 
 interface DaemonScript {
@@ -37,6 +39,8 @@ interface DaemonScript {
   pull: 'finishes' | 'fails' | 'hangs';
   /** The status the image inspect answers while the image is absent. */
   absentStatus?: number;
+  /** The startup pull's own image inspect (the second one of boot) never answers while the image is absent. */
+  inspectHangs?: boolean;
 }
 
 interface HangingPull {
@@ -45,6 +49,7 @@ interface HangingPull {
 
 function fakeDocker(script: DaemonScript, calls: string[], hanging: HangingPull): Docker {
   let present = script.present;
+  let inspects = 0;
   return {
     info: async () => ({ ID: 'engine-1' }),
     listVolumes: async () => ({ Volumes: [] }),
@@ -53,8 +58,10 @@ function fakeDocker(script: DaemonScript, calls: string[], hanging: HangingPull)
     getImage: () => ({
       inspect: async () => {
         calls.push('inspect');
+        inspects += 1;
+        if (!present && script.inspectHangs && inspects === 2) await new Promise<never>(() => undefined);
         if (!present) throw Object.assign(new Error('no such image'), { statusCode: script.absentStatus ?? 404 });
-        return { Id: 'sha256:helper' };
+        return { Id: PRESENT_IMAGE_ID };
       },
     }),
     pull: (ref: string, callback: (err: Error | null, stream: NodeJS.ReadableStream | null) => void) => {
@@ -116,6 +123,15 @@ function text(spy: { mock: { calls: unknown[][] } }): string {
   return spy.mock.calls.flat().map(String).join(' ');
 }
 
+/** Moves the fake clock until the boot promise settles, however many timers boot arms on the way. */
+async function settleBootWith(booting: Promise<unknown>): Promise<void> {
+  let settled = false;
+  void booting.finally(() => { settled = true; });
+  for (let i = 0; i < 200 && !settled; i += 1) {
+    await vi.advanceTimersByTimeAsync(PAST_THE_WAIT_MS);
+  }
+}
+
 async function boot(script: DaemonScript) {
   const calls: string[] = [];
   const hanging: HangingPull = { settle: () => undefined };
@@ -147,6 +163,7 @@ afterAll(async () => {
 beforeEach(() => {
   process.env[HELPER_ENV] = HELPER_DIGEST_REF;
   runner.RecoveryEngineService.resetForTests();
+  SelfIdentityService.getInstance().resetForTesting();
   (operations.RecoveryOperationStore.getInstance() as unknown as { reconciled: boolean }).reconciled = false;
   const db = recoveryDbModule.recoveryDb();
   for (const table of [
@@ -173,16 +190,17 @@ describe('boot with the pinned helper image missing', () => {
     expect(calls.indexOf(`pull:${HELPER_DIGEST_REF}`)).toBeLessThan(calls.indexOf('removeForeign'));
     expect(calls.indexOf(`pull:${HELPER_DIGEST_REF}`)).toBeLessThan(calls.indexOf('run:unlock'));
     expect(service.isReady()).toBe(true);
-    // With the helper in place the cheap check moves on to the repository volume, not the helper.
-    expect(service.health()).not.toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+    // With the helper in place the cheap check reaches the repository volume, which this fake daemon does not have.
+    expect(service.health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
   });
 
   it('registers the pulled image as Sencho infrastructure, so a prune keeps it', async () => {
     activateRepository();
-    const register = vi.spyOn(SelfIdentityService.getInstance(), 'registerRecoveryImage').mockImplementation(() => undefined);
+    const registered = vi.spyOn(SelfIdentityService.getInstance(), 'registerRecoveryImage');
     await boot({ present: false, pull: 'finishes' });
 
-    expect(register).toHaveBeenCalledWith('sha256:helper');
+    expect(registered).toHaveBeenCalledWith(PRESENT_IMAGE_ID);
+    expect(SelfIdentityService.getInstance().isRecoveryImage(PRESENT_IMAGE_ID)).toBe(true);
   });
 
   it('does not pull when the helper is already on the host', async () => {
@@ -236,7 +254,7 @@ describe('boot with the pinned helper image missing', () => {
     expect(service.isReady()).toBe(true);
     expect(text(out.warn)).toContain('Helper image could not be pulled at startup');
     // The truthful answer stays: no helper, no protection.
-    expect(service.health()).toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+    expect(service.health()).toEqual(HELPER_UNAVAILABLE);
   });
 
   it('finishes boot when reading the active repository throws', async () => {
@@ -252,13 +270,28 @@ describe('boot with the pinned helper image missing', () => {
     expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
   });
 
-  it('leaves no timer behind after a pull that finishes in time', async () => {
+  it.each(['finishes', 'fails'] as const)('leaves no wait timer behind after a pull that %s in time', async (pull) => {
     activateRepository();
+    quietConsole();
     vi.useFakeTimers();
-    const { service } = await boot({ present: false, pull: 'finishes' });
+    const before = vi.getTimerCount();
+    const { service } = await boot({ present: false, pull });
 
     expect(service.isReady()).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('stops waiting for an inspect that never answers, so boot still finishes', async () => {
+    activateRepository();
+    const out = quietConsole();
+    vi.useFakeTimers();
+    const booting = boot({ present: false, pull: 'finishes', inspectHangs: true });
+    await settleBootWith(booting);
+    const { service, calls } = await booting;
+
+    expect(service.isReady()).toBe(true);
+    expect(calls).toContain('run:unlock');
+    expect(text(out.warn)).toContain('boot continues without waiting');
   });
 });
 
@@ -269,7 +302,7 @@ describe('boot with a pull that outlasts the wait', () => {
     vi.useFakeTimers();
     const out = quietConsole();
     const booting = boot({ present: false, pull: 'hangs' });
-    await vi.advanceTimersByTimeAsync(PAST_THE_WAIT_MS);
+    await settleBootWith(booting);
     const result = await booting;
     return { ...result, out };
   }
@@ -280,18 +313,18 @@ describe('boot with a pull that outlasts the wait', () => {
     expect(service.isReady()).toBe(true);
     expect(calls).toContain('run:unlock');
     expect(text(out.warn)).toContain('boot continues without waiting');
-    expect(service.health()).toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+    expect(service.health()).toEqual(HELPER_UNAVAILABLE);
   });
 
   it('registers the image and corrects the answer when the pull finishes later', async () => {
-    const register = vi.spyOn(SelfIdentityService.getInstance(), 'registerRecoveryImage').mockImplementation(() => undefined);
     const { hanging, service, out } = await bootPastTheWait();
     vi.useRealTimers();
+    expect(SelfIdentityService.getInstance().isRecoveryImage(PRESENT_IMAGE_ID)).toBe(false);
 
     hanging.settle(null);
-    await vi.waitFor(() => expect(register).toHaveBeenCalledWith('sha256:helper'));
+    await vi.waitFor(() => expect(SelfIdentityService.getInstance().isRecoveryImage(PRESENT_IMAGE_ID)).toBe(true));
     expect(text(out.log)).toContain('pull finished after boot moved on');
-    await vi.waitFor(() => expect(service.health()).not.toEqual({ state: 'unavailable', reason: 'helper_unavailable' }));
+    await vi.waitFor(() => expect(service.health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' }));
   });
 
   it('logs a pull that fails later, with no unhandled rejection', async () => {
@@ -308,5 +341,16 @@ describe('boot with a pull that outlasts the wait', () => {
     } finally {
       process.off('unhandledRejection', unhandled);
     }
+  });
+});
+
+describe('which helper references can be pulled', () => {
+  it('accepts a registry digest reference and refuses an image id or a tag', async () => {
+    const { helperImageCanBePulled } = await import('../services/recovery/restic/helperImage');
+
+    expect(helperImageCanBePulled(HELPER_DIGEST_REF)).toBe(true);
+    expect(helperImageCanBePulled(HELPER_IMAGE_ID)).toBe(false);
+    expect(helperImageCanBePulled('ghcr.io/studio-saelix/sencho-recovery-helper:latest')).toBe(false);
+    expect(helperImageCanBePulled('')).toBe(false);
   });
 });
