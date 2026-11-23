@@ -447,7 +447,7 @@ curl https://your-sencho-instance:1852/api/recovery/repository \
 
 Every recovery action runs in a small helper container built from a pinned restic. The Sencho image carries the digest of the helper built from the same commit, and starts only that digest. A tag is refused on purpose: a tag can be repointed at different bytes after the pairing was sealed.
 
-Normally there is nothing to configure. The Sencho image sets `SENCHO_RECOVERY_HELPER_IMAGE` to `repository@sha256:...`. Provisioning pulls it once when it is missing, and so does startup on a node that already has a repository, so protection is back as soon as the pull finishes. Startup gives the pull two minutes and then carries on without waiting; a node that cannot reach the registry stays at `helper_unavailable` until the image is pulled by hand or provisioning is repeated. Status reads never pull.
+Normally there is nothing to configure. The Sencho image sets `SENCHO_RECOVERY_HELPER_IMAGE` to `repository@sha256:...`. Provisioning pulls it once when it is missing, and so does startup on a node with an active repository, so protection returns as soon as the pull finishes. Startup waits up to a minute for the pull and then carries on; the pull keeps running in the Docker daemon. A node that cannot reach the registry stays at `helper_unavailable` until the image is present, whether pulled by hand or by repeating provisioning. Status reads never pull.
 
 On an air-gapped host, load the helper image with `docker load`. That drops the repository digests, leaving only an image id, so set the variable to the id:
 

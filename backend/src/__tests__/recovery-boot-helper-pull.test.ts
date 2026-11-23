@@ -1,12 +1,13 @@
 /**
  * What boot does when the pinned recovery helper image is not on the host.
  *
- * Each Sencho image pins its own helper digest, so a node that already has a
+ * Each Sencho image pins its own helper digest, so a node with an active
  * repository finds the new helper missing after an image change. Without a pull
  * every recovery point reads as unavailable until provisioning runs again. Boot
- * pulls the pinned helper once for such a node, never for a node that has no
- * repository, never for an image id, and never lets a failed or slow pull stop
- * the rest of boot.
+ * pulls the pinned helper once for such a node, registers it as Sencho's own
+ * infrastructure so a prune keeps it, and never lets a failed or slow pull stop
+ * the rest of boot. It pulls nothing for a node without an active repository,
+ * for an image id, or for an unpinned reference.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type Docker from 'dockerode';
@@ -17,6 +18,7 @@ let runner: typeof import('../services/recovery/operationRunner');
 let operations: typeof import('../services/recovery/operations');
 let repositoryStore: typeof import('../services/recovery/repositories');
 let recoveryDbModule: typeof import('../services/recovery/recoveryDb');
+let SelfIdentityService: typeof import('../services/SelfIdentityService').default;
 let DockerController: typeof import('../services/DockerController').default;
 let nodeId: number;
 
@@ -24,16 +26,24 @@ const ENGINE_KEY = 'docker-engine:engine-1';
 const HELPER_ENV = 'SENCHO_RECOVERY_HELPER_IMAGE';
 const HELPER_DIGEST_REF = `ghcr.io/studio-saelix/sencho-recovery-helper@sha256:${'b'.repeat(64)}`;
 const HELPER_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
+// Longer than the wait boot gives a pull, whatever that is set to.
+const PAST_THE_WAIT_MS = 10 * 60_000;
 let previousHelperEnv: string | undefined;
 
 interface DaemonScript {
   /** Whether the helper image is on the host before boot. */
   present: boolean;
-  /** How the pull ends: it finishes, fails, or never ends within the test. */
+  /** How the pull ends: it finishes, fails, or waits until the test settles it. */
   pull: 'finishes' | 'fails' | 'hangs';
+  /** The status the image inspect answers while the image is absent. */
+  absentStatus?: number;
 }
 
-function fakeDocker(script: DaemonScript, calls: string[]): Docker {
+interface HangingPull {
+  settle: (err: Error | null) => void;
+}
+
+function fakeDocker(script: DaemonScript, calls: string[], hanging: HangingPull): Docker {
   let present = script.present;
   return {
     info: async () => ({ ID: 'engine-1' }),
@@ -42,7 +52,8 @@ function fakeDocker(script: DaemonScript, calls: string[]): Docker {
     listContainers: async () => [],
     getImage: () => ({
       inspect: async () => {
-        if (!present) throw Object.assign(new Error('no such image'), { statusCode: 404 });
+        calls.push('inspect');
+        if (!present) throw Object.assign(new Error('no such image'), { statusCode: script.absentStatus ?? 404 });
         return { Id: 'sha256:helper' };
       },
     }),
@@ -56,7 +67,13 @@ function fakeDocker(script: DaemonScript, calls: string[]): Docker {
     },
     modem: {
       followProgress: (_stream: unknown, done: (err: Error | null) => void) => {
-        if (script.pull === 'hangs') return;
+        if (script.pull === 'hangs') {
+          hanging.settle = (err) => {
+            if (!err) present = true;
+            done(err);
+          };
+          return;
+        }
         present = true;
         done(null);
       },
@@ -70,7 +87,10 @@ function helper(calls: string[]) {
       calls.push(`run:${spec.profile}`);
       return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
     },
-    removeForeignEpochHelpers: async () => 0,
+    removeForeignEpochHelpers: async () => {
+      calls.push('removeForeign');
+      return 0;
+    },
     countForeignEpochHelpers: async () => 0,
   } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
 }
@@ -85,13 +105,25 @@ function activateRepository(): void {
   store.setActive(repository.id);
 }
 
-async function boot(script: DaemonScript): Promise<{ calls: string[]; service: ReturnType<typeof runner.RecoveryEngineService.getInstance> }> {
+function quietConsole() {
+  return {
+    log: vi.spyOn(console, 'log').mockImplementation(() => undefined),
+    warn: vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+  };
+}
+
+function text(spy: { mock: { calls: unknown[][] } }): string {
+  return spy.mock.calls.flat().map(String).join(' ');
+}
+
+async function boot(script: DaemonScript) {
   const calls: string[] = [];
-  vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker(script, calls));
+  const hanging: HangingPull = { settle: () => undefined };
+  vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker(script, calls, hanging));
   const service = runner.RecoveryEngineService.getInstance(nodeId);
   service.setHelperRunnerForTests(helper(calls));
   await service.runBootSequence();
-  return { calls, service };
+  return { calls, service, hanging };
 }
 
 beforeAll(async () => {
@@ -100,6 +132,7 @@ beforeAll(async () => {
   operations = await import('../services/recovery/operations');
   repositoryStore = await import('../services/recovery/repositories');
   recoveryDbModule = await import('../services/recovery/recoveryDb');
+  SelfIdentityService = (await import('../services/SelfIdentityService')).default;
   DockerController = (await import('../services/DockerController')).default;
   nodeId = (await import('../services/DatabaseService')).DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
   previousHelperEnv = process.env[HELPER_ENV];
@@ -132,16 +165,24 @@ afterEach(() => {
 });
 
 describe('boot with the pinned helper image missing', () => {
-  it('pulls the pinned digest once for a node that has a repository, before any helper runs', async () => {
+  it('pulls the pinned digest once for an active repository, before any helper runs', async () => {
     activateRepository();
     const { calls, service } = await boot({ present: false, pull: 'finishes' });
 
     expect(calls.filter((c) => c.startsWith('pull:'))).toEqual([`pull:${HELPER_DIGEST_REF}`]);
-    // The unlock helper runs only once the image is there.
+    expect(calls.indexOf(`pull:${HELPER_DIGEST_REF}`)).toBeLessThan(calls.indexOf('removeForeign'));
     expect(calls.indexOf(`pull:${HELPER_DIGEST_REF}`)).toBeLessThan(calls.indexOf('run:unlock'));
     expect(service.isReady()).toBe(true);
     // With the helper in place the cheap check moves on to the repository volume, not the helper.
     expect(service.health()).not.toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+  });
+
+  it('registers the pulled image as Sencho infrastructure, so a prune keeps it', async () => {
+    activateRepository();
+    const register = vi.spyOn(SelfIdentityService.getInstance(), 'registerRecoveryImage').mockImplementation(() => undefined);
+    await boot({ present: false, pull: 'finishes' });
+
+    expect(register).toHaveBeenCalledWith('sha256:helper');
   });
 
   it('does not pull when the helper is already on the host', async () => {
@@ -151,42 +192,121 @@ describe('boot with the pinned helper image missing', () => {
     expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
   });
 
-  it('does not pull for a node with no repository, because nobody turned recovery on', async () => {
+  it('does not pull for a node with no active repository, because nobody turned recovery on', async () => {
     const { calls, service } = await boot({ present: false, pull: 'finishes' });
 
     expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
     expect(service.isReady()).toBe(true);
   });
 
-  it('does not try to pull an image id, which has nothing to be pulled from', async () => {
+  it('does not look at an image id, which has nothing to be pulled from', async () => {
     process.env[HELPER_ENV] = HELPER_IMAGE_ID;
+    activateRepository();
+    const out = quietConsole();
+    const { calls, service } = await boot({ present: false, pull: 'finishes' });
+
+    expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
+    expect(text(out.log)).not.toContain('Pulling the pinned helper image');
+    expect(text(out.warn)).not.toContain('could not be pulled at startup');
+    expect(service.isReady()).toBe(true);
+  });
+
+  it('does not pull when no helper is pinned', async () => {
+    delete process.env[HELPER_ENV];
     activateRepository();
     const { calls, service } = await boot({ present: false, pull: 'finishes' });
 
     expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
+    expect(service.isReady()).toBe(true);
+  });
+
+  it('pulls when the daemon cannot answer the inspect, and still finishes boot', async () => {
+    activateRepository();
+    const { calls, service } = await boot({ present: false, pull: 'finishes', absentStatus: 500 });
+
+    expect(calls.filter((c) => c.startsWith('pull:'))).toHaveLength(1);
     expect(service.isReady()).toBe(true);
   });
 
   it('finishes boot and says so when the registry cannot be reached', async () => {
     activateRepository();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const out = quietConsole();
     const { service } = await boot({ present: false, pull: 'fails' });
 
     expect(service.isReady()).toBe(true);
-    expect(warn.mock.calls.flat().join(' ')).toContain('Helper image could not be pulled at startup');
+    expect(text(out.warn)).toContain('Helper image could not be pulled at startup');
     // The truthful answer stays: no helper, no protection.
     expect(service.health()).toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
   });
 
-  it('stops waiting for a pull that does not end, so the rest of boot still runs', async () => {
+  it('finishes boot when reading the active repository throws', async () => {
     activateRepository();
-    vi.useFakeTimers();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const booting = boot({ present: false, pull: 'hangs' });
-    await vi.advanceTimersByTimeAsync(121_000);
-    const { service } = await booting;
+    const out = quietConsole();
+    vi.spyOn(repositoryStore.RecoveryRepositoryStore.getInstance(), 'getActive').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    const { calls, service } = await boot({ present: false, pull: 'finishes' });
 
     expect(service.isReady()).toBe(true);
-    expect(warn.mock.calls.flat().join(' ')).toContain('boot continues without waiting');
+    expect(text(out.warn)).toContain('database is locked');
+    expect(calls.some((c) => c.startsWith('pull:'))).toBe(false);
+  });
+
+  it('leaves no timer behind after a pull that finishes in time', async () => {
+    activateRepository();
+    vi.useFakeTimers();
+    const { service } = await boot({ present: false, pull: 'finishes' });
+
+    expect(service.isReady()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('boot with a pull that outlasts the wait', () => {
+  /** Starts a boot against a pull that never ends by itself and lets the wait run out. */
+  async function bootPastTheWait() {
+    activateRepository();
+    vi.useFakeTimers();
+    const out = quietConsole();
+    const booting = boot({ present: false, pull: 'hangs' });
+    await vi.advanceTimersByTimeAsync(PAST_THE_WAIT_MS);
+    const result = await booting;
+    return { ...result, out };
+  }
+
+  it('carries on with the rest of boot and keeps the answer honest', async () => {
+    const { calls, service, out } = await bootPastTheWait();
+
+    expect(service.isReady()).toBe(true);
+    expect(calls).toContain('run:unlock');
+    expect(text(out.warn)).toContain('boot continues without waiting');
+    expect(service.health()).toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+  });
+
+  it('registers the image and corrects the answer when the pull finishes later', async () => {
+    const register = vi.spyOn(SelfIdentityService.getInstance(), 'registerRecoveryImage').mockImplementation(() => undefined);
+    const { hanging, service, out } = await bootPastTheWait();
+    vi.useRealTimers();
+
+    hanging.settle(null);
+    await vi.waitFor(() => expect(register).toHaveBeenCalledWith('sha256:helper'));
+    expect(text(out.log)).toContain('pull finished after boot moved on');
+    await vi.waitFor(() => expect(service.health()).not.toEqual({ state: 'unavailable', reason: 'helper_unavailable' }));
+  });
+
+  it('logs a pull that fails later, with no unhandled rejection', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const { hanging, out } = await bootPastTheWait();
+      vi.useRealTimers();
+
+      hanging.settle(new Error('connection reset'));
+      await vi.waitFor(() => expect(text(out.warn)).toContain('failed after boot moved on'));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
   });
 });
