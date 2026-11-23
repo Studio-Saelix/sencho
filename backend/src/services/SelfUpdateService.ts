@@ -69,10 +69,10 @@ const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
 // How long a cached pin classification is served before a routine caller
 // re-reads it. Only config files Sencho can read directly through its own bind
 // mounts are re-read (no container). When a file needs the helper container, the
-// cached classification is served until a fresh read replaces it (an update, a
-// Compose reapply, an image channel switch, opening the image channel settings,
-// the Fleet Recheck, or a restart), so routine monitoring never starts a
-// container once a pin is fully read. Update DECISIONS always read fresh
+// cached classification is served until a complete fresh read replaces it (an
+// update, a Compose reapply, an image channel switch, opening the image channel
+// settings, the Fleet Recheck, or a restart), so routine monitoring never starts
+// a container once a pin is fully read. Update DECISIONS always read fresh
 // (fresh: true).
 const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -812,13 +812,18 @@ class SelfUpdateService {
    * Preflight the route layer runs before responding, so a blocked update fails
    * fast with a 409 instead of returning 202 and stalling the reconnect overlay.
    * A missing target version is the legacy pull-current path and makes no repin
-   * decision. A digest/unknown pin (or an unreadable compose file) is blocked.
+   * decision, but the route chose the hardened or community path from a fresh read
+   * of the files, so it is refused when that read missed a file. A digest/unknown
+   * pin (or a compose file that cannot be read in full) is blocked.
    */
   async canSelfUpdateTarget(targetVersion?: string): Promise<SelfUpdatePreflight> {
     if (!this.canSelfUpdate) {
       return { ok: false, reason: 'Self-update is unavailable on this instance.' };
     }
-    if (!targetVersion) return { ok: true };
+    if (!targetVersion) {
+      const read = await this.startCoalescedFullRead();
+      return read?.partial ? { ok: false, reason: UPDATE_READ_FAILED_REASON } : { ok: true };
+    }
     const info = await this.getPinInfo({ fresh: true });
     if (!info) return { ok: false, reason: UPDATE_READ_FAILED_REASON };
     if (isRepinBlocked(info.pinKind)) {
@@ -892,9 +897,10 @@ class SelfUpdateService {
 
   /**
    * A full read for a fresh caller. While one runs, every fresh caller that
-   * arrives shares a single read queued behind it, which starts after they all
-   * arrived and so sees any edit made before them. Starting one helper per caller
-   * would pile containers onto the Docker host.
+   * arrives shares a single read queued behind it, which starts after they have
+   * all joined and so sees any edit made before them; callers that arrive once that
+   * read has begun queue the next one. Starting one helper per caller would pile
+   * containers onto the Docker host.
    */
   private startCoalescedFullRead(): Promise<ComposeRead | null> {
     if (this.freshQueued) return this.freshQueued;
@@ -917,7 +923,8 @@ class SelfUpdateService {
    * complete entry, and never replaces a partial entry that classified an image
    * with one that classified none. A complete read replaces a partial entry
    * whenever it started; no other read replaces an entry that a read started
-   * later wrote.
+   * later wrote. The result's `partial` is true when a file could not be read:
+   * fresh callers treat that as no answer.
    */
   private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
     const ctx = this.composeContext;

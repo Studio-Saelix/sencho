@@ -1366,6 +1366,40 @@ describe('a fresh read that could not read every Compose file', () => {
     expect(helperCalls()).toHaveLength(1);
   });
 
+  it('refuses a no-target update too, since the route chose the hardened or community path from that read', async () => {
+    warnSilently();
+    const service = partialProject();
+
+    await expect(service.canSelfUpdateTarget()).resolves.toEqual({
+      ok: false,
+      reason: expect.stringContaining('Could not read the Sencho compose file'),
+    });
+
+    hostFiles.set(uncoveredFile, 'services:\n  other:\n    image: busybox\n');
+    await expect(service.canSelfUpdateTarget()).resolves.toEqual({ ok: true });
+  });
+
+  it('lets a no-target update through when every file was read but none sets the service image', async () => {
+    writeCovered('saelix/sencho:0.99.0');
+    fs.writeFileSync(coveredFile, 'services:\n  other:\n    image: busybox\n');
+    const service = setup([coveredFile], [sameMount]);
+
+    await expect(service.canSelfUpdateTarget()).resolves.toEqual({ ok: true });
+  });
+
+  it('leaves an earlier complete classification in the cache for routine and cacheOnly callers', async () => {
+    warnSilently();
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+
+    hostFiles.delete(uncoveredFile);
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+  });
+
   it('answers a fresh caller again as soon as every file can be read', async () => {
     warnSilently();
     const service = partialProject();
@@ -1409,7 +1443,7 @@ describe('concurrent fresh reads of a Compose file only the helper can read', ()
     held.release();
     const results = await Promise.all(callers);
 
-    expect(results[0]).toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    for (const index of [0, 1, 4, 5]) expect(results[index]).toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     expect(results[2]).toMatchObject({ imageRef: 'saelix/sencho:0.99.0' });
     expect(results[3]).toEqual({ ok: true });
     // One read for the first caller and one shared by the five that arrived while it ran.
@@ -1458,54 +1492,130 @@ describe('concurrent fresh reads of a Compose file only the helper can read', ()
     expect(helperCalls()).toHaveLength(3);
   });
 
-  it('give every caller the next read when the one they queued behind fails', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  it('give every caller the next read when the one they queued behind rejects', async () => {
     hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
     const service = setup([uncoveredFile], []);
     const internals = service as unknown as Internals;
+    const original = internals.readComposeImage.bind(service);
     let release: () => void = () => undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const base = mockExecFileAsync.getMockImplementation()!;
-    let first = true;
-    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
-      if (first && isReadHelper([args[0], args[1]])) {
-        first = false;
-        await gate;
-        throw new Error('docker is busy');
-      }
-      return base(...(args as [string, string[]]));
+    let started = 0;
+    vi.spyOn(internals, 'readComposeImage').mockImplementation(async allowHelper => {
+      started += 1;
+      if (started > 1) return original(allowHelper);
+      await gate;
+      throw new Error('read exploded');
     });
 
     const older = service.getPinInfo({ fresh: true });
-    await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
+    const olderOutcome = older.then(() => 'resolved', (error: Error) => error.message);
+    await vi.waitFor(() => expect(started).toBe(1));
     const queued = [service.getPinInfo({ fresh: true }), service.getPinInfo({ fresh: true })];
     release();
 
-    await expect(older).resolves.toBeNull();
+    await expect(olderOutcome).resolves.toBe('read exploded');
     await expect(Promise.all(queued)).resolves.toEqual([
       expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
       expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
     ]);
-    expect(helperCalls()).toHaveLength(2);
+    expect(started).toBe(2);
     expect(internals.freshQueued).toBeNull();
+    expect(internals.pinInflight).toBeNull();
   });
 
-  it('start a new shared read for callers that arrive after the queued one has begun', async () => {
+  it('reject every caller that shared a queued read that rejects, and leave the next caller a read of its own', async () => {
     hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
     const service = setup([uncoveredFile], []);
     const internals = service as unknown as Internals;
+    const original = internals.readComposeImage.bind(service);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started = 0;
+    vi.spyOn(internals, 'readComposeImage').mockImplementation(async allowHelper => {
+      started += 1;
+      if (started === 1) {
+        await gate;
+        return original(allowHelper);
+      }
+      if (started === 2) throw new Error('queued read exploded');
+      return original(allowHelper);
+    });
+
+    const first = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(started).toBe(1));
+    const sharers = [service.getPinInfo({ fresh: true }), service.getPinInfo({ fresh: true })]
+      .map(call => call.then(() => 'resolved', (error: Error) => error.message));
+    release();
+
+    await expect(first).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(Promise.all(sharers)).resolves.toEqual(['queued read exploded', 'queued read exploded']);
+    expect(internals.freshQueued).toBeNull();
+    expect(internals.pinInflight).toBeNull();
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+  });
+
+  it('queue callers that arrive after the queued read has begun behind it, with a read that sees their edit', async () => {
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    const internals = service as unknown as Internals;
+    // Each helper container is held until its own gate opens, and serves the file as it was when it started.
+    const gates: Array<() => void> = [];
+    const base = mockExecFileAsync.getMockImplementation()!;
+    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
+      const served = await base(...(args as [string, string[]]));
+      if (isReadHelper([args[0], args[1]])) await new Promise<void>(resolve => { gates.push(resolve); });
+      return served;
+    });
+
+    const first = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    const second = service.getPinInfo({ fresh: true });
+    gates[0]();
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    expect(internals.freshQueued).toBeNull();
+
+    // The second read is running and has already read the file; this edit and these callers come after it.
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.5'));
+    const late = [service.getPinInfo({ fresh: true }), service.getResolvedComposeImageForUpdate()];
+    expect(internals.freshQueued).not.toBeNull();
+    gates[1]();
+    await vi.waitFor(() => expect(gates).toHaveLength(3));
+    gates[2]();
+
+    await expect(first).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(second).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(late[0]).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.5' });
+    await expect(late[1]).resolves.toMatchObject({ imageRef: 'saelix/sencho:0.99.5' });
+    expect(helperCalls()).toHaveLength(3);
+    expect(internals.freshQueued).toBeNull();
+
+    // Nothing is running now, so the next caller starts its own read.
+    gates.length = 0;
+    const idle = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    gates[0]();
+    await idle;
+    expect(helperCalls()).toHaveLength(4);
+  });
+
+  it('read the new Compose context when a new detection arrives while a read is queued', async () => {
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    writeCovered('saelix/sencho:0.50.0');
+    const service = setup([uncoveredFile], []);
+    const internals = service as unknown as Internals;
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const held = holdHelper();
 
     const first = service.getPinInfo({ fresh: true });
     await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
     const queued = service.getPinInfo({ fresh: true });
+    internals.composeContext = { ...internals.composeContext, configFiles: coveredFile, workingDir: coveredDir, hostBindMounts: [sameMount], mountDestinations: [coveredDir] };
+    internals.applyDetection(null);
     held.release();
-    await Promise.all([first, queued]);
-    expect(helperCalls()).toHaveLength(2);
-    expect(internals.freshQueued).toBeNull();
 
-    // Nothing is running now, so the next caller starts its own read.
-    await service.getPinInfo({ fresh: true });
-    expect(helperCalls()).toHaveLength(3);
+    await first;
+    await expect(queued).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.50.0' });
+    expect(internals.freshQueued).toBeNull();
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.50.0' });
   });
 });

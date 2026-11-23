@@ -192,8 +192,9 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
  * Re-read this node's own Compose image pin, so its /api/meta reports an edit the
  * operator made to the Compose file without waiting for a restart. The hub calls
  * it on a Fleet Recheck (see IMAGE_PIN_REFRESH_CAPABILITY). Reads only: it never
- * changes the Compose file or the running container. `refreshed` is false when
- * the read could not classify the pin from every Compose file.
+ * changes the Compose file or the running container. `refreshed` is false when no
+ * complete classification is available (a Compose file could not be read, or none
+ * sets the image); a partial read still updates the cached pin.
  */
 systemUpdateRouter.post('/image-pin-refresh', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'system:license')) return;
