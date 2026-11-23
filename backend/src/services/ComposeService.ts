@@ -1927,7 +1927,8 @@ export class ComposeService {
           // first irreversible step (orphan removal, retiring the gates), and
           // the lease is held until the up has exited. A fence recorded during
           // the pulls is refused here with nothing changed; one recorded after
-          // this waits for the up instead of landing under it.
+          // the legacy-orphan lookup below waits for the up instead of landing
+          // under it, and one recorded between the two is refused by the lookup.
           upLease = await admitComposeProcess({ cwd: stackDir, args, env });
           // Legacy orphans are looked up here, read-only, and removed only once
           // the candidate check has passed, so a refused image leaves the
@@ -2022,7 +2023,8 @@ export class ComposeService {
       gitopsDeploy?.bound();
     } catch (deployError) {
       // A data restore's fence refusing a command before Compose was handed
-      // the up (the verification pull, or the up's own admission) is a
+      // the up (the verification pull, the up's own admission, or the legacy
+      // orphan lookup's `compose ps`) is a
       // refusal, not a failed deploy: no GitOps deploy record is opened for it.
       // Any other failure once the up's argv was assembled opens the record if
       // the admission had not yet, so it is recorded as before.
@@ -2050,8 +2052,9 @@ export class ComposeService {
         }
         throw deployError;
       }
-      // A data restore's fence refused a compose file the up names before
-      // Compose was handed it: the previous runtime is still the one the
+      // A data restore's fence refused a file the up opens, or the legacy
+      // orphan lookup before it, ahead of Compose being handed the up: the
+      // previous runtime is still the one the
       // generation captured, so it is abandoned, not compensated (which would
       // restore files under the fence and be refused the same way), and the
       // refusal leaves this method as itself. The handoff has not happened yet

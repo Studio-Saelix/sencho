@@ -19,6 +19,7 @@ import { EventEmitter } from 'events';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import * as composeArgvFence from '../helpers/composeArgvFence';
 
 interface FakeChild extends EventEmitter {
   stdout: EventEmitter;
@@ -267,7 +268,7 @@ describe('an atomic deploy refused before Compose is handed its up leaves the pr
 
   it('refuses at the legacy-orphan lookup\'s own `compose ps` with no Compose error logged, no orphan removed and no GitOps record', async () => {
     const { svc, dockerController, removed, compensate, begin } = harness();
-    vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockResolvedValue(undefined);
+    const execute = vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockResolvedValue(undefined);
     // A fence recorded after the up's admission and before the lookup's own.
     vi.spyOn(dockerController as unknown as { isStackDirectoryAbsent: () => Promise<boolean> }, 'isStackDirectoryAbsent')
       .mockImplementation(async () => { holdFence(); return false; });
@@ -275,7 +276,8 @@ describe('an atomic deploy refused before Compose is handed its up leaves the pr
     const error = await refusal(svc.deployStack(STACK, undefined, true));
     expect(m.isDataRestoreFenceError(error), String(error)).toBe(true);
     expect(errorLog.mock.calls.some((call) => String(call[0]).includes('Docker Compose Error'))).toBe(false);
-    expect(composeMutations()).toEqual([]);
+    // The up is stubbed at `execute`, so "never handed the up" is asserted there.
+    expect(execute).not.toHaveBeenCalled();
     expect(removed).not.toHaveBeenCalled();
     expect(begin).not.toHaveBeenCalled();
     expectPreviousPointUntouched();
@@ -286,6 +288,12 @@ describe('an atomic deploy refused before Compose is handed its up leaves the pr
   it('hands the candidate off only after the up is admitted, and supersedes the previous point when the deploy runs', async () => {
     const { svc } = harness();
     const events: string[] = [];
+    const realAdmit = composeArgvFence.admitComposeProcess;
+    vi.spyOn(composeArgvFence, 'admitComposeProcess').mockImplementation(async (...args) => {
+      const lease = await realAdmit(...args);
+      events.push('admit');
+      return lease;
+    });
     const recovery = m.StackUpdateRecoveryService.getInstance();
     const realHandoff = recovery.handoff.bind(recovery);
     vi.spyOn(recovery, 'handoff').mockImplementation((...args) => {
@@ -299,9 +307,40 @@ describe('an atomic deploy refused before Compose is handed its up leaves the pr
       pullRefs: [],
       verifyPulled: async () => { events.push('verified'); },
     });
-    expect(events).toEqual(['pull', 'verified', 'handoff', 'up']);
+    expect(events).toEqual(['pull', 'verified', 'admit', 'handoff', 'up']);
     expect(rowOf(CANDIDATE)?.status).toBe('active');
     expect(rowOf(CANDIDATE)?.is_current).toBe(1);
     expect(rowOf(PREVIOUS)?.status).toBe('superseded');
+  });
+});
+
+describe('a deploy whose handoff cannot complete after its up was admitted', () => {
+  it('abandons the candidate it could not hand off, starts no up and does not compensate', async () => {
+    const { svc, compensate, begin } = harness();
+    const execute = vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockResolvedValue(undefined);
+    const recovery = m.StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'handoff').mockReturnValue(false);
+    const abandon = vi.spyOn(recovery, 'abandon');
+    const error = await refusal(svc.deployStack(STACK, undefined, true));
+    expect(String(error)).toContain('Failed to hand off recovery generation');
+    expect(abandon).toHaveBeenCalledWith(CANDIDATE);
+    expect(execute).not.toHaveBeenCalled();
+    expect(compensate).not.toHaveBeenCalled();
+    // Not a fence refusal, so the deploy is recorded as a failed one that moved nothing.
+    expect(begin).toHaveBeenCalledTimes(1);
+    expectPreviousPointUntouched();
+    expect(m.fsWorkInFlightCountForTests()).toBe(0);
+  });
+
+  it('compensates a candidate it handed off but could not mark reconciling, as an update does, and releases its lease', async () => {
+    const { svc, compensate } = harness();
+    const execute = vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockResolvedValue(undefined);
+    const recovery = m.StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'markReconciling').mockReturnValue(false);
+    const error = await refusal(svc.deployStack(STACK, undefined, true));
+    expect(String((error as { originalError?: unknown })?.originalError ?? error)).toContain('Failed to mark recovery generation as reconciling');
+    expect(execute).not.toHaveBeenCalled();
+    expect(compensate).toHaveBeenCalledTimes(1);
+    expect(m.fsWorkInFlightCountForTests()).toBe(0);
   });
 });
