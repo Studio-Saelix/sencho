@@ -405,9 +405,8 @@ export class RecoveryEngineService {
     this.boot = { ready: false, startedAt: Date.now(), finishedAt: null, reason: 'engine_starting' };
     try {
       this.operations.reconcileAtStartup();
-      // Before the registration below, which protects the helper image from a prune only when it is present.
-      await this.pullMissingHelperAtBoot();
       await this.registerOwnInfrastructure();
+      await this.pullMissingHelperAtBoot();
       if (resolveHelperImageRef().kind === 'pinned') {
         const runner = this.helperRunner();
         const removed = await runner.removeForeignEpochHelpers();
@@ -506,7 +505,7 @@ export class RecoveryEngineService {
         const inspected = await this.docker().getImage(configured.ref).inspect() as { Id?: string };
         if (inspected.Id) self.registerRecoveryImage(inspected.Id);
       } catch {
-        // The image is not pulled yet; provisioning registers it after the pull.
+        // The image is not pulled yet; the startup pull or provisioning registers it after the pull.
       }
     }
   }
@@ -519,8 +518,8 @@ export class RecoveryEngineService {
    * and a node that cannot reach the registry keeps its truthful
    * `helper_unavailable` answer: nothing here, a failed or a slow pull included,
    * stops boot. When the pull outlasts the wait, the helper-dependent steps
-   * below run without the image, so a repository lock left by interrupted work
-   * stays held (and says so in the log) until an administrator releases it.
+   * below run without the image, so a repository lock left by an interrupted
+   * capture, check or restore stays held until an administrator releases it.
    */
   private async pullMissingHelperAtBoot(): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
@@ -534,6 +533,8 @@ export class RecoveryEngineService {
         if (image.state !== 'missing') return false;
         console.log('[Recovery] Pulling the pinned helper image for the active repository');
         await pullHelperImage(this.docker(), ref);
+        // The registration at the top of boot found no image to protect from a prune; it does now.
+        await this.registerOwnInfrastructure();
         return true;
       };
       const work = pulled();
@@ -546,12 +547,7 @@ export class RecoveryEngineService {
         (didPull) => {
           if (!didPull) return;
           console.log('[Recovery] Helper image pull finished after boot moved on');
-          // Registration found no image at boot, so the helper is registered now, and the cached answer corrected.
-          this.registerOwnInfrastructure()
-            .then(() => this.refreshHealth())
-            .catch((err: unknown) => {
-              console.warn('[Recovery] Helper image registration failed after boot moved on:', errorMessageForLog(err));
-            });
+          void this.refreshHealth();
         },
         (err: unknown) => {
           console.warn('[Recovery] Helper image pull failed after boot moved on:', errorMessageForLog(err));
