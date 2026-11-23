@@ -266,6 +266,23 @@ describe('an atomic deploy refused before Compose is handed its up leaves the pr
     expect(compensate).not.toHaveBeenCalled();
   });
 
+  it('abandons the candidate, rethrows the original error and compensates nothing when a verification pull fails before the up', async () => {
+    const { svc, compensate, begin } = harness();
+    const execute = vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockRejectedValue(new Error('pull access denied'));
+    const error = await refusal(svc.deployStack(STACK, undefined, true, undefined, {
+      pullServices: ['web'],
+      pullRefs: [],
+    }));
+    // Nothing was replaced, so the failure is the pull's own, not a rolled-back deploy.
+    expect(String(error)).toContain('pull access denied');
+    expect(error).not.toBeInstanceOf((await import('../services/ComposeService')).ComposeRollbackError);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(compensate).not.toHaveBeenCalled();
+    // A failure that is not a fence refusal is still recorded as a failed deploy that moved nothing.
+    expect(begin).toHaveBeenCalledTimes(1);
+    expectPreviousPointUntouched();
+  });
+
   it('refuses at the legacy-orphan lookup\'s own `compose ps` with no Compose error logged, no orphan removed and no GitOps record', async () => {
     const { svc, dockerController, removed, compensate, begin } = harness();
     const execute = vi.spyOn(svc as unknown as { execute: () => Promise<void> }, 'execute').mockResolvedValue(undefined);
