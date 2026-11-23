@@ -75,10 +75,12 @@ type Internals = {
   canSelfUpdate: boolean;
   pinCache: unknown;
   pinInflight: unknown;
+  freshQueued: unknown;
   lastFullReadAt: number;
   incompleteReads: number;
   incompleteReadsAt: number;
   applyDetection(code: null): void;
+  readComposeImage(allowHelper: boolean): Promise<{ info: unknown; partial: boolean } | null>;
 };
 
 /** `otherDestinations` are further mounts of the container (a volume, or a bind mount that is not the config file's own). */
@@ -99,6 +101,7 @@ function setup(configFiles: string[], mounts: Mount[], otherDestinations: string
   internals.canSelfUpdate = true;
   internals.pinCache = null;
   internals.pinInflight = null;
+  internals.freshQueued = null;
   internals.lastFullReadAt = 0;
   internals.incompleteReads = 0;
   internals.incompleteReadsAt = 0;
@@ -1010,7 +1013,7 @@ describe('a Compose file that cannot be read at all', () => {
     writeCovered('saelix/sencho:0.99.0');
     const service = setup([coveredFile, uncoveredFile], [sameMount]);
 
-    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
     expect(helperCalls()).toHaveLength(1);
 
     await expect(service.getPinInfo()).resolves.toMatchObject({ pinKind: 'semver' });
@@ -1105,7 +1108,7 @@ describe('a Compose file that cannot be read at all', () => {
     await service.getPinInfo({ fresh: true });
 
     writeCovered('saelix/sencho:0.99.1');
-    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
 
     await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.1' });
   });
@@ -1133,7 +1136,8 @@ describe('a Compose file that cannot be read at all', () => {
     await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
     const background = internals.pinInflight as Promise<unknown>;
     clock += 1000;
-    await service.getPinInfo({ fresh: true });
+    // Fresh callers queue behind a running read, so start the overlapping read directly.
+    await internals.readComposeImage(true);
     expect(internals.incompleteReads).toBe(2);
     release();
     await background;
@@ -1165,7 +1169,8 @@ describe('a Compose file that cannot be read at all', () => {
 
     const older = service.getPinInfo({ fresh: true });
     clock += 1000;
-    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ pinKind: 'semver' });
+    // Fresh callers queue behind a running read, so start the overlapping read directly.
+    await expect((service as unknown as Internals).readComposeImage(true)).resolves.toMatchObject({ partial: false });
     release();
     await expect(older).resolves.toBeNull();
 
@@ -1301,5 +1306,206 @@ describe('triggerUpdate repin', () => {
     expect(stagedWrites[0]).toBe(patchComposeServiceImage(compose('saelix/sencho:0.99.0'), 'sencho', 'saelix/sencho:0.99.1'));
     expect(helperCalls()).toHaveLength(0);
     expect(mockExecFileAsync.mock.calls.some(call => (call[1] as string[])[0] === 'pull')).toBe(true);
+  });
+});
+
+describe('a fresh read that could not read every Compose file', () => {
+  const warnSilently = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const errorSilently = () => vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const pulls = () => mockExecFileAsync.mock.calls.filter(call => (call[1] as string[])[0] === 'pull');
+
+  /** A base file the covered mount reads, and an override the helper cannot (it can override the image). */
+  function partialProject(): SelfUpdateService {
+    writeCovered('saelix/sencho:0.99.0');
+    return setup([coveredFile, uncoveredFile], [sameMount]);
+  }
+
+  it('returns nothing to every fresh caller, though the files it did read classify an image', async () => {
+    warnSilently();
+    const service = partialProject();
+
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+    await expect(service.getResolvedComposeImageForUpdate()).resolves.toBeNull();
+    await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toEqual({
+      ok: false,
+      reason: expect.stringContaining('Could not read the Sencho compose file'),
+    });
+  });
+
+  it('refuses an update that names a target, without pulling an image or staging a repin', async () => {
+    warnSilently();
+    errorSilently();
+    const service = partialProject();
+
+    await service.triggerUpdate({ targetVersion: '0.99.1' });
+
+    expect(pulls()).toHaveLength(0);
+    expect(stagedWrites).toHaveLength(0);
+    expect(service.getLastError()).toContain('Could not read the Sencho compose file');
+  });
+
+  it('refuses an update that names a target image, without pulling an image or staging a repin', async () => {
+    warnSilently();
+    errorSilently();
+    const service = partialProject();
+
+    await service.triggerUpdate({ targetImageRef: 'saelix/sencho-hardened:1.0.0' });
+
+    expect(pulls()).toHaveLength(0);
+    expect(stagedWrites).toHaveLength(0);
+    expect(service.getLastError()).toContain('Could not read the Sencho compose file');
+  });
+
+  it('keeps the partial classification for routine and cacheOnly callers, which start no helper', async () => {
+    warnSilently();
+    const service = partialProject();
+    await service.getPinInfo({ fresh: true });
+
+    await expect(service.getPinInfo({ cacheOnly: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.getPinInfo()).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    expect(helperCalls()).toHaveLength(1);
+  });
+
+  it('answers a fresh caller again as soon as every file can be read', async () => {
+    warnSilently();
+    const service = partialProject();
+    await expect(service.getPinInfo({ fresh: true })).resolves.toBeNull();
+
+    hostFiles.set(uncoveredFile, 'services:\n  other:\n    image: busybox\n');
+    await expect(service.getPinInfo({ fresh: true })).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(service.canSelfUpdateTarget('0.99.1')).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('concurrent fresh reads of a Compose file only the helper can read', () => {
+  /** Holds every helper container until `release()`, so reads stay in flight. Each serves the file as it was when it started. */
+  function holdHelper(): { release: () => void } {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const base = mockExecFileAsync.getMockImplementation()!;
+    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
+      const served = await base(...(args as [string, string[]])).then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+      if (isReadHelper([args[0], args[1]])) await gate;
+      if ('error' in served) throw served.error;
+      return served.value;
+    });
+    return { release: () => release() };
+  }
+
+  it('share one read queued behind the running one, however many callers arrive', async () => {
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    const held = holdHelper();
+
+    const callers = [
+      service.getPinInfo({ fresh: true }),
+      service.getPinInfo({ fresh: true }),
+      service.getResolvedComposeImageForUpdate(),
+      service.canSelfUpdateTarget('0.99.1'),
+      service.getPinInfo({ fresh: true }),
+      service.getPinInfo({ fresh: true }),
+    ];
+    await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
+    held.release();
+    const results = await Promise.all(callers);
+
+    expect(results[0]).toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    expect(results[2]).toMatchObject({ imageRef: 'saelix/sencho:0.99.0' });
+    expect(results[3]).toEqual({ ok: true });
+    // One read for the first caller and one shared by the five that arrived while it ran.
+    expect(helperCalls()).toHaveLength(2);
+  });
+
+  it('give the callers that arrived while a read ran a read that started after they did', async () => {
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    const held = holdHelper();
+
+    const first = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
+    // The operator edits the file after the first read began and before the second caller asks.
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.5'));
+    const second = service.getPinInfo({ fresh: true });
+    const third = service.getResolvedComposeImageForUpdate();
+    held.release();
+
+    await expect(first).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.0' });
+    await expect(second).resolves.toMatchObject({ composeImageRef: 'saelix/sencho:0.99.5' });
+    await expect(third).resolves.toMatchObject({ imageRef: 'saelix/sencho:0.99.5' });
+    expect(helperCalls()).toHaveLength(2);
+  });
+
+  it('queue behind a routine retry that is already running, and start no more than one more read', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    writeCovered('saelix/sencho:0.99.0');
+    const service = setup([coveredFile, uncoveredFile], [sameMount]);
+    await service.getPinInfo({ fresh: true });
+    expect(helperCalls()).toHaveLength(1);
+    clock = T0 + FIVE_MIN;
+    const held = holdHelper();
+
+    await service.getPinInfo();
+    await vi.waitFor(() => expect(helperCalls()).toHaveLength(2));
+    hostFiles.set(uncoveredFile, 'services:\n  other:\n    image: busybox\n');
+    const callers = [service.getPinInfo({ fresh: true }), service.getPinInfo({ fresh: true }), service.canSelfUpdateTarget('0.99.1')];
+    held.release();
+
+    await expect(Promise.all(callers)).resolves.toEqual([
+      expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
+      expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
+      { ok: true },
+    ]);
+    expect(helperCalls()).toHaveLength(3);
+  });
+
+  it('give every caller the next read when the one they queued behind fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    const internals = service as unknown as Internals;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const base = mockExecFileAsync.getMockImplementation()!;
+    let first = true;
+    mockExecFileAsync.mockImplementation(async (...args: unknown[]) => {
+      if (first && isReadHelper([args[0], args[1]])) {
+        first = false;
+        await gate;
+        throw new Error('docker is busy');
+      }
+      return base(...(args as [string, string[]]));
+    });
+
+    const older = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
+    const queued = [service.getPinInfo({ fresh: true }), service.getPinInfo({ fresh: true })];
+    release();
+
+    await expect(older).resolves.toBeNull();
+    await expect(Promise.all(queued)).resolves.toEqual([
+      expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
+      expect.objectContaining({ composeImageRef: 'saelix/sencho:0.99.0' }),
+    ]);
+    expect(helperCalls()).toHaveLength(2);
+    expect(internals.freshQueued).toBeNull();
+  });
+
+  it('start a new shared read for callers that arrive after the queued one has begun', async () => {
+    hostFiles.set(uncoveredFile, compose('saelix/sencho:0.99.0'));
+    const service = setup([uncoveredFile], []);
+    const internals = service as unknown as Internals;
+    const held = holdHelper();
+
+    const first = service.getPinInfo({ fresh: true });
+    await vi.waitFor(() => expect(helperCalls()).toHaveLength(1));
+    const queued = service.getPinInfo({ fresh: true });
+    held.release();
+    await Promise.all([first, queued]);
+    expect(helperCalls()).toHaveLength(2);
+    expect(internals.freshQueued).toBeNull();
+
+    // Nothing is running now, so the next caller starts its own read.
+    await service.getPinInfo({ fresh: true });
+    expect(helperCalls()).toHaveLength(3);
   });
 });

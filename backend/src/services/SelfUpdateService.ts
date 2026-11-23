@@ -111,6 +111,8 @@ type DirectRead =
 /** Result of reading every config file; `info` is null when none of the files it read sets the service image. */
 interface ComposeRead {
   info: ResolvedComposeImage | null;
+  /** True when a config file could not be read, so `info` classifies only the files that were. */
+  partial: boolean;
 }
 
 /** Narrow projection of the Dockerode mount entry we actually consume. */
@@ -476,6 +478,8 @@ class SelfUpdateService {
   private routineReadWarned = false;
   /** The newest read that may start the helper, so routine callers can wait for it. */
   private pinInflight: Promise<ComposeRead | null> | null = null;
+  /** The one read queued behind `pinInflight` for fresh callers that arrived while it ran. */
+  private freshQueued: Promise<ComposeRead | null> | null = null;
   private lastFullReadAt = 0;
   /** Consecutive full reads that could not read every config file. */
   private incompleteReads = 0;
@@ -778,8 +782,11 @@ class SelfUpdateService {
    * was attempted and while the cached classification is missing or partial (a
    * config file could not be read), on a backoff of 5 minutes up to a day;
    * `cacheOnly` never reads. Pass `{ fresh: true }` for update decisions so a live
-   * compose edit is always reflected. A read that missed some files returns the
-   * classification of the files it did read. Returns null when self-update is
+   * compose edit is always reflected. Concurrent fresh callers share one read.
+   * A fresh read that could not read every config file returns null, never the
+   * classification of the files it did read: a file it missed can override the
+   * image, so an update decision must not act on it (the cache keeps that partial
+   * classification for routine callers). Returns null when self-update is
    * unavailable, or no read has classified the pin yet.
    */
   async getPinInfo(opts?: { fresh?: boolean; cacheOnly?: boolean }): Promise<PinInfo | null> {
@@ -823,7 +830,9 @@ class SelfUpdateService {
   /**
    * Resolve the compose-declared service image. A fresh read always reads the
    * current files (directly when a mount exposes them, otherwise through the
-   * helper) and refreshes the cache. A routine read serves the cache: once it is
+   * helper) and refreshes the cache; it returns null when any file could not be
+   * read, and callers that arrive while a read runs share the one read queued
+   * after it. A routine read serves the cache: once it is
    * older than the TTL it is re-read directly, and only when every file can be
    * read directly. A routine read starts the helper only while the cache is
    * missing or partial, after a first read was attempted and no more often than
@@ -833,7 +842,10 @@ class SelfUpdateService {
    */
   private async resolveComposeImage(fresh: boolean, cacheOnly = false): Promise<ResolvedComposeImage | null> {
     if (!this.composeContext) return null;
-    if (fresh) return (await this.startFullRead())?.info ?? null;
+    if (fresh) {
+      const read = await this.startCoalescedFullRead();
+      return read && !read.partial ? read.info : null;
+    }
     const cache = this.pinCache;
     if (cache && !cache.partial) {
       const expired = Date.now() - cache.checkedAt >= PIN_CACHE_TTL_MS;
@@ -879,6 +891,24 @@ class SelfUpdateService {
   }
 
   /**
+   * A full read for a fresh caller. While one runs, every fresh caller that
+   * arrives shares a single read queued behind it, which starts after they all
+   * arrived and so sees any edit made before them. Starting one helper per caller
+   * would pile containers onto the Docker host.
+   */
+  private startCoalescedFullRead(): Promise<ComposeRead | null> {
+    if (this.freshQueued) return this.freshQueued;
+    const running = this.pinInflight;
+    if (!running) return this.startFullRead();
+    const queued = running.then(() => undefined, () => undefined).then(() => {
+      this.freshQueued = null;
+      return this.startFullRead();
+    });
+    this.freshQueued = queued;
+    return queued;
+  }
+
+  /**
    * Read every config file and classify the image. A routine read (no helper)
    * returns null, keeping the cache, when a file cannot be read directly, and
    * records the attempt in `checkedAt` so it is not repeated on every tick. A read
@@ -891,7 +921,7 @@ class SelfUpdateService {
    */
   private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
     const ctx = this.composeContext;
-    if (!ctx) return { info: null };
+    if (!ctx) return { info: null, partial: false };
     const startedAt = Date.now();
     if (allowHelper) this.lastFullReadAt = startedAt;
     const files: { filePath: string; content: string }[] = [];
@@ -933,7 +963,7 @@ class SelfUpdateService {
       this.pinCache = { info, at: startedAt, checkedAt: startedAt, needsHelper, partial };
       if (!partial) this.routineReadWarned = false;
     }
-    return { info };
+    return { info, partial };
   }
 
   /** A routine read could not read a file directly: keep the cache, retry after the TTL, log once. */
