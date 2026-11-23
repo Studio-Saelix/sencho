@@ -15,7 +15,7 @@ import {
   unlockRepository,
 } from './localRepository';
 import { RecoveryHelperRunner, HELPER_LABEL_RESTORE_INTENT } from './restic/helperRunner';
-import { inspectHelperImage, resolveHelperImageRef, type HelperImageState } from './restic/helperImage';
+import { inspectHelperImage, pullHelperImage, resolveHelperImageRef, type HelperImageState } from './restic/helperImage';
 import { RESTIC_ENGINE_ID, ResticEngine } from './restic/ResticEngine';
 import { RecoveryOperationStore } from './operations';
 import { RecoveryPointStore } from './recoveryPoints';
@@ -126,6 +126,8 @@ interface RunningWork {
 
 /** How stale the cached health may be before a read refreshes it in the background. */
 const HEALTH_TTL_MS = 60_000;
+/** How long boot waits for a missing helper image to download before it carries on without it. */
+const BOOT_HELPER_PULL_TIMEOUT_MS = 120_000;
 
 export interface AdmissionResult {
   operation: RecoveryOperation;
@@ -402,6 +404,7 @@ export class RecoveryEngineService {
     try {
       this.operations.reconcileAtStartup();
       await this.registerOwnInfrastructure();
+      await this.pullMissingHelperAtBoot();
       if (resolveHelperImageRef().kind === 'pinned') {
         const runner = this.helperRunner();
         const removed = await runner.removeForeignEpochHelpers();
@@ -509,6 +512,42 @@ export class RecoveryEngineService {
    * Clear restic's own locks left by a dead process, under no Sencho operation.
    * Answers whether they are known to be cleared.
    */
+  /**
+   * An active repository means the operator turned recovery on, and each Sencho
+   * image pins its own helper digest, so a new image finds its helper missing
+   * and every point would read as unavailable until provisioning ran again. The
+   * pinned helper is pulled once here instead. A status read still never pulls,
+   * and a node that cannot reach the registry keeps its truthful
+   * `helper_unavailable` answer: a failed or slow pull never stops boot.
+   */
+  private async pullMissingHelperAtBoot(): Promise<void> {
+    const configured = resolveHelperImageRef();
+    // An image id is what `docker load` leaves on an air-gapped host; there is nothing to pull it from.
+    if (configured.kind !== 'pinned' || !configured.ref.includes('@')) return;
+    if (!this.repositories.getActive()) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const image = await inspectHelperImage(this.docker(), configured);
+      if (image.state !== 'missing') return;
+      console.log('[Recovery] Pulling the pinned helper image for the active repository');
+      const pull = pullHelperImage(this.docker(), configured.ref).then(() => 'pulled' as const);
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), BOOT_HELPER_PULL_TIMEOUT_MS);
+      });
+      if (await Promise.race([pull, timeout]) === 'timeout') {
+        // The daemon keeps downloading, and the next provision or restart finds the image.
+        console.warn('[Recovery] Helper image pull is still running; boot continues without waiting for it');
+        pull.catch((err: unknown) => {
+          console.warn('[Recovery] Helper image pull failed after boot moved on:', errorMessageForLog(err));
+        });
+      }
+    } catch (err) {
+      console.warn('[Recovery] Helper image could not be pulled at startup:', errorMessageForLog(err));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async unlockAfterRestart(): Promise<boolean> {
     const repository = this.repositories.getActive();
     if (!repository) return false;
