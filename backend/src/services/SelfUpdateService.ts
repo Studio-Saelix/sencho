@@ -906,7 +906,7 @@ class SelfUpdateService {
     if (this.freshQueued) return this.freshQueued;
     const running = this.pinInflight;
     if (!running) return this.startFullRead();
-    const queued = running.then(() => undefined, () => undefined).then(() => {
+    const queued = running.catch(() => undefined).then(() => {
       this.freshQueued = null;
       return this.startFullRead();
     });
