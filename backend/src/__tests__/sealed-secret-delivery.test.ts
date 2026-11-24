@@ -6,6 +6,8 @@
  * writer runs against a Docker double. Every case runs for a direct-proxy node
  * and for a Pilot node; the local node runs in process.
  */
+import { randomUUID } from 'node:crypto';
+
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -284,6 +286,68 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     } finally {
       restoreUnreadable();
     }
+  });
+
+  describe.each([
+    { defaultCredential: 'readable' },
+    { defaultCredential: 'unreadable' },
+  ])('with no local node row and a $defaultCredential remote default', ({ defaultCredential }) => {
+    it.each([
+      { selector: 'no selector', apply: (r: request.Test) => r },
+      { selector: 'an x-node-id header', apply: (r: request.Test) => r.set('x-node-id', String(directNodeId)) },
+      { selector: 'a nodeId query', apply: (r: request.Test) => r.query({ nodeId: directNodeId }) },
+      // The receiving instance ignores selectors, so a deleted, malformed or
+      // nonexistent one cannot redirect the request or its audit row.
+      { selector: 'a nonexistent x-node-id', apply: (r: request.Test) => r.set('x-node-id', '999999') },
+      { selector: 'a malformed nodeId query', apply: (r: request.Test) => r.query({ nodeId: 'not-a-number' }) },
+    ])('answers every receiving route from this instance with $selector', async ({ apply }) => {
+      const raw = db.getDb();
+      raw.prepare("UPDATE nodes SET type = 'remote' WHERE id = ?").run(localNodeId);
+      const restoreUnreadable = defaultCredential === 'unreadable' ? unreadableRemote(true) : null;
+      if (!restoreUnreadable) db.updateNode(directNodeId, { is_default: true });
+      try {
+        const { NodeRegistry } = await import('../services/NodeRegistry');
+        expect(NodeRegistry.getInstance().getLocalNodeId()).toBeNull();
+        const { SealedSecretStore } = await import('../services/sealedSecrets/SealedSecretStore');
+        SealedSecretStore.getInstance().setDockerForTests(null);
+        // Rows an earlier case buffered must not count as this case's.
+        db.flushAuditLogBuffer();
+        raw.prepare('DELETE FROM audit_log').run();
+        const bearer = `Bearer ${transport.bearer()}`;
+        const send = (r: request.Test) => apply(r.set('Authorization', bearer));
+
+        const key = await send(request(app).get('/api/sealed-secrets/key'));
+        expect(key.status).toBe(200);
+        expect((await send(request(app).get('/api/sealed-secrets'))).status).toBe(200);
+        expect((await send(request(app).get(`/api/sealed-secrets/${PURPOSE}/${SLOT_A}`))).status).toBe(200);
+
+        const { sealSecret } = await import('../helpers/sealedSecretSeal');
+        const operationId = randomUUID();
+        const sealed = sealSecret(Buffer.from(key.body.publicKey, 'base64'), {
+          purpose: PURPOSE, deliverySourceId: key.body.deliverySourceId, slot: SLOT_A, generation: 1, operationId,
+        }, SECRET);
+        const accept = await send(request(app).post(`/api/sealed-secrets/${PURPOSE}`))
+          .send({ slot: SLOT_A, generation: 1, operationId, actor: 'admin', sealed });
+        // The store's own answer for an instance with no daemon, not a 500 from a decrypted default.
+        expect(accept.status).toBe(503);
+        expect(accept.body.code).toBe('SECRET_STORE_UNAVAILABLE');
+        const removal = await send(request(app).delete(`/api/sealed-secrets/${PURPOSE}/${SLOT_A}`))
+          .send({ generation: 2, operationId: randomUUID(), actor: 'admin' });
+        expect(removal.status).toBe(200);
+        expect(removal.body.status).toBe('not_current');
+        expect(fake.files.size).toBe(0);
+        // A request this instance served is never recorded against the node it named.
+        db.flushAuditLogBuffer();
+        const nodeIds = (raw.prepare("SELECT node_id FROM audit_log WHERE path LIKE '/api/sealed-secrets%'").all() as { node_id: number | null }[])
+          .map((row) => row.node_id);
+        expect(nodeIds.length).toBeGreaterThan(0);
+        expect(nodeIds.every((id) => id === null)).toBe(true);
+      } finally {
+        restoreUnreadable?.();
+        raw.prepare("UPDATE nodes SET type = 'local' WHERE id = ?").run(localNodeId);
+        db.getDb().prepare('UPDATE nodes SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END').run(localNodeId);
+      }
+    });
   });
 
   it('does not trust a pin the registry path made over plaintext', async () => {

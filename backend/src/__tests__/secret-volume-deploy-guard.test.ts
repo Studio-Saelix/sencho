@@ -236,8 +236,14 @@ describe('ComposeService secret volume guard', () => {
     Mounts: Array<{ Type: string; Name?: string; Destination?: string }>;
   }>;
   /** What `inspect` answers per container id: the create spec the down guard reads. */
-  let inspectFor: Record<string, { HostConfig: { Mounts?: Array<{ Type: string; Source?: string; Target: string }>; Binds?: string[] } }>;
+  let inspectFor: Record<string, {
+    Id?: string;
+    Mounts?: Array<{ Type: string; Name?: string; Destination?: string }>;
+    HostConfig: { Mounts?: Array<{ Type: string; Source?: string; Target: string }>; Binds?: string[]; VolumesFrom?: string[] };
+  }>;
   let inspectError: (Error & { statusCode?: number }) | null;
+  /** A failure for one container id or name only. */
+  let inspectErrorFor: Record<string, Error & { statusCode?: number }>;
   let listVolumes: ReturnType<typeof vi.fn>;
   let listContainers: ReturnType<typeof vi.fn>;
 
@@ -297,6 +303,7 @@ describe('ComposeService secret volume guard', () => {
     containers = [];
     inspectFor = {};
     inspectError = null;
+    inspectErrorFor = {};
     h.endpointReadsRender = true;
     h.endpointRenderReads = 0;
     h.fakeDocker = (args) => {
@@ -325,6 +332,7 @@ describe('ComposeService secret volume guard', () => {
       inspect: async () => {
         events.push(`inspect:${id}`);
         if (inspectError) throw inspectError;
+        if (inspectErrorFor[id]) throw inspectErrorFor[id];
         return inspectFor[id] ?? { HostConfig: {} };
       },
     }));
@@ -824,6 +832,314 @@ describe('ComposeService secret volume guard', () => {
         expect(error).toBeInstanceOf(SecretVolumeProtectedError);
         expect((error as Error).message).toContain('could not read the containers of this stack');
         expect(mutations()).toEqual([]);
+      });
+
+      describe('a secret mount inherited through volumes_from', () => {
+        const tok = `${stack}_tok`;
+        /**
+         * A 64-hex volume name, Docker's anonymous name shape. The fake volume
+         * list reports no labels, so this keeps the provenance path under test;
+         * the named tests below also run with a plain name the guard can clear
+         * without reading the donor.
+         */
+        const namedId = 'a1'.repeat(32);
+
+        const twoServices = (volume = tok, volumeKey = 'tok', declare = true) => () => ({
+          name: stack,
+          services: { web: { image: 'alpine:3.20' }, side: { image: 'alpine:3.20', volumes_from: ['web'] } },
+          volumes: declare ? { [volumeKey]: { name: volume, external: true } } : {},
+        });
+
+        /** `c-web` mounts `volume` at /token (named unless `anonymous`); `c-side` inherits it from `c-web`. */
+        function donorAndInheritor(volume: string, anonymous = false, donorService = 'web', donorProject = stack) {
+          containers = [
+            {
+              Id: 'c-web',
+              Names: [`/${donorProject}-${donorService}-1`],
+              Labels: { 'com.docker.compose.project': donorProject, 'com.docker.compose.service': donorService },
+              Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
+            },
+            {
+              Id: 'c-side',
+              Names: [`/${stack}-side-1`],
+              Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+              Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
+            },
+          ];
+          const donor = {
+            Id: 'c-web',
+            Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
+            HostConfig: { Mounts: [{ Type: 'volume', ...(anonymous ? {} : { Source: volume }), Target: '/token' }] },
+          };
+          inspectFor = {
+            'c-web': donor,
+            [`${donorProject}-${donorService}-1`]: donor,
+            'c-side': { Id: 'c-side', Mounts: donor.Mounts, HostConfig: { VolumesFrom: [`${donorProject}-${donorService}-1:ro`] } },
+          };
+        }
+
+        it.each([
+          ['edge-tunnel', 'runDown'],
+          ['edge-tunnel', 'downStack'],
+          ['released-edge-tunnel', 'runDown'],
+          ['released-edge-tunnel', 'downStack'],
+        ] as const)('lets the recorded %s consumer through %s when the inherited mount is named by its donor', async (kind, method) => {
+          recordManagedKind(stack, kind);
+          renderFor = twoServices(namedId);
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId);
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(events).toContain('inspect:c-side');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it.each(['runDown', 'downStack'] as const)('%s lets an ordinary stack through when it inherits a named secret mount from a container outside the project', async (method) => {
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20' } } });
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId, false, 'tunnel', 'edge');
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(events).toContain('inspect:c-side');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it.each(['runDown', 'downStack'] as const)('%s lets a named volume through when the donor it inherits from is gone', async (method) => {
+          // The surviving container still lists the volume by name, and Docker
+          // keeps a volume created by name when the container is removed. The
+          // donor's create spec is not needed to establish that.
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20', volumes_from: ['container:retired-donor'] } } });
+          labelledVolumes = [tok];
+          containers = [{
+            Id: 'c-side',
+            Names: [`/${stack}-side-1`],
+            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Mounts: [{ Type: 'volume', Name: tok, Destination: '/token' }],
+          }];
+          inspectFor = { 'c-side': { Id: 'c-side', Mounts: [{ Type: 'volume', Name: tok, Destination: '/token' }], HostConfig: { VolumesFrom: ['retired-donor:ro'] } } };
+          inspectErrorFor['retired-donor'] = Object.assign(new Error('no such container'), { statusCode: 404 });
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it.each(['runDown', 'downStack'] as const)('%s refuses a possibly-anonymous volume whose donor is gone', async (method) => {
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20', volumes_from: ['container:retired-donor'] } } });
+          labelledVolumes = [namedId];
+          containers = [{
+            Id: 'c-side',
+            Names: [`/${stack}-side-1`],
+            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
+          }];
+          inspectFor = { 'c-side': { Id: 'c-side', Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }], HostConfig: { VolumesFrom: ['retired-donor:ro'] } } };
+          inspectErrorFor['retired-donor'] = Object.assign(new Error('no such container'), { statusCode: 404 });
+
+          const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+          expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+          expect((error as Error).message).toContain('could not read the containers of this stack');
+          expect(mutations()).toEqual([]);
+        });
+
+        it('permits a mount of a volume created by name, which Docker keeps when the container is removed', async () => {
+          // A plain name cannot be a Docker-created anonymous volume, so the
+          // container spec is irrelevant: the volume survives the removal.
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [tok];
+          holder(stack, tok);
+          inspectFor['c-web'] = { HostConfig: {} };
+
+          await svc().runDown(stack, { removeVolumes: true });
+
+          expect(events).not.toContain('inspect:c-web');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('follows a chain of donors to the one that names the mount', async () => {
+          recordManagedKind(stack, 'edge-tunnel');
+          renderFor = twoServices(namedId, 'tok', false);
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId);
+          // c-side inherits from c-mid, which inherits from the named c-web.
+          inspectFor['c-mid'] = { Id: 'c-mid', Mounts: inspectFor['c-web'].Mounts, HostConfig: { VolumesFrom: [`${stack}-web-1`] } };
+          inspectFor['c-side'].HostConfig.VolumesFrom = ['c-mid'];
+
+          await svc().runDown(stack, { removeVolumes: true });
+
+          expect(events).toContain('inspect:c-mid');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('does not inspect a donor twice when a chain reaches it by name and by id', async () => {
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20' } } });
+          labelledVolumes = [namedId];
+          containers = [{
+            Id: 'c-side',
+            Names: [`/${stack}-side-1`],
+            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
+          }];
+          const mounts = [{ Type: 'volume' as const, Name: namedId, Destination: '/token' }];
+          // The mid donor lists the same donor by name and then by its id: the
+          // second reference must not inspect it again.
+          inspectFor = {
+            'c-side': { Id: 'c-side', Mounts: mounts, HostConfig: { VolumesFrom: ['c-mid'] } },
+            'c-mid': { Id: 'c-mid', Mounts: mounts, HostConfig: { VolumesFrom: ['c-donor-name', 'c-donor-id'] } },
+            'c-donor-name': { Id: 'c-donor-id', Mounts: mounts, HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } },
+          };
+
+          await expect(svc().runDown(stack, { removeVolumes: true })).rejects.toBeInstanceOf(SecretVolumeProtectedError);
+          expect(events.filter((event) => event === 'inspect:c-donor-name')).toHaveLength(1);
+          expect(events).not.toContain('inspect:c-donor-id');
+          expect(mutations()).toEqual([]);
+        });
+
+        it('names the mount through a donor bind entry', async () => {
+          renderFor = twoServices(namedId, 'tok', false);
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId);
+          inspectFor['c-web'].HostConfig = { Binds: [`${namedId}:/token:ro`] };
+
+          await svc().runDown(stack, { removeVolumes: true });
+
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('refuses, and stops, when donors inherit from each other and none names the mount', async () => {
+          renderFor = twoServices(namedId, 'tok', false);
+          labelledVolumes = [namedId];
+          containers = [{
+            Id: 'c-side',
+            Names: [`/${stack}-side-1`],
+            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
+          }];
+          const mounts = [{ Type: 'volume' as const, Name: namedId, Destination: '/token' }];
+          // c-side and c-mid inherit from each other; neither names the volume.
+          inspectFor = {
+            'c-side': { Id: 'c-side', Mounts: mounts, HostConfig: { VolumesFrom: ['c-mid'] } },
+            'c-mid': { Id: 'c-mid', Mounts: mounts, HostConfig: { VolumesFrom: ['c-side'] } },
+          };
+
+          await expect(svc().runDown(stack, { removeVolumes: true })).rejects.toBeInstanceOf(SecretVolumeProtectedError);
+          expect(events.filter((event) => event === 'inspect:c-mid')).toHaveLength(1);
+          expect(mutations()).toEqual([]);
+        });
+
+        it.each(['runDown', 'downStack'] as const)('%s refuses a mount inherited from a donor that mounts it anonymously', async (method) => {
+          renderFor = twoServices(ANON, 'tok', false);
+          labelledVolumes = [ANON];
+          donorAndInheritor(ANON, true);
+
+          const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+          expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+          expect((error as Error).message).toContain('mounts without naming it');
+          expect(mutations()).toEqual([]);
+        });
+
+        it.each([
+          ['edge-tunnel', 'runDown'],
+          ['edge-tunnel', 'downStack'],
+          ['released-edge-tunnel', 'runDown'],
+          ['released-edge-tunnel', 'downStack'],
+        ] as const)('refuses the recorded %s consumer for an anonymous mount inherited from a donor outside the project through %s', async (kind, method) => {
+          // The donor is not a container this down removes, so only following
+          // volumes_from finds the anonymous mount it copied.
+          recordManagedKind(stack, kind);
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20', volumes_from: ['container:tunnel'] } } });
+          labelledVolumes = [ANON];
+          donorAndInheritor(ANON, true, 'tunnel', 'edge');
+
+          const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+          expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+          expect(events).not.toContain('inspect:c-web');
+          expect(mutations()).toEqual([]);
+        });
+
+        it('refuses a donor that does not hold the mount the inheritor has', async () => {
+          renderFor = twoServices(namedId, 'tok', false);
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId);
+          inspectFor[`${stack}-web-1`] = { Id: 'c-web', Mounts: [], HostConfig: { Mounts: [{ Type: 'volume', Source: namedId, Target: '/other' }] } };
+          // c-web itself still lists and inspects as named; only the inheritor's provenance is unknown.
+          await expect(svc().runDown(stack, { removeVolumes: true })).rejects.toBeInstanceOf(SecretVolumeProtectedError);
+          expect(mutations()).toEqual([]);
+        });
+
+        it.each([
+          ['runDown', 'cannot be inspected', 500],
+          ['downStack', 'cannot be inspected', 500],
+          ['runDown', 'is gone', 404],
+          ['downStack', 'is gone', 404],
+        ] as const)('%s refuses when the donor %s', async (method, _what, statusCode) => {
+          recordManagedKind(stack, 'edge-tunnel');
+          renderFor = twoServices(namedId);
+          labelledVolumes = [namedId];
+          donorAndInheritor(namedId);
+          inspectErrorFor[`${stack}-web-1`] = Object.assign(new Error('donor read failed'), { statusCode });
+
+          const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+          expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+          expect((error as Error).message).toContain('could not read the containers of this stack');
+          expect(mutations()).toEqual([]);
+        });
+      });
+
+      describe('a container the down does not remove with its volumes', () => {
+        function oneHolder(labels: Record<string, string>) {
+          containers = [{
+            Id: 'c-held',
+            Names: [`/${stack}-held-1`],
+            Labels: { 'com.docker.compose.project': stack, ...labels },
+            Mounts: [{ Type: 'volume', Name: ANON, Destination: '/token' }],
+          }];
+          inspectFor = { 'c-held': { HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } } };
+        }
+
+        it.each([
+          ['runDown', 'a service the project no longer declares', { 'com.docker.compose.service': 'retired' }],
+          ['downStack', 'a service the project no longer declares', { 'com.docker.compose.service': 'retired' }],
+          ['runDown', 'a service the project does not enable', { 'com.docker.compose.service': 'debug' }],
+          ['downStack', 'a service the project does not enable', { 'com.docker.compose.service': 'debug' }],
+          ['downStack', 'a one-off of a service the project no longer declares', { 'com.docker.compose.service': 'retired', 'com.docker.compose.oneoff': 'True' }],
+          ['runDown', 'no service label', {}],
+          ['downStack', 'no service label', {}],
+        ] as const)('%s leaves an orphan with %s alone, as Compose keeps its volumes', async (method, _what, labels) => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder(labels);
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(events).not.toContain('inspect:c-held');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('lets runDown through for a one-off run container, which a plain down never lists', async () => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' });
+
+          await svc().runDown(stack, { removeVolumes: true });
+
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('refuses downStack for a one-off run container of a declared service, which --remove-orphans removes with its volumes', async () => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' });
+
+          expect(await failureOf(svc().downStack(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+          expect(mutations()).toEqual([]);
+        });
       });
 
       it('goes ahead when the container is gone by the time it is inspected', async () => {

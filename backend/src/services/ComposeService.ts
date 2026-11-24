@@ -324,6 +324,73 @@ export type GitOpsDeployHandle = {
   failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
 };
 
+/** The project a `down --volumes` acts on, as the guard needs it. */
+interface DownProject {
+  /** The project name Compose runs the down under. */
+  projectName: string;
+  /** The services the rendered project enables. */
+  services: ReadonlySet<string>;
+  /** Whether the down lists one-off `run` containers (`--remove-orphans` does). */
+  removesOneOffs: boolean;
+}
+
+interface SecretMount {
+  name: string;
+  destination: string;
+}
+
+/**
+ * The label Docker puts on a volume it created for a mount that named none.
+ * Removing a container with its volumes deletes only such anonymous volumes;
+ * a volume created by name is kept.
+ */
+const DOCKER_ANONYMOUS_VOLUME_LABEL = 'com.docker.volume.anonymous';
+
+/** Docker names an anonymous volume with a random 64-hex id. */
+const DOCKER_ANONYMOUS_VOLUME_NAME = /^[0-9a-f]{64}$/;
+
+/**
+ * True when a secret volume could be one Docker created anonymously, the only
+ * kind removing a container with its volumes deletes. A volume the label read
+ * returned is judged by its own labels; one it did not return falls back to
+ * Docker's 64-hex anonymous name. A volume created by name is never removed
+ * with a container, so its mount needs no provenance check.
+ */
+function couldBeAnonymousVolume(
+  name: string,
+  labelsByName: ReadonlyMap<string, Record<string, string> | null>,
+): boolean {
+  const labels = labelsByName.get(name);
+  if (labels) return Object.prototype.hasOwnProperty.call(labels, DOCKER_ANONYMOUS_VOLUME_LABEL);
+  return DOCKER_ANONYMOUS_VOLUME_NAME.test(name);
+}
+
+/**
+ * Whether Compose's `down --volumes` removes a container of the project with
+ * its volumes: it must belong to an enabled service of the project, and a
+ * one-off `run` container only counts when the down lists one-offs. Orphans
+ * are left alone, or, with `--remove-orphans`, removed but with their volumes
+ * kept.
+ * A plain down lists only containers labelled `oneoff=False`; one lacking the
+ * label counts here too, which errs toward refusing.
+ */
+function downRemovesWithVolumes(labels: Record<string, string> | undefined, project: DownProject): boolean {
+  const service = labels?.['com.docker.compose.service'];
+  if (!service || !project.services.has(service)) return false;
+  return project.removesOneOffs || labels?.['com.docker.compose.oneoff'] !== 'True';
+}
+
+/** True when `container`'s own create spec names `mount`'s volume at its path (a `volume` mount or a bind entry). */
+function specNamesMount(container: Docker.ContainerInspectInfo, mount: SecretMount): boolean {
+  const specMounts = container.HostConfig?.Mounts ?? [];
+  const binds = container.HostConfig?.Binds ?? [];
+  return specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && samePath(spec.Target) === mount.destination)
+    || binds.some((bind) => {
+      const [source, target] = bind.split(':');
+      return source === mount.name && samePath(target) === mount.destination;
+    });
+}
+
 /** A container path as Docker reports it: `/token/` and `//token` are `/token`. */
 function samePath(value: string | undefined): string {
   if (!value) return '';
@@ -519,14 +586,19 @@ export class ComposeService {
    * A secret volume is refused too (`SecretVolumeProtectedError`), whether the
    * stack's declaration shows it (reserved name, authored label) or only the
    * Docker volume of that name carries the label, and whether it is declared or
-   * a container of the project mounts it anonymously; a label or container read
-   * that fails refuses. The stack Sencho recorded as the secret's consumer may
-   * declare it, but only as `external` and mounted by name, which Compose never
-   * removes. See `assertNoSecretVolumeRemoval`.
+   * a container the down removes with its volumes mounts it anonymously,
+   * directly or through `volumes_from`; a label or container read that fails
+   * refuses. The stack Sencho recorded as the secret's consumer may declare it,
+   * but only as `external` and mounted by name, which Compose never removes.
+   * See `assertNoSecretVolumeRemoval`.
+   *
+   * `down.removesOneOffs` says whether the down lists one-off `run` containers
+   * with its volumes (`--remove-orphans` does).
    */
-  private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
+  private async assertNoRecoveryVolumeRemoval(stackName: string, down: { removesOneOffs: boolean }): Promise<void> {
     let declaredVolumes: EffResource[] | null = null;
     let projectName = stackName;
+    let services = new Set<string>();
     try {
       const result = await this.renderConfig(stackName);
       // Sencho's own refusal says why the volumes cannot be read, which is a
@@ -541,6 +613,7 @@ export class ComposeService {
           const model = parseEffectiveModel(parsed, stackName);
           declaredVolumes = Object.values(model.volumes);
           projectName = model.projectName;
+          services = new Set(model.services.map((service) => service.name));
         } else {
           console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
@@ -559,7 +632,7 @@ export class ComposeService {
     if (recoveryVolumeNamesIn(declaredVolumes.map((volume) => volume.name), (name) => self.isRecoveryVolume(name)).length > 0) {
       throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
     }
-    await this.assertNoSecretVolumeRemoval(stackName, projectName, declaredVolumes);
+    await this.assertNoSecretVolumeRemoval(stackName, { projectName, services, removesOneOffs: down.removesOneOffs }, declaredVolumes);
   }
 
   /**
@@ -574,19 +647,25 @@ export class ComposeService {
    *
    * Anonymous volumes: removing a container with its volumes also removes
    * every volume it mounted without naming it, whatever the stack's file now
-   * says, so each container of the project is checked for a secret volume
-   * mounted that way. The consumer gets no exemption here: an anonymous mount
-   * is exactly what the removal deletes.
+   * says, so each container the down removes with its volumes is checked for a
+   * secret volume mounted that way. The consumer gets no exemption here: an
+   * anonymous mount is exactly what the removal deletes.
    *
    * A volume or container read that fails refuses.
    */
-  private async assertNoSecretVolumeRemoval(stackName: string, projectName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
+  private async assertNoSecretVolumeRemoval(stackName: string, project: DownProject, declaredVolumes: readonly EffResource[]): Promise<void> {
     let docker: Docker;
     let labelledVolumeNames: Set<string>;
+    const secretVolumeLabels = new Map<string, Record<string, string> | null>();
     try {
       docker = DockerController.getInstance(this.nodeId).getDocker();
       const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
-      labelledVolumeNames = new Set((listed?.Volumes ?? []).map((volume) => volume.Name));
+      labelledVolumeNames = new Set();
+      for (const volume of listed?.Volumes ?? []) {
+        labelledVolumeNames.add(volume.Name);
+        // null when the daemon reports none; the name fallback then applies.
+        secretVolumeLabels.set(volume.Name, volume.Labels ?? null);
+      }
     } catch (error) {
       console.warn('[ComposeService] Could not read the volume labels of this node for the secret volume check of %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
       throw new SecretVolumeProtectedError(
@@ -606,7 +685,8 @@ export class ComposeService {
         );
       }
     }
-    if (await this.mountsSecretVolumeAnonymously(docker, stackName, projectName, isSecretName)) {
+    const couldBeAnonymous = (name: string): boolean => couldBeAnonymousVolume(name, secretVolumeLabels);
+    if (await this.mountsSecretVolumeAnonymously(docker, stackName, project, isSecretName, couldBeAnonymous)) {
       throw new SecretVolumeProtectedError(
         'A container of this stack holds a secret Sencho keeps on this node in a volume it mounts without naming it, which removing volumes would delete, so its volumes were not removed. '
         + 'Run the operation without removing volumes.',
@@ -615,20 +695,31 @@ export class ComposeService {
   }
 
   /**
-   * True when a container of the project mounts a secret volume anonymously,
-   * the mount Docker deletes with the container when volumes are removed. A
-   * mount counts as named only when the container's own create spec names the
-   * volume at that path (a `volume` mount or a bind entry); anything else is
-   * taken as anonymous. Containers are looked up under the project name the
-   * render gives, which is the one Compose runs the down under and can differ
-   * from the stack name. Throws `SecretVolumeProtectedError` when the
-   * containers cannot be read.
+   * True when a container the down removes with its volumes mounts a secret
+   * volume anonymously, the mount Docker deletes with the container.
+   *
+   * Which containers: see `downRemovesWithVolumes`. They are looked up under
+   * the project name the render gives, which is the one Compose runs the down
+   * under and can differ from the stack name.
+   *
+   * Which mounts: only a secret volume Docker could have created anonymously
+   * (`couldBeAnonymousVolume`) is checked. A volume created by name is kept
+   * when its container is removed, so its mount cannot lose the secret and its
+   * provenance does not matter. For a possibly-anonymous volume, Docker keeps
+   * a mount whose spec names its volume. A mount counts as named when the
+   * container's own create spec names the volume at that path, or when it came
+   * through `volumes_from` from a container whose same mount is named, since
+   * Docker copies the donor's spec. Anything else is taken as anonymous.
+   *
+   * Throws `SecretVolumeProtectedError` when a container, or a donor it
+   * inherits a possibly-anonymous secret mount from, cannot be read.
    */
   private async mountsSecretVolumeAnonymously(
     docker: Docker,
     stackName: string,
-    projectName: string,
+    project: DownProject,
     isSecretName: (name: string) => boolean,
+    couldBeAnonymous: (name: string) => boolean,
   ): Promise<boolean> {
     const unreadable = (error: unknown): SecretVolumeProtectedError => {
       console.warn('[ComposeService] Could not read the containers of %s for the secret volume check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -639,14 +730,16 @@ export class ComposeService {
     };
     let listed: Docker.ContainerInfo[];
     try {
-      listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${projectName}`] } });
+      listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${project.projectName}`] } });
     } catch (error) {
       throw unreadable(error);
     }
-    const holders: Array<{ id: string; mounts: Array<{ name: string; destination: string }> }> = [];
+    const holders: Array<{ id: string; mounts: SecretMount[] }> = [];
     for (const container of listed ?? []) {
+      if (!downRemovesWithVolumes(container.Labels, project)) continue;
       const mounts = (container.Mounts ?? [])
-        .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && isSecretName(mount.Name))
+        .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string'
+          && isSecretName(mount.Name) && couldBeAnonymous(mount.Name))
         .map((mount) => ({ name: mount.Name as string, destination: samePath(mount.Destination) }));
       if (mounts.length > 0) holders.push({ id: container.Id, mounts });
     }
@@ -659,16 +752,46 @@ export class ComposeService {
         if ((error as { statusCode?: number })?.statusCode === 404) continue;
         throw unreadable(error);
       }
-      const specMounts = info.HostConfig?.Mounts ?? [];
-      const binds = info.HostConfig?.Binds ?? [];
       for (const mount of holder.mounts) {
-        const named = specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && samePath(spec.Target) === mount.destination)
-          || binds.some((bind) => {
-            const [source, target] = bind.split(':');
-            return source === mount.name && samePath(target) === mount.destination;
-          });
-        if (!named) return true;
+        if (!(await this.mountIsNamed(docker, info, mount, new Set([holder.id]), unreadable))) return true;
       }
+    }
+    return false;
+  }
+
+  /**
+   * True when `container`'s mount of a possibly-anonymous `mount.name` at
+   * `mount.destination` is named in its own spec, or was inherited through
+   * `volumes_from` from a container whose same mount is named, followed through
+   * chains of donors. A donor that cannot be read, or is gone, throws: the spec
+   * the mount was copied from is then unknown, and unknown is not a pass.
+   */
+  private async mountIsNamed(
+    docker: Docker,
+    container: Docker.ContainerInspectInfo,
+    mount: SecretMount,
+    seen: Set<string>,
+    unreadable: (error: unknown) => SecretVolumeProtectedError,
+  ): Promise<boolean> {
+    if (specNamesMount(container, mount)) return true;
+    for (const entry of container.HostConfig?.VolumesFrom ?? []) {
+      // `container[:mode]`; a container name or id never holds a colon.
+      const ref = entry.split(':')[0];
+      if (!ref || seen.has(ref)) continue;
+      seen.add(ref);
+      let donor: Docker.ContainerInspectInfo;
+      try {
+        donor = await docker.getContainer(ref).inspect();
+      } catch (error) {
+        throw unreadable(error);
+      }
+      // The same donor reached again under its id rather than its name.
+      if (donor.Id && donor.Id !== ref) {
+        if (seen.has(donor.Id)) continue;
+        seen.add(donor.Id);
+      }
+      const provides = (donor.Mounts ?? []).some((own) => own.Type === 'volume' && own.Name === mount.name && samePath(own.Destination) === mount.destination);
+      if (provides && await this.mountIsNamed(docker, donor, mount, seen, unreadable)) return true;
     }
     return false;
   }
@@ -1385,7 +1508,8 @@ export class ComposeService {
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
-    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
+    // A plain down never lists one-off `run` containers, so it does not remove them.
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName, { removesOneOffs: false });
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     const composeArgs = await this.authoredComposeArgs(stackName, args);
@@ -3432,7 +3556,9 @@ export class ComposeService {
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
     // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
-    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
+    // `--remove-orphans` lists one-off `run` containers too: a one-off of a declared
+    // service is removed with its volumes, an orphan without them.
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName, { removesOneOffs: true });
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes
