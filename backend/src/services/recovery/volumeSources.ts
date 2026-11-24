@@ -12,6 +12,7 @@ import { HELPER_LABEL_REPOSITORY, RecoveryHelperRunner } from './restic/helperRu
 import { RECOVERY_RESERVED_PREFIX } from './reservedNames';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import type { HelperProfile } from './restic/helperRunner';
+import { isReservedSecretVolumeName, isSecretVolumeRef } from '../../helpers/secretVolume';
 import type { StorageDependent } from './types';
 
 /**
@@ -31,6 +32,7 @@ import type { StorageDependent } from './types';
  */
 
 export type IneligibleReason =
+  | 'secret_volume'
   | 'volume_missing'
   | 'reserved_name'
   | 'repository_volume'
@@ -62,12 +64,16 @@ export interface EligibilityInput {
 
 /**
  * Why this volume cannot hold recovery points, in the order the reasons matter.
- * The repository label comes first so the repository volume says what it is
+ * A secret volume (reserved name or secret label) comes first. The repository
+ * label comes next so the repository volume says what it is
  * (its name carries the reserved prefix too), and a volume whose name Sencho
  * reserves is refused whatever else is true of it, so a repository volume can
  * never be offered as a source even if its label were missing.
  */
 export function classifyVolumeEligibility(input: EligibilityInput): IneligibleReason | null {
+  // A secret volume comes first: no recovery point may ever hold its value,
+  // whatever else is true of it.
+  if (isSecretVolumeRef(input.name, input.labels)) return 'secret_volume';
   if (input.labels && input.labels[HELPER_LABEL_REPOSITORY]) return 'repository_volume';
   if (!isDockerVolumeName(input.name)) return 'reserved_name';
   if (input.name.startsWith(RECOVERY_RESERVED_PREFIX)) return 'reserved_name';
@@ -561,7 +567,9 @@ export async function describeStoredLocator(input: {
       createdAt: null,
       labels: {},
       eligible: false,
-      ineligibleReason: 'volume_missing',
+      // A reserved secret name stays refused even while the volume is absent,
+      // so a restore can never create it.
+      ineligibleReason: isReservedSecretVolumeName(input.locator) ? 'secret_volume' : 'volume_missing',
     };
   }
   return {
@@ -578,6 +586,8 @@ export function describeIneligible(reason: IneligibleReason | null): string | nu
   switch (reason) {
     case null:
       return null;
+    case 'secret_volume':
+      return 'This volume holds a secret Sencho delivered to this node, so it is never captured or restored.';
     case 'volume_missing':
       return 'This volume does not exist on this node yet.';
     case 'reserved_name':

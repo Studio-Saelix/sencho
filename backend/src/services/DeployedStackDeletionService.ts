@@ -25,6 +25,7 @@ import { getErrorMessage } from '../utils/errors';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isSecretVolumeProtectedError } from '../helpers/secretVolume';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
@@ -68,7 +69,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'compose_inputs_refused' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'secret_volume_protected' | 'compose_inputs_refused' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -316,6 +317,11 @@ export class DeployedStackDeletionService {
         if (isRecoveryVolumeProtectedError(downErr)) {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'recovery_volume_protected', error: downErr.message };
+        }
+        // And for a stack that declares a secret volume Sencho keeps on this node.
+        if (isSecretVolumeProtectedError(downErr)) {
+          db.updateCleanupPendingStatus(intentId, 'cancelled');
+          return { ok: false, code: 'secret_volume_protected', error: downErr.message };
         }
         // Sencho refused to hand the stack's inputs to Compose, so nothing was
         // torn down. With containers still bound to the directory, deleting its

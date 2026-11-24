@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isSecretVolumeProtectedError } from '../helpers/secretVolume';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { HealthGateService } from './HealthGateService';
@@ -379,7 +380,7 @@ export class StackUpdateOrchestrator {
             { serviceName, mutationStage: 'policy', recoveryId },
           );
         }
-        if (isDockerEndpointProtectedError(composeError)) {
+        if (isDockerEndpointProtectedError(composeError) || isSecretVolumeProtectedError(composeError)) {
           return serviceFailed(
             composeError.code,
             composeError.message,
@@ -538,7 +539,7 @@ export class StackUpdateOrchestrator {
           stackName, serviceName, options.terminalWs ?? undefined,
         );
       } catch (composeError) {
-        if (isDockerEndpointProtectedError(composeError)) {
+        if (isDockerEndpointProtectedError(composeError) || isSecretVolumeProtectedError(composeError)) {
           return serviceFailed(
             composeError.code,
             composeError.message,

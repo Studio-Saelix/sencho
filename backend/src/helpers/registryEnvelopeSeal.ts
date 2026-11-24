@@ -204,17 +204,30 @@ export function getOrCreateSealingKey(): SealingKeyPublic {
   };
 }
 
-function deriveAesKey(ikm: Buffer): Buffer {
+/** HKDF salt and info that separate one sealing purpose's keys from another's. */
+export interface EnvelopeDerivation {
+  salt: string;
+  info: string;
+}
+
+const REGISTRY_DERIVATION: EnvelopeDerivation = { salt: HKDF_SALT, info: HKDF_INFO };
+
+function deriveAesKey(ikm: Buffer, derivation: EnvelopeDerivation): Buffer {
   if (ikm.length !== PUBLIC_KEY_BYTES || ikm.equals(ZERO_32)) {
     throw new Error('X25519 shared secret rejected');
   }
-  return Buffer.from(crypto.hkdfSync('sha256', ikm, HKDF_SALT, HKDF_INFO, 32));
+  return Buffer.from(crypto.hkdfSync('sha256', ikm, derivation.salt, derivation.info, 32));
 }
 
-export function sealAuths(
+/**
+ * Seal `plaintext` to the recipient's X25519 key: ephemeral DH, HKDF-SHA256
+ * with the purpose's salt and info, AES-256-GCM bound to `aad`.
+ */
+export function sealEnvelope(
   recipientPublicKeyRaw: Buffer,
-  auths: RegistryDeliveryAuthEntry[],
+  plaintext: Buffer,
   aad: string,
+  derivation: EnvelopeDerivation,
 ): SealedAuthsV1 {
   const recipient = publicKeyFromRaw(recipientPublicKeyRaw);
   const ephemeral = crypto.generateKeyPairSync('x25519');
@@ -222,11 +235,10 @@ export function sealAuths(
     privateKey: ephemeral.privateKey,
     publicKey: recipient,
   });
-  const aesKey = deriveAesKey(ikm);
+  const aesKey = deriveAesKey(ikm, derivation);
   const nonce = crypto.randomBytes(NONCE_BYTES);
   const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, nonce);
   cipher.setAAD(Buffer.from(aad, 'utf8'));
-  const plaintext = Buffer.from(JSON.stringify(auths), 'utf8');
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
   const epkRaw = publicKeyRawFromPrivate(ephemeral.privateKey);
@@ -238,6 +250,14 @@ export function sealAuths(
   };
 }
 
+export function sealAuths(
+  recipientPublicKeyRaw: Buffer,
+  auths: RegistryDeliveryAuthEntry[],
+  aad: string,
+): SealedAuthsV1 {
+  return sealEnvelope(recipientPublicKeyRaw, Buffer.from(JSON.stringify(auths), 'utf8'), aad, REGISTRY_DERIVATION);
+}
+
 function isSealedAuthsShape(value: unknown): value is SealedAuthsV1 {
   if (typeof value !== 'object' || value === null) return false;
   const raw = value as Record<string, unknown>;
@@ -247,9 +267,19 @@ function isSealedAuthsShape(value: unknown): value is SealedAuthsV1 {
     && typeof raw.ct === 'string';
 }
 
-export function openAuths(sealed: unknown, aad: string): RegistryDeliveryAuthEntry[] {
+/**
+ * Open an envelope sealed to this instance's key with the given derivation.
+ * Every failure (bad shape, wrong key, wrong AAD, missing key file) throws an
+ * Error carrying `failureMessage` only, so a caller never echoes detail.
+ */
+export function openEnvelope(
+  sealed: unknown,
+  aad: string,
+  derivation: EnvelopeDerivation,
+  failureMessage: string,
+): Buffer {
   if (!isSealedAuthsShape(sealed)) {
-    throw new Error('Registry delivery envelope failed to decrypt');
+    throw new Error(failureMessage);
   }
 
   // Buffer.from(base64) never throws; length / zero-key checks reject bad input.
@@ -263,7 +293,7 @@ export function openAuths(sealed: unknown, aad: string): RegistryDeliveryAuthEnt
     || nonce.length !== NONCE_BYTES
     || ctAndTag.length <= GCM_TAG_BYTES
   ) {
-    throw new Error('Registry delivery envelope failed to decrypt');
+    throw new Error(failureMessage);
   }
 
   const ciphertext = ctAndTag.subarray(0, ctAndTag.length - GCM_TAG_BYTES);
@@ -276,15 +306,35 @@ export function openAuths(sealed: unknown, aad: string): RegistryDeliveryAuthEnt
       privateKey: local.privateKey,
       publicKey: ephemeralPub,
     });
-    const aesKey = deriveAesKey(ikm);
+    const aesKey = deriveAesKey(ikm, derivation);
     const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, nonce);
     decipher.setAAD(Buffer.from(aad, 'utf8'));
     decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-    return parseAuthEntries(JSON.parse(plaintext));
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   } catch {
-    throw new Error('Registry delivery envelope failed to decrypt');
+    throw new Error(failureMessage);
   }
+}
+
+export function openAuths(sealed: unknown, aad: string): RegistryDeliveryAuthEntry[] {
+  const failure = 'Registry delivery envelope failed to decrypt';
+  const plaintext = openEnvelope(sealed, aad, REGISTRY_DERIVATION, failure);
+  try {
+    return parseAuthEntries(JSON.parse(plaintext.toString('utf8')));
+  } catch {
+    throw new Error(failure);
+  }
+}
+
+/**
+ * A key derived from this instance's sealing private key for a named use. It
+ * never leaves the instance, so a value keyed by it cannot be computed or
+ * checked anywhere else.
+ */
+export function deriveLocalKey(info: string): Buffer {
+  const local = loadOrCreateKey();
+  const pkcs8 = local.privateKey.export({ type: 'pkcs8', format: 'der' });
+  return Buffer.from(crypto.hkdfSync('sha256', pkcs8, 'sencho-local-key-v1', info, 32));
 }
 
 /** Validate a plaintext or decrypted auths array; throws on bad shape. */

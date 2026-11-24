@@ -95,6 +95,21 @@ import {
 import { withTimeout } from '../utils/withTimeout';
 import type { NotificationCategory } from './NotificationService';
 import type { DeployCandidateVerification } from '../helpers/policyGate';
+import {
+  SECRET_VOLUME_LABEL,
+  SecretVolumeProtectedError,
+  isReservedSecretVolumeName,
+  secretVolumeNames,
+} from '../helpers/secretVolume';
+import {
+  evaluateSecretVolumeUse,
+  isSecretVolumeExemptKind,
+  modelReferencesContainers,
+  secretVolumeUnverifiedMessage,
+  secretVolumeUseRefusalMessage,
+  type SecretConsumerContainer,
+  type SecretVolumeNodeFacts,
+} from './preflight/secretVolumeUse';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
 function hasUsableCapturedInvocation(
@@ -217,6 +232,31 @@ function renderErrorLine(stderr: string): string {
   return (lines.find(line => !isWarning(line)) ?? lines[0] ?? '').slice(0, 300);
 }
 
+/** What `renderConfig` answers for one render. */
+type RenderOutcome = {
+  rendered: string | null;
+  stderr: string;
+  code: number | null;
+  timedOut: boolean;
+  withheld?: boolean;
+  refusal?: string;
+};
+
+/**
+ * One `docker compose config` render shared by the guards of one operation.
+ * The first caller spawns it; every later caller reads the same outcome, so
+ * adding a guard to an entry point costs no second render.
+ */
+export type SharedRender = () => Promise<RenderOutcome>;
+
+/** Why a render produced no model, in words safe to show (Compose diagnostics of an overlay are withheld). */
+function renderFailureReason(result: RenderOutcome): string {
+  return result.refusal ? result.refusal
+    : result.timedOut ? 'docker compose config timed out'
+      : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+        : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+}
+
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
@@ -330,6 +370,7 @@ export class ComposeService {
     stackName: string,
     mutation: EndpointMutation,
     stackDirOverride?: string,
+    render: SharedRender = this.sharedRender(stackName, stackDirOverride),
   ): Promise<DockerEndpointRefusal | null> {
     return evaluateDockerEndpointGuard({
       nodeId: this.nodeId,
@@ -337,16 +378,12 @@ export class ComposeService {
       mutation,
       probes: {
         renderConfig: async () => {
-          const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
+          const result = await render();
           if (result.rendered) return result.rendered;
           // The guard refuses what it cannot see, so say why the render failed. The
           // diagnostics are withheld for an overlay render (they quote secrets);
           // Sencho's own refusal names the file and the reason, so it is safe.
-          const why = result.refusal ? result.refusal
-            : result.timedOut ? 'docker compose config timed out'
-              : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
-                : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
-          throw new Error(why);
+          throw new Error(renderFailureReason(result));
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
         localImage: (imageRef) => this.localImageLookup(imageRef),
@@ -359,10 +396,11 @@ export class ComposeService {
     stackName: string,
     mutation: EndpointMutation,
     stackDirOverride?: string,
+    render?: SharedRender,
   ): Promise<void> {
     let refusal: DockerEndpointRefusal | null;
     try {
-      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride, render);
     } catch (error) {
       // A guard that cannot run is not a pass. Raised as a refusal so callers
       // that tolerate other teardown failures (delete, template rollback) keep
@@ -375,6 +413,82 @@ export class ComposeService {
       });
     }
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * A memoized render for one operation: the stack's authored model, its
+   * overlay, or the exact global flags of a rebuilt invocation (`composePrefix`).
+   */
+  /** A memoized render of the stack's authored model, for a caller that runs several checks on one operation. */
+  public createSharedRender(stackName: string): SharedRender {
+    return this.sharedRender(stackName);
+  }
+
+  private sharedRender(stackName: string, stackDirOverride?: string, composePrefix?: string[]): SharedRender {
+    let pending: Promise<RenderOutcome> | null = null;
+    const opts = composePrefix
+      ? { stackDirOverride, composePrefix }
+      : stackDirOverride ? { stackDirOverride } : undefined;
+    return () => (pending ??= this.renderConfig(stackName, opts));
+  }
+
+  /**
+   * The refusal when the model this operation will run reaches a volume that
+   * holds a secret Sencho keeps on this node, else null. See
+   * `preflight/secretVolumeUse.ts` for what counts. The stack Sencho recorded
+   * as the secret's consumer is exempt. A render or Docker read that fails is
+   * a refusal, because what cannot be seen cannot be promised. The labels
+   * dry-run preview calls this too, so the preview answers what the run will.
+   */
+  public async evaluateSecretVolumeUse(
+    stackName: string,
+    render: SharedRender = this.sharedRender(stackName),
+  ): Promise<string | null> {
+    // Same scope as the Docker endpoint guard: a remote node's operation runs
+    // on that node, which applies this check itself.
+    if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
+    try {
+      if (isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName))) return null;
+      const result = await render();
+      if (result.rendered === null) return secretVolumeUnverifiedMessage(stackName, renderFailureReason(result));
+      const parsed: unknown = JSON.parse(result.rendered);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return secretVolumeUnverifiedMessage(stackName, 'the rendered configuration is not a model');
+      }
+      const model = parseEffectiveModel(parsed, stackName);
+      const findings = evaluateSecretVolumeUse(model, await this.secretVolumeNodeFacts(model));
+      return findings.length > 0 ? secretVolumeUseRefusalMessage(stackName, findings) : null;
+    } catch (error) {
+      console.error('[ComposeService] Secret volume check failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return secretVolumeUnverifiedMessage(stackName, getErrorMessage(error, 'check failed'));
+    }
+  }
+
+  private async assertNoSecretVolumeUse(stackName: string, render?: SharedRender): Promise<void> {
+    const refusal = await this.evaluateSecretVolumeUse(stackName, render);
+    if (refusal) throw new SecretVolumeProtectedError(refusal);
+  }
+
+  /**
+   * The node facts the secret volume evaluator needs: one label-filtered
+   * volume list, plus the container list only when the model names a
+   * container with `volumes_from` or `pid`.
+   */
+  private async secretVolumeNodeFacts(model: EffectiveModel): Promise<SecretVolumeNodeFacts> {
+    const docker = DockerController.getInstance(this.nodeId).getDocker();
+    const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+    const labelledVolumeNames = new Set(
+      (listed?.Volumes ?? []).map((volume) => volume.Name).filter((name): name is string => typeof name === 'string' && name !== ''),
+    );
+    if (!modelReferencesContainers(model)) return { labelledVolumeNames, consumers: null };
+    const secretNames = new Set([...labelledVolumeNames, ...secretVolumeNames()]);
+    const containers = await docker.listContainers({ all: true });
+    const consumers: SecretConsumerContainer[] = containers
+      .filter((container) => (container.Mounts ?? []).some(
+        (mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && secretNames.has(mount.Name),
+      ))
+      .map((container) => ({ id: container.Id, names: (container.Names ?? []).map((name) => name.replace(/^\//, '')) }));
+    return { labelledVolumeNames, consumers };
   }
 
   /**
@@ -396,6 +510,7 @@ export class ComposeService {
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declared: string[] | null = null;
+    let declaresSecretVolume = false;
     try {
       const result = await this.renderConfig(stackName);
       // Sencho's own refusal says why the volumes cannot be read, which is a
@@ -407,7 +522,12 @@ export class ComposeService {
         // The model parser tolerates anything and returns an empty model, which
         // would read as "declares nothing"; only an object is a model.
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
+          const volumes = Object.values(parseEffectiveModel(parsed, stackName).volumes);
+          declared = volumes.map((volume) => volume.name);
+          // A secret volume is declared `external` by the stack that consumes it,
+          // so Compose would not remove it; any other stack that declares one must
+          // not get this far, exactly as its deploy is refused.
+          declaresSecretVolume = volumes.some((volume) => isReservedSecretVolumeName(volume.name) || volume.hasSecretLabel === true);
         } else {
           console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
@@ -425,6 +545,12 @@ export class ComposeService {
     const self = SelfIdentityService.getInstance();
     if (recoveryVolumeNamesIn(declared, (name) => self.isRecoveryVolume(name)).length > 0) {
       throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
+    }
+    if (declaresSecretVolume && !isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName))) {
+      throw new SecretVolumeProtectedError(
+        'This stack declares a volume Sencho reserves for a secret it keeps on this node, so its volumes were not removed. '
+        + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first.',
+      );
     }
   }
 
@@ -1702,11 +1828,14 @@ export class ComposeService {
     // Before the guard: a render that fails on a missing required variable
     // should say so, not that the guard could not read the model.
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
+    const render = this.sharedRender(stackName, ctx?.overlayDir);
     await this.assertDockerEndpointSafe(
       stackName,
       { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
       ctx?.overlayDir,
+      render,
     );
+    await this.assertNoSecretVolumeUse(stackName, render);
     const stackDir = this.resolveStackDir(stackName, ctx);
     // The overlay is the project this deploy will actually run, so the guard
     // reads it rather than the live stack.
@@ -2223,6 +2352,13 @@ export class ComposeService {
     // relative mount has the same consequence, so it refuses on the same terms.
     // `buildComposeArgsWithRecoveryOverride` appends the action last, so the
     // global-flag prefix is this argv without those tokens.
+    // The secret volume check reads the same file set, so a captured
+    // generation that reached a secret volume is refused even when the current
+    // files no longer do.
+    await this.assertNoSecretVolumeUse(
+      stackName,
+      this.sharedRender(stackName, overlay?.overlayDir, args.slice(0, args.length - upAction.length)),
+    );
     await this.assertSafePilotBindMapping(
       stackName,
       overlay?.overlayDir,
@@ -2779,7 +2915,9 @@ export class ComposeService {
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
@@ -3121,7 +3259,9 @@ export class ComposeService {
   ): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -3156,7 +3296,9 @@ export class ComposeService {
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {

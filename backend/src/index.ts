@@ -74,6 +74,7 @@ import { diagnosticsRouter } from './routes/diagnostics';
 import { dependencyMapRouter } from './routes/dependencyMap';
 import { networkingRouter } from './routes/networking';
 import { registryDeliveryRouter } from './routes/registryDelivery';
+import { sealedSecretsRouter } from './routes/sealedSecrets';
 import { publicExposureRouter } from './routes/publicExposure';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
@@ -193,6 +194,7 @@ app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/dependency-map', dependencyMapRouter);
 app.use('/api/networking', networkingRouter);
 app.use('/api/registry-delivery', registryDeliveryRouter);
+app.use('/api/sealed-secrets', sealedSecretsRouter);
 // Hub-only: the hub's Cloudflare account and its zones (HUB_ONLY_PREFIXES).
 app.use('/api/public-exposure', publicExposureRouter);
 // Read-only bootstrap preflight. Mounted ahead of the nodes router so its exact

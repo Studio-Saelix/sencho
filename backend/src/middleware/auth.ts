@@ -139,6 +139,10 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       }
       req.user = { username: 'node-proxy', role, userId: 0 };
       req.machineAuthScope = decoded.scope;
+      // The hub's own background call: a machine bearer the gateway did not
+      // forward for a signed-in user (the gateway always sets the role header).
+      // Routes that must never serve a user request on the node check this.
+      req.hubBackgroundCall = forwardedRole === undefined;
       // How the forwarding hub knows this node, for responses that name it.
       const hubNode = parseHubNodeHeaders(req.headers[PROXY_HUB_NODE_ID_HEADER], req.headers[PROXY_HUB_NODE_NAME_HEADER]);
       if (hubNode) req.hubNode = hubNode;

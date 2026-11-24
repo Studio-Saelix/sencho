@@ -52,6 +52,9 @@ export function isProxyExemptPath(path: string): boolean {
 // the local route handler, which the proxy would skip).
 // The public exposure account follows the same rule: only the hub holds the
 // Cloudflare token, and every Cloudflare call starts on the hub.
+// Sealed secrets are the reverse case: the node serves them, but only to the
+// hub's own background call, so the hub must never forward a user request
+// there (the node route refuses any request that carries a forwarded role).
 //
 // Entries are stored with a trailing slash; the matcher accepts the exact
 // collection path (without the trailing slash) AND any sub-path under it,
@@ -87,6 +90,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/cloud-backup/',
   '/api/nodes/bootstrap/',
   '/api/public-exposure/',
+  '/api/sealed-secrets/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

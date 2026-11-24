@@ -4,6 +4,12 @@ import path from 'path';
 import { createHash } from 'crypto';
 import DockerController from './DockerController';
 import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import {
+  isReservedSecretVolumeName,
+  isSecretVolume,
+  SecretVolumeProtectedError,
+  secretVolumeAccessMessage,
+} from '../helpers/secretVolume';
 
 const HELPER_IMAGE = 'alpine:3.20';
 const VOLUME_MOUNT = '/v';
@@ -543,15 +549,25 @@ export class VolumeBrowserService {
     if (RestoreFenceStore.getInstance().isVolumeFenced(volumeName)) {
       throw new DataRestoreFenceError(volumeName, 'browse');
     }
+    // A reserved secret volume name is refused before Docker is asked, so the
+    // answer is the same whether or not the volume exists yet.
+    if (isReservedSecretVolumeName(volumeName)) {
+      throw new SecretVolumeProtectedError(secretVolumeAccessMessage(volumeName));
+    }
     const docker = DockerController.getInstance(this.nodeId).getDocker();
+    let labels: Record<string, string> | null | undefined;
     try {
-      await docker.getVolume(volumeName).inspect();
+      const info = await docker.getVolume(volumeName).inspect();
+      labels = info.Labels;
     } catch (err: unknown) {
       const e = err as { statusCode?: number; message?: string };
       if (e.statusCode === 404 || /no such volume/i.test(e.message ?? '')) {
         throw new VolumeNotFoundError(volumeName);
       }
       throw new ExecError(`Volume inspect failed: ${e.message ?? 'unknown'}`);
+    }
+    if (isSecretVolume(labels)) {
+      throw new SecretVolumeProtectedError(secretVolumeAccessMessage(volumeName));
     }
   }
 

@@ -37,6 +37,8 @@ export function isSecretVolumeRef(name: string, labels?: Record<string, string> 
  */
 export class SecretVolumeProtectedError extends Error {
   readonly code = SECRET_VOLUME_PROTECTED_CODE;
+  /** Carried so a generic status-honouring error mapper answers 423, not 500. */
+  readonly status = 423;
 
   constructor(message: string) {
     super(message);
@@ -53,6 +55,10 @@ export function isSecretVolumeProtectedError(error: unknown): error is SecretVol
 export function secretVolumeAccessMessage(name: string): string {
   return `Volume "${name}" holds a secret Sencho delivered to this node, so Sencho does not open, change or remove it.`;
 }
+
+/** The refusal text when a restore names a reserved secret volume as its target. */
+export const SECRET_VOLUME_RESTORE_REFUSAL =
+  'This volume name is reserved for a secret Sencho delivered to this node, so a restore cannot write it.';
 
 /** Answers 423 with the refusal's code when `error` is one. Returns false for any other error. */
 export function sendIfSecretVolumeProtected(res: Response, error: unknown): boolean {

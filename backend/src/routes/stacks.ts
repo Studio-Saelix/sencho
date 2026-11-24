@@ -122,6 +122,7 @@ import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
+import { SECRET_VOLUME_PROTECTED_CODE, isSecretVolumeProtectedError, sendIfSecretVolumeProtected } from '../helpers/secretVolume';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -1567,6 +1568,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       res.status(423).json({ error: result.error, code: RECOVERY_VOLUME_PROTECTED_CODE });
       return;
     }
+    if (result.code === 'secret_volume_protected') {
+      res.status(423).json({ error: result.error, code: SECRET_VOLUME_PROTECTED_CODE });
+      return;
+    }
     if (result.code === 'compose_inputs_refused') {
       res.status(409).json({ error: result.error, code: COMPOSE_INPUTS_REFUSED_CODE });
       return;
@@ -2435,6 +2440,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), errorMessageForLog(error));
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (sendIfSecretVolumeProtected(res, error)) return;
     if (error instanceof PulledCandidateBlockedError) {
       // The pull landed an image the gate refused before `up` ran, so the
       // previous containers are still the running workload. Answer like every
@@ -2587,7 +2593,8 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
     if (sendIfRecoveryVolumeProtected(res, error)) return;
-    // A refusal ran nothing, like the two above: say why, and keep it out of
+    if (sendIfSecretVolumeProtected(res, error)) return;
+    // A refusal ran nothing, like the ones above: say why, and keep it out of
     // the failure feed.
     if (sendIfComposeInputsRefused(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
@@ -2871,6 +2878,8 @@ function serviceFailureStatus(code: string): number {
     case 'recovery_claim_failed':
     case DOCKER_ENDPOINT_PROTECTED_CODE:
       return 409;
+    case SECRET_VOLUME_PROTECTED_CODE:
+      return 423;
     default:
       // Compose, retag, inspect, and replica-divergence failures are server-side.
       return 500;
@@ -3018,6 +3027,7 @@ async function handleServiceScopedMutation(
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (sendIfSecretVolumeProtected(res, error)) return;
     if (error instanceof UpdatePolicyChangedError || error instanceof UpdatePolicyRefusedError) {
       if (!res.headersSent) {
         res.status(409).json({
@@ -3336,6 +3346,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
     if (sendIfDockerEndpointProtected(res, error)) return;
+    if (sendIfSecretVolumeProtected(res, error)) return;
     // A policy refusal raised after the check passed: either a caller handed the
     // orchestrator a result that does not allow this update, or the label
     // changed while the images were being pulled. Answer it as a refusal.
@@ -3623,6 +3634,19 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         }
       }
       sendIfDockerEndpointProtected(res, error);
+      return;
+    }
+    if (isSecretVolumeProtectedError(error)) {
+      // Refused before compose ran, so the restored files are put back.
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a refused rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+        }
+      }
+      sendIfSecretVolumeProtected(res, error);
       return;
     }
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');

@@ -2209,3 +2209,65 @@ describe.skipIf(isWindows)('symlink semantics (Linux/macOS only)', () => {
     }
   });
 });
+
+// ── Secret volume roots ───────────────────────────────────────────────────────
+
+describe('secret volume roots', () => {
+  // The root a stack that mounts a secret volume resolves to: listed so the
+  // stack's mounts stay truthful, but neither browsable nor writable.
+  const secretRoot: StackFileRoot = {
+    id: 'volume:secretroot', kind: 'volume', label: 'sencho_edge_secret', hostPathOrName: 'sencho_edge_secret',
+    mounts: [{ service: 'edge', containerPath: '/run/secret', readOnly: true }],
+    readonly: true, accessible: true, browsable: false, writable: false,
+    chmodable: false, dangerous: false, managedSourceOverlap: false,
+    warning: 'Volume "sencho_edge_secret" holds a secret Sencho delivered to this node, so Sencho does not open, change or remove it.',
+    backend: 'helper',
+  };
+  const rootId = 'volume:secretroot';
+
+  async function stubSecretRoot(): Promise<void> {
+    const { StackFileRootsService } = await import('../services/StackFileRootsService');
+    vi.spyOn(StackFileRootsService.prototype, 'resolveRoot').mockResolvedValue(secretRoot);
+  }
+
+  const readRoutes: Array<{ name: string; path: string; query: Record<string, string | string[]> }> = [
+    { name: 'list', path: 'files', query: { rootId } },
+    { name: 'content', path: 'files/content', query: { rootId, path: 'token' } },
+    { name: 'download', path: 'files/download', query: { rootId, path: 'token' } },
+    { name: 'bulk-download', path: 'files/bulk-download', query: { rootId, path: ['token'] } },
+    { name: 'permissions read', path: 'files/permissions', query: { rootId, path: 'token' } },
+  ];
+
+  it.each(readRoutes)('refuses a stack:read user on $name', async ({ path: routePath, query }) => {
+    await stubSecretRoot();
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/${routePath}`)
+      .query(query)
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ROOT_UNAVAILABLE');
+    expect(res.body.error).toMatch(/holds a secret/);
+  });
+
+  const writeRoutes: Array<{
+    name: string;
+    send: (agent: ReturnType<typeof request>) => request.Test;
+  }> = [
+    { name: 'upload', send: (a) => a.post(`/api/stacks/${STACK}/files/upload`).query({ rootId }).attach('file', Buffer.from('x'), 'token') },
+    { name: 'write content', send: (a) => a.put(`/api/stacks/${STACK}/files/content`).query({ rootId, path: 'token' }).send({ content: 'x' }) },
+    { name: 'delete', send: (a) => a.delete(`/api/stacks/${STACK}/files`).query({ rootId, path: 'token' }) },
+    { name: 'folder', send: (a) => a.post(`/api/stacks/${STACK}/files/folder`).query({ rootId, path: 'dir' }) },
+    { name: 'rename', send: (a) => a.patch(`/api/stacks/${STACK}/files/rename`).query({ rootId }).send({ from: 'token', to: 'copy' }) },
+    { name: 'copy', send: (a) => a.post(`/api/stacks/${STACK}/files/copy`).query({ rootId }).send({ from: 'token', to: 'copy' }) },
+    { name: 'bulk-delete', send: (a) => a.post(`/api/stacks/${STACK}/files/bulk-delete`).query({ rootId }).send({ paths: ['token'] }) },
+    { name: 'bulk-move', send: (a) => a.post(`/api/stacks/${STACK}/files/bulk-move`).query({ rootId }).send({ from: ['token'], toDir: '' }) },
+    { name: 'permissions write', send: (a) => a.put(`/api/stacks/${STACK}/files/permissions`).query({ rootId, path: 'token' }).send({ mode: 0o644 }) },
+  ];
+
+  it.each(writeRoutes)('refuses even an admin on $name', async ({ send }) => {
+    await stubSecretRoot();
+    const res = await send(request(app)).set('Cookie', adminCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('READONLY_ROOT');
+  });
+});

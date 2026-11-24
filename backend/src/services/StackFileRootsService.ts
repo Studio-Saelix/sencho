@@ -22,6 +22,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
+import { isReservedSecretVolumeName, isSecretVolume, secretVolumeAccessMessage } from '../helpers/secretVolume';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { isDockerSocketMount } from './storage/types';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
@@ -553,10 +554,12 @@ export class StackFileRootsService {
 
   private async buildVolumeRoot(group: { name: string; mounts: RootMount[] }): Promise<StackFileRoot> {
     let accessible = false;
+    let secret = isReservedSecretVolumeName(group.name);
     let warning: string | null = null;
     try {
-      await DockerController.getInstance(this.nodeId).getDocker().getVolume(group.name).inspect();
+      const info = await DockerController.getInstance(this.nodeId).getDocker().getVolume(group.name).inspect();
       accessible = true;
+      if (isSecretVolume(info.Labels)) secret = true;
     } catch (err) {
       // Distinguish a genuine 404 (volume absent) from a transient Docker failure
       // (daemon unreachable, proxy hop down) so the warning is honest and a
@@ -572,7 +575,10 @@ export class StackFileRootsService {
         : 'Sencho could not reach Docker to resolve this named volume; it may be temporarily unavailable.';
     }
     const readonly = group.mounts.every((m) => m.readOnly);
-    const browsable = accessible;
+    // A secret volume is listed so the stack's mounts stay truthful, but no
+    // file route can open it: not browsable, not writable.
+    if (secret) warning = secretVolumeAccessMessage(group.name);
+    const browsable = accessible && !secret;
     return {
       id: `volume:${shortHash(group.name)}`,
       kind: 'volume',

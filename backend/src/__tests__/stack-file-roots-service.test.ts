@@ -521,6 +521,32 @@ describe('StackFileRootsService.listRoots', () => {
     expect(inspected).toContain('app_cache');
   });
 
+  it('lists a labelled secret volume as neither browsable nor writable', async () => {
+    stub({
+      rendered: renderModel({ db: [{ type: 'volume', source: 'tok', target: '/t' }] }, { tok: { name: 'app_tok' } }),
+      // An empty label value still marks the volume: the key is what counts.
+      volumeInspect: async (name) => ({ Name: name, Labels: { 'io.sencho.secret': '' } }),
+    });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const vol = roots.find((r) => r.kind === 'volume');
+    expect(vol?.hostPathOrName).toBe('app_tok');
+    expect(vol?.accessible).toBe(true);
+    expect(vol?.browsable).toBe(false);
+    expect(vol?.writable).toBe(false);
+    expect(vol?.warning).toMatch(/holds a secret/);
+  });
+
+  it('refuses the reserved secret volume name even without its label', async () => {
+    stub({
+      rendered: renderModel({ db: [{ type: 'volume', source: 'edge', target: '/t' }] }, { edge: { name: 'sencho_edge_secret' } }),
+      volumeInspect: async (name) => ({ Name: name, Labels: {} }),
+    });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const vol = roots.find((r) => r.kind === 'volume');
+    expect(vol?.browsable).toBe(false);
+    expect(vol?.writable).toBe(false);
+  });
+
   it('degrades a named volume that cannot be inspected to non-browsable', async () => {
     stub({
       rendered: renderModel({ db: [{ type: 'volume', source: 'gone', target: '/c' }] }),

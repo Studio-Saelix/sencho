@@ -12,6 +12,7 @@ import { BlueprintService, BlueprintNameConflictError, BlueprintOwnershipProbeEr
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { refuseIfSelfStack } from '../helpers/selfStackGuard';
 import { sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { sendIfSecretVolumeProtected } from '../helpers/secretVolume';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
@@ -638,6 +639,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         }
         if (refuseGitManagedConflict(res, error)) return;
         if (sendIfDockerEndpointProtected(res, error)) return;
+        if (sendIfSecretVolumeProtected(res, error)) return;
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }

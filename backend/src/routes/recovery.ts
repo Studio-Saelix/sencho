@@ -22,6 +22,7 @@ import {
   type RecoveryAccess,
 } from '../services/recovery/authorization';
 import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
+import { isReservedSecretVolumeName, SECRET_VOLUME_RESTORE_REFUSAL } from '../helpers/secretVolume';
 import { RECOVERY_RESERVED_TARGET_PREFIX } from '../services/recovery/restoreIntents';
 import { RecoveryOperationStore } from '../services/recovery/operations';
 import { RecoveryPointStore } from '../services/recovery/recoveryPoints';
@@ -626,6 +627,11 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
   if (body.targetVolumeName.startsWith(RECOVERY_RESERVED_PREFIX)
     || body.targetVolumeName.startsWith(RECOVERY_RESERVED_TARGET_PREFIX)) {
     throw new RecoveryError('invalid_request');
+  }
+  // A secret volume name is reserved too: a restore must never create the
+  // volume a delivered secret lives in.
+  if (isReservedSecretVolumeName(body.targetVolumeName)) {
+    throw new RecoveryError('invalid_request', { detail: SECRET_VOLUME_RESTORE_REFUSAL });
   }
   const result = await engineService(req).admitRestore({
     nodeId: req.nodeId,
