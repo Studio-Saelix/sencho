@@ -13,10 +13,13 @@ import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 let lastShowServiceChips: boolean | undefined;
 // Capture the scoped deploy permission handed to the service lifecycle menus.
 let lastContainersHealthCanDeploy: boolean | undefined;
+// Capture which containers' stats failures reach the health pane.
+let lastContainersHealthFailures: EditorViewProps['containerStatsFailures'];
 vi.mock('./editor-view-blocks', () => ({
     StackIdentityHeader: () => <div>identity-header</div>,
-    ContainersHealth: ({ canDeploy }: { canDeploy: boolean }) => {
+    ContainersHealth: ({ canDeploy, containerStatsFailures }: { canDeploy: boolean; containerStatsFailures?: EditorViewProps['containerStatsFailures'] }) => {
         lastContainersHealthCanDeploy = canDeploy;
+        lastContainersHealthFailures = containerStatsFailures;
         return <div>health-pane</div>;
     },
     StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
@@ -183,6 +186,17 @@ describe('MobileStackDetail service lifecycle permission', () => {
         render(<MobileStackDetail {...makeProps({ can })} />);
         fireEvent.click(screen.getByRole('tab', { name: 'Health' }));
         expect(lastContainersHealthCanDeploy).toBe(false);
+    });
+});
+
+describe('MobileStackDetail stats failures', () => {
+    afterEach(() => { lastContainersHealthFailures = undefined; });
+
+    it('hands the failed containers to the health pane', () => {
+        const failures = new Map([['c1', 'stream' as const]]);
+        render(<MobileStackDetail {...makeProps({ containerStatsFailures: failures })} />);
+        fireEvent.click(screen.getByRole('tab', { name: 'Health' }));
+        expect(lastContainersHealthFailures).toBe(failures);
     });
 });
 

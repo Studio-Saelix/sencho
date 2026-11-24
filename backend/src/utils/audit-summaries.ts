@@ -151,6 +151,13 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'PUT /registries': 'Updated registry credential',
   'DELETE /registries': 'Deleted registry credential',
 
+  // Public exposure account (hub-only; the token is never in the path or summary)
+  'PUT /public-exposure/account': 'Connected Cloudflare account',
+  'POST /public-exposure/account/verify': 'Rechecked Cloudflare account',
+  'POST /public-exposure/account/dns-check': 'Checked Cloudflare DNS write',
+  'DELETE /public-exposure/account': 'Disconnected Cloudflare account',
+  'PUT /public-exposure/zones/*': 'Updated public exposure zone',
+
   // Labels
   'POST /labels': 'Created label',
   'PUT /labels': 'Updated label',
@@ -272,6 +279,9 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
   const normalized = apiPath.replace(/^\//, '');
   const overwrite = method === 'POST' ? overwriteRouteSummary(normalized, statusCode, body) : null;
   if (overwrite) return overwrite;
+  if (statusCode === 202 && method === 'POST' && normalized.startsWith('public-exposure/account/dns-check')) {
+    return 'Cloudflare DNS write check did not finish (202)';
+  }
   // Do not claim a successful action when the request was rejected, blocked,
   // or conflict-resolved. Per-user preference writes carry machine codes in
   // the response body, so the status code is the only honest signal here.
@@ -296,6 +306,14 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
       if (/^nodes\/bootstrap\/operations\/[^/]+\/release/.test(normalized)) return `Bootstrap release refused (${statusCode})`;
       if (/^nodes\/bootstrap\/operations\/[^/]+\/verify/.test(normalized)) return `Bootstrap readiness check refused (${statusCode})`;
       if (normalized.startsWith('nodes/bootstrap/operations')) return `Bootstrap plan approval refused (${statusCode})`;
+    }
+    if (normalized.startsWith('public-exposure/')) {
+      const outcome = statusCode >= 500 ? 'failed' : 'refused';
+      if (normalized.startsWith('public-exposure/account/verify')) return `Cloudflare account recheck ${outcome} (${statusCode})`;
+      if (normalized.startsWith('public-exposure/account/dns-check')) return `Cloudflare DNS write check ${outcome} (${statusCode})`;
+      if (normalized.startsWith('public-exposure/zones')) return `Public exposure zone update ${outcome} (${statusCode})`;
+      if (method === 'DELETE') return `Cloudflare account disconnect ${outcome} (${statusCode})`;
+      if (method === 'PUT') return `Cloudflare account connection ${outcome} (${statusCode})`;
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;

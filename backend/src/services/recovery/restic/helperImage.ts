@@ -78,13 +78,18 @@ export async function inspectHelperImage(
   }
 }
 
+/** A registry digest reference can be pulled; an image id (`docker load`) has nothing to be pulled from. */
+export function helperImageCanBePulled(ref: string): boolean {
+  return DIGEST_REFERENCE.test(ref);
+}
+
 /**
  * Pull the pinned helper. Only provisioning calls this; a read path never does.
  * The reference already carries a digest, so the daemon verifies the bytes it
  * receives against it.
  */
 export async function pullHelperImage(docker: Docker, ref: string): Promise<void> {
-  if (!DIGEST_REFERENCE.test(ref)) {
+  if (!helperImageCanBePulled(ref)) {
     // An image id that is already loaded cannot be pulled, and there is nothing
     // to pull it from: the caller's inspect said it was absent, so this is a
     // missing image on an air-gapped host.

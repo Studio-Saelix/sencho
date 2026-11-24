@@ -4,6 +4,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-24)
+
+
+### Highlights
+
+<!-- highlights-hash: 7c7b2d6adf86fb80 -->
+
+Node bootstrap is now a guided flow. You can run a read-only preflight against a candidate node, review an approved plan, enroll the Pilot, and only see it marked ready once it actually verifies. Node management has its own menu, so this no longer means hand-editing config to bring a machine into the fleet.
+
+The assurance work gives Compose Doctor a real source model to point at, with a canonical rule registry and normalized findings, so issues land on the line they came from. Secrets in bundles are masked by default and revealed one key at a time, and registry credentials are now redacted from doctor log lines and drift warnings. Security scans lead with a single answer and state each fact once, and image exposure intent follows the Network exposed label. Dismissed findings across fleet, security, and updates open in a sheet from their count instead of expanding inline.
+
+Recovery gained two practical capabilities: you can browse and download the contents of a saved point, and restore a point over its own volume. The pinned helper image is pulled at startup when a repository already exists, and a cancelled download no longer keeps feeding its sink. Socket discovery now finds Docker socket proxies and direct consumers per node.
+
+Editors go full screen on every tab with a compact one-line header at any width, and Git Source and Save & Deploy stay labelled at standard desktop widths. A stack stuck in a crash loop can be stopped from its stack page with a single alert per loop. Networking fixes cover upper-case port protocols, templated host ports, tunnel badge identity, and topology ports rendered from host port facts. Updates no longer claim an all-clear before the first readiness load answers, and Recheck gives delayed feedback rather than appearing to hang.
+
+The build moves to Go 1.27.4 with containerd v2.4.2 and an x/net floor of v0.62.0 in the recovery helper and source-built CLI binaries. Compose files whose YAML aliases expand without bound are refused. Smaller fixes tidy up audit naming for fleet restore-all, host byte units on the dashboard, mobile last-seen ages, and the Encrypt archives switch while a passphrase is pending.
+
+### Added
+
+* **assurance:** author the Compose source model and locate findings on it ([#2253](https://github.com/Studio-Saelix/sencho/issues/2253)) ([a1e41f7](https://github.com/Studio-Saelix/sencho/commit/a1e41f7cda7df4c4ede974683379fe28e7c5d6ab))
+* **assurance:** canonical rule registry and normalized findings ([#2241](https://github.com/Studio-Saelix/sencho/issues/2241)) ([ae1ac25](https://github.com/Studio-Saelix/sencho/commit/ae1ac25afda560a5edd07d3eebc4ec5006b0b98d))
+* **editor:** full screen on every editor tab and a one-line header at any width ([#2323](https://github.com/Studio-Saelix/sencho/issues/2323)) ([d5654ec](https://github.com/Studio-Saelix/sencho/commit/d5654ec94a43ee97f27cd4bf370ece094a520dd4))
+* **fleet:** open the dismissed readiness findings in a sheet from the count ([#2256](https://github.com/Studio-Saelix/sencho/issues/2256)) ([cbed789](https://github.com/Studio-Saelix/sencho/commit/cbed789f2240d3ebfec5567191a5299c9ed9a713))
+* **nodes:** read-only bootstrap preflight and node management menu ([#2251](https://github.com/Studio-Saelix/sencho/issues/2251)) ([7bbaaf5](https://github.com/Studio-Saelix/sencho/commit/7bbaaf58d84ac1fc42d60f73d8f09f21b44f65db))
+* **nodes:** run an approved bootstrap plan and enroll the Pilot ([#2273](https://github.com/Studio-Saelix/sencho/issues/2273)) ([338c43f](https://github.com/Studio-Saelix/sencho/commit/338c43f2f7ca5fe8798f22aac8df033de57782a0))
+* **nodes:** verify a bootstrapped Pilot is ready before calling it ready ([#2288](https://github.com/Studio-Saelix/sencho/issues/2288)) ([d378aed](https://github.com/Studio-Saelix/sencho/commit/d378aed1a4f881c952d63ecff048f7100e396dd1))
+* **recovery:** browse and download a saved point's contents ([#2266](https://github.com/Studio-Saelix/sencho/issues/2266)) ([e661bba](https://github.com/Studio-Saelix/sencho/commit/e661bba16affe607474cb68f454ac3b5c9cddb19))
+* **recovery:** restore a point over its own volume ([#2240](https://github.com/Studio-Saelix/sencho/issues/2240)) ([07c410d](https://github.com/Studio-Saelix/sencho/commit/07c410d495d3d3f224ff0af8e36047216c358eb1))
+* **secrets:** mask bundle values by default and reveal one key at a time ([#2254](https://github.com/Studio-Saelix/sencho/issues/2254)) ([d1b1b07](https://github.com/Studio-Saelix/sencho/commit/d1b1b076e2ca87b6cc993bfdc05f932d6bf95b1b))
+* **security:** lead the scan diff with one answer and state each fact once ([#2264](https://github.com/Studio-Saelix/sencho/issues/2264)) ([91ab483](https://github.com/Studio-Saelix/sencho/commit/91ab48356cbde6d113c68521e6ddf4c0bfebd375))
+* **security:** set an image's exposure intent from its Network exposed label ([#2261](https://github.com/Studio-Saelix/sencho/issues/2261)) ([7807367](https://github.com/Studio-Saelix/sencho/commit/78073679fc55a3569023ac46b8133c7dd1d28e84))
+* **socket:** discover Docker socket proxies and direct consumers per node ([#2255](https://github.com/Studio-Saelix/sencho/issues/2255)) ([636f6ad](https://github.com/Studio-Saelix/sencho/commit/636f6adff64126b9373a6550fbbac12c0ce0fcf8))
+* **ui:** open every dismissed findings list in a sheet from its count ([#2257](https://github.com/Studio-Saelix/sencho/issues/2257)) ([e2edbba](https://github.com/Studio-Saelix/sencho/commit/e2edbba952b564a59c20e0b0095c76470f1fa25a))
+* **updates:** open the stack editor from tag-only rows and state each readiness fact once ([#2262](https://github.com/Studio-Saelix/sencho/issues/2262)) ([46c02dd](https://github.com/Studio-Saelix/sencho/commit/46c02ddb5da556b7ef0d97d808130189dd466c83))
+
+
+### Fixed
+
+* **assurance:** keep the closing parenthesis after a redacted keyword secret ([#2304](https://github.com/Studio-Saelix/sencho/issues/2304)) ([28863a7](https://github.com/Studio-Saelix/sencho/commit/28863a76d64b6a2dc346cdbf410d20444f2a4f4e))
+* **assurance:** redact registry credentials from Compose Doctor log lines ([#2283](https://github.com/Studio-Saelix/sencho/issues/2283)) ([30bcaa0](https://github.com/Studio-Saelix/sencho/commit/30bcaa030e9924318fdc4850fc9efebb25516e51))
+* **audit:** name a fleet restore-all as a restore ([#2302](https://github.com/Studio-Saelix/sencho/issues/2302)) ([13673a6](https://github.com/Studio-Saelix/sencho/commit/13673a6b5050ee37f16858af681c12f151fd180e))
+* **compose:** refuse a file whose YAML aliases expand without bound ([#2265](https://github.com/Studio-Saelix/sencho/issues/2265)) ([fde830e](https://github.com/Studio-Saelix/sencho/commit/fde830e4b9b2336df2789c43f4ec3097a1a18602))
+* **containers:** return the protected service on stop and restart refusals ([#2311](https://github.com/Studio-Saelix/sencho/issues/2311)) ([cdcf0de](https://github.com/Studio-Saelix/sencho/commit/cdcf0de19134a45221e87c4f052bcf407c8d7f97))
+* **dashboard:** show a real unit for every host byte reading ([#2325](https://github.com/Studio-Saelix/sencho/issues/2325)) ([3ec0890](https://github.com/Studio-Saelix/sencho/commit/3ec0890e44375b4c2fead44ff93285fd40938941))
+* **docker:** raise the x/net floor to v0.62.0 in the recovery helper and the source-built CLI binaries ([#2263](https://github.com/Studio-Saelix/sencho/issues/2263)) ([79d51d8](https://github.com/Studio-Saelix/sencho/commit/79d51d8598425b7162fdbb4d9fa300de23d433e2))
+* **docker:** rebuild with Go 1.27.4 and raise the containerd floor to v2.4.2 ([#2322](https://github.com/Studio-Saelix/sencho/issues/2322)) ([c4a5671](https://github.com/Studio-Saelix/sencho/commit/c4a567121817560c51ae83603291971caba67fe4))
+* **drift:** redact registry credentials from drift image warnings ([#2310](https://github.com/Studio-Saelix/sencho/issues/2310)) ([0897b5a](https://github.com/Studio-Saelix/sencho/commit/0897b5af1eb7e62e2f807dfd75a1e1a4b810fa4c))
+* **editor:** keep Git Source and Save & Deploy labelled at standard desktop widths ([#2328](https://github.com/Studio-Saelix/sencho/issues/2328)) ([af92141](https://github.com/Studio-Saelix/sencho/commit/af92141360e13f66f8ad9b666d4e4b0108d723a9))
+* **editor:** show the stats warning when a stats stream fails or ends in-band ([#2326](https://github.com/Studio-Saelix/sencho/issues/2326)) ([444ade9](https://github.com/Studio-Saelix/sencho/commit/444ade94ab6cddc722532e6b510c94bd3b9063f9))
+* **fleet:** keep one create action in empty snapshots and secrets tabs ([#2275](https://github.com/Studio-Saelix/sencho/issues/2275)) ([0b679d9](https://github.com/Studio-Saelix/sencho/commit/0b679d97850f0e63ce7d7d4b67fa6c2b32c1fdf2))
+* **fleet:** keep the Pinned pill muted at every call site ([#2301](https://github.com/Studio-Saelix/sencho/issues/2301)) ([b9f9ace](https://github.com/Studio-Saelix/sencho/commit/b9f9ace485256d210978c50676b806beb77e748a))
+* **fleet:** recover self-update eligibility and name the reason ([#2246](https://github.com/Studio-Saelix/sencho/issues/2246)) ([5d1030c](https://github.com/Studio-Saelix/sencho/commit/5d1030c3d0d64c5d253fd87d5c71a710782e57a3)), thanks @Crosis47
+* **gitops:** hide the update review from sessions without stack edit ([#2299](https://github.com/Studio-Saelix/sencho/issues/2299)) ([556d345](https://github.com/Studio-Saelix/sencho/commit/556d34501dd8c26348ab8a2d64f329bb9ab60ce0))
+* **gitops:** rank a failed deploy as the row's urgent reason ([#2297](https://github.com/Studio-Saelix/sencho/issues/2297)) ([2cdea7e](https://github.com/Studio-Saelix/sencho/commit/2cdea7e0d29cb5d7eba73e66be651fbfb249d063))
+* **gitops:** report refused Retry and Resume instead of success ([#2298](https://github.com/Studio-Saelix/sencho/issues/2298)) ([afe3958](https://github.com/Studio-Saelix/sencho/commit/afe3958d2f1da374f8603ee5a1c8ac110bde3919))
+* **labels:** degrade the label inventory when a deploy spec is refused ([#2285](https://github.com/Studio-Saelix/sencho/issues/2285)) ([8164273](https://github.com/Studio-Saelix/sencho/commit/8164273e72acdad53253d886ae94cbe901a6f75a))
+* **mobile:** show fleet last seen in real age, not raw seconds ([#2300](https://github.com/Studio-Saelix/sencho/issues/2300)) ([51c9774](https://github.com/Studio-Saelix/sencho/commit/51c9774d8e73359f80359e25ad7d708cbd254add))
+* **networking:** fold an upper-case port protocol before comparing it ([#2312](https://github.com/Studio-Saelix/sencho/issues/2312)) ([8caad04](https://github.com/Studio-Saelix/sencho/commit/8caad044ff1bd5017bde5bb5972c3163ea3e6115))
+* **networking:** keep the topology refresh control visible while reloading ([#2274](https://github.com/Studio-Saelix/sencho/issues/2274)) ([cd89a55](https://github.com/Studio-Saelix/sencho/commit/cd89a556cb100880fb9b250ab93cea78be8df2a6))
+* **networking:** key each tunnel badge by its full path identity ([#2309](https://github.com/Studio-Saelix/sencho/issues/2309)) ([bb530a4](https://github.com/Studio-Saelix/sencho/commit/bb530a47a604e1f87bdf09612e7f8d8a464d3bdd))
+* **networking:** read a port whose host side is a template ([#2317](https://github.com/Studio-Saelix/sencho/issues/2317)) ([6d749ea](https://github.com/Studio-Saelix/sencho/commit/6d749eab5713724781f8d236a43147e781c332fd))
+* **networking:** render topology container ports from host port facts ([#2305](https://github.com/Studio-Saelix/sencho/issues/2305)) ([3fc4507](https://github.com/Studio-Saelix/sencho/commit/3fc4507710a9a966a683246e976fe35c50ef4ba3))
+* **networking:** validate network references before the legacy inspect call ([#2250](https://github.com/Studio-Saelix/sencho/issues/2250)) ([10fdbb4](https://github.com/Studio-Saelix/sencho/commit/10fdbb4daa552213250733c0048512c4c4211ea0))
+* **recovery:** pull the pinned helper image at startup when a repository already exists ([#2327](https://github.com/Studio-Saelix/sencho/issues/2327)) ([c384817](https://github.com/Studio-Saelix/sencho/commit/c384817eb75b9c0122f78577246de139ae7f2302))
+* **recovery:** stop a cancelled download feeding its sink ([#2286](https://github.com/Studio-Saelix/sencho/issues/2286)) ([b4d36fd](https://github.com/Studio-Saelix/sencho/commit/b4d36fdc9ef73b3a651ca27e68c173c3a505a3c1))
+* **resources:** trust a Docker inspect status over a 404 in the message ([#2282](https://github.com/Studio-Saelix/sencho/issues/2282)) ([1fee7db](https://github.com/Studio-Saelix/sencho/commit/1fee7db9a2934d0b71893009f0d8cb00831bbf42))
+* **security:** evaluate the image an update will pull, not the one installed ([#2245](https://github.com/Studio-Saelix/sencho/issues/2245)) ([dd93d5f](https://github.com/Studio-Saelix/sencho/commit/dd93d5fffa46ef0bcf9a6886d756ab7fd4aa368c))
+* **settings:** show the Encrypt archives switch on while its passphrase is pending ([#2242](https://github.com/Studio-Saelix/sencho/issues/2242)) ([d23ac69](https://github.com/Studio-Saelix/sencho/commit/d23ac6982dd80a289c0a7c814dc79da58d6343f4))
+* stop a crash-looping stack from the stack page and alert once per loop ([#2268](https://github.com/Studio-Saelix/sencho/issues/2268)) ([4556844](https://github.com/Studio-Saelix/sencho/commit/45568441efc81ff0d32cec4f7dd3db9da8786b7c))
+* **updates:** delay-gated feedback for Recheck and the first load ([#2252](https://github.com/Studio-Saelix/sencho/issues/2252)) ([f70b028](https://github.com/Studio-Saelix/sencho/commit/f70b0289a2aa1a08baf92c11daeecbb55d02ebb8))
+* **updates:** stop claiming an all-clear before the first readiness load answers ([#2281](https://github.com/Studio-Saelix/sencho/issues/2281)) ([03d5c3d](https://github.com/Studio-Saelix/sencho/commit/03d5c3d743169ee1e60d21f9a3d7245a6f3afb4a))
+
 ## [0.98.2](https://github.com/Studio-Saelix/sencho/compare/v0.98.1...v0.98.2) (2026-11-03)
 
 

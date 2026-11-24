@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { Sparkline } from '@/components/ui/sparkline';
 import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { parseHostUsage } from '@/lib/hostUsage';
+import { formatBytes } from '@/lib/utils';
 import type { SystemStats } from './types';
 
 interface ResourceGaugesProps {
@@ -12,14 +13,6 @@ interface ResourceGaugesProps {
 }
 
 const SPARK_WINDOW_MS = 10 * 60 * 1000;
-
-const formatBytes = (bytes: number): string => {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-};
 
 const getValueTone = (value: number, warn = 80, crit = 90): string => {
   if (value >= crit) return 'text-destructive';
@@ -133,26 +126,26 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">
           {ramUnknown ? (
             <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span>{formatBytes(ramTotal)} total · usage unknown</span>
+              <span>{formatBytes(ramTotal, 1)} total · usage unknown</span>
               <ShowUsageLink />
             </span>
-          ) : ramUsed !== null ? `${formatBytes(ramUsed)} / ${formatBytes(ramTotal)}` : '\u00A0'}
+          ) : ramUsed !== null ? `${formatBytes(ramUsed, 1)} / ${formatBytes(ramTotal, 1)}` : '\u00A0'}
         </div>
         {ramBallooned > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
             {showVmRetained ? (
-              <div>Current VM Memory: {formatBytes(vmRetained)}</div>
+              <div>Current VM Memory: {formatBytes(vmRetained, 1)}</div>
             ) : null}
             {showVmRetained && memory?.effectiveUsed !== undefined ? (
               <div>Current pressure: {((memory.effectiveUsed / vmRetained) * 100).toFixed(0)}%</div>
             ) : null}
-            <div>Balloon reclaimable: {formatBytes(ramBallooned)}</div>
+            <div>Balloon reclaimable: {formatBytes(ramBallooned, 1)}</div>
           </div>
         ) : null}
         {ramRawUsed !== null && ramArcReclaimable > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
-            <div>Current memory in use: {formatBytes(ramRawUsed + ramArcReclaimable)}</div>
-            <div>ZFS ARC reclaimable: {formatBytes(ramArcReclaimable)}</div>
+            <div>Current memory in use: {formatBytes(ramRawUsed + ramArcReclaimable, 1)}</div>
+            <div>ZFS ARC reclaimable: {formatBytes(ramArcReclaimable, 1)}</div>
           </div>
         ) : null}
         {ramVal !== null ? <GaugeBar value={ramVal} /> : null}
@@ -167,7 +160,7 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
           {systemStats?.disk ? `${diskVal.toFixed(0)}%` : '--'}
         </div>
         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">
-          {systemStats?.disk ? `${formatBytes(systemStats.disk.used)} / ${formatBytes(systemStats.disk.total)}` : '\u00A0'}
+          {systemStats?.disk ? `${formatBytes(systemStats.disk.used, 1)} / ${formatBytes(systemStats.disk.total, 1)}` : '\u00A0'}
         </div>
         {systemStats?.disk ? <GaugeBar value={diskVal} /> : null}
       </div>
@@ -178,16 +171,16 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
           NETWORK
         </div>
         <div className="mt-2 font-mono tabular-nums text-2xl leading-none text-stat-value">
-          {systemStats?.network ? `${formatBytes(netTotalPerSec)}/s` : '--'}
+          {systemStats?.network ? `${formatBytes(netTotalPerSec, 1)}/s` : '--'}
         </div>
         <div className="mt-1.5 flex items-center gap-2 font-mono text-[11px] text-stat-subtitle">
           {systemStats?.network ? (
             <>
               <span className="text-stat-icon">↓</span>
-              <span className="tabular-nums text-stat-value">{formatBytes(systemStats.network.rxSec)}/s</span>
+              <span className="tabular-nums text-stat-value">{formatBytes(systemStats.network.rxSec, 1)}/s</span>
               <span className="text-stat-icon">·</span>
               <span className="text-stat-icon">↑</span>
-              <span className="tabular-nums text-stat-value">{formatBytes(systemStats.network.txSec)}/s</span>
+              <span className="tabular-nums text-stat-value">{formatBytes(systemStats.network.txSec, 1)}/s</span>
             </>
           ) : (
             <span>{'\u00A0'}</span>

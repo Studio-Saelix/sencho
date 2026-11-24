@@ -45,10 +45,13 @@ vi.mock('@/lib/authoredLocation', async (importOriginal) => {
 let lastShowServiceChips: boolean | undefined;
 // Capture the scoped deploy permission handed to the service lifecycle menus.
 let lastContainersHealthCanDeploy: boolean | undefined;
+// Capture which containers' stats failures reach the health pane.
+let lastContainersHealthFailures: EditorViewProps['containerStatsFailures'];
 vi.mock('../editor-view-blocks', () => ({
   StackIdentityHeader: () => <div>identity-header</div>,
-  ContainersHealth: ({ canDeploy }: { canDeploy: boolean }) => {
+  ContainersHealth: ({ canDeploy, containerStatsFailures }: { canDeploy: boolean; containerStatsFailures?: EditorViewProps['containerStatsFailures'] }) => {
     lastContainersHealthCanDeploy = canDeploy;
+    lastContainersHealthFailures = containerStatsFailures;
     return <div>health-pane</div>;
   },
   StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
@@ -153,6 +156,43 @@ describe('EditorView Anatomy layout', () => {
   });
 });
 
+describe('EditorView editor full screen', () => {
+  it.each(['compose', 'env', 'files'] as const)('offers the toggle on the %s tab', (activeTab) => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab })} />);
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument();
+  });
+
+  it('collapses the left column, keeps it across tabs, and resets when the editor closes', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose' })} />);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    rerender(<EditorView {...makeProps({ editingCompose: true, activeTab: 'env' })} />);
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+
+    rerender(<EditorView {...makeProps({ editingCompose: false, activeTab: 'env' })} />);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+  });
+});
+
+describe('EditorView full screen and deploy', () => {
+  it('exits full screen when Save & Deploy is chosen so the deploy output is visible', async () => {
+    const user = userEvent.setup();
+    const requestSaveAndDeploy = vi.fn();
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose', actionsReady: true, requestSaveAndDeploy })} />);
+    await user.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(screen.queryByTestId('stack-detail-primary-pane')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Save & Deploy' }));
+    expect(requestSaveAndDeploy).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('stack-detail-primary-pane')).toBeInTheDocument();
+  });
+});
+
 describe('EditorView service lifecycle permission', () => {
   afterEach(() => { lastContainersHealthCanDeploy = undefined; });
 
@@ -167,6 +207,22 @@ describe('EditorView service lifecycle permission', () => {
     const can = vi.fn().mockReturnValue(false);
     render(<EditorView {...makeProps({ can })} />);
     expect(lastContainersHealthCanDeploy).toBe(false);
+  });
+});
+
+describe('EditorView stats failures', () => {
+  afterEach(() => { lastContainersHealthFailures = undefined; });
+  const failures = new Map([['c1', 'stream' as const]]);
+  const running = (id: string) => ({ Id: id, Names: [`/${id}`], State: 'running', Status: 'Up', Image: 'img' }) as unknown as EditorViewProps['containers'][number];
+
+  it('hands the failed containers to the single-container health pane', () => {
+    render(<EditorView {...makeProps({ containers: [running('c1')], containerStatsFailures: failures })} />);
+    expect(lastContainersHealthFailures).toBe(failures);
+  });
+
+  it('hands the failed containers to the multi-container health pane', () => {
+    render(<EditorView {...makeProps({ containers: [running('c1'), running('c2')], containerStatsFailures: failures })} />);
+    expect(lastContainersHealthFailures).toBe(failures);
   });
 });
 

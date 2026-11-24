@@ -5,13 +5,20 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function formatBytes(bytes: number, decimals = 2) {
-  if (!+bytes) return '0 Bytes';
-  const k = 1024;
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+
+/**
+ * Formats a byte count (or a per-second rate) in 1024-based units labeled B,
+ * KB, MB and so on, rounded to `decimals` places with trailing zeros dropped.
+ * Zero, a negative value and a non-finite value read as "0 B". The unit index
+ * is clamped to the table, so a fraction of a byte stays in B and a value past
+ * the largest unit stays in YB instead of rendering "undefined".
+ */
+export function formatBytes(bytes: number, decimals = 2): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+  const i = Math.min(BYTE_UNITS.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(1024))));
+  return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(dm))} ${BYTE_UNITS[i]}`;
 }
 
 export function formatCount(n: number, unit: string): string {

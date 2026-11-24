@@ -209,6 +209,8 @@ export interface MobileSubTab<T extends string = string> {
   label: string;
   /** Optional trailing count badge (dimmed). */
   count?: number;
+  /** Optional trailing mark that carries its own accessible name, such as an attention dot. */
+  indicator?: ReactNode;
 }
 
 // Horizontal mono tab scroller with a cyan underline on the active tab. When
@@ -239,6 +241,7 @@ export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLa
             >
               {tab.label}
               {tab.count != null && <span className="ml-1.5 opacity-60">{tab.count}</span>}
+              {tab.indicator}
             </button>
           );
         })}

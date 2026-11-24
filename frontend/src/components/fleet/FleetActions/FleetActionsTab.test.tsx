@@ -101,7 +101,7 @@ it('marks a partial estimate on the Reclaim row', async () => {
     return Promise.resolve(jsonResponse(404, {}));
   });
   render(<FleetActionsTab nodes={nodes} />);
-  expect(await screen.findByText('~500 Bytes of images · partial')).toBeInTheDocument();
+  expect(await screen.findByText('~500 B of images · partial')).toBeInTheDocument();
 });
 
 it('says there is nothing to reclaim when the estimate is zero, partial or not', async () => {

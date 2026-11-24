@@ -1571,6 +1571,7 @@ export class DatabaseService {
         this.migrateGitOpsSourcePolicy();
         this.migrateRecoverySchema();
         this.migrateNodeBootstrapTrustHostCase();
+        this.migratePublicExposure();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1592,6 +1593,55 @@ export class DatabaseService {
     /** Whether this build applied the recovery schema; recovery stores refuse work otherwise. */
     public getRecoverySchemaOutcome(): RecoverySchemaOutcome {
         return this.recoverySchemaOutcome;
+    }
+
+    /**
+     * Hub tables for public exposure: the connected provider account (one per
+     * adapter, its token encrypted), the account's zones and which of them may
+     * carry public hostnames, and the per-node endpoint table. The endpoint
+     * table is created here so an account disconnect can refuse while any
+     * endpoint exists; a later slice owns every write to it, and any later
+     * change to its shape goes through tryAddColumn, never an edit of this
+     * CREATE statement. Idempotent.
+     */
+    private migratePublicExposure(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS exposure_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                adapter_id TEXT NOT NULL UNIQUE,
+                credential_enc TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                last_check_json TEXT NOT NULL,
+                verified_at INTEGER,
+                created_by TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS exposure_zones (
+                account_id INTEGER NOT NULL,
+                zone_ref TEXT NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                allowed_suffixes_json TEXT NOT NULL DEFAULT '[]',
+                dns_scope TEXT NOT NULL DEFAULT 'unconfirmed',
+                dns_checked_at INTEGER,
+                scope_check_pending_json TEXT,
+                last_seen_at INTEGER NOT NULL,
+                PRIMARY KEY (account_id, zone_ref)
+            );
+            CREATE TABLE IF NOT EXISTS exposure_node_endpoints (
+                node_id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                provider_ref TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                credential_generation INTEGER NOT NULL DEFAULT 0,
+                credential_delivered_at INTEGER,
+                created_by TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+        `);
     }
 
     /**
