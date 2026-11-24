@@ -686,7 +686,8 @@ class DockerController {
 
   // Sencho's own image, networks, and named volumes are always in use by the
   // running container, so Docker's server-side prune APIs (pruneContainers,
-  // pruneImages, pruneNetworks, pruneVolumes) skip them by definition. No
+  // pruneImages, pruneNetworks) skip them by definition, and so does the
+  // volume prune, which lists only unused volumes (pruneVolumesEnumerated). No
   // extra self-guard is needed at this layer; the `managed` scope path goes
   // through `pruneManagedOnly`, which adds an explicit self filter for
   // defense-in-depth.

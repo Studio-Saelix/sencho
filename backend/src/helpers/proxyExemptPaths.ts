@@ -24,12 +24,26 @@ export const PROXY_EXEMPT_PREFIXES: readonly string[] = [
   '/api/sealed-secrets',
 ];
 
-/** Returns true when the path should bypass the remote proxy (handled locally). */
+/**
+ * Returns true when the path should bypass the remote proxy (handled locally).
+ * Case-insensitive, as Express routing is: `/api/Sealed-Secrets` reaches the
+ * same local router, so it must not be forwarded either.
+ */
 export function isProxyExemptPath(path: string): boolean {
+  const normalized = path.toLowerCase();
   for (const prefix of PROXY_EXEMPT_PREFIXES) {
-    if (path.startsWith(prefix)) return true;
+    if (normalized.startsWith(prefix)) return true;
   }
   return false;
+}
+
+/**
+ * True for the sealed secret routes, which act on this instance's own Docker
+ * daemon whatever node the request names, so the request belongs to the local
+ * node (for its audit row too), never to the default node.
+ */
+export function isSealedSecretPath(path: string): boolean {
+  return path.toLowerCase().startsWith('/api/sealed-secrets');
 }
 
 // Path prefixes that are hub-only: they must be served on the instance you are

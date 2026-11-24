@@ -120,7 +120,7 @@ describe('node sealed secret routes', () => {
 
 describe('the hub never forwards a user request to the sealed secret prefix', () => {
   it('classifies the prefix as served locally, never proxied', () => {
-    for (const path of ['/api/sealed-secrets', '/api/sealed-secrets/key', `/api/sealed-secrets/edge-tunnel-run-token/${SLOT}`]) {
+    for (const path of ['/api/sealed-secrets', '/api/sealed-secrets/key', `/api/sealed-secrets/edge-tunnel-run-token/${SLOT}`, '/api/Sealed-Secrets/KEY']) {
       expect(isProxyExemptPath(path)).toBe(true);
       expect(isHubOnlyPath(path)).toBe(false);
     }
@@ -159,6 +159,13 @@ describe('the hub never forwards a user request to the sealed secret prefix', ()
         });
       expect(post.status).toBe(422);
       expect(post.body.code).toBe('SEALED_SECRET_OPEN_FAILED');
+      // The request acted on this instance's daemon, so its audit row names the
+      // local node, not the remote default.
+      db.flushAuditLogBuffer();
+      const row = db.getDb()
+        .prepare("SELECT node_id FROM audit_log WHERE path = '/api/sealed-secrets/edge-tunnel-run-token' ORDER BY id DESC LIMIT 1")
+        .get() as { node_id: number | null } | undefined;
+      expect(row?.node_id).toBe(localId);
     } finally {
       db.updateNode(localId, { is_default: true });
     }

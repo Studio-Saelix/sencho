@@ -557,8 +557,8 @@ export class ComposeService {
    * the declaration Compose removes.
    */
   private async assertNoSecretVolumeRemoval(stackName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
-    // Compose removes only what the stack declares, and a secret volume always
-    // has a name, so a stack that declares no volume cannot reach one.
+    // Compose removes only volumes the stack declares, so a stack declaring
+    // none cannot remove a secret volume, and the label read is skipped.
     if (declaredVolumes.length === 0) return;
     let labelledVolumeNames: Set<string>;
     try {
@@ -580,7 +580,8 @@ export class ComposeService {
     if (isConsumer && secret.every((volume) => volume.external)) return;
     throw new SecretVolumeProtectedError(
       'This stack declares a volume that holds, or is reserved for, a secret Sencho keeps on this node, so its volumes were not removed. '
-      + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first.',
+      + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first. '
+      + 'The stack that consumes the secret must declare the volume as external.',
     );
   }
 

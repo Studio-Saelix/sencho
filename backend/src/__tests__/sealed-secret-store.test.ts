@@ -204,6 +204,27 @@ describe('SealedSecretStore.accept', () => {
   });
 });
 
+describe('the store resolves this instance\'s own daemon', () => {
+  it('uses the default node when it is local, else the lowest-id local node, and refuses with 503 when there is none', async () => {
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const registry = NodeRegistry.getInstance();
+    const node = (id: number, type: 'local' | 'remote') => ({ id, type }) as unknown as import('../services/DatabaseService').Node;
+    const getDefault = vi.spyOn(db, 'getDefaultNode').mockReturnValue(node(4, 'local'));
+    const getNodes = vi.spyOn(db, 'getNodes').mockReturnValue([node(9, 'local'), node(4, 'remote'), node(6, 'local')]);
+    expect(registry.getLocalNodeId()).toBe(4);
+    getDefault.mockReturnValue(node(4, 'remote'));
+    expect(registry.getLocalNodeId()).toBe(6);
+    getNodes.mockReturnValue([node(4, 'remote')]);
+    expect(registry.getLocalNodeId()).toBeNull();
+
+    store.setDockerForTests(null);
+    const error = await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO));
+    expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(error.status).toBe(503);
+    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+  });
+});
+
 describe('volume prune racing a first delivery', () => {
   it('keeps a secret a first delivery wrote after the prune listed the volumes, and an identical retry still finds it', async () => {
     const { NodeRegistry } = await import('../services/NodeRegistry');

@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
-import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
+import { isProxyExemptPath, isSealedSecretPath } from '../helpers/proxyExemptPaths';
+import { NodeRegistry } from '../services/NodeRegistry';
 import { resolveNodeId } from '../helpers/resolveNodeId';
 
 /**
@@ -14,7 +15,8 @@ import { resolveNodeId } from '../helpers/resolveNodeId';
  * unrecoverable 404 loop).
  */
 export const nodeContextMiddleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
-  req.nodeId = resolveNodeId(req, { warnOnMalformed: true });
+  req.nodeId = (isSealedSecretPath(req.path) ? NodeRegistry.getInstance().getLocalNodeId() : null)
+    ?? resolveNodeId(req, { warnOnMalformed: true });
 
   if (req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
     const node = DatabaseService.getInstance().getNode(req.nodeId);

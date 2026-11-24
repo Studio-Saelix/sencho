@@ -650,6 +650,30 @@ describe('ComposeService secret volume guard', () => {
     });
 
     it.each([
+      ['edge-tunnel', 'runDown'],
+      ['edge-tunnel', 'downStack'],
+      ['released-edge-tunnel', 'runDown'],
+      ['released-edge-tunnel', 'downStack'],
+    ] as const)('lets the recorded %s consumer remove its volumes through %s when its secret volumes are external', async (kind, method) => {
+      recordManagedKind(stack, kind);
+      renderFor = () => ({
+        name: stack,
+        services: { web: { image: 'alpine:3.20' } },
+        volumes: {
+          secret: { name: SECRET_VOLUME, external: true },
+          tok: { name: `${stack}_tok`, external: true },
+          data: { name: `${stack}_data` },
+        },
+      });
+      labelledVolumes = [`${stack}_tok`];
+
+      await svc()[method](stack, { removeVolumes: true });
+
+      expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+    });
+
+    it.each([
+      ['the reserved volume beside an external one', () => ({ ext: { name: SECRET_VOLUME, external: true }, own: { name: `${stack}_tok` } }), [`${stack}_tok`]],
       ['the reserved volume', () => ({ secret: { name: SECRET_VOLUME } }), [] as string[]],
       ['a labelled volume', () => ({ tok: { name: `${stack}_tok` } }), [`${stack}_tok`]],
     ])('refuses the recorded consumer when it declares %s as its own, which Compose would remove', async (_what, volumes, labelled) => {

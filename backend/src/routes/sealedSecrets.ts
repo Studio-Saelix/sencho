@@ -13,9 +13,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 /**
  * Node side of sealed secret delivery. Every route answers only the hub's own
- * background call (a machine bearer with no forwarded role header); the hub
- * also refuses to forward a user request to this prefix. No route returns a
- * secret value.
+ * background call (a machine bearer with no forwarded role header). A request
+ * for this prefix is never forwarded to a remote node: whichever instance
+ * receives it answers it itself, and refuses anything but that background
+ * call. No route returns a secret value.
  */
 export const sealedSecretsRouter = Router();
 
