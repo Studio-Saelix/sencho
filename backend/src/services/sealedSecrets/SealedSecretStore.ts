@@ -73,9 +73,18 @@ export class SealedSecretStore {
     this.dockerOverride = docker;
   }
 
+  /**
+   * This instance's own Docker daemon. The store keeps the secret on the node
+   * that received it, so it follows the local node, never the default node:
+   * an operator can make a remote node the default.
+   */
   private docker(): Docker {
     if (this.dockerOverride) return this.dockerOverride;
-    return DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId()).getDocker();
+    const localNodeId = NodeRegistry.getInstance().getLocalNodeId();
+    if (localNodeId === null) {
+      throw new SealedSecretError('SECRET_STORE_UNAVAILABLE', 503, 'This instance has no local node, so it has no Docker daemon to keep the secret on.');
+    }
+    return DockerController.getInstance(localNodeId).getDocker();
   }
 
   private serialize<T>(purpose: string, work: () => Promise<T>): Promise<T> {

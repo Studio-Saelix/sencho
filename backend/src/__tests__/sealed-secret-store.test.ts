@@ -204,6 +204,30 @@ describe('SealedSecretStore.accept', () => {
   });
 });
 
+describe('volume prune racing a first delivery', () => {
+  it('keeps a secret a first delivery wrote after the prune listed the volumes, and an identical retry still finds it', async () => {
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const DockerController = (await import('../services/DockerController')).default;
+    vi.spyOn(NodeRegistry.getInstance(), 'getDocker').mockReturnValue(fake.docker);
+    fake.volumes.set('app_data', {});
+    // The delivery lands right after the prune's first volume listing, the
+    // moment a choice made from that listing would be stale.
+    fake.afterListVolumes = async () => {
+      fake.afterListVolumes = null;
+      expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+    };
+
+    await DockerController.getInstance(1).pruneSystem('volumes');
+
+    expect(fake.removedVolumes).toEqual(['app_data']);
+    expect(fake.volumes.get(VOLUME)).toEqual({ 'io.sencho.secret': PURPOSE });
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(SECRET);
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_A, generation: 1, state: 'present' });
+    expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('already_accepted');
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(SECRET);
+  });
+});
+
 describe('SealedSecretStore.remove', () => {
   it('records the removal without starting the writer when the volume was removed outside Sencho', async () => {
     await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);

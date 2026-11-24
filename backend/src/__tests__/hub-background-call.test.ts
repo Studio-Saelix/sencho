@@ -1,7 +1,8 @@
 /**
  * The node's sealed secret routes answer only the hub's own background call:
  * a node_proxy or pilot_tunnel bearer that carries no forwarded role header.
- * The hub refuses to forward a user request to the prefix at all.
+ * The prefix is never forwarded to a remote node, so a user request that
+ * names one is answered, and refused, by the instance that received it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
@@ -10,7 +11,7 @@ import jwt from 'jsonwebtoken';
 import { cleanupTestDb, setupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
 import { PROXY_ROLE_HEADER } from '../services/license-headers';
-import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
+import { isHubOnlyPath, isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 
 const SLOT = '0b9f3c2e-1d4a-4b5c-8d6e-7f8091a2b3c4';
@@ -118,22 +119,48 @@ describe('node sealed secret routes', () => {
 });
 
 describe('the hub never forwards a user request to the sealed secret prefix', () => {
-  it('classifies the prefix as hub-only', () => {
-    expect(isHubOnlyPath('/api/sealed-secrets')).toBe(true);
-    expect(isHubOnlyPath('/api/sealed-secrets/key')).toBe(true);
-    expect(isHubOnlyPath(`/api/sealed-secrets/edge-tunnel-run-token/${SLOT}`)).toBe(true);
+  it('classifies the prefix as served locally, never proxied', () => {
+    for (const path of ['/api/sealed-secrets', '/api/sealed-secrets/key', `/api/sealed-secrets/edge-tunnel-run-token/${SLOT}`]) {
+      expect(isProxyExemptPath(path)).toBe(true);
+      expect(isHubOnlyPath(path)).toBe(false);
+    }
   });
 
   it.each([
     ['direct proxy', () => directNodeId],
     ['Pilot', () => pilotNodeId],
-  ])('refuses %s forwarding with HUB_ONLY_ENDPOINT', async (_name, nodeId) => {
+  ])('answers a user request that names a %s node itself, and refuses it', async (_name, nodeId) => {
     for (const [method, path, body] of ROUTES) {
       const res = await send(method, path, body)
         .set('Authorization', `Bearer ${sign({ username: TEST_USERNAME })}`)
         .set('x-node-id', String(nodeId()));
       expect(res.status).toBe(403);
-      expect(res.body.code).toBe('HUB_ONLY_ENDPOINT');
+      expect(res.body.code).toBe('HUB_BACKGROUND_REQUIRED');
+    }
+  });
+
+  it('serves the background call itself when a remote node is the default', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const localId = db.getDefaultNode()!.id;
+    db.updateNode(directNodeId, { is_default: true });
+    try {
+      const bearer = `Bearer ${sign({ scope: 'node_proxy' })}`;
+      const key = await request(app).get('/api/sealed-secrets/key').set('Authorization', bearer);
+      expect(key.status).toBe(200);
+      expect(typeof key.body.fingerprint).toBe('string');
+      // The JSON body is parsed for this instance, not left raw for a proxy hop.
+      const post = await request(app)
+        .post('/api/sealed-secrets/edge-tunnel-run-token')
+        .set('Authorization', bearer)
+        .send({
+          slot: SLOT, generation: 1, operationId: '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d', actor: 'admin',
+          sealed: { v: 1, epk: 'AAAA', n: 'AAAA', ct: 'AAAA' },
+        });
+      expect(post.status).toBe(422);
+      expect(post.body.code).toBe('SEALED_SECRET_OPEN_FAILED');
+    } finally {
+      db.updateNode(localId, { is_default: true });
     }
   });
 

@@ -585,14 +585,81 @@ describe('ComposeService secret volume guard', () => {
       expect(mutations()).toEqual([]);
     });
 
-    it('refuses a stack declaring the reserved label the same way', async () => {
+    it.each(['runDown', 'downStack'] as const)('%s refuses a stack declaring the reserved label the same way', async (method) => {
       renderFor = () => ({
         name: stack,
         services: { web: { image: 'alpine:3.20' } },
         volumes: { lookalike: { name: `${stack}_lookalike`, labels: ['io.sencho.secret=x'] } },
       });
 
-      expect(await failureOf(svc().runDown(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s refuses a volume only the Docker volume labels, though the stack declares it plainly', async (method) => {
+      renderFor = () => ({
+        name: stack,
+        services: { web: { image: 'alpine:3.20' } },
+        volumes: { data: { name: `${stack}_data` } },
+      });
+      labelledVolumes = [`${stack}_data`];
+
+      const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('so its volumes were not removed');
+      expect(listVolumes).toHaveBeenCalledWith({ filters: { label: ['io.sencho.secret'] } });
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s refuses when the volume labels cannot be read', async (method) => {
+      renderFor = () => ({
+        name: stack,
+        services: { web: { image: 'alpine:3.20' } },
+        volumes: { data: { name: `${stack}_data` } },
+      });
+      listVolumes.mockRejectedValueOnce(new Error('connect ECONNREFUSED /var/run/docker.sock'));
+
+      const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('could not read the volumes on this node');
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s removes the volumes of an ordinary stack when no declared volume is a secret', async (method) => {
+      renderFor = () => ({
+        name: stack,
+        services: { web: { image: 'alpine:3.20' } },
+        volumes: { data: { name: `${stack}_data` } },
+      });
+      labelledVolumes = ['some-other-stack_tok'];
+
+      await svc()[method](stack, { removeVolumes: true });
+
+      expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+    });
+
+    it('does not read volume labels for a stack that declares no volume', async () => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+
+      await svc().runDown(stack, { removeVolumes: true });
+
+      expect(listVolumes).not.toHaveBeenCalled();
+      expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+    });
+
+    it.each([
+      ['the reserved volume', () => ({ secret: { name: SECRET_VOLUME } }), [] as string[]],
+      ['a labelled volume', () => ({ tok: { name: `${stack}_tok` } }), [`${stack}_tok`]],
+    ])('refuses the recorded consumer when it declares %s as its own, which Compose would remove', async (_what, volumes, labelled) => {
+      recordManagedKind(stack, 'edge-tunnel');
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: volumes() });
+      labelledVolumes = labelled;
+
+      for (const method of ['runDown', 'downStack'] as const) {
+        expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+      }
       expect(mutations()).toEqual([]);
     });
 

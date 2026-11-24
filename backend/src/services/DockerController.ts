@@ -716,35 +716,21 @@ class DockerController {
       const r = await this.docker.pruneNetworks({ filters });
       spaceReclaimed = (r as { SpaceReclaimed?: number }).SpaceReclaimed || 0;
     } else if (target === 'volumes') {
-      const filters: Record<string, string[]> = { all: ['true'] };
-      if (labelFilter) filters.label = [labelFilter];
-      // The recovery repository is Sencho's own infrastructure: it holds every
-      // volume point this node has taken, and no prune may remove it. The daemon
-      // filter is a second line of defense beside `isOwnVolume` in the plan and
-      // managed paths, which cannot see a volume that no container mounts.
-      filters['label!'] = [`dev.sencho.recovery.repository`];
-      // A secret volume must never be pruned either, but the daemon ANDs
-      // several `label!` values (a volume is kept only when it carries all of
-      // them), so a second exclusion cannot share this call. A node holding a
-      // secret volume prunes one volume at a time instead.
-      if (await this.hasSecretVolume()) {
-        return this.pruneVolumesEnumerated(labelFilter);
-      }
-      const r = await this.docker.pruneVolumes({ filters });
-      spaceReclaimed = r.SpaceReclaimed || 0;
+      // Never Docker's bulk volume prune. The recovery repository could be
+      // excluded there with one `label!` filter, but a secret volume needs a
+      // second one, and the daemon ANDs several `label!` values (a volume is
+      // kept only when it carries all of them). Choosing the bulk call from a
+      // listing taken first is no answer either: a first secret delivery can
+      // create its volume between that listing and the prune. Removing one
+      // listed volume at a time checks each volume's own labels instead, and a
+      // volume created after the listing is not on it.
+      return this.pruneVolumesEnumerated(labelFilter);
     }
 
     return {
       success: true,
       reclaimedBytes: spaceReclaimed
     };
-  }
-
-  /** True when any volume on the node is a secret volume (reserved name or secret label). */
-  private async hasSecretVolume(): Promise<boolean> {
-    const listed = await this.docker.listVolumes();
-    const volumes = (listed?.Volumes ?? []) as Array<{ Name: string; Labels?: Record<string, string> | null }>;
-    return volumes.some((v) => isSecretVolumeRef(v.Name, v.Labels));
   }
 
   /** True when a volume's labels satisfy a Docker `label` filter (`key` or `key=value`). */
@@ -756,10 +742,10 @@ class DockerController {
   }
 
   /**
-   * The volume prune for a node that holds a secret volume: every unused
-   * volume the daemon prune would remove, except secret volumes and the
-   * recovery repository, removed one by one. A volume that gains a container
-   * between the listing and its removal is refused by Docker and kept.
+   * The volume prune: every unused volume the daemon prune would remove
+   * (`all=true`, so named volumes too), except secret volumes and the recovery
+   * repository, removed one by one. A volume that gains a container between
+   * the listing and its removal is refused by Docker and kept.
    */
   private async pruneVolumesEnumerated(labelFilter?: string): Promise<{ success: boolean; reclaimedBytes: number }> {
     const usage = DockerController.mapVolumeUsageFromDf(await this.safeVolumeDfSnapshot());

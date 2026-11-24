@@ -19,7 +19,7 @@ import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
-import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
+import { parseEffectiveModel, type EffectiveModel, type EffResource } from './preflight/effectiveModel';
 import {
   RecoveryVolumeProtectedError,
   recoveryVolumeNamesIn,
@@ -507,10 +507,15 @@ export class ComposeService {
    * The exception is an input Sencho refused to hand to Compose: that throws
    * `ComposeExpansionRefusal` instead, because the same guard refuses the down
    * without volumes too.
+   *
+   * A secret volume is refused too (`SecretVolumeProtectedError`), whether the
+   * stack's declaration shows it (reserved name, authored label) or only the
+   * Docker volume of that name carries the label; a label read that fails
+   * refuses. The stack Sencho recorded as the secret's consumer may declare it,
+   * but only as `external`, which Compose never removes.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
-    let declared: string[] | null = null;
-    let declaresSecretVolume = false;
+    let declaredVolumes: EffResource[] | null = null;
     try {
       const result = await this.renderConfig(stackName);
       // Sencho's own refusal says why the volumes cannot be read, which is a
@@ -522,12 +527,7 @@ export class ComposeService {
         // The model parser tolerates anything and returns an empty model, which
         // would read as "declares nothing"; only an object is a model.
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const volumes = Object.values(parseEffectiveModel(parsed, stackName).volumes);
-          declared = volumes.map((volume) => volume.name);
-          // A secret volume is declared `external` by the stack that consumes it,
-          // so Compose would not remove it; any other stack that declares one must
-          // not get this far, exactly as its deploy is refused.
-          declaresSecretVolume = volumes.some((volume) => isReservedSecretVolumeName(volume.name) || volume.hasSecretLabel === true);
+          declaredVolumes = Object.values(parseEffectiveModel(parsed, stackName).volumes);
         } else {
           console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
@@ -541,17 +541,47 @@ export class ComposeService {
       if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
-    if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
+    if (declaredVolumes === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
     const self = SelfIdentityService.getInstance();
-    if (recoveryVolumeNamesIn(declared, (name) => self.isRecoveryVolume(name)).length > 0) {
+    if (recoveryVolumeNamesIn(declaredVolumes.map((volume) => volume.name), (name) => self.isRecoveryVolume(name)).length > 0) {
       throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
     }
-    if (declaresSecretVolume && !isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName))) {
+    await this.assertNoSecretVolumeRemoval(stackName, declaredVolumes);
+  }
+
+  /**
+   * The secret half of the `down --volumes` guard. A stack that is not the
+   * secret's recorded consumer is refused when it declares a secret volume at
+   * all, external or not, exactly as its deploy is refused. The consumer is
+   * refused only when it declares one that is not `external`, because that is
+   * the declaration Compose removes.
+   */
+  private async assertNoSecretVolumeRemoval(stackName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
+    // Compose removes only what the stack declares, and a secret volume always
+    // has a name, so a stack that declares no volume cannot reach one.
+    if (declaredVolumes.length === 0) return;
+    let labelledVolumeNames: Set<string>;
+    try {
+      const listed = await DockerController.getInstance(this.nodeId).getDocker()
+        .listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+      labelledVolumeNames = new Set((listed?.Volumes ?? []).map((volume) => volume.Name));
+    } catch (error) {
+      console.warn('[ComposeService] Could not read the volume labels of this node for the secret volume check of %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
       throw new SecretVolumeProtectedError(
-        'This stack declares a volume Sencho reserves for a secret it keeps on this node, so its volumes were not removed. '
-        + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first.',
+        'Sencho could not read the volumes on this node to check that this stack does not reach a secret volume, so its volumes were not removed. '
+        + 'Check the Docker connection and try again, or run the operation without removing volumes.',
       );
     }
+    const secret = declaredVolumes.filter((volume) => isReservedSecretVolumeName(volume.name)
+      || volume.hasSecretLabel === true
+      || labelledVolumeNames.has(volume.name));
+    if (secret.length === 0) return;
+    const isConsumer = isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName));
+    if (isConsumer && secret.every((volume) => volume.external)) return;
+    throw new SecretVolumeProtectedError(
+      'This stack declares a volume that holds, or is reserved for, a secret Sencho keeps on this node, so its volumes were not removed. '
+      + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first.',
+    );
   }
 
   /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */

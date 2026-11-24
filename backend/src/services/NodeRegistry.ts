@@ -108,6 +108,21 @@ export class NodeRegistry extends EventEmitter {
     }
 
     /**
+     * The id of the node whose Docker daemon this instance reaches directly:
+     * the default node when it is local, else the first local node. The
+     * default can legally be a remote node, so code that acts on this
+     * instance's own daemon must not follow it. Null only when no local node
+     * row exists.
+     */
+    public getLocalNodeId(): number | null {
+        const db = DatabaseService.getInstance();
+        const defaultNode = db.getDefaultNode();
+        if (defaultNode?.id && defaultNode.type === 'local') return defaultNode.id;
+        const local = db.getNodes().filter((node) => node.type === 'local' && node.id).sort((a, b) => a.id - b.id)[0];
+        return local?.id ?? null;
+    }
+
+    /**
      * Get a node configuration by its ID.
      */
     public getNode(nodeId: number): Node | undefined {

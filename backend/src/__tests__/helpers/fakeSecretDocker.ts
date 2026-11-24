@@ -41,6 +41,10 @@ export interface FakeSecretDocker {
   holdNextWait: Promise<void> | null;
   /** When set, the next writer's attach stream emits this error after start. */
   streamErrorNext: Error | null;
+  /** Called after every `listVolumes` answer is taken, before it is returned: a concurrent operation landing right after a listing. */
+  afterListVolumes: (() => Promise<void>) | null;
+  /** Names of volumes removed through `getVolume(name).remove` or `pruneVolumes`. */
+  removedVolumes: string[];
 }
 
 export function createFakeSecretDocker(): FakeSecretDocker {
@@ -58,7 +62,13 @@ export function createFakeSecretDocker(): FakeSecretDocker {
     writerRemovals: () => removals,
     holdNextWait: null,
     streamErrorNext: null,
+    afterListVolumes: null,
+    removedVolumes: [],
   };
+  // A volume is unused when no container mounts it, as the daemon's `dangling` filter and prune read it.
+  const unusedVolumes = () => [...state.volumes.entries()]
+    .filter(([name]) => !state.mounted.has(name))
+    .map(([Name, Labels]) => ({ Name, Labels }));
   let started = 0;
   let removals = 0;
 
@@ -123,7 +133,35 @@ export function createFakeSecretDocker(): FakeSecretDocker {
         if (!labels) throw Object.assign(new Error('no such volume'), { statusCode: 404 });
         return { Name: name, Labels: labels };
       },
+      remove: async () => {
+        if (!state.volumes.has(name)) throw Object.assign(new Error('no such volume'), { statusCode: 404 });
+        if (state.mounted.has(name)) throw Object.assign(new Error('volume is in use'), { statusCode: 409 });
+        state.volumes.delete(name);
+        for (const key of [...state.files.keys()]) if (key.startsWith(`${name}/`)) state.files.delete(key);
+        state.removedVolumes.push(name);
+      },
     }),
+    listVolumes: async (opts?: { filters?: { dangling?: string[]; label?: string[] } }) => {
+      let volumes = opts?.filters?.dangling?.includes('true')
+        ? unusedVolumes()
+        : [...state.volumes.entries()].map(([Name, Labels]) => ({ Name, Labels }));
+      const label = opts?.filters?.label ?? [];
+      if (label.length > 0) volumes = volumes.filter((volume) => label.every((key) => Object.prototype.hasOwnProperty.call(volume.Labels, key)));
+      const answer = { Volumes: volumes };
+      if (state.afterListVolumes) await state.afterListVolumes();
+      return answer;
+    },
+    // The daemon prune: every unused volume, kept only when it carries every `label!` key.
+    pruneVolumes: async (opts?: { filters?: { 'label!'?: string[] } }) => {
+      const keep = opts?.filters?.['label!'] ?? [];
+      for (const { Name, Labels } of unusedVolumes()) {
+        if (keep.length > 0 && keep.every((key) => Object.prototype.hasOwnProperty.call(Labels, key))) continue;
+        state.volumes.delete(Name);
+        for (const key of [...state.files.keys()]) if (key.startsWith(`${Name}/`)) state.files.delete(key);
+        state.removedVolumes.push(Name);
+      }
+      return { SpaceReclaimed: 0 };
+    },
     createVolume: async ({ Name, Labels }: { Name: string; Labels: Record<string, string> }) => {
       if (!state.volumes.has(Name)) state.volumes.set(Name, { ...Labels });
       return { Name };

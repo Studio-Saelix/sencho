@@ -78,7 +78,7 @@ See [Compose Doctor](/features/compose-doctor) for the full rule reference and h
 
 ## Reserved volume
 
-The volume name `sencho_edge_secret` and the volume label `io.sencho.secret` are reserved for a secret Sencho keeps on the node. Sencho does not browse, edit, back up, restore, prune, or delete a volume that carries that label, and a stack whose volume resolves to that name, declares the label, or mounts such a volume, is refused at deploy and reported by [Compose Doctor](/features/compose-doctor#reserved-secret-volume). If one of your own volumes uses the name or the label, rename the volume or drop the label.
+The volume name `sencho_edge_secret` and the volume label `io.sencho.secret` are reserved for a secret Sencho keeps on the node. Sencho does not browse, edit, back up, restore, prune, or delete a volume that carries that label, and a stack whose volume resolves to that name, declares the label, or mounts such a volume, is refused at deploy and reported by [Compose Doctor](/features/compose-doctor#reserved-secret-volume). A down that removes volumes is refused for such a stack too, including when the stack declares the volume under an ordinary name and only the Docker volume carries the label, and when Sencho cannot read the node's volume labels to check. If one of your own volumes uses the name or the label, rename the volume or drop the label.
 
 ## Troubleshooting
 

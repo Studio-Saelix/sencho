@@ -842,17 +842,29 @@ describe('DockerController - pruneSystem', () => {
     });
   });
 
-  it('prunes volumes with all true filter, never the recovery repository', async () => {
-    mockDocker.pruneVolumes.mockResolvedValue({ SpaceReclaimed: 4096 });
+  it('prunes every unused volume one by one, never the recovery repository', async () => {
+    mockDfSections({ volume: { Volumes: [{ Name: 'app_data', UsageData: { RefCount: 0, Size: 4096 } }] } });
+    mockDocker.listVolumes.mockResolvedValue({
+      Volumes: [
+        { Name: 'app_data', Labels: {} },
+        { Name: 'sencho-recovery-repo', Labels: { 'dev.sencho.recovery.repository': '1' } },
+      ],
+    });
+    const removed: string[] = [];
+    mockDocker.getVolume.mockImplementation((name: string) => ({
+      remove: vi.fn().mockImplementation(async () => { removed.push(name); }),
+    }));
 
     const dc = DockerController.getInstance(1);
-    await dc.pruneSystem('volumes');
+    const result = await dc.pruneSystem('volumes');
 
-    // The excluded label is what protects Sencho's own recovery repository, which
-    // no container mounts and so would otherwise read as an unused volume.
-    expect(mockDocker.pruneVolumes).toHaveBeenCalledWith({
-      filters: { all: ['true'], 'label!': ['dev.sencho.recovery.repository'] },
-    });
+    // `dangling` lists named volumes too, as the daemon prune's `all` would.
+    // The recovery repository is Sencho's own: no container mounts it, so it
+    // reads as unused, and it is skipped by its label.
+    expect(mockDocker.listVolumes).toHaveBeenCalledWith({ filters: { dangling: ['true'] } });
+    expect(mockDocker.pruneVolumes).not.toHaveBeenCalled();
+    expect(removed).toEqual(['app_data']);
+    expect(result).toEqual({ success: true, reclaimedBytes: 4096 });
   });
 });
 

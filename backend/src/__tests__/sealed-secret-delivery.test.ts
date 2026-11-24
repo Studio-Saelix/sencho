@@ -104,6 +104,24 @@ beforeEach(async () => {
   Service.resetForTests();
 });
 
+/**
+ * Make a remote node the default while the store resolves its own Docker, as
+ * on a receiving instance whose operator picked a remote default. Only the
+ * local node's client answers; any other node id throws as the registry does
+ * for a remote node. Returns the restore step.
+ */
+async function remoteDefaultWithLocalDaemon(remoteDefaultId: number): Promise<() => void> {
+  const { NodeRegistry } = await import('../services/NodeRegistry');
+  const { SealedSecretStore } = await import('../services/sealedSecrets/SealedSecretStore');
+  const registry = NodeRegistry.getInstance();
+  const realGetDocker = registry.getDocker.bind(registry);
+  vi.spyOn(registry, 'getDocker').mockImplementation((id: number) => (id === localNodeId ? fake.docker : realGetDocker(id)));
+  SealedSecretStore.getInstance().setDockerForTests(null);
+  db.updateNode(remoteDefaultId, { is_default: true });
+  expect(registry.getDefaultNodeId()).toBe(remoteDefaultId);
+  return () => db.updateNode(localNodeId, { is_default: true });
+}
+
 function service() {
   return Service.getInstance();
 }
@@ -190,6 +208,22 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     const lines = audit();
     expect(lines.some((line) => line.startsWith('sealed_secret.delivered:'))).toBe(true);
     expect(lines.some((line) => line.startsWith('sealed_secret.accepted:'))).toBe(true);
+  });
+
+  it('accepts, replaces and removes on the local daemon when a remote node is the default', async () => {
+    install();
+    transport.setConfidential(true);
+    const restore = await remoteDefaultWithLocalDaemon(directNodeId);
+    try {
+      expect(await deliver()).toEqual({ status: 'accepted', generation: 1 });
+      expect(fake.files.get(VOLUME_FILE)?.content).toBe(SECRET);
+      expect(await deliver(SLOT_B, `${SECRET}-b`)).toMatchObject({ status: 'accepted', generation: 2 });
+      expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+      expect((await remove(SLOT_B)).status).toBe('deleted');
+      expect(fake.files.has(VOLUME_FILE)).toBe(false);
+    } finally {
+      restore();
+    }
   });
 
   it('does not trust a pin the registry path made over plaintext', async () => {
@@ -535,5 +569,21 @@ describe('sealed secret delivery to the local node', () => {
     expect((await service().remove({ nodeId: localNodeId, purpose: PURPOSE, slot: SLOT_A, actor: 'admin' })).status).toBe('deleted');
     expect(calls).toHaveLength(0);
     expect((await service().evaluateReadiness(localNodeId)).readiness).toBe('local');
+  });
+
+  it('accepts, replaces and removes on the local daemon when a remote node is the default', async () => {
+    const { calls } = installInProcessNodeTransport({ app, bearer: () => '' });
+    const restore = await remoteDefaultWithLocalDaemon(pilotNodeId);
+    try {
+      const deliver = (slot: string, secret: string) => service().deliver({ nodeId: localNodeId, purpose: PURPOSE, slot, secret, actor: 'admin' });
+      expect(await deliver(SLOT_A, SECRET)).toEqual({ status: 'accepted', generation: 1 });
+      expect(await deliver(SLOT_B, `${SECRET}-b`)).toMatchObject({ status: 'accepted', generation: 2 });
+      expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+      expect((await service().remove({ nodeId: localNodeId, purpose: PURPOSE, slot: SLOT_B, actor: 'admin' })).status).toBe('deleted');
+      expect(fake.files.has(VOLUME_FILE)).toBe(false);
+      expect(calls).toHaveLength(0);
+    } finally {
+      restore();
+    }
   });
 });

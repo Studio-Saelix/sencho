@@ -85,16 +85,24 @@ beforeEach(() => {
 });
 
 describe('pruneSystem volumes', () => {
-  it('keeps the single daemon prune when the node holds no secret volume', async () => {
-    mockDocker.listVolumes.mockResolvedValue({ Volumes: [ORDINARY] });
-    mockDocker.pruneVolumes.mockResolvedValue({ SpaceReclaimed: 5 });
+  it('never uses the daemon prune, also when the node holds no secret volume yet', async () => {
+    // The bulk call could only exclude the recovery repository, so a secret
+    // volume a first delivery creates after any earlier listing would go with it.
+    const all = [ORDINARY, REPOSITORY];
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: all });
+    mockDocker.df.mockResolvedValue(unused(...all.map((v) => v.Name)));
+    const removed: string[] = [];
+    mockDocker.getVolume.mockImplementation((name: string) => ({
+      remove: vi.fn().mockImplementation(async () => { removed.push(name); }),
+    }));
 
     const result = await DockerController.getInstance(1).pruneSystem('volumes');
 
-    expect(mockDocker.pruneVolumes).toHaveBeenCalledWith({
-      filters: { all: ['true'], 'label!': ['dev.sencho.recovery.repository'] },
-    });
-    expect(result).toEqual({ success: true, reclaimedBytes: 5 });
+    expect(mockDocker.pruneVolumes).not.toHaveBeenCalled();
+    expect(mockDocker.listVolumes).toHaveBeenCalledTimes(1);
+    expect(mockDocker.listVolumes).toHaveBeenCalledWith({ filters: { dangling: ['true'] } });
+    expect(removed).toEqual(['my-stack_data']);
+    expect(result).toEqual({ success: true, reclaimedBytes: 10 });
   });
 
   it.each([
@@ -111,8 +119,6 @@ describe('pruneSystem volumes', () => {
 
     const result = await DockerController.getInstance(1).pruneSystem('volumes');
 
-    // The daemon ANDs `label!` values, so a node with a secret volume never
-    // reaches the bulk prune API.
     expect(mockDocker.pruneVolumes).not.toHaveBeenCalled();
     expect(mockDocker.listVolumes).toHaveBeenCalledWith({ filters: { dangling: ['true'] } });
     expect(removed).toEqual(['my-stack_data']);
