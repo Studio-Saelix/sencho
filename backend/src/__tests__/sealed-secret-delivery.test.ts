@@ -307,6 +307,35 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('removed');
   });
 
+  it('converges after the send failed between persisting the generation and reaching the node', async () => {
+    transport.setConfidential(true);
+    let fail = true;
+    install({
+      beforeSend: (call) => {
+        if (call.method === 'POST' && fail) { fail = false; throw new Error('connection reset'); }
+      },
+    });
+    expect((await refusal(deliver())).code).toBe('SEALED_SECRET_TARGET_UNREACHABLE');
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toMatchObject({ state: 'sending', generation: 1 });
+    expect(fake.files.has(VOLUME_FILE)).toBe(false);
+    expect(await deliver()).toEqual({ status: 'accepted', generation: 1 });
+  });
+
+  it('converges after the node wrote the file but answered 5xx', async () => {
+    transport.setConfidential(true);
+    install();
+    const upsert = vi.spyOn(db, 'upsertSealedSecretRecord').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    const error = await refusal(deliver());
+    expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
+    expect(error.details.nodeCode).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(SECRET);
+    upsert.mockRestore();
+    expect(await deliver()).toEqual({ status: 'accepted', generation: 1 });
+    expect(db.getSealedSecretRecord(PURPOSE)?.generation).toBe(1);
+  });
+
   it('maps a node refusal to the hub code and keeps the row retryable', async () => {
     transport.setConfidential(true);
     install();
