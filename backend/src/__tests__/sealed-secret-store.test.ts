@@ -1,0 +1,223 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { cleanupTestDb, setupTestDb } from './helpers/setupTestDb';
+import { createFakeSecretDocker, type FakeSecretDocker } from './helpers/fakeSecretDocker';
+
+type StoreModule = typeof import('../services/sealedSecrets/SealedSecretStore');
+type DbModule = typeof import('../services/DatabaseService');
+
+const PURPOSE = 'edge-tunnel-run-token' as const;
+const VOLUME = 'sencho_edge_secret';
+const SLOT_A = '0b9f3c2e-1d4a-4b5c-8d6e-7f8091a2b3c4';
+const SLOT_B = '1c0a4d3f-2e5b-4c6d-9e7f-8a9102b3c4d5';
+const SECRET = 'S3ntinelSecretValue-qwertyuiop';
+const WHO = { actor: 'admin', path: 'test', method: 'POST' };
+
+let tmpDir: string;
+let store: InstanceType<StoreModule['SealedSecretStore']>;
+let StoreClass: StoreModule['SealedSecretStore'];
+let db: InstanceType<DbModule['DatabaseService']>;
+let fake: FakeSecretDocker;
+
+beforeAll(async () => {
+  tmpDir = await setupTestDb();
+  ({ SealedSecretStore: StoreClass } = await import('../services/sealedSecrets/SealedSecretStore'));
+  db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+});
+
+afterAll(() => {
+  cleanupTestDb(tmpDir);
+});
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  db.getDb().prepare('DELETE FROM sealed_secret_generations').run();
+  db.getDb().prepare('DELETE FROM audit_log').run();
+  fake = createFakeSecretDocker();
+  StoreClass.resetForTests();
+  store = StoreClass.getInstance();
+  store.setDockerForTests(fake.docker);
+});
+
+function auditSummaries(): string[] {
+  db.flushAuditLogBuffer?.();
+  return (db.getDb().prepare('SELECT summary FROM audit_log ORDER BY id').all() as { summary: string }[]).map((row) => row.summary);
+}
+
+async function refusal(promise: Promise<unknown>): Promise<{ code: string; status: number; details: Record<string, unknown> }> {
+  try {
+    await promise;
+  } catch (error: unknown) {
+    return error as { code: string; status: number; details: Record<string, unknown> };
+  }
+  throw new Error('expected a refusal');
+}
+
+describe('SealedSecretStore.accept', () => {
+  it('creates the labelled volume, writes the file with its owner and mode, then records it', async () => {
+    const result = await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    expect(result.status).toBe('accepted');
+    expect(fake.volumes.get(VOLUME)).toEqual({ 'io.sencho.secret': PURPOSE });
+    expect(fake.files.get(`${VOLUME}/token`)).toEqual({ content: SECRET, uid: 65532, gid: 65532, mode: '0400' });
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_A, generation: 1, state: 'present' });
+    expect(auditSummaries().some((line) => line.startsWith('sealed_secret.accepted:'))).toBe(true);
+  });
+
+  it('answers already_accepted to an identical retry at the same generation without writing again', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    const runs = fake.writerRuns();
+    const again = await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    expect(again.status).toBe('already_accepted');
+    expect(fake.writerRuns()).toBe(runs);
+  });
+
+  it.each([
+    ['different content', SLOT_A, `${SECRET}-other`, 1],
+    ['a different slot', SLOT_B, SECRET, 1],
+    ['an older generation', SLOT_A, SECRET, 0.5],
+  ])('refuses the same or older generation with %s as stale', async (_label, slot, secret, generationFactor) => {
+    await store.accept(PURPOSE, SLOT_A, 2, SECRET, WHO);
+    const generation = generationFactor === 1 ? 2 : 1;
+    const error = await refusal(store.accept(PURPOSE, slot, generation, secret, WHO));
+    expect(error.code).toBe('SEALED_SECRET_GENERATION_STALE');
+    expect(error.status).toBe(409);
+    expect(error.details.purposeGeneration).toBe(2);
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(SECRET);
+  });
+
+  it('replaces with a new slot at a higher generation and keeps one record', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    const result = await store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO);
+    expect(result.status).toBe('accepted');
+    expect(db.listSealedSecretRecords()).toHaveLength(1);
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_B, generation: 2 });
+    expect(auditSummaries().some((line) => line.startsWith('sealed_secret.replaced:') && line.includes(`previous_slot=${SLOT_A}`))).toBe(true);
+  });
+
+  it('leaves the generation unrecorded when the writer fails, so the same generation can be retried', async () => {
+    fake.exitCodes.push(1);
+    const error = await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO));
+    expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(error.status).toBe(503);
+    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+    expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+  });
+
+  it('answers 503 when the record write fails after the file was written, and the retry converges', async () => {
+    const upsert = vi.spyOn(db, 'upsertSealedSecretRecord').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    const error = await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO));
+    expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+    upsert.mockRestore();
+    expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+    expect(db.getSealedSecretRecord(PURPOSE)?.generation).toBe(1);
+  });
+
+  it('serializes concurrent accepts for one purpose', async () => {
+    const [first, second] = await Promise.allSettled([
+      store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO),
+      store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO),
+    ]);
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('fulfilled');
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_B, generation: 2 });
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(`${SECRET}-b`);
+  });
+
+  it('refuses an empty or oversize secret before touching Docker', async () => {
+    expect((await refusal(store.accept(PURPOSE, SLOT_A, 1, '', WHO))).code).toBe('SEALED_SECRET_REQUEST_INVALID');
+    expect((await refusal(store.accept(PURPOSE, SLOT_A, 1, 'x'.repeat(4097), WHO))).code).toBe('SEALED_SECRET_REQUEST_INVALID');
+    expect(fake.writerRuns()).toBe(0);
+  });
+
+  it('refuses a volume of that name without the store label and writes nothing', async () => {
+    fake.volumes.set(VOLUME, {});
+    const error = await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO));
+    expect(error.code).toBe('SECRET_VOLUME_FOREIGN');
+    expect(error.status).toBe(409);
+    expect(fake.writerRuns()).toBe(0);
+    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+  });
+
+  it('refuses a labelled volume a container already mounts when the node has no record for it', async () => {
+    fake.volumes.set(VOLUME, { 'io.sencho.secret': PURPOSE });
+    fake.mounted.add(VOLUME);
+    expect((await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO))).code).toBe('SECRET_VOLUME_FOREIGN');
+    expect(fake.writerRuns()).toBe(0);
+  });
+
+  it('adopts its own labelled, unmounted volume left by a failed first write', async () => {
+    fake.volumes.set(VOLUME, { 'io.sencho.secret': PURPOSE });
+    expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+  });
+
+  it('runs the writer locked down, with the secret on stdin only', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    const opts = fake.createOptions[0];
+    expect(opts.User).toBe('0:0');
+    expect(opts.HostConfig?.CapDrop).toEqual(['ALL']);
+    expect(opts.HostConfig?.CapAdd).toEqual(['CHOWN', 'FOWNER']);
+    expect(opts.HostConfig?.NetworkMode).toBe('none');
+    expect(opts.HostConfig?.ReadonlyRootfs).toBe(true);
+    expect(opts.HostConfig?.Privileged).toBe(false);
+    expect(opts.HostConfig?.SecurityOpt).toEqual(['no-new-privileges:true']);
+    expect(opts.HostConfig?.LogConfig?.Type).toBe('none');
+    expect(opts.HostConfig?.Mounts).toEqual([{ Type: 'volume', Source: VOLUME, Target: '/v', ReadOnly: false }]);
+    expect(opts.OpenStdin).toBe(true);
+    expect(opts.Env).toBeUndefined();
+    expect(JSON.stringify(opts)).not.toContain(SECRET.slice(0, 8));
+  });
+});
+
+describe('SealedSecretStore.remove', () => {
+  it('answers not_current for a slot that is not live and never starts the writer', async () => {
+    expect(await store.remove(PURPOSE, SLOT_A, 1, WHO)).toEqual({ status: 'not_current', generation: 0, currentSlot: null });
+    await store.accept(PURPOSE, SLOT_B, 1, SECRET, WHO);
+    const runs = fake.writerRuns();
+    expect(await store.remove(PURPOSE, SLOT_A, 5, WHO)).toEqual({ status: 'not_current', generation: 1, currentSlot: SLOT_B });
+    expect(fake.writerRuns()).toBe(runs);
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(SECRET);
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_B, generation: 1, state: 'present' });
+  });
+
+  it('removes the live slot at a higher generation, then is idempotent, then accepts a redelivery', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    expect((await refusal(store.remove(PURPOSE, SLOT_A, 1, WHO))).code).toBe('SEALED_SECRET_GENERATION_STALE');
+    expect(await store.remove(PURPOSE, SLOT_A, 2, WHO)).toEqual({ status: 'deleted', generation: 2, currentSlot: SLOT_A });
+    expect(fake.files.has(`${VOLUME}/token`)).toBe(false);
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ state: 'deleted', generation: 2, fingerprint: null });
+    expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('already_deleted');
+    expect((await refusal(store.remove(PURPOSE, SLOT_A, 1, WHO))).code).toBe('SEALED_SECRET_GENERATION_STALE');
+    expect((await store.remove(PURPOSE, SLOT_A, 3, WHO)).status).toBe('deleted');
+    expect((await store.accept(PURPOSE, SLOT_A, 4, SECRET, WHO)).status).toBe('accepted');
+    expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(SECRET);
+  });
+
+  it('keeps the record present when the removal fails, so the retry converges', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    fake.exitCodes.push(1);
+    expect((await refusal(store.remove(PURPOSE, SLOT_A, 2, WHO))).code).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ state: 'present', generation: 1 });
+    expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('deleted');
+  });
+
+  it('describes the purpose record and never a value', async () => {
+    expect(store.describe(PURPOSE, SLOT_A)).toMatchObject({ state: 'absent', purposeGeneration: 0 });
+    await store.accept(PURPOSE, SLOT_A, 3, SECRET, WHO);
+    const described = store.describe(PURPOSE, SLOT_A);
+    expect(described).toMatchObject({ state: 'present', purposeGeneration: 3 });
+    expect(store.describe(PURPOSE, SLOT_B)).toMatchObject({ state: 'absent', purposeGeneration: 3, fingerprint: null });
+    expect(JSON.stringify([described, store.list()])).not.toContain(SECRET.slice(0, 8));
+  });
+
+  it('survives a node restart: a fresh store reads the same record', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    StoreClass.resetForTests();
+    const restarted = StoreClass.getInstance();
+    restarted.setDockerForTests(fake.docker);
+    expect(restarted.describe(PURPOSE, SLOT_A)).toMatchObject({ state: 'present', purposeGeneration: 1 });
+    expect((await restarted.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('already_accepted');
+  });
+});
