@@ -10,7 +10,7 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { ImageUpdateStatus, StackUpdateInfo, StackUnattendedPolicy } from '@/types/imageUpdates';
+import type { ImageUpdateStatus, StackUpdateInfo, StackUnattendedPolicy, SemverBump, UpdatePreview as SharedUpdatePreview } from '@/types/imageUpdates';
 import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
 import {
@@ -40,50 +40,9 @@ import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
 import { openStackEditor, toastUpdatePolicyRefusal } from '@/lib/updatePolicyRefusal';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
+import { UpdateServiceNotes } from './updates/UpdateServiceNotes';
 
-type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
-
-interface UpdatePreviewImage {
-  service: string;
-  image: string;
-  current_tag: string;
-  next_tag: string | null;
-  has_update: boolean;
-  digest_update?: boolean;
-  tag_update?: boolean;
-  semver_bump: SemverBump;
-  /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
-  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
-  check_error?: string | null;
-  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
-  digest_error?: string | null;
-}
-
-type UpdateKind = 'tag' | 'digest' | 'none';
-
-interface UpdatePreview {
-  stack_name: string;
-  images: UpdatePreviewImage[];
-  summary: {
-    has_update: boolean;
-    primary_image: string | null;
-    current_tag: string | null;
-    next_tag: string | null;
-    semver_bump: SemverBump;
-    update_kind: UpdateKind;
-    blocked: boolean;
-    blocked_reason: string | null;
-    has_build_services?: boolean;
-    rebuild_available?: boolean;
-    /** Absent on older remotes; treat missing as non-authoritative. */
-    check_status?: 'ok' | 'partial' | 'failed';
-    verification_failed?: boolean;
-    verification_error?: string | null;
-  };
-  build_services?: string[];
-  rollback_target: string | null;
-  changelog: string | null;
-}
+type UpdatePreview = SharedUpdatePreview;
 
 function declaredServiceCount(preview: UpdatePreview | null | undefined): number {
   if (!preview) return 0;
@@ -530,9 +489,13 @@ function StackReadinessCard({
                 <ImageSourceMenu imageRef={p.summary.primary_image} />
               </div>
 
-              <div className="border-t border-dashed border-card-border pt-3 text-xs text-stat-subtitle/90 leading-relaxed">
-                {p.changelog ?? 'No changelog available from the registry yet.'}
-              </div>
+              <UpdateServiceNotes
+                preview={p}
+                stack={stack}
+                nodeId={nodeId}
+                variant="list"
+                className="border-t border-dashed border-card-border pt-3"
+              />
 
               {blocked && blockedReason && (
                 <div className="text-[11px] text-destructive/90">
@@ -1023,9 +986,7 @@ function ReadinessTableRow({
                 {withErrorDetail('Digest check could not be verified', preview.summary.verification_error)}
               </div>
             )}
-            <div className="text-xs text-stat-subtitle/90 leading-relaxed">
-              {preview.changelog ?? 'No changelog available from the registry yet.'}
-            </div>
+            <UpdateServiceNotes preview={preview} stack={stack} nodeId={nodeId} variant="list" />
             {blocked && preview.summary.blocked_reason && (
               <div className="text-[11px] text-destructive/90">
                 {preview.summary.blocked_reason}
@@ -1149,10 +1110,6 @@ export function MobileReadinessCard({
     || applyingService !== null;
   const composeEditVerb = useComposeEditVerb(card);
   const applyTitle = applyTitleFor(preview);
-  const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
-  const dot = changelog.indexOf('.');
-  const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
-  const rest = dot > 0 ? changelog.slice(dot + 1) : changelog;
 
   return (
     <div
@@ -1226,9 +1183,13 @@ export function MobileReadinessCard({
               </div>
             )}
             <div className="truncate font-mono text-[11px] text-stat-subtitle">{p.summary.primary_image ?? '-'}</div>
-            <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
-              {lead && <b className="text-stat-title">{lead}</b>}{rest}
-            </div>
+            <UpdateServiceNotes
+              preview={p}
+              stack={stack}
+              nodeId={nodeId}
+              variant="list"
+              className="border-t border-dashed border-card-border pt-[9px]"
+            />
             {showServiceApply && (
               <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
                 {updatingImages.map(img => (

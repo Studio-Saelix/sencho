@@ -3,6 +3,7 @@ import {
   MANAGED_LABEL_DECLARED_REASON,
   MANAGED_LABEL_DEPLOYED_REASON,
   MANAGED_LABEL_KEYS,
+  DETECTION_LABEL_KEYS,
   POLICY_LABEL_KEYS,
   SENCHO_NOTIFY_ROUTE_LABEL,
   type SenchoLabelState,
@@ -155,6 +156,16 @@ export const POLICY_LABEL_STATE_LABELS: Record<PolicyLabelRowState, string> = {
 };
 
 /**
+ * Which behavioral label families the active node evaluates, each from its own
+ * capability: `io.sencho.update` and `io.sencho.notify.route` (policy), and the
+ * update detection labels (detection).
+ */
+export interface NodeLabelEvaluation {
+  policy: boolean;
+  detection: boolean;
+}
+
+/**
  * The state of a behavioral label row. It comes from the row's own `behavior`
  * (which the node derives from the rendered Compose model) and the node's
  * capability, never from a container's `changed` list: a stale container can
@@ -162,19 +173,22 @@ export const POLICY_LABEL_STATE_LABELS: Record<PolicyLabelRowState, string> = {
  */
 export function policyLabelRowState(
   label: Pick<LabelValue, 'key' | 'behavior'>,
-  nodeEvaluatesPolicy: boolean,
+  evaluation: NodeLabelEvaluation,
 ): PolicyLabelRowState | null {
-  if (!POLICY_LABEL_KEYS.includes(label.key)) return null;
-  if (!nodeEvaluatesPolicy) return 'not-evaluated';
+  const evaluated = POLICY_LABEL_KEYS.includes(label.key) ? evaluation.policy
+    : DETECTION_LABEL_KEYS.includes(label.key) ? evaluation.detection
+      : null;
+  if (evaluated === null) return null;
+  if (!evaluated) return 'not-evaluated';
   if (label.behavior?.state === 'active') return 'active';
   if (label.behavior?.state === 'invalid') return 'ignored';
   return null;
 }
 
 /** True when the declared `io.sencho.notify.route` copy is in force for this row. */
-export function showsNotifyRouteMatch(label: Pick<LabelValue, 'key' | 'behavior'>, nodeEvaluatesPolicy: boolean): boolean {
+export function showsNotifyRouteMatch(label: Pick<LabelValue, 'key' | 'behavior'>, evaluation: NodeLabelEvaluation): boolean {
   return label.key === SENCHO_NOTIFY_ROUTE_LABEL
-    && policyLabelRowState(label, nodeEvaluatesPolicy) === 'active';
+    && policyLabelRowState(label, evaluation) === 'active';
 }
 
 /**

@@ -16,7 +16,11 @@ vi.mock('./stack/StackActivityTimeline', () => ({
 // off so the panel surface stays exactly what these tests assert against. The
 // active node is mutable so the footer-link tests can simulate a remote node.
 const { nodeState } = vi.hoisted(() => ({
-  nodeState: { activeNode: { id: 1 } as unknown, unsupportedCapabilities: undefined as string[] | undefined },
+  nodeState: {
+    activeNode: { id: 1 } as unknown,
+    unsupportedCapabilities: undefined as string[] | undefined,
+    nodeMeta: new Map<number, { capabilities: string[] }>(),
+  },
 }));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
@@ -27,6 +31,7 @@ vi.mock('@/context/NodeContext', () => ({
     hasCapability: (capability: string) => nodeState.unsupportedCapabilities === undefined
       ? false
       : !nodeState.unsupportedCapabilities.includes(capability),
+    nodeMeta: nodeState.nodeMeta,
   }),
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
@@ -1042,7 +1047,7 @@ describe('StackAnatomyPanel hidden helper chips', () => {
     senchoLabels: {
       renderable: true,
       services: Object.fromEntries(
-        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, update: null, notifyRoute: null, ...over }]),
+        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, update: null, notifyRoute: null, updateCheck: true, updateIgnore: [], updateChangelog: null, ...over }]),
       ),
       entries: [],
     },

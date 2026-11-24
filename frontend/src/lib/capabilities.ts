@@ -37,6 +37,7 @@ export const CAPABILITIES = [
   'container-label-inventory',
   'sencho-labels-v1',
   'sencho-label-policy-v1',
+  'sencho-label-detection-v1',
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',
@@ -95,6 +96,9 @@ export const SENCHO_LABELS_V1_CAPABILITY = 'sencho-labels-v1' as const satisfies
 
 /** The node evaluates the behavioral labels (`io.sencho.update`, `io.sencho.notify.route`). */
 export const SENCHO_LABEL_POLICY_CAPABILITY = 'sencho-label-policy-v1' as const satisfies Capability;
+
+/** The node evaluates the update detection labels (`io.sencho.update.check`, `.ignore`, `.changelog`). */
+export const SENCHO_LABEL_DETECTION_CAPABILITY = 'sencho-label-detection-v1' as const satisfies Capability;
 export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY = 'scoped-stack-auth-evidence' as const satisfies Capability;
 export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY = 'remote-registry-credentials' as const satisfies Capability;
 export const REMOTE_REGISTRY_SEALED_ENVELOPE_V1_CAPABILITY =

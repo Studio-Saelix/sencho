@@ -28,6 +28,8 @@ import { ScanStatusBanner } from './stack/ScanStatusBanner';
 import PreflightPanel from './stack/PreflightPanel';
 import StoragePanel from './stack/StoragePanel';
 import EnvironmentPanel from './stack/EnvironmentPanel';
+import type { UpdatePreview as SharedUpdatePreview } from '@/types/imageUpdates';
+import { UpdateServiceNotes } from './updates/UpdateServiceNotes';
 import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
@@ -58,46 +60,7 @@ interface StackAnatomyPanelProps {
   serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry | null;
 }
 
-type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
-type UpdateKind = 'tag' | 'digest' | 'none';
-
-interface UpdatePreviewImage {
-  service: string;
-  image: string;
-  current_tag: string;
-  next_tag: string | null;
-  has_update: boolean;
-  digest_update?: boolean;
-  tag_update?: boolean;
-  semver_bump: SemverBump;
-  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
-  check_error?: string | null;
-  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
-  digest_error?: string | null;
-}
-
-interface UpdatePreviewSummary {
-  has_update: boolean;
-  primary_image: string | null;
-  current_tag: string | null;
-  next_tag: string | null;
-  semver_bump: SemverBump;
-  update_kind?: UpdateKind;
-  blocked: boolean;
-  blocked_reason: string | null;
-  has_build_services: boolean;
-  rebuild_available: boolean;
-  check_status?: 'ok' | 'partial' | 'failed';
-  verification_failed?: boolean;
-  verification_error?: string | null;
-}
-
-interface UpdatePreview {
-  summary: UpdatePreviewSummary;
-  images: UpdatePreviewImage[];
-  build_services?: string[];
-  changelog: string | null;
-}
+type UpdatePreview = SharedUpdatePreview;
 
 /** Secret-safe effective facts from GET /stacks/:name/effective-anatomy. */
 interface EffectiveAnatomyFacts {
@@ -507,8 +470,7 @@ export default function StackAnatomyPanel({
   const gitRebuildHint = hasBuildServices && activeGitSource
     ? 'After applying Git source changes, use Rebuild & Update to deploy the updated source.'
     : '';
-  const changelogLine = updatePreview?.changelog ? updatePreview.changelog.split(/[.\n]/)[0] : '';
-  const bannerTailSegments = [buildHint, gitRebuildHint, changelogLine].filter(Boolean);
+  const bannerTailSegments = [buildHint, gitRebuildHint].filter(Boolean);
   const applyLabel = hasBuildServices
     ? (applying ? 'rebuilding...' : 'Rebuild & Update')
     : (applying ? 'applying...' : 'apply');
@@ -782,6 +744,13 @@ export default function StackAnatomyPanel({
                     [bumpLabel, bannerLeadIn, ...bannerTailSegments].filter(Boolean).join(' · ')
                   )}
                 </div>
+                <UpdateServiceNotes
+                  preview={updatePreview}
+                  stack={stackName}
+                  nodeId={activeNode?.id}
+                  variant="inline"
+                  className="mt-1"
+                />
                 {blocked && updatePreview.summary.blocked_reason && (
                   <div className="mt-1 font-mono text-[10px] text-destructive">{updatePreview.summary.blocked_reason}</div>
                 )}

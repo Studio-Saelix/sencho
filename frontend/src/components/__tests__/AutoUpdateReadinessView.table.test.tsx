@@ -1,6 +1,6 @@
 /**
  * The desktop Update page lists pending updates as a sortable table by default,
- * with the node-grouped card board as the alternative. Row detail (changelog,
+ * with the node-grouped card board as the alternative. Row detail (changelog link,
  * blocked reason, per-service Apply) lives in an expandable row.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -40,7 +40,7 @@ interface PreviewOpts {
   bump?: 'patch' | 'minor' | 'major';
   blocked?: boolean;
   blockedReason?: string | null;
-  changelog?: string | null;
+  changelogUrl?: string;
   images?: { service: string; has_update: boolean }[];
 }
 
@@ -52,6 +52,7 @@ function preview(stack: string, opts: PreviewOpts = {}) {
     images: images.map(i => ({
       service: i.service, image: `${stack}:1.0`, current_tag: '1.0', next_tag: '1.1',
       has_update: i.has_update, digest_update: true, tag_update: false, semver_bump: bump, check_status: 'ok',
+      ...(i.has_update && opts.changelogUrl ? { changelog_url: opts.changelogUrl } : {}),
     })),
     summary: {
       has_update: true,
@@ -65,7 +66,7 @@ function preview(stack: string, opts: PreviewOpts = {}) {
       check_status: 'ok',
     },
     rollback_target: null,
-    changelog: opts.changelog ?? null,
+    changelog: null,
   };
 }
 
@@ -167,13 +168,13 @@ describe('AutoUpdateReadinessView table view', () => {
     );
   });
 
-  it('keeps changelog and per-service Apply in an expandable row', async () => {
+  it('keeps the changelog link and per-service Apply in an expandable row', async () => {
     mockNodeMeta.set(1, { capabilities: [SERVICE_SCOPED_UPDATE_CAPABILITY] });
     seed(
       { '1': { multi: true } },
       {
         multi: preview('multi', {
-          changelog: 'Release notes for multi.',
+          changelogUrl: 'https://example.com/multi/releases',
           images: [{ service: 'web', has_update: true }, { service: 'worker', has_update: true }],
         }),
       },
@@ -182,7 +183,7 @@ describe('AutoUpdateReadinessView table view', () => {
     await screen.findByTestId('readiness-table');
 
     expect(screen.queryByTestId('readiness-row-detail')).toBeNull();
-    expect(screen.queryByText('Release notes for multi.')).toBeNull();
+    expect(screen.queryByTestId('update-changelog-link')).toBeNull();
 
     const toggle = screen.getByRole('button', { name: 'Show details for multi' });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -190,7 +191,11 @@ describe('AutoUpdateReadinessView table view', () => {
 
     expect(screen.getByRole('button', { name: 'Hide details for multi' })).toHaveAttribute('aria-expanded', 'true');
     const detail = screen.getByTestId('readiness-row-detail');
-    expect(within(detail).getByText('Release notes for multi.')).toBeInTheDocument();
+    const links = within(detail).getAllByTestId('update-changelog-link');
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAttribute('href', 'https://example.com/multi/releases');
+    expect(links[0]).toHaveAttribute('target', '_blank');
+    expect(links[0]).toHaveAttribute('rel', 'noopener noreferrer');
     const serviceButtons = within(detail).getAllByRole('button', { name: /^Apply$/ });
     expect(serviceButtons).toHaveLength(2);
 
@@ -204,13 +209,13 @@ describe('AutoUpdateReadinessView table view', () => {
 
   it('shows no per-service Apply for a single-service stack', async () => {
     mockNodeMeta.set(1, { capabilities: [SERVICE_SCOPED_UPDATE_CAPABILITY] });
-    seed({ '1': { solo: true } }, { solo: preview('solo', { changelog: 'Solo notes.' }) });
+    seed({ '1': { solo: true } }, { solo: preview('solo', { changelogUrl: 'https://example.com/solo' }) });
     render(<AutoUpdateReadinessView />);
     await screen.findByTestId('readiness-table');
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show details for solo' })); });
     const detail = screen.getByTestId('readiness-row-detail');
-    expect(within(detail).getByText('Solo notes.')).toBeInTheDocument();
+    expect(within(detail).getByTestId('update-changelog-link')).toHaveAttribute('href', 'https://example.com/solo');
     expect(within(detail).queryByRole('button', { name: /^Apply$/ })).toBeNull();
   });
 
@@ -307,13 +312,15 @@ describe('AutoUpdateReadinessView table view', () => {
     expect(screen.getByTestId('readiness-verification-warning')).toHaveTextContent('Registry unreachable');
   });
 
-  it('collapses an expanded row and shows the changelog fallback when the registry has none', async () => {
-    seed({ '1': { bare: true } }, { bare: preview('bare', { changelog: null }) });
+  it('collapses an expanded row and prints no changelog line when the service declares no link', async () => {
+    seed({ '1': { bare: true } }, { bare: preview('bare') });
     render(<AutoUpdateReadinessView />);
     await screen.findByTestId('readiness-table');
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show details for bare' })); });
-    expect(screen.getByText('No changelog available from the registry yet.')).toBeInTheDocument();
+    expect(screen.getByTestId('readiness-row-detail')).toBeInTheDocument();
+    expect(screen.queryByText(/changelog/i)).toBeNull();
+    expect(screen.queryByTestId('update-service-notes')).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Hide details for bare' })); });
     expect(screen.queryByTestId('readiness-row-detail')).toBeNull();
     expect(screen.getByRole('button', { name: 'Show details for bare' })).toHaveAttribute('aria-expanded', 'false');

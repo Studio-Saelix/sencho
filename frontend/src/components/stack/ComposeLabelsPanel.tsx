@@ -26,11 +26,12 @@ import {
   type LabelAuthoredOrigin,
   type LabelSource,
   type LabelValue,
+  type NodeLabelEvaluation,
   type StackLabelInventory,
 } from '@/lib/labelInventory';
 import { SourceLocationLink } from '@/components/ui/source-location-link';
 import type { AuthoredLocation } from '@/lib/authoredLocation';
-import { SENCHO_LABELS_V1_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY } from '@/lib/capabilities';
+import { SENCHO_LABELS_V1_CAPABILITY, SENCHO_LABEL_DETECTION_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY } from '@/lib/capabilities';
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const CARD_CLASS = 'rounded-lg border border-muted px-3 py-2.5';
@@ -103,18 +104,18 @@ function AuthoredLabelOrigin({
 function LabelRow({
   label,
   authored,
-  nodeEvaluatesPolicy,
+  labelEvaluation,
   onReveal,
   onOpenLocation,
 }: {
   label: LabelValue;
   authored?: LabelAuthoredOrigin;
-  nodeEvaluatesPolicy: boolean;
+  labelEvaluation: NodeLabelEvaluation;
   onReveal?: () => void;
   onOpenLocation?: (key: string) => void;
 }) {
   const { isAdmin } = useAuth();
-  const policyState = policyLabelRowState(label, nodeEvaluatesPolicy);
+  const policyState = policyLabelRowState(label, labelEvaluation);
   return (
     <div
       className="flex flex-wrap items-center gap-2 border-t border-muted py-2 first:border-t-0"
@@ -149,7 +150,7 @@ function LabelRow({
       ) : (
         <LabelBehaviorStatus label={label} />
       )}
-      {showsNotifyRouteMatch(label, nodeEvaluatesPolicy) && (
+      {showsNotifyRouteMatch(label, labelEvaluation) && (
         <span className="text-[11px] text-stat-subtitle">{NOTIFY_ROUTE_MATCH_COPY}</span>
       )}
       {label.redacted && isAdmin && onReveal && (
@@ -196,7 +197,11 @@ export default function ComposeLabelsPanel({
   const nodeLacksSenchoLabels = activeNodeMeta?.version != null && !hasCapability(SENCHO_LABELS_V1_CAPABILITY);
   // An older node does not evaluate the behavioral labels; that is a capability
   // answer, not an absent field in its resolution.
-  const nodeEvaluatesPolicy = !(activeNodeMeta?.version != null && !hasCapability(SENCHO_LABEL_POLICY_CAPABILITY));
+  const nodeAnswered = activeNodeMeta?.version != null;
+  const labelEvaluation: NodeLabelEvaluation = {
+    policy: !(nodeAnswered && !hasCapability(SENCHO_LABEL_POLICY_CAPABILITY)),
+    detection: !(nodeAnswered && !hasCapability(SENCHO_LABEL_DETECTION_CAPABILITY)),
+  };
   const [inventory, setInventory] = useState<StackLabelInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -493,7 +498,7 @@ export default function ComposeLabelsPanel({
                   key={`decl-${label.key}`}
                   label={label}
                   authored={svc.authored?.[label.key]}
-                  nodeEvaluatesPolicy={nodeEvaluatesPolicy}
+                  labelEvaluation={labelEvaluation}
                   onReveal={isAdmin && !revealSecrets ? handleReveal : undefined}
                   onOpenLocation={onOpenLocation
                     ? (key) => { void openLabelLocation(svc.service, key); }
@@ -522,7 +527,7 @@ export default function ComposeLabelsPanel({
                   )}
                   {runtimeVisible.length > 0 ? (
                     runtimeVisible.map((label) => (
-                      <LabelRow key={`rt-${label.key}`} label={label} nodeEvaluatesPolicy={nodeEvaluatesPolicy} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
+                      <LabelRow key={`rt-${label.key}`} label={label} labelEvaluation={labelEvaluation} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
                     ))
                   ) : (
                     !filtersActive && <p className="text-xs text-stat-subtitle">No runtime labels on this container.</p>
