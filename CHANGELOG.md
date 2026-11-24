@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-24)
 
 
+### Highlights
+
+<!-- highlights-hash: 7c7b2d6adf86fb80 -->
+
+Node bootstrap is now a guided flow. You can run a read-only preflight against a candidate node, review an approved plan, enroll the Pilot, and only see it marked ready once it actually verifies. Node management has its own menu, so this no longer means hand-editing config to bring a machine into the fleet.
+
+The assurance work gives Compose Doctor a real source model to point at, with a canonical rule registry and normalized findings, so issues land on the line they came from. Secrets in bundles are masked by default and revealed one key at a time, and registry credentials are now redacted from doctor log lines and drift warnings. Security scans lead with a single answer and state each fact once, and image exposure intent follows the Network exposed label. Dismissed findings across fleet, security, and updates open in a sheet from their count instead of expanding inline.
+
+Recovery gained two practical capabilities: you can browse and download the contents of a saved point, and restore a point over its own volume. The pinned helper image is pulled at startup when a repository already exists, and a cancelled download no longer keeps feeding its sink. Socket discovery now finds Docker socket proxies and direct consumers per node.
+
+Editors go full screen on every tab with a compact one-line header at any width, and Git Source and Save & Deploy stay labelled at standard desktop widths. A stack stuck in a crash loop can be stopped from its stack page with a single alert per loop. Networking fixes cover upper-case port protocols, templated host ports, tunnel badge identity, and topology ports rendered from host port facts. Updates no longer claim an all-clear before the first readiness load answers, and Recheck gives delayed feedback rather than appearing to hang.
+
+The build moves to Go 1.27.4 with containerd v2.4.2 and an x/net floor of v0.62.0 in the recovery helper and source-built CLI binaries. Compose files whose YAML aliases expand without bound are refused. Smaller fixes tidy up audit naming for fleet restore-all, host byte units on the dashboard, mobile last-seen ages, and the Encrypt archives switch while a passphrase is pending.
+
 ### Added
 
 * **assurance:** author the Compose source model and locate findings on it ([#2253](https://github.com/Studio-Saelix/sencho/issues/2253)) ([a1e41f7](https://github.com/Studio-Saelix/sencho/commit/a1e41f7cda7df4c4ede974683379fe28e7c5d6ab))
