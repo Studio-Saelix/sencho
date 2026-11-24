@@ -128,6 +128,8 @@ export function useNodeSealingKey(
 
   useEffect(() => {
     if (!enabled || nodeId === null) return;
+    // `load` sets state only after its request resolves, never synchronously.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(nodeId);
   }, [enabled, nodeId, load]);
 
