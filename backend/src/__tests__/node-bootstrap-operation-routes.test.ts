@@ -213,7 +213,8 @@ describe('bootstrap operation routes: refusals', () => {
 
   it('stops listing an enrolled run once its node is deleted from Fleet, and still opens the run by id', async () => {
     const db = DatabaseService.getInstance();
-    const now = Date.now();
+    // Newer than the held runs the paging test above leaves behind with future creation times, so this run is among the newest finished ones.
+    const now = Date.now() + 60_000;
     const nodeId = db.addNode({ name: 'route-deleted', type: 'remote', compose_dir: '/opt/docker/sencho', is_default: false, api_url: '', api_token: '', mode: 'pilot_agent' });
     const id = '00000000-0000-4000-8000-000000003002';
     db.insertNodeBootstrapOperation({
