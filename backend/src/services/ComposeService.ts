@@ -1436,6 +1436,7 @@ export class ComposeService {
     stackName: string,
     overlayDir?: string,
     composeArgsPrefix?: string[],
+    render?: SharedRender,
   ): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
@@ -1452,7 +1453,7 @@ export class ComposeService {
     const hostComposeDir = resolveHostBindPath(composeDir, mounts);
     if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
 
-    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix);
+    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix, render);
     if (!analysis) return;
 
     const unsafeBind = analysis.model.services
@@ -1517,9 +1518,13 @@ export class ComposeService {
     stackName: string,
     overlayDir?: string,
     composeArgsPrefix?: string[],
+    render?: SharedRender,
   ): Promise<{ model: EffectiveModel; bases: string[]; deviceSources: string[] } | null> {
     let rendered: Awaited<ReturnType<ComposeService['renderConfig']>>;
-    if (composeArgsPrefix) {
+    if (render) {
+      // The caller's render of this exact file set, shared with its other checks.
+      rendered = await render();
+    } else if (composeArgsPrefix) {
       // A rebuilt invocation is the project this command runs, so the render
       // reuses its exact global flags instead of deriving a second one.
       rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir, composePrefix: composeArgsPrefix });
@@ -2355,15 +2360,10 @@ export class ComposeService {
     // The secret volume check reads the same file set, so a captured
     // generation that reached a secret volume is refused even when the current
     // files no longer do.
-    await this.assertNoSecretVolumeUse(
-      stackName,
-      this.sharedRender(stackName, overlay?.overlayDir, args.slice(0, args.length - upAction.length)),
-    );
-    await this.assertSafePilotBindMapping(
-      stackName,
-      overlay?.overlayDir,
-      args.slice(0, args.length - upAction.length),
-    );
+    const composeArgsPrefix = args.slice(0, args.length - upAction.length);
+    const render = this.sharedRender(stackName, overlay?.overlayDir, composeArgsPrefix);
+    await this.assertNoSecretVolumeUse(stackName, render);
+    await this.assertSafePilotBindMapping(stackName, overlay?.overlayDir, composeArgsPrefix, render);
     await this.withRegistryAuth(async (env) => {
       // The child inherits COMPOSE_ENV_FILES from this process whether or not
       // the invocation names that file, so check it at the last moment before

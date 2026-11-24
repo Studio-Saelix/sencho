@@ -11634,6 +11634,7 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
         const orphanSpy = vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack').mockResolvedValue([]);
         const dockerSpy = vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
             listContainers: async () => [],
+            listVolumes: async () => ({ Volumes: [] }),
         } as unknown as ReturnType<typeof DockerController.prototype.getDocker>);
         return {
             executed,

@@ -122,7 +122,8 @@ function maximalModel(): EffectiveModel {
       ext: { name: 'ext-net', external: true, internal: false },
     },
     volumes: {
-      cache: { name: 'proj_cache', external: false, internal: false },
+      // Declares the reserved secret volume label, so secret-volume-reference fires.
+      cache: { name: 'proj_cache', external: false, internal: false, hasSecretLabel: true },
       extvol: { name: 'ext-vol', external: true, internal: false },
     },
   };

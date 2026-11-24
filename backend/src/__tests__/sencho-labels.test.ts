@@ -33,6 +33,7 @@ import { CAPABILITIES } from '../services/CapabilityRegistry';
 import { serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
 import fs from 'fs';
 import path from 'path';
+import { SECRET_VOLUME_LABEL } from '../helpers/secretVolume';
 
 const chr = (code: number): string => String.fromCharCode(code);
 
@@ -127,9 +128,11 @@ describe('registry', () => {
     }
     expect(keys.size).toBeGreaterThan(0);
     // A key is known when a definition owns it (exact, or the named-link prefix), when Sencho
-    // stamps it, or when it is the bare namespace that comments and the constant spell.
+    // stamps it, when it is the bare namespace that comments and the constant spell, or when
+    // it is the secret volume label: a volume label, declared in helpers/secretVolume.ts.
     const unregistered = [...keys].filter(key =>
-      key !== 'io.sencho' && !isManagedSenchoLabel(key) && findSenchoLabelDefinition(key) === null);
+      key !== 'io.sencho' && key !== SECRET_VOLUME_LABEL
+      && !isManagedSenchoLabel(key) && findSenchoLabelDefinition(key) === null);
     expect(unregistered).toEqual([]);
   });
 

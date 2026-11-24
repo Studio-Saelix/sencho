@@ -353,7 +353,7 @@ describe('Direct Git producers drive the revision state', () => {
     vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
       .mockResolvedValue([]);
     vi.spyOn(DockerController.prototype, 'getDocker')
-      .mockReturnValue({ listContainers: async () => [] } as unknown as ReturnType<
+      .mockReturnValue({ listContainers: async () => [], listVolumes: async () => ({ Volumes: [] }) } as unknown as ReturnType<
         typeof DockerController.prototype.getDocker
       >);
 
