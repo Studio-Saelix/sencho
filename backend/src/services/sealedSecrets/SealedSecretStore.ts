@@ -219,17 +219,19 @@ export class SealedSecretStore {
         this.audit('sealed_secret.refused', { ...facts, reason: 'store_unavailable' }, who, 503);
         throw error;
       }
+      let reason: string | undefined;
       if (labels?.[SECRET_VOLUME_LABEL] === purposeId) {
         await this.write(purposeId, { kind: 'remove' }, facts, who);
-      } else if (labels !== null) {
-        console.warn('[SealedSecrets] Secret volume was replaced outside Sencho; recording the removal without touching it.');
+      } else {
+        reason = labels === null ? 'volume_gone' : 'volume_replaced';
+        console.warn(`[SealedSecrets] Secret volume is ${labels === null ? 'gone' : 'replaced outside Sencho'}; recording the removal without touching it.`);
       }
       this.record(
         db,
         { ...record, generation, state: 'deleted', fingerprint: null, acceptedAt: Date.now() },
         'The node removed the secret but could not record it. Retry the removal.',
       );
-      this.audit('sealed_secret.removed', facts, who, 200);
+      this.audit('sealed_secret.removed', { ...facts, reason }, who, 200);
       return { status: 'deleted' as const, generation, currentSlot: slot };
     });
   }

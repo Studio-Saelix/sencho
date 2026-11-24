@@ -325,11 +325,12 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
         ? `Sealed secret from the control instance ${outcome} (${statusCode})`
         : `Sealed secret removal ${outcome} (${statusCode})`;
     }
-    if (/^nodes\/[^/]+\/sealing-key(\/confirm)?$/.test(normalized) && (method === 'POST' || method === 'DELETE')) {
-      const outcome = statusCode >= 500 ? 'failed' : 'refused';
-      return method === 'POST'
-        ? `Node sealing key confirmation ${outcome} (${statusCode})`
-        : `Node sealing key pin reset ${outcome} (${statusCode})`;
+    const sealingKeyOutcome = statusCode >= 500 ? 'failed' : 'refused';
+    if (method === 'POST' && /^nodes\/[^/]+\/sealing-key\/confirm\/?$/.test(normalized)) {
+      return `Node sealing key confirmation ${sealingKeyOutcome} (${statusCode})`;
+    }
+    if (method === 'DELETE' && /^nodes\/[^/]+\/sealing-key\/?$/.test(normalized)) {
+      return `Node sealing key pin reset ${sealingKeyOutcome} (${statusCode})`;
     }
   }
   const normalizedSegments = normalized.split('/');

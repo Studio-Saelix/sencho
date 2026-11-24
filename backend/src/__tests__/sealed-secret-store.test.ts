@@ -224,6 +224,7 @@ describe('SealedSecretStore.remove', () => {
     expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('deleted');
     expect(fake.writerRuns()).toBe(runs);
     expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ state: 'deleted', generation: 2 });
+    expect(auditSummaries().some((line) => line.startsWith('sealed_secret.removed:') && line.includes('reason=volume_replaced'))).toBe(true);
   });
 
   it('sweeps a leftover writer before every run, also when the node already holds a record', async () => {

@@ -520,12 +520,13 @@ export class SealedSecretDeliveryService {
 
   /**
    * A refusal the node decided (a 4xx with a code it knows) changed nothing on
-   * the node: every one of them fires before the file is touched. Anything
+   * the node: each one fires before the live file is replaced or removed (the
+   * writer's own empty or oversize refusal exits before its rename). Anything
    * else (a transport error, a 5xx, an answer this hub cannot read) may have
    * landed, and keeps the pending row so a retry converges.
    */
   private static isDefinitiveRefusal(answer: Extract<NodeAnswer<unknown>, { ok: false }>): boolean {
-    return answer.status < 500 && answer.code !== null;
+    return answer.status >= 400 && answer.status < 500 && answer.code !== null;
   }
 
   async deliver(input: DeliverInput): Promise<DeliveryResult> {
