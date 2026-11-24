@@ -185,7 +185,6 @@ class RemoteChannel implements NodeChannel {
         headers: { Authorization: `Bearer ${this.target.apiToken}` },
         timeout: REQUEST_TIMEOUT_MS,
         maxContentLength: RESPONSE_LIMIT_BYTES,
-        maxRedirects: 0,
         validateStatus: () => true,
       });
     } catch (error: unknown) {
