@@ -250,6 +250,9 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm', 502)).toBe('Node sealing key confirmation failed (502)');
     expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 403)).toBe('Node sealing key pin reset refused (403)');
     expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 204)).toBe('Reset node sealing key pin: 3');
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm/', 409)).toBe('Node sealing key confirmation refused (409)');
+    // No such route: a refused POST to the bare path is not called a confirmation.
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key', 404)).not.toContain('confirmation');
   });
 });
 

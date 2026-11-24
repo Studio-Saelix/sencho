@@ -211,6 +211,7 @@ describe('SealedSecretStore.remove', () => {
     const runs = fake.writerRuns();
     expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('deleted');
     expect(fake.writerRuns()).toBe(runs);
+    expect(auditSummaries().some((line) => line.startsWith('sealed_secret.removed:') && line.includes('reason=volume_gone'))).toBe(true);
     // Nothing recreated the volume, labelled or not, so the next delivery creates the store's own.
     expect(fake.volumes.has(VOLUME)).toBe(false);
     expect((await store.accept(PURPOSE, SLOT_A, 3, SECRET, WHO)).status).toBe('accepted');
