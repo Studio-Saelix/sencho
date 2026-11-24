@@ -15,8 +15,8 @@ import { resolveNodeId } from '../helpers/resolveNodeId';
  * unrecoverable 404 loop).
  */
 export const nodeContextMiddleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
-  req.nodeId = (isSealedSecretPath(req.path) ? NodeRegistry.getInstance().getLocalNodeId() : null)
-    ?? resolveNodeId(req, { warnOnMalformed: true });
+  const localNodeId = isSealedSecretPath(req.path) ? NodeRegistry.getInstance().getLocalNodeId() : null;
+  req.nodeId = localNodeId ?? resolveNodeId(req, { warnOnMalformed: true });
 
   if (req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
     const node = DatabaseService.getInstance().getNode(req.nodeId);
