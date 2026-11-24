@@ -184,6 +184,8 @@ Sencho stamps three keys on the containers it creates. They are not configuratio
 
 On a container, these keys are reported as **Inert** with the reason that Sencho set them. Declared in a Compose file, they are **Ignored**, because they are reserved. They never change how a service is presented.
 
+One volume label is reserved on different terms. `io.sencho.secret` marks the volume where Sencho keeps a secret on the node, so a Compose file that declares it on a volume is refused at deploy rather than ignored. See [Reserved volume](/features/compose-storage#reserved-volume).
+
 ## Mixed-version fleets
 
 A node advertises the `sencho-labels-v1` capability once it resolves these labels. A node that predates them does not apply any of them: its stacks show no named links, no order, and no hidden services, its link pencil is not offered, and the Compose Labels tab tells you to update the node when a stack declares them. Sencho never applies part of the contract on such a node. See [Node compatibility](/features/node-compatibility).
