@@ -112,11 +112,22 @@ export interface AugmentRegistryDeliveryInput {
 }
 
 function isTransportConfidential(nodeId: number, node: Node): boolean {
-  const delivery = RegistryDeliveryService.getInstance();
   if (node.mode === 'pilot_agent') {
     return PilotTunnelManager.getInstance().isTunnelConfidential(nodeId);
   }
-  return delivery.isProxyTransportConfidential(nodeId);
+  return RegistryDeliveryService.getInstance().isProxyTransportConfidential(nodeId);
+}
+
+/**
+ * The same confidentiality rule, evaluated on a target the caller already
+ * resolved, so the answer describes the hop its requests will actually use:
+ * the Pilot tunnel for a loopback target, otherwise the target's own URL.
+ */
+export function isResolvedTargetConfidential(nodeId: number, target: ProxyTarget): boolean {
+  if (target.trustedLoopback) {
+    return PilotTunnelManager.getInstance().isTunnelConfidential(nodeId);
+  }
+  return target.apiUrl.trim().toLowerCase().startsWith('https://');
 }
 
 function throwIfAborted(abortSignal: AbortSignal | undefined): void {
