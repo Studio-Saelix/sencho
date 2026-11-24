@@ -9,6 +9,8 @@ export interface InProcessCall {
   path: string;
   headers: Record<string, string>;
   data: unknown;
+  /** The node's answer, once it arrived. */
+  response?: { status: number; body: unknown };
 }
 
 export interface InProcessNodeTransportOptions {
@@ -66,6 +68,7 @@ export function installInProcessNodeTransport(options: InProcessNodeTransportOpt
         : agent.get(url.pathname);
     for (const [key, value] of Object.entries(headers)) pending = pending.set(key, value);
     const res = config.data === undefined ? await pending : await pending.send(config.data as object);
+    call.response = { status: res.status, body: res.body as unknown };
     if (options.afterAnswer) {
       try {
         options.afterAnswer(call, res.status);
