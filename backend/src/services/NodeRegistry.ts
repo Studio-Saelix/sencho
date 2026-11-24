@@ -112,14 +112,10 @@ export class NodeRegistry extends EventEmitter {
      * the default node when it is local, else the first local node. The
      * default can legally be a remote node, so code that acts on this
      * instance's own daemon must not follow it. Null only when no local node
-     * row exists.
+     * row exists. No node credential is decrypted to answer.
      */
     public getLocalNodeId(): number | null {
-        const db = DatabaseService.getInstance();
-        const defaultNode = db.getDefaultNode();
-        if (defaultNode?.id && defaultNode.type === 'local') return defaultNode.id;
-        const local = db.getNodes().filter((node) => node.type === 'local' && node.id).sort((a, b) => a.id - b.id)[0];
-        return local?.id ?? null;
+        return DatabaseService.getInstance().getLocalNodeId();
     }
 
     /**

@@ -59,10 +59,12 @@ import { CacheService } from '../services/CacheService';
 import { SecretVolumeProtectedError } from '../helpers/secretVolume';
 
 const PROJECT = { 'com.docker.compose.project': 'my-stack' };
-const SECRET_LABELLED = { Name: 'my-stack_tok', Labels: { ...PROJECT, 'io.sencho.secret': '' } };
-const SECRET_RESERVED = { Name: 'sencho_edge_secret', Labels: { ...PROJECT } };
-const ORDINARY = { Name: 'my-stack_data', Labels: { ...PROJECT } };
-const REPOSITORY = { Name: 'sencho-recovery-repo', Labels: { 'dev.sencho.recovery.repository': '1' } };
+// What `GET /volumes` reports for a plain local volume.
+const LOCAL = { Driver: 'local', Options: null };
+const SECRET_LABELLED = { Name: 'my-stack_tok', Labels: { ...PROJECT, 'io.sencho.secret': '' }, ...LOCAL };
+const SECRET_RESERVED = { Name: 'sencho_edge_secret', Labels: { ...PROJECT }, ...LOCAL };
+const ORDINARY = { Name: 'my-stack_data', Labels: { ...PROJECT }, ...LOCAL };
+const REPOSITORY = { Name: 'sencho-recovery-repo', Labels: { 'dev.sencho.recovery.repository': '1' }, ...LOCAL };
 
 function unused(...names: string[]) {
   return { Volumes: names.map((Name) => ({ Name, UsageData: { RefCount: 0, Size: 10 } })), Images: [], LayersSize: 0 };
@@ -126,7 +128,7 @@ describe('pruneSystem volumes', () => {
   });
 
   it('honours a label filter on the per-volume path', async () => {
-    const tagged = { Name: 'tagged', Labels: { 'com.example': 'yes' } };
+    const tagged = { Name: 'tagged', Labels: { 'com.example': 'yes' }, ...LOCAL };
     const all = [SECRET_LABELLED, ORDINARY, tagged];
     mockDocker.listVolumes.mockResolvedValue({ Volumes: all });
     const removed: string[] = [];
@@ -137,6 +139,33 @@ describe('pruneSystem volumes', () => {
     await DockerController.getInstance(1).pruneSystem('volumes', 'com.example=yes');
 
     expect(removed).toEqual(['tagged']);
+  });
+
+  // The daemon prune only ever considered local volumes without driver
+  // options; the per-volume prune must not reach further than it did.
+  const PLUGIN = { Name: 'plugin_data', Driver: 'rexray/ebs', Options: null };
+  const NFS = { Name: 'nfs_data', Driver: 'local', Options: { type: 'nfs', o: 'addr=10.0.0.5,rw', device: ':/export' } };
+  const BIND = { Name: 'bind_data', Driver: 'local', Options: { type: 'none', o: 'bind', device: '/srv/data' } };
+  const NO_DRIVER = { Name: 'unknown_driver' };
+  const EMPTY_OPTIONS = { Name: 'empty_options', Driver: 'local', Options: {} };
+
+  it.each([
+    ['without a label filter', undefined, {}],
+    ['with a matching label filter', 'com.example=yes', { 'com.example': 'yes' }],
+  ])('keeps plugin, option-backed and driverless volumes %s, as the daemon prune did', async (_case, filter, labels) => {
+    const all = [ORDINARY, PLUGIN, NFS, BIND, NO_DRIVER, EMPTY_OPTIONS]
+      .map((volume) => ({ ...volume, Labels: { ...(volume as { Labels?: Record<string, string> }).Labels, ...labels } }));
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: all });
+    mockDocker.df.mockResolvedValue(unused(...all.map((v) => v.Name)));
+    const removed: string[] = [];
+    mockDocker.getVolume.mockImplementation((name: string) => ({
+      remove: vi.fn().mockImplementation(async () => { removed.push(name); }),
+    }));
+
+    const result = await DockerController.getInstance(1).pruneSystem('volumes', filter);
+
+    expect(removed).toEqual(['my-stack_data', 'empty_options']);
+    expect(result).toEqual({ success: true, reclaimedBytes: 20 });
   });
 });
 

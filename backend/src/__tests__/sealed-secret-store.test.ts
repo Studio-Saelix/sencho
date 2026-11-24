@@ -208,20 +208,42 @@ describe('the store resolves this instance\'s own daemon', () => {
   it('uses the default node when it is local, else the lowest-id local node, and refuses with 503 when there is none', async () => {
     const { NodeRegistry } = await import('../services/NodeRegistry');
     const registry = NodeRegistry.getInstance();
-    const node = (id: number, type: 'local' | 'remote') => ({ id, type }) as unknown as import('../services/DatabaseService').Node;
-    const getDefault = vi.spyOn(db, 'getDefaultNode').mockReturnValue(node(4, 'local'));
-    const getNodes = vi.spyOn(db, 'getNodes').mockReturnValue([node(9, 'local'), node(4, 'remote'), node(6, 'local')]);
-    expect(registry.getLocalNodeId()).toBe(4);
-    getDefault.mockReturnValue(node(4, 'remote'));
-    expect(registry.getLocalNodeId()).toBe(6);
-    getNodes.mockReturnValue([node(4, 'remote')]);
-    expect(registry.getLocalNodeId()).toBeNull();
+    const raw = db.getDb();
+    const originalDefault = db.getDefaultNode()!.id;
+    const insert = (name: string, type: 'local' | 'remote', token: string | null = null) => Number(raw.prepare(
+      'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token) VALUES (?, ?, ?, 0, ?, ?, ?, ?)',
+    ).run(name, type, '/app/compose', 'online', Date.now(), type === 'remote' ? 'https://10.0.0.9:1852' : null, token).lastInsertRowid);
+    const makeDefault = (id: number) => raw.prepare('UPDATE nodes SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END').run(id);
+    // A credential this instance cannot decrypt, as after a restore without its key.
+    const unreadable = insert('unrecovered', 'remote', `enc:${'00'.repeat(12)}:${'00'.repeat(16)}:00`);
+    const remote = insert('remote-default', 'remote');
+    const laterLocal = insert('legacy-local', 'local');
+    const added = [unreadable, remote, laterLocal];
+    expect(() => db.getNodes()).toThrow();
+    try {
+      makeDefault(laterLocal);
+      expect(registry.getLocalNodeId()).toBe(laterLocal);
+      makeDefault(remote);
+      expect(registry.getLocalNodeId()).toBe(Math.min(originalDefault, laterLocal));
 
-    store.setDockerForTests(null);
-    const error = await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO));
-    expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
-    expect(error.status).toBe(503);
-    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+      // Accept, replace and remove reach the local daemon, never decrypting the unreadable row.
+      const getDocker = vi.spyOn(registry, 'getDocker').mockReturnValue(fake.docker);
+      store.setDockerForTests(null);
+      expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+      expect((await store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO)).status).toBe('accepted');
+      expect((await store.remove(PURPOSE, SLOT_B, 3, WHO)).status).toBe('deleted');
+      expect(new Set(getDocker.mock.calls.map(([id]) => id))).toEqual(new Set([Math.min(originalDefault, laterLocal)]));
+
+      raw.prepare("UPDATE nodes SET type = 'remote' WHERE type = 'local'").run();
+      expect(registry.getLocalNodeId()).toBeNull();
+      const error = await refusal(store.accept(PURPOSE, SLOT_A, 4, SECRET, WHO));
+      expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
+      expect(error.status).toBe(503);
+    } finally {
+      raw.prepare("UPDATE nodes SET type = 'local' WHERE id IN (?, ?)").run(originalDefault, laterLocal);
+      for (const id of added) raw.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+      makeDefault(originalDefault);
+    }
   });
 });
 

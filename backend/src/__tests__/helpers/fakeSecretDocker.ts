@@ -68,7 +68,7 @@ export function createFakeSecretDocker(): FakeSecretDocker {
   // A volume is unused when no container mounts it, as the daemon's `dangling` filter and prune read it.
   const unusedVolumes = () => [...state.volumes.entries()]
     .filter(([name]) => !state.mounted.has(name))
-    .map(([Name, Labels]) => ({ Name, Labels }));
+    .map(([Name, Labels]) => ({ Name, Labels, Driver: 'local', Options: null }));
   let started = 0;
   let removals = 0;
 
@@ -144,7 +144,7 @@ export function createFakeSecretDocker(): FakeSecretDocker {
     listVolumes: async (opts?: { filters?: { dangling?: string[]; label?: string[] } }) => {
       let volumes = opts?.filters?.dangling?.includes('true')
         ? unusedVolumes()
-        : [...state.volumes.entries()].map(([Name, Labels]) => ({ Name, Labels }));
+        : [...state.volumes.entries()].map(([Name, Labels]) => ({ Name, Labels, Driver: 'local', Options: null }));
       const label = opts?.filters?.label ?? [];
       if (label.length > 0) volumes = volumes.filter((volume) => label.every((key) => Object.prototype.hasOwnProperty.call(volume.Labels, key)));
       const answer = { Volumes: volumes };

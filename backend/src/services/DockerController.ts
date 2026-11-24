@@ -743,17 +743,36 @@ class DockerController {
   }
 
   /**
+   * True when the daemon's own volume prune would consider this volume: the
+   * `local` driver with no driver options. The daemon leaves plugin volumes
+   * and option-backed local volumes (an NFS mount, a bind) out of every prune,
+   * so the enumerated prune must too. A volume whose driver is not reported is
+   * kept.
+   */
+  private static isDaemonPrunableVolume(vol: { Driver?: string | null; Options?: Record<string, string> | null }): boolean {
+    if (vol.Driver !== 'local') return false;
+    return !vol.Options || Object.keys(vol.Options).length === 0;
+  }
+
+  /**
    * The volume prune: every unused volume the daemon prune would remove
-   * (`all=true`, so named volumes too), except secret volumes and the recovery
-   * repository, removed one by one. A volume that gains a container between
-   * the listing and its removal is refused by Docker and kept.
+   * (`all=true`, so named volumes too, and only plain local volumes), except
+   * secret volumes and the recovery repository, removed one by one. A volume
+   * that gains a container between the listing and its removal is refused by
+   * Docker and kept.
    */
   private async pruneVolumesEnumerated(labelFilter?: string): Promise<{ success: boolean; reclaimedBytes: number }> {
     const usage = DockerController.mapVolumeUsageFromDf(await this.safeVolumeDfSnapshot());
     const listed = await this.docker.listVolumes({ filters: { dangling: ['true'] } });
-    const volumes = (listed?.Volumes ?? []) as Array<{ Name: string; Labels?: Record<string, string> | null }>;
+    const volumes = (listed?.Volumes ?? []) as Array<{
+      Name: string;
+      Labels?: Record<string, string> | null;
+      Driver?: string | null;
+      Options?: Record<string, string> | null;
+    }>;
     let reclaimedBytes = 0;
     for (const vol of volumes) {
+      if (!DockerController.isDaemonPrunableVolume(vol)) continue;
       if (isSecretVolumeRef(vol.Name, vol.Labels)) continue;
       if (DockerController.isRecoveryRepositoryLabel(vol.Labels ?? undefined)) continue;
       if (labelFilter && !DockerController.matchesLabelFilter(vol.Labels, labelFilter)) continue;

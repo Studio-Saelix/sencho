@@ -846,8 +846,8 @@ describe('DockerController - pruneSystem', () => {
     mockDfSections({ volume: { Volumes: [{ Name: 'app_data', UsageData: { RefCount: 0, Size: 4096 } }] } });
     mockDocker.listVolumes.mockResolvedValue({
       Volumes: [
-        { Name: 'app_data', Labels: {} },
-        { Name: 'sencho-recovery-repo', Labels: { 'dev.sencho.recovery.repository': '1' } },
+        { Name: 'app_data', Labels: {}, Driver: 'local', Options: null },
+        { Name: 'sencho-recovery-repo', Labels: { 'dev.sencho.recovery.repository': '1' }, Driver: 'local', Options: null },
       ],
     });
     const removed: string[] = [];

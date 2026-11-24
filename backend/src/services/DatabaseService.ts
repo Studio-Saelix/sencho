@@ -6749,6 +6749,20 @@ stmt.run('gitops_schema_version', '1');
         return this.decryptNodeRow(row);
     }
 
+    /**
+     * The id of the local node this instance's own Docker daemon belongs to:
+     * the default node when it is local, else the lowest-id local node; null
+     * when there is none. Reads ids only and decrypts no row, so a remote
+     * node's credential that cannot be decrypted (a database restored without
+     * its encryption key) never stands between this instance and its own node.
+     */
+    public getLocalNodeId(): number | null {
+        const row = this.db.prepare(
+            "SELECT id FROM nodes WHERE type = 'local' ORDER BY is_default DESC, id ASC LIMIT 1",
+        ).get() as { id: number } | undefined;
+        return row?.id ?? null;
+    }
+
     public getDefaultNode(): Node | undefined {
         const stmt = this.db.prepare(`SELECT ${DatabaseService.NODE_COLUMNS} FROM nodes WHERE is_default = 1 LIMIT 1`);
         const row = stmt.get() as any;

@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import type Docker from 'dockerode';
 import { parse as parseYaml } from 'yaml';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -516,6 +517,7 @@ export class ComposeService {
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declaredVolumes: EffResource[] | null = null;
+    let projectName = stackName;
     try {
       const result = await this.renderConfig(stackName);
       // Sencho's own refusal says why the volumes cannot be read, which is a
@@ -527,7 +529,9 @@ export class ComposeService {
         // The model parser tolerates anything and returns an empty model, which
         // would read as "declares nothing"; only an object is a model.
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          declaredVolumes = Object.values(parseEffectiveModel(parsed, stackName).volumes);
+          const model = parseEffectiveModel(parsed, stackName);
+          declaredVolumes = Object.values(model.volumes);
+          projectName = model.projectName;
         } else {
           console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
@@ -546,24 +550,32 @@ export class ComposeService {
     if (recoveryVolumeNamesIn(declaredVolumes.map((volume) => volume.name), (name) => self.isRecoveryVolume(name)).length > 0) {
       throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
     }
-    await this.assertNoSecretVolumeRemoval(stackName, declaredVolumes);
+    await this.assertNoSecretVolumeRemoval(stackName, projectName, declaredVolumes);
   }
 
   /**
-   * The secret half of the `down --volumes` guard. A stack that is not the
-   * secret's recorded consumer is refused when it declares a secret volume at
-   * all, external or not, exactly as its deploy is refused. The consumer is
-   * refused only when it declares one that is not `external`, because that is
-   * the declaration Compose removes.
+   * The secret half of the `down --volumes` guard, over both kinds of volume
+   * `down --volumes` removes.
+   *
+   * Declared volumes: a stack that is not the secret's recorded consumer is
+   * refused when it declares a secret volume at all, external or not, exactly
+   * as its deploy is refused. The consumer is refused only when it declares
+   * one that is not `external`, because that is the declaration Compose
+   * removes.
+   *
+   * Anonymous volumes: removing a container with its volumes also removes
+   * every volume it mounted without naming it, whatever the stack's file now
+   * says, so each container of the project is checked for a secret volume
+   * mounted that way. The consumer gets no exemption here: an anonymous mount
+   * is exactly what the removal deletes.
+   *
+   * A volume or container read that fails refuses.
    */
-  private async assertNoSecretVolumeRemoval(stackName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
-    // Compose removes only volumes the stack declares, so a stack declaring
-    // none cannot remove a secret volume, and the label read is skipped.
-    if (declaredVolumes.length === 0) return;
+  private async assertNoSecretVolumeRemoval(stackName: string, projectName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
+    const docker = DockerController.getInstance(this.nodeId).getDocker();
     let labelledVolumeNames: Set<string>;
     try {
-      const listed = await DockerController.getInstance(this.nodeId).getDocker()
-        .listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+      const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
       labelledVolumeNames = new Set((listed?.Volumes ?? []).map((volume) => volume.Name));
     } catch (error) {
       console.warn('[ComposeService] Could not read the volume labels of this node for the secret volume check of %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -572,17 +584,87 @@ export class ComposeService {
         + 'Check the Docker connection and try again, or run the operation without removing volumes.',
       );
     }
-    const secret = declaredVolumes.filter((volume) => isReservedSecretVolumeName(volume.name)
-      || volume.hasSecretLabel === true
-      || labelledVolumeNames.has(volume.name));
-    if (secret.length === 0) return;
-    const isConsumer = isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName));
-    if (isConsumer && secret.every((volume) => volume.external)) return;
-    throw new SecretVolumeProtectedError(
-      'This stack declares a volume that holds, or is reserved for, a secret Sencho keeps on this node, so its volumes were not removed. '
-      + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first. '
-      + 'The stack that consumes the secret must declare the volume as external.',
-    );
+    const isSecretName = (name: string): boolean => isReservedSecretVolumeName(name) || labelledVolumeNames.has(name);
+    const secret = declaredVolumes.filter((volume) => isSecretName(volume.name) || volume.hasSecretLabel === true);
+    if (secret.length > 0) {
+      const isConsumer = isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName));
+      if (!isConsumer || !secret.every((volume) => volume.external)) {
+        throw new SecretVolumeProtectedError(
+          'This stack declares a volume that holds, or is reserved for, a secret Sencho keeps on this node, so its volumes were not removed. '
+          + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first. '
+          + 'The stack that consumes the secret must declare the volume as external.',
+        );
+      }
+    }
+    if (await this.mountsSecretVolumeAnonymously(docker, stackName, projectName, isSecretName)) {
+      throw new SecretVolumeProtectedError(
+        'A container of this stack holds a secret Sencho keeps on this node in a volume it mounts without naming it, which removing volumes would delete, so its volumes were not removed. '
+        + 'Run the operation without removing volumes.',
+      );
+    }
+  }
+
+  /**
+   * True when a container of the project mounts a secret volume anonymously,
+   * the mount Docker deletes with the container when volumes are removed. A
+   * mount counts as named only when the container's own create spec names the
+   * volume at that path (a `volume` mount or a bind entry); anything else is
+   * taken as anonymous. Containers are looked up under the project name
+   * Compose runs under and under the stack name, since the two can differ.
+   * Throws `SecretVolumeProtectedError` when the containers cannot be read.
+   */
+  private async mountsSecretVolumeAnonymously(
+    docker: Docker,
+    stackName: string,
+    projectName: string,
+    isSecretName: (name: string) => boolean,
+  ): Promise<boolean> {
+    const unreadable = (error: unknown): SecretVolumeProtectedError => {
+      console.warn('[ComposeService] Could not read the containers of %s for the secret volume check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return new SecretVolumeProtectedError(
+        'Sencho could not read the containers of this stack to check that removing its volumes does not delete a secret volume, so its volumes were not removed. '
+        + 'Check the Docker connection and try again, or run the operation without removing volumes.',
+      );
+    };
+    const seen = new Set<string>();
+    const holders: Array<{ id: string; mounts: Array<{ name: string; destination: string }> }> = [];
+    for (const project of new Set([projectName, stackName])) {
+      let listed: Docker.ContainerInfo[];
+      try {
+        listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${project}`] } });
+      } catch (error) {
+        throw unreadable(error);
+      }
+      for (const container of listed ?? []) {
+        if (seen.has(container.Id)) continue;
+        seen.add(container.Id);
+        const mounts = (container.Mounts ?? [])
+          .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && isSecretName(mount.Name))
+          .map((mount) => ({ name: mount.Name as string, destination: mount.Destination }));
+        if (mounts.length > 0) holders.push({ id: container.Id, mounts });
+      }
+    }
+    for (const holder of holders) {
+      let info: Docker.ContainerInspectInfo;
+      try {
+        info = await docker.getContainer(holder.id).inspect();
+      } catch (error) {
+        // Gone since the listing: Docker has nothing of it left to remove.
+        if ((error as { statusCode?: number })?.statusCode === 404) continue;
+        throw unreadable(error);
+      }
+      const specMounts = info.HostConfig?.Mounts ?? [];
+      const binds = info.HostConfig?.Binds ?? [];
+      for (const mount of holder.mounts) {
+        const named = specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && spec.Target === mount.destination)
+          || binds.some((bind) => {
+            const [source, target] = bind.split(':');
+            return source === mount.name && target === mount.destination;
+          });
+        if (!named) return true;
+      }
+    }
+    return false;
   }
 
   /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */

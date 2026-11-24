@@ -229,7 +229,15 @@ describe('ComposeService secret volume guard', () => {
   let events: string[];
   let dockerSpawns: string[][];
   let labelledVolumes: string[];
-  let containers: Array<{ Id: string; Names: string[]; Mounts: Array<{ Type: string; Name?: string }> }>;
+  let containers: Array<{
+    Id: string;
+    Names: string[];
+    Labels?: Record<string, string>;
+    Mounts: Array<{ Type: string; Name?: string; Destination?: string }>;
+  }>;
+  /** What `inspect` answers per container id: the create spec the down guard reads. */
+  let inspectFor: Record<string, { HostConfig: { Mounts?: Array<{ Type: string; Source?: string; Target: string }>; Binds?: string[] } }>;
+  let inspectError: (Error & { statusCode?: number }) | null;
   let listVolumes: ReturnType<typeof vi.fn>;
   let listContainers: ReturnType<typeof vi.fn>;
 
@@ -287,6 +295,8 @@ describe('ComposeService secret volume guard', () => {
     dockerSpawns = [];
     labelledVolumes = [];
     containers = [];
+    inspectFor = {};
+    inspectError = null;
     h.endpointReadsRender = true;
     h.endpointRenderReads = 0;
     h.fakeDocker = (args) => {
@@ -303,11 +313,22 @@ describe('ComposeService secret volume guard', () => {
       events.push('listVolumes');
       return { Volumes: labelledVolumes.map((Name) => ({ Name })), Warnings: [] };
     });
-    listContainers = vi.fn(async () => {
+    listContainers = vi.fn(async (opts?: { filters?: { label?: string[] } }) => {
       events.push('listContainers');
-      return containers;
+      // A Compose project filter answers only that project's containers, as the daemon does.
+      const project = opts?.filters?.label?.find((label) => label.startsWith('com.docker.compose.project='));
+      if (project === undefined) return containers;
+      const name = project.slice('com.docker.compose.project='.length);
+      return containers.filter((container) => container.Labels?.['com.docker.compose.project'] === name);
     });
-    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({ listVolumes, listContainers } as unknown as Docker);
+    const getContainer = vi.fn((id: string) => ({
+      inspect: async () => {
+        events.push(`inspect:${id}`);
+        if (inspectError) throw inspectError;
+        return inspectFor[id] ?? { HostConfig: {} };
+      },
+    }));
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({ listVolumes, listContainers, getContainer } as unknown as Docker);
     // Probing the Compose version is a spawn of its own; it is not under test.
     vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue(null);
     // Observed, not replaced: marks when the check ran and records its answer.
@@ -640,13 +661,143 @@ describe('ComposeService secret volume guard', () => {
       expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
     });
 
-    it('does not read volume labels for a stack that declares no volume', async () => {
+    it('reads the volume labels and the containers of a stack that declares no volume', async () => {
+      // Anonymous volumes are not declared, and `down --volumes` removes them.
       renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
 
       await svc().runDown(stack, { removeVolumes: true });
 
-      expect(listVolumes).not.toHaveBeenCalled();
+      expect(listVolumes).toHaveBeenCalledWith({ filters: { label: ['io.sencho.secret'] } });
+      expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: [`com.docker.compose.project=${stack}`] } });
       expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+    });
+
+    describe('a secret volume a container mounts anonymously', () => {
+      const ANON = 'f3b1c2d4e5a6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90';
+      const declaredNone = () => ({});
+      const declaredOrdinary = () => ({ data: { name: `${stack}_data` } });
+
+      /** A Compose container of `project` mounting `volume` at /token, anonymously unless `named`. */
+      function holder(project: string, volume: string, named = false) {
+        containers = [{
+          Id: 'c-web',
+          Names: [`/${project}-web-1`],
+          Labels: { 'com.docker.compose.project': project, 'com.docker.compose.service': 'web' },
+          Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
+        }];
+        inspectFor = {
+          'c-web': { HostConfig: { Mounts: [{ Type: 'volume', ...(named ? { Source: volume } : {}), Target: '/token' }] } },
+        };
+      }
+
+      it.each([
+        ['runDown', 'no declared volume', declaredNone],
+        ['downStack', 'no declared volume', declaredNone],
+        ['runDown', 'an ordinary declared volume', declaredOrdinary],
+        ['downStack', 'an ordinary declared volume', declaredOrdinary],
+      ] as const)('%s refuses it with %s', async (method, _declared, volumes) => {
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20', volumes: [{ type: 'volume', target: '/token' }] } }, volumes: volumes() });
+        labelledVolumes = [ANON];
+        holder(stack, ANON);
+
+        const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+        expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+        expect((error as Error).message).toContain('mounts without naming it');
+        expect(events).toContain('inspect:c-web');
+        expect(mutations()).toEqual([]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s finds it under the project name Compose runs the stack as', async (method) => {
+        renderFor = () => ({ name: 'edge-project', services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = [ANON];
+        holder('edge-project', ANON);
+
+        expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+        expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: ['com.docker.compose.project=edge-project'] } });
+        expect(mutations()).toEqual([]);
+      });
+
+      it.each(['edge-tunnel', 'released-edge-tunnel'])('refuses the recorded %s consumer too, through both methods', async (kind) => {
+        recordManagedKind(stack, kind);
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: { tok: { name: `${stack}_tok`, external: true } } });
+        labelledVolumes = [`${stack}_tok`, ANON];
+        holder(stack, ANON);
+
+        for (const method of ['runDown', 'downStack'] as const) {
+          expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+        }
+        expect(mutations()).toEqual([]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s lets the consumer through when it mounts the secret volume by name', async (method) => {
+        recordManagedKind(stack, 'edge-tunnel');
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: { tok: { name: `${stack}_tok`, external: true } } });
+        labelledVolumes = [`${stack}_tok`];
+        holder(stack, `${stack}_tok`, true);
+
+        await svc()[method](stack, { removeVolumes: true });
+
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
+
+      it('counts a bind entry naming the volume as a named mount', async () => {
+        recordManagedKind(stack, 'edge-tunnel');
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: { tok: { name: `${stack}_tok`, external: true } } });
+        labelledVolumes = [`${stack}_tok`];
+        holder(stack, `${stack}_tok`);
+        inspectFor['c-web'] = { HostConfig: { Binds: [`${stack}_tok:/token:ro`] } };
+
+        await svc().runDown(stack, { removeVolumes: true });
+
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s removes an ordinary anonymous volume without inspecting the container', async (method) => {
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = ['some-other-stack_tok'];
+        holder(stack, ANON);
+
+        await svc()[method](stack, { removeVolumes: true });
+
+        expect(events).not.toContain('inspect:c-web');
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s refuses when the containers cannot be listed', async (method) => {
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+        listContainers.mockRejectedValueOnce(new Error('connect ECONNREFUSED /var/run/docker.sock'));
+
+        const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+        expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+        expect((error as Error).message).toContain('could not read the containers of this stack');
+        expect(mutations()).toEqual([]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s refuses when a container holding a secret volume cannot be inspected', async (method) => {
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = [ANON];
+        holder(stack, ANON);
+        inspectError = Object.assign(new Error('server error'), { statusCode: 500 });
+
+        const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
+
+        expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+        expect((error as Error).message).toContain('could not read the containers of this stack');
+        expect(mutations()).toEqual([]);
+      });
+
+      it('goes ahead when the container is gone by the time it is inspected', async () => {
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = [ANON];
+        holder(stack, ANON);
+        inspectError = Object.assign(new Error('no such container'), { statusCode: 404 });
+
+        await svc().runDown(stack, { removeVolumes: true });
+
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
     });
 
     it.each([

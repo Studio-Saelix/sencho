@@ -7,6 +7,7 @@
  * and for a Pilot node; the local node runs in process.
  */
 import jwt from 'jsonwebtoken';
+import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanupTestDb, setupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -122,6 +123,27 @@ async function remoteDefaultWithLocalDaemon(remoteDefaultId: number): Promise<()
   return () => db.updateNode(localNodeId, { is_default: true });
 }
 
+/**
+ * Add a remote node whose stored credential this instance cannot decrypt, as
+ * after restoring a database without its encryption key, and prove it is
+ * unreadable. Returns the restore step.
+ */
+function unreadableUnrelatedRemote(asDefault = false): () => void {
+  const unreadable = `enc:${'00'.repeat(12)}:${'00'.repeat(16)}:00`;
+  const id = Number(db.getDb().prepare(
+    "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES ('unrecovered', 'remote', '/app/compose', 0, 'offline', ?, 'https://10.0.0.9:1852', ?, 'proxy')",
+  ).run(Date.now(), unreadable).lastInsertRowid);
+  if (asDefault) {
+    db.getDb().prepare('UPDATE nodes SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END').run(id);
+    expect(() => db.getDefaultNode()).toThrow();
+  }
+  expect(() => db.getNodes()).toThrow();
+  return () => {
+    db.getDb().prepare('DELETE FROM nodes WHERE id = ?').run(id);
+    if (asDefault) db.getDb().prepare('UPDATE nodes SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END').run(localNodeId);
+  };
+}
+
 function service() {
   return Service.getInstance();
 }
@@ -223,6 +245,42 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
       expect(fake.files.has(VOLUME_FILE)).toBe(false);
     } finally {
       restore();
+    }
+  });
+
+  it('keeps serving its receiving routes and its store while an unrelated remote credential cannot be decrypted', async () => {
+    install();
+    transport.setConfidential(true);
+    const restore = await remoteDefaultWithLocalDaemon(directNodeId);
+    const restoreUnreadable = unreadableUnrelatedRemote();
+    try {
+      const bearer = `Bearer ${transport.bearer()}`;
+      expect((await request(app).get('/api/sealed-secrets/key').set('Authorization', bearer)).status).toBe(200);
+      expect((await request(app).get('/api/sealed-secrets').set('Authorization', bearer)).status).toBe(200);
+      expect((await request(app).get(`/api/sealed-secrets/${PURPOSE}/${SLOT_A}`).set('Authorization', bearer)).status).toBe(200);
+      expect(await deliver()).toEqual({ status: 'accepted', generation: 1 });
+      expect(await deliver(SLOT_B, `${SECRET}-b`)).toMatchObject({ status: 'accepted', generation: 2 });
+      expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+      expect((await remove(SLOT_B)).status).toBe('deleted');
+      expect(fake.files.has(VOLUME_FILE)).toBe(false);
+    } finally {
+      restoreUnreadable();
+      restore();
+    }
+  });
+
+  it('serves its receiving routes when the default node itself has a credential it cannot decrypt', async () => {
+    const restoreUnreadable = unreadableUnrelatedRemote(true);
+    try {
+      const bearer = `Bearer ${transport.bearer()}`;
+      expect((await request(app).get('/api/sealed-secrets/key').set('Authorization', bearer)).status).toBe(200);
+      expect((await request(app).get('/api/sealed-secrets').set('Authorization', bearer)).status).toBe(200);
+      expect((await request(app).get(`/api/sealed-secrets/${PURPOSE}/${SLOT_A}`).set('Authorization', bearer)).status).toBe(200);
+      const post = await request(app).post(`/api/sealed-secrets/${PURPOSE}`).set('Authorization', bearer).send({ slot: SLOT_A, generation: 1 });
+      // Past every middleware to the route's own validation: no envelope was sent.
+      expect(post.status).toBe(400);
+    } finally {
+      restoreUnreadable();
     }
   });
 
@@ -583,6 +641,23 @@ describe('sealed secret delivery to the local node', () => {
       expect(fake.files.has(VOLUME_FILE)).toBe(false);
       expect(calls).toHaveLength(0);
     } finally {
+      restore();
+    }
+  });
+
+  it('accepts, replaces and removes in process while an unrelated remote credential cannot be decrypted', async () => {
+    const { calls } = installInProcessNodeTransport({ app, bearer: () => '' });
+    const restore = await remoteDefaultWithLocalDaemon(pilotNodeId);
+    const restoreUnreadable = unreadableUnrelatedRemote();
+    try {
+      const deliver = (slot: string, secret: string) => service().deliver({ nodeId: localNodeId, purpose: PURPOSE, slot, secret, actor: 'admin' });
+      expect(await deliver(SLOT_A, SECRET)).toEqual({ status: 'accepted', generation: 1 });
+      expect(await deliver(SLOT_B, `${SECRET}-b`)).toMatchObject({ status: 'accepted', generation: 2 });
+      expect((await service().remove({ nodeId: localNodeId, purpose: PURPOSE, slot: SLOT_B, actor: 'admin' })).status).toBe('deleted');
+      expect(fake.files.has(VOLUME_FILE)).toBe(false);
+      expect(calls).toHaveLength(0);
+    } finally {
+      restoreUnreadable();
       restore();
     }
   });
