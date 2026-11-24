@@ -15,6 +15,7 @@ export type SealedSecretHubCode =
   | 'SEALED_SECRET_TRANSPORT_NOT_CONFIDENTIAL'
   | 'SEAL_KEY_MISMATCH'
   | 'SEALED_SECRET_TARGET_REFUSED'
+  | 'SEALED_SECRET_DELIVERY_PENDING'
   | 'SEALED_SECRET_DELIVERY_FAILED';
 
 export type SealedSecretCode = SealedSecretNodeCode | SealedSecretHubCode;

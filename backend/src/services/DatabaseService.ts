@@ -4460,6 +4460,29 @@ stmt.run('gitops_schema_version', '1');
         return result.changes > 0;
     }
 
+    /**
+     * Put back the row an operation replaced, when the node refused that
+     * operation outright and so changed nothing. Only while the row still
+     * describes that operation; with no earlier row, the row goes.
+     */
+    public restoreSealedSecretDelivery(
+        nodeId: number,
+        purpose: string,
+        operationId: string,
+        previous: SealedSecretDeliveryRow | null,
+    ): void {
+        this.db.transaction(() => {
+            const current = this.getSealedSecretDelivery(nodeId, purpose);
+            if (!current || current.operationId !== operationId) return;
+            if (previous) {
+                this.upsertSealedSecretDelivery(previous);
+            } else {
+                this.db.prepare('DELETE FROM sealed_secret_deliveries WHERE node_id = ? AND purpose = ? AND operation_id = ?')
+                    .run(nodeId, purpose, operationId);
+            }
+        })();
+    }
+
     // --- Managed stacks (read only here) ---
 
     /** The kind Sencho recorded for a stack it manages, or null for an ordinary stack. */

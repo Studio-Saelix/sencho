@@ -247,6 +247,9 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('DELETE', '/sealed-secrets/edge-tunnel-run-token/0b9f3c2e-1d4a-4b5c-8d6e-7f8091a2b3c4', 409))
       .toBe('Sealed secret removal refused (409)');
     expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm', 409)).toBe('Node sealing key confirmation refused (409)');
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm', 502)).toBe('Node sealing key confirmation failed (502)');
+    expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 403)).toBe('Node sealing key pin reset refused (403)');
+    expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 204)).toBe('Reset node sealing key pin: 3');
   });
 });
 

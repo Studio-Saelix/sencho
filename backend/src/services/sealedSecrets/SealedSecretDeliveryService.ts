@@ -107,17 +107,19 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Responses are small JSON documents; anything larger is not a node's answer. */
 const RESPONSE_LIMIT_BYTES = 64 * 1024;
 const DELIVERY_PATH = 'sealed-secret-delivery';
-/** A node's refusal text is shown to the caller; keep it to a sentence or two. */
-const NODE_MESSAGE_LIMIT = 300;
-const NODE_CODES: ReadonlySet<string> = new Set<SealedSecretNodeCode>([
-  'SEALED_SECRET_PURPOSE_UNKNOWN',
-  'SEALED_SECRET_SLOT_INVALID',
-  'SEALED_SECRET_REQUEST_INVALID',
-  'SEALED_SECRET_OPEN_FAILED',
-  'SEALED_SECRET_GENERATION_STALE',
-  'SECRET_VOLUME_FOREIGN',
-  'SECRET_STORE_UNAVAILABLE',
-]);
+/** A node's refusal text is shown to the caller; keep it to a few sentences. */
+const NODE_MESSAGE_LIMIT = 500;
+/** Every node code, as a record so the compiler flags a code added to the union but not here. */
+const NODE_CODE_RECORD: Record<SealedSecretNodeCode, true> = {
+  SEALED_SECRET_PURPOSE_UNKNOWN: true,
+  SEALED_SECRET_SLOT_INVALID: true,
+  SEALED_SECRET_REQUEST_INVALID: true,
+  SEALED_SECRET_OPEN_FAILED: true,
+  SEALED_SECRET_GENERATION_STALE: true,
+  SECRET_VOLUME_FOREIGN: true,
+  SECRET_STORE_UNAVAILABLE: true,
+};
+const NODE_CODES: ReadonlySet<string> = new Set(Object.keys(NODE_CODE_RECORD));
 
 function hubError(code: SealedSecretError['code'], status: number, message: string, details: Record<string, string | number | null> = {}) {
   return new SealedSecretError(code, status, message, details);
@@ -253,6 +255,8 @@ class RemoteChannel implements NodeChannel {
     const answer = await this.call('GET', '/key');
     if (!answer.ok) {
       console.warn('[SealedSecretDelivery] Node refused the key read:', answer.status, sanitizeForLog(answer.code ?? ''));
+      // A server error is the node (or the hop to it) failing, not a bad key answer.
+      if (answer.status >= 500) throw unreachable();
       throw deliveryFailed({ nodeCode: answer.code, nodeStatus: answer.status });
     }
     if (typeof answer.body !== 'object' || answer.body === null) throw deliveryFailed();
@@ -487,8 +491,9 @@ export class SealedSecretDeliveryService {
 
   /**
    * Map a node's refusal to the hub's vocabulary; the node's code travels along.
-   * A node failure (5xx) or an answer without a known code is a retryable
-   * delivery failure, not a refusal: the node did not decide against it.
+   * A 5xx, or an answer without a known code, is reported as a delivery failure
+   * (502) with the node's status attached, not as a refusal: the node did not
+   * decide against the request.
    */
   private nodeRefused(answer: Extract<NodeAnswer<unknown>, { ok: false }>): SealedSecretError {
     const details = { nodeCode: answer.code, nodeStatus: answer.status };
@@ -513,6 +518,16 @@ export class SealedSecretDeliveryService {
     return { generation: Math.max(row?.generation ?? 0, nodeGeneration) + 1, operationId: crypto.randomUUID() };
   }
 
+  /**
+   * A refusal the node decided (a 4xx with a code it knows) changed nothing on
+   * the node: every one of them fires before the file is touched. Anything
+   * else (a transport error, a 5xx, an answer this hub cannot read) may have
+   * landed, and keeps the pending row so a retry converges.
+   */
+  private static isDefinitiveRefusal(answer: Extract<NodeAnswer<unknown>, { ok: false }>): boolean {
+    return answer.status < 500 && answer.code !== null;
+  }
+
   async deliver(input: DeliverInput): Promise<DeliveryResult> {
     if (!isValidSlot(input.purpose, input.slot)) {
       this.refuse(input.nodeId, input, invalidSlot(), 'sealed_secret.delivery_refused');
@@ -529,6 +544,7 @@ export class SealedSecretDeliveryService {
 
   private async runDelivery(channel: NodeChannel, input: DeliverInput): Promise<DeliveryResult> {
     const db = DatabaseService.getInstance();
+    const previous = db.getSealedSecretDelivery(input.nodeId, input.purpose);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const node = await channel.describe(input.purpose, input.slot);
       const row = db.getSealedSecretDelivery(input.nodeId, input.purpose);
@@ -555,7 +571,12 @@ export class SealedSecretDeliveryService {
         }, input.actor, 200);
         return { status: answer.body.status, generation };
       }
-      if (answer.code !== 'SEALED_SECRET_GENERATION_STALE' || attempt === 1) throw this.nodeRefused(answer);
+      if (answer.code !== 'SEALED_SECRET_GENERATION_STALE' || attempt === 1) {
+        if (SealedSecretDeliveryService.isDefinitiveRefusal(answer)) {
+          db.restoreSealedSecretDelivery(input.nodeId, input.purpose, operationId, previous);
+        }
+        throw this.nodeRefused(answer);
+      }
       // The node moved (or the reused generation held other content): re-read once and move past it.
     }
     throw deliveryFailed();
@@ -578,22 +599,29 @@ export class SealedSecretDeliveryService {
 
   private async runRemoval(channel: NodeChannel, input: RemoveInput): Promise<RemovalResult> {
     const db = DatabaseService.getInstance();
+    const previous = db.getSealedSecretDelivery(input.nodeId, input.purpose);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const node = await channel.describe(input.purpose, input.slot);
       const row = db.getSealedSecretDelivery(input.nodeId, input.purpose);
       if (attempt === 0 && row?.state === 'removed' && row.slot === input.slot
         && node.state === 'deleted' && node.purposeGeneration === row.generation) {
         // Both sides already record this removal: answer it without a new generation.
+        this.audit('sealed_secret.removed', input.nodeId, {
+          purpose: input.purpose, slot: input.slot, generation: row.generation, actor: input.actor, status: 'already_deleted',
+        }, input.actor, 200);
         return { status: 'already_deleted', generation: row.generation, currentSlot: input.slot };
       }
-      if (row?.state === 'sending' && row.slot !== input.slot) {
-        // A replacement with another secret id is still unconfirmed, so the node
-        // may hold either secret under either record. Removing the old id now
-        // could remove the new secret's file; the replacement converges first.
+      if (row?.state === 'sending') {
+        // A delivery's outcome is unknown: the node may have written its file
+        // without recording it, so its record can name another secret id (or
+        // none) while the file holds the new secret. A removal now could remove
+        // the wrong file, or report a secret removed that is still there. The
+        // delivery converges first.
         throw hubError(
-          'SEALED_SECRET_TARGET_REFUSED',
+          'SEALED_SECRET_DELIVERY_PENDING',
           409,
-          'A replacement of this secret is still pending on this node, so the old one was not removed. Retry the delivery first.',
+          'A delivery of this secret to this node has not been confirmed, so nothing was removed. Retry that delivery first, '
+            + 'or deliver a replacement, then remove.',
         );
       }
       const { generation, operationId } = attempt === 0
@@ -622,7 +650,12 @@ export class SealedSecretDeliveryService {
         }, input.actor, 200);
         return answer.body;
       }
-      if (answer.code !== 'SEALED_SECRET_GENERATION_STALE' || attempt === 1) throw this.nodeRefused(answer);
+      if (answer.code !== 'SEALED_SECRET_GENERATION_STALE' || attempt === 1) {
+        if (ownsRow && SealedSecretDeliveryService.isDefinitiveRefusal(answer)) {
+          db.restoreSealedSecretDelivery(input.nodeId, input.purpose, operationId, previous);
+        }
+        throw this.nodeRefused(answer);
+      }
     }
     throw deliveryFailed();
   }

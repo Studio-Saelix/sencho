@@ -288,7 +288,7 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     const writesBefore = writes(calls).length;
     expect(await remove()).toEqual({ status: 'already_deleted', generation: 2, currentSlot: SLOT_A });
     expect(writes(calls)).toHaveLength(writesBefore);
-    expect(audit().some((line) => line.startsWith('sealed_secret.removed:'))).toBe(true);
+    expect(audit().some((line) => line.startsWith('sealed_secret.removed:') && line.includes('status=already_deleted'))).toBe(true);
   });
 
   it('leaves the live token in place when an old slot is removed after a replace', async () => {
@@ -348,14 +348,17 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(db.getSealedSecretRecord(PURPOSE)?.generation).toBe(1);
   });
 
-  it('maps a node refusal to the hub code and keeps the row retryable', async () => {
+  it('maps a node refusal to the hub code, and a retry succeeds once the cause is gone', async () => {
     transport.setConfidential(true);
     install();
     fake.volumes.set('sencho_edge_secret', {});
     const error = await refusal(deliver());
     expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
     expect(error.details.nodeCode).toBe('SECRET_VOLUME_FOREIGN');
-    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('sending');
+    // The node decided before writing anything, so the hub keeps no pending row.
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toBeNull();
+    fake.volumes.delete('sencho_edge_secret');
+    expect(await deliver()).toEqual({ status: 'accepted', generation: 1 });
   });
 
   /**
@@ -413,12 +416,41 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
     // The node's record still names the old slot; removing it now would remove the new file.
     const error = await refusal(remove(SLOT_A));
-    expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
+    expect(error.code).toBe('SEALED_SECRET_DELIVERY_PENDING');
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+    // Removing the pending slot itself would answer not_current (the record names
+    // the old slot) and report the new secret removed while it is still there.
+    expect((await refusal(remove(SLOT_B))).code).toBe('SEALED_SECRET_DELIVERY_PENDING');
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
     // Once the replacement converges, the old slot is simply not current.
     expect(await deliver(SLOT_B, `${SECRET}-b`)).toEqual({ status: 'accepted', generation: 2 });
     expect((await remove(SLOT_A)).status).toBe('not_current');
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+  });
+
+  it('puts the hub row back after a refusal the node decided, so it never blocks a removal', async () => {
+    transport.setConfidential(true);
+    install();
+    await deliver();
+    // The node refuses an oversize replacement before touching its file.
+    const error = await refusal(deliver(SLOT_B, 'x'.repeat(5000)));
+    expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
+    expect(error.details.nodeCode).toBe('SEALED_SECRET_REQUEST_INVALID');
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toMatchObject({ slot: SLOT_A, generation: 1, state: 'delivered' });
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(SECRET);
+    expect(await remove(SLOT_A)).toEqual({ status: 'deleted', generation: 2, currentSlot: SLOT_A });
+  });
+
+  it('removes the hub row of a first delivery the node refused outright', async () => {
+    transport.setConfidential(true);
+    install();
+    await refusal(deliver(SLOT_A, 'x'.repeat(5000)));
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toBeNull();
+  });
+
+  it('reports a node whose key read fails with a server error as unreachable', async () => {
+    install({ respond: (call) => (call.path.endsWith('/key') ? { status: 503, body: { error: 'busy' } } : undefined) });
+    expect((await service().evaluateReadiness(transport.nodeId())).readiness).toBe('unreachable');
   });
 
   it('treats an answer with no known code (a bridge or proxy error) as a retryable failure', async () => {

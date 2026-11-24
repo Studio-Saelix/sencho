@@ -3,10 +3,14 @@
  * delivery on both sides (direct proxy, Pilot, and the local node), then look
  * for the secret, and its first 8 characters, everywhere Sencho writes or
  * answers: node responses, requests on the wire, every audit row, console
- * output, diagnostics, every new table, the writer container's options, and
- * the stack-side surfaces of a stack that references the secret volume (its
- * Compose Doctor report and stored findings, its dossier, and the fleet
- * snapshot capture).
+ * output, diagnostics, every new table and the writer container's options.
+ *
+ * It also reads the stack-side outputs of a stack that references the secret
+ * volume (its Compose Doctor report and stored findings, its dossier, and the
+ * fleet snapshot capture). None of those readers opens a volume, so this part
+ * proves that what they emit about such a stack carries no secret material and
+ * that each one did cover the stack; that no reader can open the volume at all
+ * is proven by the volume, stack file, recovery and prune refusal tests.
  */
 import fs from 'fs';
 import path from 'path';
@@ -117,6 +121,9 @@ describe('sealed secret leak sweep', () => {
       fake.exitCodes.push(1);
       await run(() => deliver(SLOT_A, `${SENTINEL}-d`));
       await run(() => deliver(SLOT_A, `${SENTINEL}${'x'.repeat(5000)}`));
+      // Refused while the failed delivery is unconfirmed, then converged and removed.
+      await run(() => service.remove({ nodeId, purpose: PURPOSE, slot: SLOT_A, actor: 'admin' }));
+      await run(() => deliver(SLOT_A, `${SENTINEL}-d`));
       await run(() => service.remove({ nodeId, purpose: PURPOSE, slot: SLOT_A, actor: 'admin' }));
       await run(() => service.remove({ nodeId, purpose: PURPOSE, slot: SLOT_B, actor: 'admin' }));
       fake.volumes.set('sencho_edge_secret', {});
@@ -161,6 +168,7 @@ describe('sealed secret leak sweep', () => {
     expect(dossier.status).toBe(200);
     const { captureLocalNodeFiles } = await import('../utils/snapshot-capture');
     const capture = await captureLocalNodeFiles({ id: localId, name: 'local', mode: 'proxy' }, true);
+    expect(capture.stacks.some((stack) => stack.stackName === consumer)).toBe(true);
 
     db.flushAuditLogBuffer();
     const { collectDiagnostics } = await import('../services/DiagnosticsService');

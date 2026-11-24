@@ -208,16 +208,22 @@ export class SealedSecretStore {
         throw stale(record);
       }
 
-      // A volume removed outside Sencho holds no file to remove. Running the
-      // writer would only make Docker create the volume again.
-      let volumeExists: boolean;
+      // Only the store's own volume holds the store's file. A volume removed
+      // outside Sencho holds no file to remove (running the writer would only
+      // make Docker create it again), and a volume someone recreated without
+      // the store's label is not touched: the store's file went with the old one.
+      let labels: Record<string, string> | null;
       try {
-        volumeExists = await this.inspectVolumeLabels(this.docker(), getSealedSecretPurpose(purposeId).volume) !== null;
+        labels = await this.inspectVolumeLabels(this.docker(), getSealedSecretPurpose(purposeId).volume);
       } catch (error: unknown) {
         this.audit('sealed_secret.refused', { ...facts, reason: 'store_unavailable' }, who, 503);
         throw error;
       }
-      if (volumeExists) await this.write(purposeId, { kind: 'remove' }, facts, who);
+      if (labels?.[SECRET_VOLUME_LABEL] === purposeId) {
+        await this.write(purposeId, { kind: 'remove' }, facts, who);
+      } else if (labels !== null) {
+        console.warn('[SealedSecrets] Secret volume was replaced outside Sencho; recording the removal without touching it.');
+      }
       this.record(
         db,
         { ...record, generation, state: 'deleted', fingerprint: null, acceptedAt: Date.now() },
@@ -282,8 +288,8 @@ export class SealedSecretStore {
     // Labelled but no record: either the store's own first write failed after
     // creating the volume (safe to retry), or someone else made a look-alike
     // and may already have it mounted. Only an unmounted volume is adopted. A
-    // writer a crashed run left behind is the store's own and is removed first,
-    // so it never counts as a mount.
+    // writer container a crashed run left behind (found by the store's helper
+    // label) is removed first, so it never counts as a mount.
     if (!hasRecord) {
       await removeLeftoverWriters(docker, volume);
       if (await this.isMounted(docker, volume)) throw this.foreign(volume);

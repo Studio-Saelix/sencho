@@ -217,6 +217,22 @@ describe('SealedSecretStore.remove', () => {
     expect(fake.volumes.get(VOLUME)).toEqual({ 'io.sencho.secret': PURPOSE });
   });
 
+  it('records the removal without touching a volume someone recreated without the store label', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    fake.volumes.set(VOLUME, {});
+    const runs = fake.writerRuns();
+    expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('deleted');
+    expect(fake.writerRuns()).toBe(runs);
+    expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ state: 'deleted', generation: 2 });
+  });
+
+  it('sweeps a leftover writer before every run, also when the node already holds a record', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    fake.leftoverWriters.push({ Id: 'replayable-writer', volume: VOLUME });
+    expect((await store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO)).status).toBe('accepted');
+    expect(fake.removedContainers).toEqual(['replayable-writer']);
+  });
+
   it('audits a removal that names a slot other than the live one', async () => {
     await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
     await store.remove(PURPOSE, SLOT_B, 2, WHO);

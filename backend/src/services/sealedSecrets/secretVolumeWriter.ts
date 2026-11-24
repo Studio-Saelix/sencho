@@ -144,11 +144,13 @@ function exitMessage(code: number): string {
 }
 
 /**
- * Remove writer containers a crashed or killed run left behind on this volume.
- * Each run removes its own container when it ends, so any writer found here
- * belongs to a run that no longer exists. Left in place, it would count as a
+ * Remove writer containers a crashed or killed run left behind on this volume,
+ * found by the helper label the store sets. Each run removes its own container
+ * when it ends and runs on a purpose are serialized, so a labelled writer found
+ * here is not a live run of this process. Left in place, it would count as a
  * container that mounts the volume, and starting it again would replay its
- * write or removal.
+ * write or removal. The label is evidence, not proof: whoever can create
+ * containers on the node can set it too, and is host-equivalent there anyway.
  */
 export async function removeLeftoverWriters(docker: Docker, volumeName: string): Promise<void> {
   let leftovers: Docker.ContainerInfo[];
