@@ -6,7 +6,14 @@ export const IMAGE_UPDATE_FACTS_IMAGE_LIMIT = 24;
 export const IMAGE_UPDATE_FACTS_STACK_LIMIT = 500;
 export const IMAGE_UPDATE_FACTS_BYTE_LIMIT = 1024 * 1024;
 
-export type ImageUpdateDetectWireResult = ImageUpdateDetectResult;
+/**
+ * A detection result on the wire. `candidateDigest` is sent only when the hub
+ * asked for detection directives: an older hub's strict parser rejects a key it
+ * does not know.
+ */
+export type ImageUpdateDetectWireResult = Omit<ImageUpdateDetectResult, 'candidateDigest'> & {
+    candidateDigest?: string | null;
+};
 export type ImageUpdateFactsModel = { renderable: true }
     | { renderable: false; code: 'effective_model_render_failed'; error: string };
 
@@ -50,6 +57,21 @@ export interface ImageUpdateStackFacts extends ImageUpdateBoundFacts {
      * keeps the last decision it recorded rather than assuming allow.
      */
     unattendedPolicy?: ImageUpdateUnattendedPolicyFacts;
+    /**
+     * The update detection labels evaluated on the node that owns the stack,
+     * one entry per service with a non-default directive. Present only when
+     * the request asked for detection.
+     */
+    directives?: ImageUpdateDirectiveFacts[];
+}
+
+/** One service's update detection labels, as the owning node resolved them. */
+export interface ImageUpdateDirectiveFacts {
+    service: string;
+    check: boolean;
+    /** Digest (`sha256:...`, lowercase) or tag entries. */
+    ignore: string[];
+    changelogUrl: string | null;
 }
 
 /** The Updates-view projection of the unattended decision, evaluated on the node that owns the stack. */

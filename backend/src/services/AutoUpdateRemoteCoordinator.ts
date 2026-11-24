@@ -7,11 +7,13 @@ import { safeRemoteFetch } from '../utils/outboundTarget';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { prepareOutboundRegistryDeliveryBody, throwRegistryDeliveryRefusal } from '../helpers/registryDeliveryOutbound';
-import { createAutoUpdateDigestGateState, recordAutoUpdateImageCheck, messageWhenNoDigestUpdate, messageWhenDigestApplyBlockedByCheckErrors } from '../helpers/autoUpdateDigestGate';
+import { alsoPullsNote, evaluateAutoUpdateTrigger, messageWhenNoDigestUpdate, messageWhenDigestApplyBlockedByCheckErrors } from '../helpers/autoUpdateDigestGate';
+import { directivesFromFacts } from './updateDetectionDirectives';
+import type { RemoteImageUpdateFactsOptions } from './remoteImageUpdateClient';
 import { awaitHubPostUpdateVerification, type HubVerificationTransport } from './hubPostUpdateVerification';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
+import { SENCHO_LABEL_DETECTION_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
 import { buildSystemPolicyGateOptions, remoteCandidateGateRefusal } from '../helpers/policyGate';
 import {
   describePolicySkip,
@@ -21,7 +23,7 @@ import {
 } from './updatePolicy';
 
 export interface RemoteAutoUpdateScanner extends HubVerificationTransport {
-  inspectRemoteStack(nodeId: number, stack: string, signal: AbortSignal): Promise<{
+  inspectRemoteStack(nodeId: number, stack: string, signal: AbortSignal, options?: RemoteImageUpdateFactsOptions): Promise<{
     facts: ImageUpdateStackFacts;
     imageResults: Map<string, ImageCheckResult>;
   }>;
@@ -110,10 +112,13 @@ export class AutoUpdateRemoteCoordinator {
     const stacks = [...new Set(selected)];
     await input.caller.authorizeAll(input.nodeId, stacks);
     if (!ImageUpdateService.isChecksEnabled()) return { handled: true, result: 'Image update detection is disabled for this node; skipped.' };
+    // The pre-flight verifies every image it would pull, so the target is asked
+    // for its detection labels and still probes every image.
+    const detection = meta.meta.capabilities.includes(SENCHO_LABEL_DETECTION_CAPABILITY);
     const results: string[] = [];
     for (const stack of stacks) {
       try {
-        results.push(await this.executeStack(input, stack));
+        results.push(await this.executeStack(input, stack, detection));
       } catch (error) {
         console.error(
           `[AutoUpdateCoordinator] Remote stack update failed for ${sanitizeForLog(stack)}:`,
@@ -163,7 +168,7 @@ export class AutoUpdateRemoteCoordinator {
       .join('\n');
   }
 
-  private async executeStack(input: RemoteAutoUpdateInput, stack: string): Promise<string> {
+  private async executeStack(input: RemoteAutoUpdateInput, stack: string, detection: boolean): Promise<string> {
     // The target's own gate decides the candidate when its build can see one. A
     // build that cannot is a different decision, and it is the hub's to make:
     // there is nobody on the target to ask. Checking here, before the forward,
@@ -178,7 +183,7 @@ export class AutoUpdateRemoteCoordinator {
     );
     if (candidateRefusal) return `Stack "${stack}": ${candidateRefusal}`;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const prepared = await this.prepare(input, stack);
+      const prepared = await this.prepare(input, stack, detection);
       if ('message' in prepared) return prepared.message;
       const target = NodeRegistry.getInstance().getProxyTarget(input.nodeId);
       if (!target) throw new Error('Remote target is unavailable');
@@ -209,30 +214,41 @@ export class AutoUpdateRemoteCoordinator {
       const verification = await awaitHubPostUpdateVerification({
         nodeId: input.nodeId, stack, targetResponse: { status: response.status, body: result }, caller: 'coordinator', transport: input.scanner,
       });
-      const message = `Stack "${stack}": updated (${prepared.images.join(', ')}).`;
+      const message = `Stack "${stack}": updated (${prepared.images.join(', ')}).${prepared.alsoPulls}`;
       return verification.detail ? `${message} ${verification.detail}` : message;
     }
     throw new Error('Automatic update observation retry exhausted');
   }
 
-  private async prepare(input: RemoteAutoUpdateInput, stack: string): Promise<{ message: string } | { body: Record<string, unknown>; images: string[] }> {
+  private async prepare(
+    input: RemoteAutoUpdateInput,
+    stack: string,
+    detection: boolean,
+  ): Promise<{ message: string } | { body: Record<string, unknown>; images: string[]; alsoPulls: string }> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => { controller.abort(); reject(new Error('Automatic update preparation timed out')); }, 90_000);
     });
-    const work = async (): Promise<{ message: string } | { body: Record<string, unknown>; images: string[] }> => {
-      const { facts, imageResults } = await input.scanner.inspectRemoteStack(input.nodeId, stack, controller.signal);
+    const work = async (): Promise<{ message: string } | { body: Record<string, unknown>; images: string[]; alsoPulls: string }> => {
+      const { facts, imageResults } = await input.scanner.inspectRemoteStack(
+        input.nodeId, stack, controller.signal, detection ? { detection: true, probeAll: true } : undefined,
+      );
       if (controller.signal.aborted) throw new Error('Automatic update preparation aborted');
       if (!facts.model.renderable || facts.name !== stack || facts.images.length > IMAGE_UPDATE_FACTS_IMAGE_LIMIT) {
         return { message: `Stack "${stack}": image facts are incomplete; skipped auto-update.` };
       }
-      const gate = createAutoUpdateDigestGateState();
-      for (const image of facts.images) {
-        const result = imageResults.get(image.ref);
-        if (!result) gate.checkErrors.push('Update check incomplete');
-        else recordAutoUpdateImageCheck(gate, image.ref, result);
+      const owners = new Map<string, string[]>();
+      for (const service of facts.services) {
+        for (const ref of new Set([...(service.declaredImage ? [service.declaredImage] : []), ...service.runtimeImages])) {
+          owners.set(ref, [...(owners.get(ref) ?? []), service.name]);
+        }
       }
+      const gate = await evaluateAutoUpdateTrigger(
+        facts.images.map(image => ({ ref: image.ref, owners: (owners.get(image.ref) ?? []).sort() })),
+        directivesFromFacts(facts),
+        async ref => imageResults.get(ref) ?? null,
+      );
       if (!gate.hasDigestUpdate) return { message: messageWhenNoDigestUpdate(stack, gate, facts.images.length) };
       const blocked = messageWhenDigestApplyBlockedByCheckErrors(stack, gate);
       if (blocked) return { message: blocked };
@@ -251,7 +267,7 @@ export class AutoUpdateRemoteCoordinator {
       });
       if (!augmented.ok) throwRegistryDeliveryRefusal(augmented);
       if (controller.signal.aborted) throw new Error('Automatic update preparation aborted');
-      return { body: augmented.body, images: gate.updatedImages };
+      return { body: augmented.body, images: gate.updatedImages, alsoPulls: alsoPullsNote(gate) };
     };
     try { return await Promise.race([work(), deadline]); }
     finally { clearTimeout(timer); }

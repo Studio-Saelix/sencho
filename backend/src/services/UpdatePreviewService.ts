@@ -12,7 +12,7 @@ import {
     configIdForLocalBuild,
     parseImageRef,
     selectLocalRepoDigests,
-    compareLocalToRemoteTag,
+    compareLocalToRemoteTagDetailed,
     listRegistryTagsResult,
     type ParsedRef,
     type RegistryCredentials,
@@ -33,6 +33,15 @@ import {
     PREVIEW_TAG_LIST_PAGE_SIZE,
     type TagEnumOutcome,
 } from './imageUpdateDetect';
+import { readEffectiveStackFacts } from './effectiveServiceModel';
+import {
+    applyIgnore,
+    directiveFor,
+    directivesFromResolution,
+    uncheckedRefs,
+    type ServiceDetectionDirective,
+    type ServiceDetectionState,
+} from './updateDetectionDirectives';
 
 export type { SemverBump, PreviewImageCheckStatus, TagEnumOutcome, ListRegistryTagsResultFn };
 export {
@@ -79,6 +88,19 @@ export interface UpdatePreviewImage {
      * masking never hides an unverified image from the mixed-state gate.
      */
     digest_error: string | null;
+    /**
+     * What the service's update detection labels did: `off` when its checks
+     * are off (the image was not checked for it), `ignored` when every pending
+     * update was skipped. Absent when no label changed the result.
+     */
+    detection?: ServiceDetectionState;
+    /**
+     * The registry's current digest for the tag when this is a same-tag
+     * rebuild: the entry that skips it in `io.sencho.update.ignore`.
+     */
+    candidate_digest?: string | null;
+    /** The service's `io.sencho.update.changelog` link, on a pending update only. */
+    changelog_url?: string | null;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -179,7 +201,7 @@ export interface LocalDigestInfo {
 
 export interface ComputePreviewDeps {
     getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
-    compareDigest: typeof compareLocalToRemoteTag;
+    compareDigest: typeof compareLocalToRemoteTagDetailed;
     listRegistryTagsResult: ListRegistryTagsResultFn;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
 }
@@ -202,7 +224,45 @@ function imageFromDetect(
         check_status: detected.checkStatus,
         check_error: detected.reason,
         digest_error: detected.digestError,
+        candidate_digest: detected.digestUpdate ? detected.candidateDigest : null,
     };
+}
+
+/** The image a checks-off service shows: not checked, never "up to date". */
+function uncheckedServiceImage(service: string, imageRef: string): UpdatePreviewImage {
+    return {
+        ...notCheckableImage(service, imageRef),
+        current_tag: parseImageRef(imageRef)?.tag ?? 'unknown',
+        detection: 'off',
+    };
+}
+
+/**
+ * One service's view of an image's detection, under its detection directive:
+ * checks off show the image as not checked, skipped candidates are cleared,
+ * and the changelog link rides on a pending update. `detected` is null when
+ * the image never reached the registry, so there is nothing to skip.
+ */
+export function servicePreviewImage(
+    service: string,
+    base: UpdatePreviewImage,
+    detected: ImageUpdateDetectResult | null,
+    directive: ServiceDetectionDirective,
+): UpdatePreviewImage {
+    if (!directive.check) return uncheckedServiceImage(service, base.image);
+    let image: UpdatePreviewImage = { ...base, service };
+    if (detected && directive.ignore.length > 0) {
+        const applied = applyIgnore(detected, directive.ignore, base.current_tag);
+        if (applied.ignored) {
+            image = {
+                ...imageFromDetect(service, base.image, base.current_tag, applied.result),
+                ...(applied.result.hasUpdate ? {} : { detection: 'ignored' as const }),
+            };
+        }
+    }
+    return image.has_update && directive.changelogUrl
+        ? { ...image, changelog_url: directive.changelogUrl }
+        : image;
 }
 
 function notCheckableImage(service: string, imageRef: string): UpdatePreviewImage {
@@ -243,9 +303,18 @@ export async function computeImagePreview(
     imageRef: string,
     deps: ComputePreviewDeps,
 ): Promise<UpdatePreviewImage> {
+    return (await computeImageDetection(service, imageRef, deps)).preview;
+}
+
+/** The preview of one image plus the detection behind it, or null when it never reached the registry. */
+async function computeImageDetection(
+    service: string,
+    imageRef: string,
+    deps: ComputePreviewDeps,
+): Promise<{ preview: UpdatePreviewImage; detected: ImageUpdateDetectResult | null }> {
     const parsed = parseImageRef(imageRef);
     if (!parsed) {
-        return notCheckableImage(service, imageRef);
+        return { preview: notCheckableImage(service, imageRef), detected: null };
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
@@ -255,17 +324,20 @@ export async function computeImagePreview(
     // funneled into detectImageUpdate's "no local digest" error path, which
     // would misreport it as a verification failure instead of not applicable.
     if (localInfo.emptyReason === 'not_checkable') {
-        return notCheckableImage(service, imageRef);
+        return { preview: notCheckableImage(service, imageRef), detected: null };
     }
     // Inspect failure and unresolved RepoDigests never reach the registry, and
     // detectImageUpdate's generic "no local digest" reason would blur these two
     // distinct causes together; keep the specific reason, matching what
     // ImageUpdateService.checkImage reports for the same two cases.
     if (localInfo.emptyReason === 'inspect_failed') {
-        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image');
+        return { preview: failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image'), detected: null };
     }
     if (localInfo.emptyReason === 'unresolved') {
-        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest');
+        return {
+            preview: failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest'),
+            detected: null,
+        };
     }
     const detected = await detectImageUpdate({
         localDigests: localInfo.digests,
@@ -279,7 +351,7 @@ export async function computeImagePreview(
             listRegistryTagsResult: deps.listRegistryTagsResult,
         },
     });
-    return imageFromDetect(service, imageRef, parsed.tag, detected);
+    return { preview: imageFromDetect(service, imageRef, parsed.tag, detected), detected };
 }
 
 function buildRollbackTarget(image: string, currentTag: string): string | null {
@@ -411,10 +483,12 @@ export class UpdatePreviewService {
             const { RemoteImageUpdateService } = await import('./RemoteImageUpdateService');
             return RemoteImageUpdateService.getInstance().getPreview(nodeId, stackName, AbortSignal.timeout(90_000));
         }
-        const [stackImages, buildServices] = await Promise.all([
+        const [stackImages, buildServices, facts] = await Promise.all([
             loadStackImages(nodeId, stackName),
             loadStackBuildServices(nodeId, stackName),
+            readEffectiveStackFacts(nodeId, stackName),
         ]);
+        const directives = directivesFromResolution(facts.model.renderable ? facts.labels : null);
         if (stackImages.length === 0) {
             return buildSummary(stackName, [], buildServices);
         }
@@ -422,7 +496,7 @@ export class UpdatePreviewService {
         const docker = DockerController.getInstance(nodeId);
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
-            compareDigest: compareLocalToRemoteTag,
+            compareDigest: compareLocalToRemoteTagDetailed,
             listRegistryTagsResult,
             getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
@@ -448,18 +522,25 @@ export class UpdatePreviewService {
             },
         };
 
+        // A ref only checks-off services use never reaches the registry.
+        const byService = new Map<string, string[]>();
+        for (const { service, image } of stackImages) byService.set(service, [...(byService.get(service) ?? []), image]);
+        const unchecked = uncheckedRefs([...byService].map(([name, refs]) => ({ name, refs })), directives);
+
         // Memoize service-independent detection by image ref so shared images
-        // hit the registry once, then attach each service name separately.
-        const detectByRef = new Map<string, Promise<UpdatePreviewImage>>();
+        // hit the registry once, then apply each service's directive separately.
+        const detectByRef = new Map<string, ReturnType<typeof computeImageDetection>>();
         const results = await Promise.all(
             stackImages.map(async ({ service, image }) => {
+                const directive = directiveFor(directives, service);
+                if (unchecked.has(image)) return uncheckedServiceImage(service, image);
                 let shared = detectByRef.get(image);
                 if (!shared) {
-                    shared = computeImagePreview('_shared_', image, deps);
+                    shared = computeImageDetection('_shared_', image, deps);
                     detectByRef.set(image, shared);
                 }
-                const base = await shared;
-                return { ...base, service };
+                const { preview, detected } = await shared;
+                return servicePreviewImage(service, preview, detected, directive);
             }),
         );
         return buildSummary(stackName, results, buildServices);

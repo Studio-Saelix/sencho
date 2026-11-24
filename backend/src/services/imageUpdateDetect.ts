@@ -10,7 +10,7 @@
  *      (tagUpdate; advisory only until Compose is edited).
  */
 import {
-    compareLocalToRemoteTag,
+    compareLocalToRemoteTagDetailed,
     listRegistryTagsResult,
     type DigestComparisonResult,
     type RegistryCredentials,
@@ -152,6 +152,8 @@ export async function listAllRegistryTagsBounded(
     };
 }
 
+type DetailedComparison = Awaited<ReturnType<typeof compareLocalToRemoteTagDetailed>>;
+
 export interface ImageUpdateDetectInput {
     localDigests: readonly string[];
     platform: { os: string; architecture: string };
@@ -173,10 +175,16 @@ export interface ImageUpdateDetectResult {
     /** Best operator-facing uncertainty reason for lastError / tooltips. */
     reason: string | null;
     semverBump: SemverBump;
+    /**
+     * The registry's current digest for the declared tag when it differs from
+     * the local image (a same-tag rebuild), else null. This is the digest an
+     * `io.sencho.update.ignore` entry names to skip that rebuild.
+     */
+    candidateDigest: string | null;
 }
 
 export interface DetectImageUpdateDeps {
-    compareDigest?: typeof compareLocalToRemoteTag;
+    compareDigest?: typeof compareLocalToRemoteTagDetailed;
     listRegistryTagsResult?: ListRegistryTagsResultFn;
 }
 
@@ -210,7 +218,7 @@ export function resolveImageCheckStatus(args: {
     return 'failed';
 }
 
-function uncertaintyReason(
+export function uncertaintyReason(
     checkStatus: PreviewImageCheckStatus,
     digestError: string | null,
     tagEnumReason: string | null,
@@ -225,11 +233,11 @@ function uncertaintyReason(
 export async function detectImageUpdate(args: ImageUpdateDetectInput & {
     deps?: DetectImageUpdateDeps;
 }): Promise<ImageUpdateDetectResult> {
-    const compareDigest = args.deps?.compareDigest ?? compareLocalToRemoteTag;
+    const compareDigest = args.deps?.compareDigest ?? compareLocalToRemoteTagDetailed;
     const listFn = args.deps?.listRegistryTagsResult ?? listRegistryTagsResult;
     const tagApplicable = !isMovingTag(args.tag);
 
-    const comparisonPromise: Promise<DigestComparisonResult> = args.localDigests.length > 0
+    const comparisonPromise: Promise<DetailedComparison> = args.localDigests.length > 0
         ? compareDigest(
             args.localDigests,
             args.registry,
@@ -244,7 +252,10 @@ export async function detectImageUpdate(args: ImageUpdateDetectInput & {
         ? listAllRegistryTagsBounded(listFn, args.registry, args.repo, args.credentials)
         : Promise.resolve({ kind: 'skipped' });
 
-    const [comparison, tagOutcome] = await Promise.all([comparisonPromise, tagPromise]);
+    const [detailed, tagOutcome] = await Promise.all([comparisonPromise, tagPromise]);
+    const comparison: DigestComparisonResult = detailed.kind === 'error'
+        ? { kind: 'error', reason: detailed.reason ?? 'Unknown error' }
+        : { kind: detailed.kind };
 
     let nextTag: string | null = null;
     if (tagOutcome.kind === 'complete' || tagOutcome.kind === 'incomplete') {
@@ -289,5 +300,6 @@ export async function detectImageUpdate(args: ImageUpdateDetectInput & {
         checkStatus,
         reason: uncertaintyReason(checkStatus, digestError, tagEnumReason),
         semverBump,
+        candidateDigest: digestUpdate && detailed.primaryDigest ? detailed.primaryDigest.toLowerCase() : null,
     };
 }

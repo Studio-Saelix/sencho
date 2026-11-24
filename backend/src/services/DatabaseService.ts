@@ -82,6 +82,13 @@ export interface StackServiceStatus {
     hasUpdate: boolean;
     checkStatus: ServiceCheckStatus;
     lastError: string | null;
+    /**
+     * What the service's update detection labels did on this check: `off` when
+     * `io.sencho.update.check` is false (`hasUpdate: false`, `not_checkable`),
+     * `ignored` when every pending update was skipped by
+     * `io.sencho.update.ignore`. Absent when no label changed the result.
+     */
+    detection?: 'off' | 'ignored';
 }
 
 /**
@@ -227,7 +234,12 @@ function parseServicesJson(raw: string | null | undefined): StackServiceStatus[]
     try {
         const parsed = JSON.parse(raw) as { version?: unknown; services?: unknown };
         if (parsed?.version !== SERVICES_JSON_VERSION || !Array.isArray(parsed.services)) return [];
-        return parsed.services.filter(isStackServiceStatus);
+        // A detection value this version does not know drops only that field.
+        return parsed.services.filter(isStackServiceStatus).map(service => {
+            if (service.detection === undefined || service.detection === 'off' || service.detection === 'ignored') return service;
+            const { detection: _unknown, ...rest } = service;
+            return rest;
+        });
     } catch {
         return [];
     }

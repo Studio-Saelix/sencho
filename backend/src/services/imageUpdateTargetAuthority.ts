@@ -13,7 +13,7 @@ export function failedImageDetection(reason: string): ImageUpdateDetectResult {
     return {
         hasUpdate: false, digestUpdate: false, tagUpdate: false, nextTag: null,
         digestError: reason, tagEnumKind: 'error', tagEnumReason: reason,
-        checkStatus: 'failed', reason, semverBump: 'none',
+        checkStatus: 'failed', reason, semverBump: 'none', candidateDigest: null,
     };
 }
 

@@ -11,10 +11,12 @@ import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { CacheService } from '../services/CacheService';
 import {
-  createAutoUpdateDigestGateState,
+  alsoPullsNote,
+  evaluateAutoUpdateTrigger,
+  localDetectionDirectives,
   messageWhenDigestApplyBlockedByCheckErrors,
   messageWhenNoDigestUpdate,
-  recordAutoUpdateImageCheck,
+  triggerImagesFromContainers,
 } from '../helpers/autoUpdateDigestGate';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { ImageUpdateFactsService, ImageUpdateFactsError } from '../services/ImageUpdateFactsService';
@@ -58,15 +60,20 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
   // never adds the field to a response that an older strict parser would reject.
   const includePolicy = input.policy === true;
   const policyKeyValid = input.policy === undefined || typeof input.policy === 'boolean';
+  // Detection is opt-in for the same reason; `probeAll` only means something with it.
+  const detection = input.detection === true;
+  const detectionKeysValid = (input.detection === undefined || typeof input.detection === 'boolean')
+    && (input.probeAll === undefined || (typeof input.probeAll === 'boolean' && (input.probeAll === false || detection)));
+  const factsOptions = { includePolicy, detection, probeAll: detection && input.probeAll === true };
   const mode = input.roster === true ? 'roster'
     : input.allStacks === true ? 'allStacks'
       : stackName !== null ? 'stack' : null;
   const allowedKeys = (keys: string[]): boolean =>
     Object.keys(input).every(key => ['contractVersion', 'requestNonce'].includes(key) || keys.includes(key));
-  if (input.contractVersion !== 1 || !requestNonce || !mode || !policyKeyValid
+  if (input.contractVersion !== 1 || !requestNonce || !mode || !policyKeyValid || !detectionKeysValid
     || (mode === 'roster' && !allowedKeys(['roster']))
-    || (mode === 'allStacks' && !allowedKeys(['allStacks', 'policy']))
-    || (mode === 'stack' && !(allowedKeys(['stack', 'policy']) && stackName !== null && isValidStackName(stackName)))) {
+    || (mode === 'allStacks' && !allowedKeys(['allStacks', 'policy', 'detection', 'probeAll']))
+    || (mode === 'stack' && !(allowedKeys(['stack', 'policy', 'detection', 'probeAll']) && stackName !== null && isValidStackName(stackName)))) {
     res.status(400).json({ ...envelope, error: 'Invalid image update facts request' });
     return;
   }
@@ -94,7 +101,7 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
         res.status(404).json({ ...envelope, error: 'Stack not found' });
         return;
       }
-      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, includePolicy);
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, factsOptions);
       res.json({ ...envelope, stacks: [facts] });
       return;
     }
@@ -106,7 +113,7 @@ imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, r
     const collected = [];
     let bytes = Buffer.byteLength(JSON.stringify({ ...envelope, stacks: [] }));
     for (const stackName of stacks) {
-      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, includePolicy);
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce, factsOptions);
       bytes += Buffer.byteLength(JSON.stringify(facts)) + (collected.length ? 1 : 0);
       if (bytes > IMAGE_UPDATE_FACTS_BYTE_LIMIT) {
         res.status(413).json({ ...envelope, error: 'Image update facts response exceeds the byte cap; request stacks by name' });
@@ -753,28 +760,19 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        const imageRefs = [...new Set(
-          containers
-            .map((c: { Image?: string }) => c.Image)
-            .filter((img): img is string => !!img && !img.startsWith('sha256:')),
-        )];
+        const images = triggerImagesFromContainers(containers);
+        const imageRefs = images.map(image => image.ref);
 
         if (imageRefs.length === 0) {
           results.push(`Stack "${stackName}": no pullable images; skipped.`);
           continue;
         }
 
-        const gate = createAutoUpdateDigestGateState();
-        for (const imageRef of imageRefs) {
-          try {
-            const result = await imageUpdateService.checkImage(docker, imageRef);
-            recordAutoUpdateImageCheck(gate, imageRef, result);
-          } catch (e) {
-            const errMsg = getErrorMessage(e, String(e));
-            gate.checkErrors.push(errMsg);
-            console.warn('[AutoUpdate] Failed to check image %s:', sanitizeForLog(imageRef), sanitizeForLog((e as Error)?.message ?? String(e)));
-          }
-        }
+        const gate = await evaluateAutoUpdateTrigger(
+          images,
+          await localDetectionDirectives(req.nodeId, stackName),
+          ref => imageUpdateService.checkImage(docker, ref),
+        );
 
         if (!gate.hasDigestUpdate) {
           results.push(messageWhenNoDigestUpdate(stackName, gate, imageRefs.length));
@@ -796,7 +794,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           // a remote node carries `scheduled` through the checked request instead.
           trigger: 'automatic',
         });
-        results.push(applied.message);
+        results.push(applied.applied ? `${applied.message}${alsoPullsNote(gate)}` : applied.message);
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);

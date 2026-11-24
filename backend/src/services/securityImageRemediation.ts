@@ -88,6 +88,16 @@ export function buildUpdateServiceIndex(
   return index;
 }
 
+/**
+ * True when the service's own check found a newer image: a reported update, or
+ * one the service skips with `io.sencho.update.ignore`. A skip hides the update
+ * from reporting; it does not mean upstream has nothing newer, so it is never
+ * read as waiting on upstream.
+ */
+function newerImageExists(service: StackServiceStatus): boolean {
+  return service.hasUpdate || service.detection === 'ignored';
+}
+
 function isStackFresh(checkedAt: number, now: number, freshnessWindowMs: number): boolean {
   if (!Number.isFinite(checkedAt) || checkedAt <= 0) return false;
   return now - checkedAt <= freshnessWindowMs;
@@ -112,7 +122,7 @@ function classifyMatches(
       anyUncertain = true;
       continue;
     }
-    if (service.hasUpdate) anyConfirmedUpdate = true;
+    if (newerImageExists(service)) anyConfirmedUpdate = true;
     else anyAuthoritativeNegative = true;
   }
 
@@ -152,7 +162,7 @@ function confirmedUpdateServices(
 ): UpdateServiceTarget[] {
   return matches
     .filter(({ service, checkedAt }) => service.checkStatus === 'ok'
-      && service.hasUpdate
+      && newerImageExists(service)
       && isStackFresh(checkedAt, now, freshnessWindowMs))
     .map(({ stackName, service }) => ({ imageRef, stackName, serviceName: service.service }));
 }

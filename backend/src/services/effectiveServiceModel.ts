@@ -15,12 +15,15 @@
  *
  * Reads only the structural fields a mutation needs; it never reads
  * `environment`, `command`, `entrypoint`, `labels`, `secrets`, or `configs`.
+ * `readEffectiveStackFacts` hands the same render to the Sencho label resolver,
+ * which stays the only reader of `labels`.
  */
 import { ComposeService } from './ComposeService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { isComposeHealthcheckActive } from '../helpers/healthcheckPresence';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { resolveSenchoLabels, type SenchoLabelResolution } from '../helpers/senchoLabels';
 
 const MAX_RENDER_ERROR = 600;
 
@@ -137,30 +140,62 @@ function parseProjectName(parsed: unknown): string | null {
  * stale or partial model.
  */
 export async function buildEffectiveServiceModel(nodeId: number, stackName: string): Promise<EffectiveServiceModelResult> {
+  return (await readEffectiveStackFacts(nodeId, stackName)).model;
+}
+
+/** The service model and the Sencho label resolution of one stack, both from the same render. */
+export interface EffectiveStackFacts {
+  model: EffectiveServiceModelResult;
+  /**
+   * The label resolution of that render, or null when the render failed, timed
+   * out, or did not parse. Null applies no label, exactly as an unrenderable
+   * model does for every other label reader.
+   */
+  labels: SenchoLabelResolution | null;
+}
+
+function unreadableLabels(result: Awaited<ReturnType<ComposeService['renderConfig']>>): boolean {
+  return result.timedOut || result.code !== 0 || !result.rendered;
+}
+
+/**
+ * One `docker compose config` render for a stack, read twice: into the service
+ * model and through the Sencho label resolver. Update scans, rechecks, facts,
+ * previews and unattended triggers read both from here, so the services, the
+ * image refs, the detection labels and the update policy describe one model.
+ */
+export async function readEffectiveStackFacts(nodeId: number, stackName: string): Promise<EffectiveStackFacts> {
   try {
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
     if (result.rendered !== null) {
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(result.rendered);
-        return {
-          renderable: true,
-          services: parseEffectiveServices(parsed),
-          projectName: parseProjectName(parsed),
-        };
+        parsed = JSON.parse(result.rendered);
       } catch (parseErr) {
         // JSON.parse errors carry no file content, so the message is safe to log.
         console.warn('[EffectiveServiceModel] Effective model parse failed for %s:',
           sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
         return {
-          renderable: false,
-          code: 'effective_model_render_failed',
-          error: 'Sencho could not parse the rendered Compose model.',
+          model: {
+            renderable: false,
+            code: 'effective_model_render_failed',
+            error: 'Sencho could not parse the rendered Compose model.',
+          },
+          labels: null,
         };
       }
+      return {
+        model: {
+          renderable: true,
+          services: parseEffectiveServices(parsed),
+          projectName: parseProjectName(parsed),
+        },
+        labels: unreadableLabels(result) ? null : resolveSenchoLabels(parsed),
+      };
     }
 
     if (result.refusal) {
-      return { renderable: false, code: 'effective_model_render_failed', error: result.refusal };
+      return { model: { renderable: false, code: 'effective_model_render_failed', error: result.refusal }, labels: null };
     }
 
     // Raw stderr can echo file content/secrets and is never surfaced; only the
@@ -169,7 +204,7 @@ export async function buildEffectiveServiceModel(nodeId: number, stackName: stri
     const error = missing.length
       ? `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`
       : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.';
-    return { renderable: false, code: 'effective_model_render_failed', error };
+    return { model: { renderable: false, code: 'effective_model_render_failed', error }, labels: null };
   } catch (err) {
     // Spawn failure (docker unavailable), or an unexpected throw before/inside the
     // render. Leave a sanitized breadcrumb so a non-spawn bug is not invisible, then
@@ -178,6 +213,6 @@ export async function buildEffectiveServiceModel(nodeId: number, stackName: stri
       sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     const error = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.')).slice(0, MAX_RENDER_ERROR).trim()
       || 'Sencho could not run docker compose on this node.';
-    return { renderable: false, code: 'effective_model_render_failed', error };
+    return { model: { renderable: false, code: 'effective_model_render_failed', error }, labels: null };
   }
 }

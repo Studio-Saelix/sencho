@@ -1,14 +1,40 @@
-import { fetchRemoteImageUpdateFacts, fetchRemoteImageUpdateRoster } from './remoteImageUpdateClient';
+import {
+    fetchRemoteImageUpdateFacts,
+    fetchRemoteImageUpdateRoster,
+    type RemoteImageUpdateFactsOptions,
+} from './remoteImageUpdateClient';
 import { probeRemoteImageUpdate } from './remoteImageUpdateProbe';
 import { mergeImageUpdateAuthority } from './imageUpdateAuthority';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING, type ImageCheckResult } from './ImageUpdateService';
 import type { RemoteAutoUpdateScanner } from './AutoUpdateRemoteCoordinator';
-import type { ImageUpdateImageFacts } from './imageUpdateFacts';
+import type { ImageUpdateImageFacts, ImageUpdateStackFacts } from './imageUpdateFacts';
 import { DatabaseService } from './DatabaseService';
-import { buildSummary, type UpdatePreviewImage } from './UpdatePreviewService';
+import { buildSummary, servicePreviewImage, type UpdatePreviewImage } from './UpdatePreviewService';
+import type { ImageUpdateDetectResult } from './imageUpdateDetect';
+import {
+    checkResultFromDetection,
+    directiveFor,
+    directivesFromFacts,
+    uncheckedRefs,
+} from './updateDetectionDirectives';
 import { parseImageRef } from './registry-api';
 import { probeRemoteCapability } from '../helpers/remoteCapabilities';
-import { SENCHO_LABEL_POLICY_CAPABILITY } from '../helpers/senchoLabels';
+import { SENCHO_LABEL_DETECTION_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY } from '../helpers/senchoLabels';
+
+const NOT_CHECKED: ImageCheckResult = { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+
+/**
+ * The refs the hub does not probe: those only checks-off services use, as the
+ * target reported. None unless the request asked for detection without
+ * `probeAll`, because an unattended pre-flight verifies every image.
+ */
+function hubUncheckedRefs(facts: ImageUpdateStackFacts, options: RemoteImageUpdateFactsOptions | undefined): Set<string> {
+    if (!options?.detection || options.probeAll) return new Set();
+    return uncheckedRefs(facts.services.map(service => ({
+        name: service.name,
+        refs: [...(service.declaredImage ? [service.declaredImage] : []), ...service.runtimeImages],
+    })), directivesFromFacts(facts));
+}
 
 export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     private static instance: RemoteImageUpdateService;
@@ -26,16 +52,17 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         nodeId: number,
         stack: string,
         signal: AbortSignal,
-        options?: { includePolicy?: boolean },
+        options?: RemoteImageUpdateFactsOptions,
     ) {
         const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal, options);
+        const unchecked = hubUncheckedRefs(facts, options);
         const imageResults = new Map<string, ImageCheckResult>();
         let next = 0;
         const worker = async () => {
             while (next < facts.images.length) {
                 signal.throwIfAborted();
                 const image = facts.images[next++];
-                imageResults.set(image.ref, await this.checkImage(image, signal));
+                imageResults.set(image.ref, unchecked.has(image.ref) ? NOT_CHECKED : await this.checkImage(image, signal));
             }
         };
         await Promise.all(Array.from({ length: Math.min(4, facts.images.length) }, worker));
@@ -44,17 +71,20 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     }
 
     public async getPreview(nodeId: number, stack: string, signal: AbortSignal) {
-        const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal);
+        const options = { detection: await this.targetEvaluatesDetection(nodeId) };
+        const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal, options);
         if (!facts.model.renderable) throw new Error(facts.model.error);
-        const previews = new Map<string, UpdatePreviewImage>();
+        const directives = directivesFromFacts(facts);
+        const unchecked = hubUncheckedRefs(facts, options);
+        const previews = new Map<string, { preview: UpdatePreviewImage; detected: ImageUpdateDetectResult | null }>();
         let next = 0;
         const worker = async () => {
             while (next < facts.images.length) {
                 signal.throwIfAborted();
                 const image = facts.images[next++];
-                const notCheckable = image.ref.includes('@') || image.emptyReason === 'not_checkable';
+                const notCheckable = image.ref.includes('@') || image.emptyReason === 'not_checkable' || unchecked.has(image.ref);
                 const result = notCheckable ? null : await this.detectImage(image, signal);
-                previews.set(image.ref, {
+                previews.set(image.ref, { detected: result, preview: {
                     service: '', image: image.ref, current_tag: parseImageRef(image.ref)?.tag ?? 'unknown',
                     next_tag: result?.nextTag ?? null, has_update: result?.hasUpdate ?? false,
                     digest_update: result?.digestUpdate ?? false, tag_update: result?.tagUpdate ?? false,
@@ -62,7 +92,8 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
                     check_status: notCheckable ? 'not_checkable' : result?.checkStatus ?? 'failed',
                     check_error: notCheckable ? null : result?.reason ?? (result ? null : 'Update check incomplete'),
                     digest_error: notCheckable ? null : result?.digestError ?? (result ? null : 'Update check incomplete'),
-                });
+                    candidate_digest: result?.digestUpdate ? result.candidateDigest : null,
+                } });
             }
         };
         await Promise.all(Array.from({ length: Math.min(4, facts.images.length) }, worker));
@@ -70,9 +101,10 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         const images = facts.services.flatMap(service => {
             const refs = [...new Set([service.declaredImage, ...service.runtimeImages].filter((ref): ref is string => ref !== null))];
             return refs.map(ref => {
-                const preview = previews.get(ref);
-                if (!preview) throw new Error('Remote preview is missing image evidence');
-                return { ...preview, service: service.name };
+                const entry = previews.get(ref);
+                if (!entry) throw new Error('Remote preview is missing image evidence');
+                // The rule runs after the authority merge, whichever side won it.
+                return servicePreviewImage(service.name, entry.preview, entry.detected, directiveFor(directives, service.name));
             });
         });
         return buildSummary(stack, images, facts.services.filter(service => service.hasBuild).map(service => service.name));
@@ -89,18 +121,15 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         }
         const result = await this.detectImage(image, signal);
         if (!result) return { hasUpdate: false, checkStatus: 'failed', error: 'Update check incomplete' };
-        return {
-            hasUpdate: result.hasUpdate, digestUpdate: result.digestUpdate, tagUpdate: result.tagUpdate,
-            checkStatus: result.checkStatus, ...(result.reason ? { error: result.reason } : {}),
-        };
+        return checkResultFromDetection(result);
     }
 
     public async recheckRemoteStack(nodeId: number, stack: string, signal: AbortSignal) {
         const owner = ImageUpdateService.getInstance();
         if (!ImageUpdateService.isChecksEnabled()) return { warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
         const generation = owner.reserveStackWriteGeneration(nodeId, stack);
-        const includePolicy = await this.targetEvaluatesPolicy(nodeId);
-        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, { includePolicy });
+        const options = await this.scanOptions(nodeId);
+        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, options);
         signal.throwIfAborted();
         return owner.commitRemoteObservation(nodeId, facts, imageResults, generation);
     }
@@ -108,7 +137,7 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     public async checkRemoteNode(nodeId: number, manual = false): Promise<boolean> {
         const owner = ImageUpdateService.getInstance();
         return owner.runRemoteScan(nodeId, manual, async () => {
-            const includePolicy = await this.targetEvaluatesPolicy(nodeId);
+            const options = await this.scanOptions(nodeId);
             const known = Object.keys(DatabaseService.getInstance().getStackUpdateDetail(nodeId));
             const failureGenerations = new Map(known.map(stack => [stack, owner.reserveStackWriteGeneration(nodeId, stack)]));
             let stacks: string[];
@@ -124,7 +153,7 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
             for (const stack of stacks) {
                 try {
                     const signal = AbortSignal.timeout(90_000);
-                    const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, { includePolicy });
+                    const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, options);
                     signal.throwIfAborted();
                     await owner.commitRemoteObservation(nodeId, facts, imageResults, generations.get(stack)!);
                 } catch (error) {
@@ -133,6 +162,24 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
                 }
             }
         });
+    }
+
+    /** The facts a hub-run scan asks for: whatever the target can evaluate. */
+    private async scanOptions(nodeId: number): Promise<RemoteImageUpdateFactsOptions> {
+        const [includePolicy, detection] = await Promise.all([
+            this.targetEvaluatesPolicy(nodeId),
+            this.targetEvaluatesDetection(nodeId),
+        ]);
+        return { includePolicy, detection };
+    }
+
+    /**
+     * Whether the target evaluates the update detection labels. An older target
+     * is never sent the request keys, and its stacks report every update.
+     */
+    public async targetEvaluatesDetection(nodeId: number): Promise<boolean> {
+        const capability = await probeRemoteCapability(nodeId, SENCHO_LABEL_DETECTION_CAPABILITY);
+        return capability.kind === 'supported';
     }
 
     /**

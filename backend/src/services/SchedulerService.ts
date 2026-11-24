@@ -20,10 +20,12 @@ import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { HealthGateService } from './HealthGateService';
 import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
 import {
-    createAutoUpdateDigestGateState,
+    alsoPullsNote,
+    evaluateAutoUpdateTrigger,
+    localDetectionDirectives,
     messageWhenDigestApplyBlockedByCheckErrors,
     messageWhenNoDigestUpdate,
-    recordAutoUpdateImageCheck,
+    triggerImagesFromContainers,
 } from '../helpers/autoUpdateDigestGate';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
@@ -1420,11 +1422,8 @@ export class SchedulerService {
             return `Stack "${stackName}": no containers found; skipped.`;
         }
 
-        const imageRefs = [...new Set(
-            containers
-                .map((c: { Image?: string }) => c.Image)
-                .filter((img): img is string => !!img && !img.startsWith('sha256:'))
-        )];
+        const images = triggerImagesFromContainers(containers);
+        const imageRefs = images.map(image => image.ref);
 
         if (imageRefs.length === 0) {
             return `Stack "${stackName}": no pullable images; skipped.`;
@@ -1434,18 +1433,11 @@ export class SchedulerService {
             console.log(`[SchedulerService] Stack "${stackName}": checking ${imageRefs.length} image(s): ${imageRefs.join(', ')}`);
         }
 
-        const gate = createAutoUpdateDigestGateState();
-
-        for (const imageRef of imageRefs) {
-            try {
-                const result = await imageUpdateService.checkImage(docker, imageRef);
-                recordAutoUpdateImageCheck(gate, imageRef, result);
-            } catch (e) {
-                const msg = getErrorMessage(e, String(e));
-                gate.checkErrors.push(msg);
-                console.warn(`[SchedulerService] Failed to check image ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
-            }
-        }
+        const gate = await evaluateAutoUpdateTrigger(
+            images,
+            await localDetectionDirectives(nodeId, stackName),
+            ref => imageUpdateService.checkImage(docker, ref),
+        );
 
         if (!gate.hasDigestUpdate) {
             return messageWhenNoDigestUpdate(stackName, gate, imageRefs.length);
@@ -1535,7 +1527,7 @@ export class SchedulerService {
             stackName
         );
 
-        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
+        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).${alsoPullsNote(gate)}`;
         return recheckWarning ? `${base} ${recheckWarning}` : base;
     }
 

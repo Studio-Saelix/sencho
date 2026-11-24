@@ -46,6 +46,15 @@ export const SENCHO_UPDATE_LABEL = 'io.sencho.update';
 /** Per-service notification routing key. Read by the one routing-key resolver. */
 export const SENCHO_NOTIFY_ROUTE_LABEL = 'io.sencho.notify.route';
 
+/** Per-service update detection: whether Sencho checks the service's image for updates. */
+export const SENCHO_UPDATE_CHECK_LABEL = 'io.sencho.update.check';
+
+/** Per-service update detection: the pending updates (digests or tags) Sencho does not report. */
+export const SENCHO_UPDATE_IGNORE_LABEL = 'io.sencho.update.ignore';
+
+/** Per-service release notes link shown with a pending update. */
+export const SENCHO_UPDATE_CHANGELOG_LABEL = 'io.sencho.update.changelog';
+
 /** Capability advertised by nodes that resolve this contract. Older nodes degrade as a whole. */
 export const SENCHO_LABELS_CAPABILITY = 'sencho-labels-v1';
 
@@ -56,11 +65,23 @@ export const SENCHO_LABELS_CAPABILITY = 'sencho-labels-v1';
  */
 export const SENCHO_LABEL_POLICY_CAPABILITY = 'sencho-label-policy-v1';
 
-export type SenchoLabelId = 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure' | 'update' | 'notify-route';
+/**
+ * Capability advertised by nodes that evaluate the update detection labels
+ * (`io.sencho.update.check`, `.ignore`, `.changelog`). A hub sends the detection
+ * request keys only to a node that advertises it.
+ */
+export const SENCHO_LABEL_DETECTION_CAPABILITY = 'sencho-label-detection-v1';
+
+export type SenchoLabelId =
+  | 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure' | 'update' | 'notify-route'
+  | 'update-check' | 'update-ignore' | 'update-changelog';
 export type SenchoLabelEffect = 'presentation' | 'operations';
 
 /** The accepted values of the update-eligibility label. */
 export type UpdatePolicyLabel = 'auto' | 'manual' | 'disabled';
+
+/** One pending update a service skips: the registry digest of a same-tag rebuild, or a newer tag. */
+export type UpdateIgnoreTarget = { kind: 'digest'; digest: string } | { kind: 'tag'; tag: string };
 
 /**
  * Where a label may be read from. `compose` is the rendered, authored model;
@@ -95,7 +116,7 @@ interface SenchoLabelDefinitionBase {
    * leaving manual ones to the operator.
    */
   onInvalid: 'ignore-with-diagnostic' | 'restrict-unattended';
-  minCapability: typeof SENCHO_LABELS_CAPABILITY | typeof SENCHO_LABEL_POLICY_CAPABILITY;
+  minCapability: typeof SENCHO_LABELS_CAPABILITY | typeof SENCHO_LABEL_POLICY_CAPABILITY | typeof SENCHO_LABEL_DETECTION_CAPABILITY;
   summary: string;
   example: string;
 }
@@ -112,7 +133,10 @@ export type SenchoLabelDefinition =
   | (SenchoLabelDefinitionBase & { id: 'hidden'; match: ExactMatch; valueType: 'boolean'; parse: (raw: string) => ParseResult<boolean> })
   | (SenchoLabelDefinitionBase & { id: 'infrastructure'; match: ExactMatch; valueType: 'literal-true'; trust: 'compose-or-deployed'; effect: 'operations'; parse: (raw: string) => ParseResult<true> })
   | (SenchoLabelDefinitionBase & { id: 'update'; match: ExactMatch; valueType: 'enum'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_POLICY_CAPABILITY; onInvalid: 'restrict-unattended'; parse: (raw: string) => ParseResult<UpdatePolicyLabel> })
-  | (SenchoLabelDefinitionBase & { id: 'notify-route'; match: ExactMatch; valueType: 'routing-key'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_POLICY_CAPABILITY; parse: (raw: string) => ParseResult<string> });
+  | (SenchoLabelDefinitionBase & { id: 'notify-route'; match: ExactMatch; valueType: 'routing-key'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_POLICY_CAPABILITY; parse: (raw: string) => ParseResult<string> })
+  | (SenchoLabelDefinitionBase & { id: 'update-check'; match: ExactMatch; valueType: 'boolean'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_DETECTION_CAPABILITY; parse: (raw: string) => ParseResult<boolean> })
+  | (SenchoLabelDefinitionBase & { id: 'update-ignore'; match: ExactMatch; valueType: 'update-ignore'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_DETECTION_CAPABILITY; parse: (raw: string) => ParseResult<UpdateIgnoreTarget[]> })
+  | (SenchoLabelDefinitionBase & { id: 'update-changelog'; match: ExactMatch; valueType: 'url'; effect: 'operations'; minCapability: typeof SENCHO_LABEL_DETECTION_CAPABILITY; parse: (raw: string) => ParseResult<string> });
 
 const MAX_URL_LENGTH = 2048;
 const MAX_LINK_NAME_LENGTH = 32;
@@ -193,6 +217,44 @@ export function parseUpdatePolicy(raw: string): ParseResult<UpdatePolicyLabel> {
     ok: false,
     reason: 'Use auto, manual, or disabled. Sencho skips unattended updates for this stack until the value is fixed.',
   };
+}
+
+export const MAX_UPDATE_IGNORE_ENTRIES = 8;
+export const UPDATE_IGNORE_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/i;
+/** Docker's tag grammar. */
+export const UPDATE_IGNORE_TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+
+/** One skip entry: a digest (lowercased) or a tag, or null when it is neither. */
+export function parseUpdateIgnoreEntry(raw: string): UpdateIgnoreTarget | null {
+  const value = raw.trim();
+  if (UPDATE_IGNORE_DIGEST_PATTERN.test(value)) return { kind: 'digest', digest: value.toLowerCase() };
+  if (UPDATE_IGNORE_TAG_PATTERN.test(value)) return { kind: 'tag', tag: value };
+  return null;
+}
+
+/**
+ * The skip list: one to eight comma-separated entries, each an image digest
+ * (`sha256:` and 64 hex) or a tag. One bad entry makes the whole value invalid,
+ * so a typo never silences a different update than the operator meant. The
+ * reason never echoes the value.
+ */
+export function parseUpdateIgnore(raw: string): ParseResult<UpdateIgnoreTarget[]> {
+  const parts = raw.split(',').map(part => part.trim());
+  if (parts.length === 1 && parts[0] === '') {
+    return { ok: false, reason: 'List at least one image digest (sha256:...) or tag.' };
+  }
+  if (parts.length > MAX_UPDATE_IGNORE_ENTRIES) {
+    return { ok: false, reason: `List at most ${MAX_UPDATE_IGNORE_ENTRIES} digests or tags.` };
+  }
+  const out: UpdateIgnoreTarget[] = [];
+  for (const part of parts) {
+    const entry = parseUpdateIgnoreEntry(part);
+    if (!entry) {
+      return { ok: false, reason: 'Each entry must be an image digest (sha256: and 64 hex characters) or a tag, separated by commas.' };
+    }
+    out.push(entry);
+  }
+  return { ok: true, value: out };
 }
 
 const MAX_ROUTING_KEY_LENGTH = 64;
@@ -371,6 +433,54 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     summary: 'Routing key that notification rules match for this service.',
     example: 'io.sencho.notify.route: production',
   },
+  {
+    id: 'update-check',
+    match: { kind: 'exact', key: SENCHO_UPDATE_CHECK_LABEL },
+    scope: 'service',
+    valueType: 'boolean',
+    parse: parseSenchoBoolean,
+    defaultBehavior: 'Sencho checks the service\'s image for updates.',
+    precedence: 'Only changes what Sencho reports. A whole-stack update still pulls this service\'s image; the node-wide detection switch still wins.',
+    conflict: 'The merged Compose model decides the value. An image shared with a service that still checks is checked for that service.',
+    effect: 'operations',
+    trust: 'compose',
+    onInvalid: 'ignore-with-diagnostic',
+    minCapability: SENCHO_LABEL_DETECTION_CAPABILITY,
+    summary: 'Whether Sencho checks this service\'s image for updates.',
+    example: 'io.sencho.update.check: "false"',
+  },
+  {
+    id: 'update-ignore',
+    match: { kind: 'exact', key: SENCHO_UPDATE_IGNORE_LABEL },
+    scope: 'service',
+    valueType: 'update-ignore',
+    parse: parseUpdateIgnore,
+    defaultBehavior: 'Every pending update is reported.',
+    precedence: 'A digest matches the registry\'s current digest for the service\'s tag; a tag matches the newer tag Sencho would report. Any other update still reports. A whole-stack update still pulls the image.',
+    conflict: 'The merged Compose model decides the value. Digests are lowercased.',
+    effect: 'operations',
+    trust: 'compose',
+    onInvalid: 'ignore-with-diagnostic',
+    minCapability: SENCHO_LABEL_DETECTION_CAPABILITY,
+    summary: 'Image digests or tags whose update Sencho does not report for this service.',
+    example: 'io.sencho.update.ignore: "sha256:...,1.27.0"',
+  },
+  {
+    id: 'update-changelog',
+    match: { kind: 'exact', key: SENCHO_UPDATE_CHANGELOG_LABEL },
+    scope: 'service',
+    valueType: 'url',
+    parse: parseSenchoUrlLabel,
+    defaultBehavior: 'No changelog link.',
+    precedence: 'Shown wherever Sencho presents this service\'s pending update; never sent to notification channels.',
+    conflict: 'The merged Compose model decides the value.',
+    effect: 'operations',
+    trust: 'compose',
+    onInvalid: 'ignore-with-diagnostic',
+    minCapability: SENCHO_LABEL_DETECTION_CAPABILITY,
+    summary: 'Release notes link shown with this service\'s pending update.',
+    example: 'io.sencho.update.changelog: https://github.com/example/app/releases',
+  },
 ];
 
 /** The definition that owns a key, or null for a key the registry does not know. */
@@ -411,6 +521,12 @@ export interface SenchoServiceLabels {
   update: UpdatePolicyLabel | 'invalid' | null;
   /** The service's notification routing key, or null when it declares none. */
   notifyRoute: string | null;
+  /** Whether Sencho checks this service's image for updates; true when absent or invalid. */
+  updateCheck: boolean;
+  /** Pending updates this service skips; empty when absent or invalid. */
+  updateIgnore: UpdateIgnoreTarget[];
+  /** Release notes link for this service's pending update, or null. */
+  updateChangelog: string | null;
 }
 
 export type SenchoLabelState = 'active' | 'invalid' | 'unsupported';
@@ -540,6 +656,24 @@ function applyLabel(def: SenchoLabelDefinition, key: string, raw: string, draft:
       draft.resolved.notifyRoute = key.value;
       return entry('active');
     }
+    case 'update-check': {
+      const check = def.parse(raw);
+      if (!check.ok) return entry('invalid', check.reason);
+      draft.resolved.updateCheck = check.value;
+      return entry('active');
+    }
+    case 'update-ignore': {
+      const ignore = def.parse(raw);
+      if (!ignore.ok) return entry('invalid', ignore.reason);
+      draft.resolved.updateIgnore = ignore.value;
+      return entry('active');
+    }
+    case 'update-changelog': {
+      const url = def.parse(raw);
+      if (!url.ok) return entry('invalid', url.reason);
+      draft.resolved.updateChangelog = url.value;
+      return entry('active');
+    }
     default: {
       // Compile-time exhaustiveness: a new registry entry must get a case above.
       const unhandled: never = def;
@@ -550,7 +684,10 @@ function applyLabel(def: SenchoLabelDefinition, key: string, raw: string, draft:
 
 function resolveService(service: string, labels: Map<string, string>, entries: SenchoLabelEntry[]): SenchoServiceLabels {
   const draft: ServiceDraft = {
-    resolved: { links: [], order: null, hidden: false, update: null, notifyRoute: null },
+    resolved: {
+      links: [], order: null, hidden: false, update: null, notifyRoute: null,
+      updateCheck: true, updateIgnore: [], updateChangelog: null,
+    },
     named: [],
     namedSeen: new Set(),
   };
