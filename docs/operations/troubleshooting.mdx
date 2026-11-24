@@ -600,9 +600,9 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 **Symptom:** `GET /api/recovery/node` reports `"state": "unavailable"` with `"reason": "helper_unavailable"`, or a capture or restore fails with `capability_unavailable` while the helper cannot start.
 
-**Cause:** Sencho starts recovery work only from the helper image pinned in its own image. The reason is one of: `SENCHO_RECOVERY_HELPER_IMAGE` is empty, it holds a tag instead of a digest, or the image it names is not present locally.
+**Cause:** Sencho starts recovery work only from the helper image pinned in its own image. The reason is one of: `SENCHO_RECOVERY_HELPER_IMAGE` is empty, it holds a tag instead of a digest, or the image it names is not present locally. A node with an active repository pulls the pinned image at startup, so a missing image on such a node usually means the host could not reach the registry (the log says `Helper image could not be pulled at startup`) or the pull was still running when startup moved on (`Helper image pull is still running`).
 
-**Fix:** Set `SENCHO_RECOVERY_HELPER_IMAGE` to a digest reference (`name@sha256:...`) or, on an air-gapped host after `docker load`, to the image id (`sha256:...`). A tag is refused on purpose, because a tag can be repointed after the pairing was sealed. Confirm the image exists with `docker image inspect <reference>`. See [The helper image](/operations/volume-recovery-points#the-helper-image).
+**Fix:** When the digest is correct and only the image is missing, restore the registry connection and run `docker pull` on the digest in `SENCHO_RECOVERY_HELPER_IMAGE`, or send `POST /api/recovery/repository` again, which pulls it. Otherwise set `SENCHO_RECOVERY_HELPER_IMAGE` to a digest reference (`name@sha256:...`) or, on an air-gapped host after `docker load`, to the image id (`sha256:...`). A tag is refused on purpose, because a tag can be repointed after the pairing was sealed. Confirm the image exists with `docker image inspect <reference>`. See [The helper image](/operations/volume-recovery-points#the-helper-image).
 
 ---
 

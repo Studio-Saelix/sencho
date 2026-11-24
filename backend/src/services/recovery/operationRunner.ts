@@ -15,7 +15,9 @@ import {
   unlockRepository,
 } from './localRepository';
 import { RecoveryHelperRunner, HELPER_LABEL_RESTORE_INTENT } from './restic/helperRunner';
-import { inspectHelperImage, resolveHelperImageRef, type HelperImageState } from './restic/helperImage';
+import {
+  helperImageCanBePulled, inspectHelperImage, pullHelperImage, resolveHelperImageRef, type HelperImageState,
+} from './restic/helperImage';
 import { RESTIC_ENGINE_ID, ResticEngine } from './restic/ResticEngine';
 import { RecoveryOperationStore } from './operations';
 import { RecoveryPointStore } from './recoveryPoints';
@@ -126,6 +128,8 @@ interface RunningWork {
 
 /** How stale the cached health may be before a read refreshes it in the background. */
 const HEALTH_TTL_MS = 60_000;
+/** How long boot waits for a missing helper image to download before it carries on without it. */
+const BOOT_HELPER_PULL_TIMEOUT_MS = 60_000;
 
 export interface AdmissionResult {
   operation: RecoveryOperation;
@@ -402,6 +406,7 @@ export class RecoveryEngineService {
     try {
       this.operations.reconcileAtStartup();
       await this.registerOwnInfrastructure();
+      await this.pullMissingHelperAtBoot();
       if (resolveHelperImageRef().kind === 'pinned') {
         const runner = this.helperRunner();
         const removed = await runner.removeForeignEpochHelpers();
@@ -500,8 +505,58 @@ export class RecoveryEngineService {
         const inspected = await this.docker().getImage(configured.ref).inspect() as { Id?: string };
         if (inspected.Id) self.registerRecoveryImage(inspected.Id);
       } catch {
-        // The image is not pulled yet; provisioning registers it after the pull.
+        // The image is not pulled yet; the startup pull or provisioning registers it after the pull.
       }
+    }
+  }
+
+  /**
+   * An active repository means the operator turned recovery on, and each Sencho
+   * image pins its own helper digest, so a new image finds its helper missing
+   * and every point would read as unavailable until provisioning ran again. The
+   * pinned helper is pulled once here instead. A status read still never pulls,
+   * and a node that cannot reach the registry keeps its truthful
+   * `helper_unavailable` answer: nothing here, a failed or a slow pull included,
+   * stops boot. When the pull outlasts the wait, the helper-dependent steps
+   * below run without the image, so a repository lock left by an interrupted
+   * capture, check or restore stays held until an administrator releases it.
+   */
+  private async pullMissingHelperAtBoot(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const configured = resolveHelperImageRef();
+      if (configured.kind !== 'pinned' || !helperImageCanBePulled(configured.ref)) return;
+      if (!this.repositories.getActive()) return;
+      const { ref } = configured;
+      const pulled = async (): Promise<boolean> => {
+        const image = await inspectHelperImage(this.docker(), configured);
+        if (image.state !== 'missing') return false;
+        console.log('[Recovery] Pulling the pinned helper image for the active repository');
+        await pullHelperImage(this.docker(), ref);
+        // The registration at the top of boot found no image to protect from a prune; it does now.
+        await this.registerOwnInfrastructure();
+        return true;
+      };
+      const work = pulled();
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), BOOT_HELPER_PULL_TIMEOUT_MS);
+      });
+      if (await Promise.race([work, timeout]) !== 'timeout') return;
+      console.warn('[Recovery] Helper image pull is still running; boot continues without waiting for it');
+      work.then(
+        (didPull) => {
+          if (!didPull) return;
+          console.log('[Recovery] Helper image pull finished after boot moved on');
+          void this.refreshHealth();
+        },
+        (err: unknown) => {
+          console.warn('[Recovery] Helper image pull failed after boot moved on:', errorMessageForLog(err));
+        },
+      );
+    } catch (err) {
+      console.warn('[Recovery] Helper image could not be pulled at startup:', errorMessageForLog(err));
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
