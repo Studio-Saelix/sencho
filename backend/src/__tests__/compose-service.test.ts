@@ -401,6 +401,9 @@ function createMockWs(): MockWebSocket {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The secret volume guard is covered in secret-volume-deploy-guard.test.ts;
+  // here it passes, as the mocked endpoint guard does.
+  vi.spyOn(ComposeService.prototype, 'evaluateSecretVolumeUse').mockResolvedValue(null);
   // clearAllMocks() clears call records but not implementations, so a mockResolvedValue
   // set by one test persists into the next. Re-assert the safe "no mesh override, no user
   // override, base = compose.yaml" baseline here so a stray override from an earlier test

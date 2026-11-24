@@ -444,10 +444,10 @@ export class ComposeService {
     stackName: string,
     render: SharedRender = this.sharedRender(stackName),
   ): Promise<string | null> {
-    // Same scope as the Docker endpoint guard: a remote node's operation runs
-    // on that node, which applies this check itself.
-    if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
     try {
+      // Same scope as the Docker endpoint guard: a remote node's operation runs
+      // on that node, which applies this check itself.
+      if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
       if (isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName))) return null;
       const result = await render();
       if (result.rendered === null) return secretVolumeUnverifiedMessage(stackName, renderFailureReason(result));

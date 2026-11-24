@@ -4,7 +4,6 @@ import { cleanupTestDb, setupTestDb } from './helpers/setupTestDb';
 import { createFakeSecretDocker, type FakeSecretDocker } from './helpers/fakeSecretDocker';
 
 type StoreModule = typeof import('../services/sealedSecrets/SealedSecretStore');
-type DbModule = typeof import('../services/DatabaseService');
 
 const PURPOSE = 'edge-tunnel-run-token' as const;
 const VOLUME = 'sencho_edge_secret';
@@ -16,7 +15,7 @@ const WHO = { actor: 'admin', path: 'test', method: 'POST' };
 let tmpDir: string;
 let store: InstanceType<StoreModule['SealedSecretStore']>;
 let StoreClass: StoreModule['SealedSecretStore'];
-let db: InstanceType<DbModule['DatabaseService']>;
+let db: import('../services/DatabaseService').DatabaseService;
 let fake: FakeSecretDocker;
 
 beforeAll(async () => {

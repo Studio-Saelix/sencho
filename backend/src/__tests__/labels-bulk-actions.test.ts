@@ -6,6 +6,8 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 let mockFsStacks: string[] = [];
 const deployStack = vi.fn();
 const evaluateDockerEndpoint = vi.fn();
+const evaluateSecretVolumeUse = vi.fn();
+const createSharedRender = vi.fn(() => vi.fn());
 const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
 const restartContainer = vi.fn();
@@ -23,7 +25,7 @@ vi.mock('../services/FileSystemService', () => ({
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
-    getInstance: vi.fn(() => ({ deployStack, evaluateDockerEndpoint })),
+    getInstance: vi.fn(() => ({ deployStack, evaluateDockerEndpoint, evaluateSecretVolumeUse, createSharedRender })),
   },
 }));
 
@@ -78,6 +80,7 @@ beforeEach(() => {
   mockFsStacks = ['alpha', 'beta'];
   deployStack.mockResolvedValue(undefined);
   evaluateDockerEndpoint.mockResolvedValue(null);
+  evaluateSecretVolumeUse.mockResolvedValue(null);
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
@@ -222,7 +225,9 @@ describe('Stack Labels bulk actions', () => {
         .send({ action, dryRun: true });
 
       expect(res.body.results).toEqual([{ stackName: 'alpha', success: false, error: refusal.message, dryRun: true }]);
-      expect(evaluateDockerEndpoint).toHaveBeenCalledWith('alpha', mutation);
+      // A deploy dry run shares one render with the secret volume check.
+      if (mutation.kind === 'up') expect(evaluateDockerEndpoint).toHaveBeenCalledWith('alpha', mutation, undefined, expect.any(Function));
+      else expect(evaluateDockerEndpoint).toHaveBeenCalledWith('alpha', mutation);
       expect(deployStack).not.toHaveBeenCalled();
       expect(stopContainer).not.toHaveBeenCalled();
       expect(restartContainer).not.toHaveBeenCalled();

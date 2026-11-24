@@ -26,7 +26,6 @@ vi.mock('../helpers/remoteCapabilities', async (importOriginal) => {
 });
 
 type ServiceModule = typeof import('../services/sealedSecrets/SealedSecretDeliveryService');
-type DbModule = typeof import('../services/DatabaseService');
 
 const PURPOSE = 'edge-tunnel-run-token' as const;
 const VOLUME_FILE = 'sencho_edge_secret/token';
@@ -36,7 +35,7 @@ const SECRET = 'S3ntinelRunToken-zxcvbnmasdfghjkl';
 
 let tmpDir: string;
 let app: import('express').Express;
-let db: InstanceType<DbModule['DatabaseService']>;
+let db: import('../services/DatabaseService').DatabaseService;
 let Service: ServiceModule['SealedSecretDeliveryService'];
 let fake: FakeSecretDocker;
 let localFingerprint: string;

@@ -1247,3 +1247,62 @@ describe('Compose Assurance contract persistence', () => {
     });
   });
 });
+
+describe('secret volume facts from the node snapshot', () => {
+  const STACK = 'doctorsecretref';
+  // A volume the node labels as a secret volume, under a name that is not
+  // reserved, so only the snapshot's `secret` flag can make it one.
+  const snapshot = {
+    containers: [
+      { id: 'abc123def4567890', name: 'edge-consumer', service: 'tunnel', composeProject: 'edge', stack: 'edge', state: 'running', exitCode: null, image: 'cloudflare/cloudflared:2026.1.0', networks: [], volumes: ['tunnel_creds'], ports: [] },
+      { id: 'fedcba9876543210', name: 'bystander', service: 'app', composeProject: 'other', stack: 'other', state: 'running', exitCode: null, image: 'alpine:3.20', networks: [], volumes: ['other_data'], ports: [] },
+    ],
+    networks: [],
+    volumes: [
+      { name: 'tunnel_creds', driver: 'local', secret: true, composeProject: null, stack: null },
+      { name: 'other_data', driver: 'local', composeProject: null, stack: null },
+    ],
+  };
+  const rendered = (ref: string) => ({
+    name: STACK,
+    services: { web: { image: 'nginx:1.27', restart: 'always', healthcheck: { test: ['CMD', 'true'] }, volumes_from: [`container:${ref}`] } },
+    networks: {},
+    volumes: {},
+  });
+
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => {
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
+    db().getDb().prepare('DELETE FROM managed_stacks WHERE stack_name = ?').run(STACK);
+  });
+
+  it('blocks volumes_from naming a container that mounts a labelled secret volume', async () => {
+    stubDocker(rendered('edge-consumer'), '', snapshot);
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    const hits = report.findings.filter(f => f.ruleId === 'secret-volume-reference');
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ severity: 'blocker', service: 'web' });
+    expect(hits[0].message).toContain('container "edge-consumer"');
+    expect(report.status).toBe('blocker');
+  });
+
+  it('leaves a reference to a container that mounts no secret volume alone', async () => {
+    stubDocker(rendered('bystander'), '', snapshot);
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'secret-volume-reference')).toBe(false);
+  });
+
+  it('blocks the labelled volume by name, and exempts the recorded consumer stack', async () => {
+    const declaring = { name: STACK, services: { web: { image: 'nginx:1.27' } }, networks: {}, volumes: { creds: { name: 'tunnel_creds', external: true } } };
+    stubDocker(declaring, '', snapshot);
+    const before = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(before.findings.filter(f => f.ruleId === 'secret-volume-reference').map(f => f.message))
+      .toEqual([expect.stringContaining('The volume "tunnel_creds" holds a secret')]);
+
+    db().getDb().prepare('INSERT INTO managed_stacks (stack_name, kind, template_version, created_at) VALUES (?, ?, ?, ?)')
+      .run(STACK, 'edge-tunnel', null, Date.now());
+    stubDocker(declaring, '', snapshot);
+    const after = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(after.findings.some(f => f.ruleId === 'secret-volume-reference')).toBe(false);
+  });
+});
