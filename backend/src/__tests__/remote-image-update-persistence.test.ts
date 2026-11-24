@@ -3,6 +3,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { DatabaseService } from '../services/DatabaseService';
 import type { ImageUpdateStackFacts } from '../services/imageUpdateFacts';
+import { checkResultFromDetection } from '../services/updateDetectionDirectives';
 
 let tmpDir: string;
 beforeAll(async () => { tmpDir = await setupTestDb(); });
@@ -146,4 +147,42 @@ it('records the target decision even when the remote model cannot render', async
     expect(db.getStackUpdateDetail(0)['remote-broken'].unattendedPolicy).toEqual({
         decision: 'skip', ineligible: [],
     });
+});
+
+it('records the target detection labels on a hub-run observation', async () => {
+    const scanner = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    const write = vi.spyOn(db, 'upsertStackUpdateStatus').mockImplementation(() => undefined);
+    const candidate = `sha256:${'c'.repeat(64)}`;
+    const facts: ImageUpdateStackFacts = {
+        name: 'labeled', model: { renderable: true }, observationRevision: 1, observationToken: 'fixture',
+        services: [
+            { name: 'app', declaredImage: 'nginx:latest', runtimeImages: [], hasBuild: false },
+            { name: 'cache', declaredImage: 'redis:7', runtimeImages: [], hasBuild: false },
+        ],
+        images: [],
+        directives: [
+            { service: 'app', check: true, ignore: [candidate], changelogUrl: null },
+            { service: 'cache', check: false, ignore: [], changelogUrl: null },
+        ],
+    };
+    const rebuild = checkResultFromDetection({
+        hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: 'latest', digestError: null,
+        tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'patch',
+        candidateDigest: candidate,
+    });
+    try {
+        const result = await scanner.commitRemoteObservation(103, facts, new Map([
+            ['nginx:latest', rebuild],
+            ['redis:7', { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true }],
+        ]), scanner.reserveStackWriteGeneration(103, 'labeled'));
+        expect(result.outcome).toBe('cleared');
+        expect(write.mock.calls[0][2]).toBe(false);
+        expect(write.mock.calls[0][6]).toEqual([
+            { service: 'app', image: 'nginx:latest', hasUpdate: false, checkStatus: 'ok', lastError: null, detection: 'ignored' },
+            { service: 'cache', image: 'redis:7', hasUpdate: false, checkStatus: 'not_checkable', lastError: null, detection: 'off' },
+        ]);
+    } finally {
+        write.mockRestore();
+    }
 });

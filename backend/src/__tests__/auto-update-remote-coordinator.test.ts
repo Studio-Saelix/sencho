@@ -11,6 +11,7 @@ vi.mock('../helpers/registryDeliveryOutbound', () => ({ prepareOutboundRegistryD
 vi.mock('../utils/outboundTarget', () => ({ safeRemoteFetch: mocks.fetch }));
 vi.mock('../services/hubPostUpdateVerification', () => ({ awaitHubPostUpdateVerification: mocks.recheck }));
 import { AutoUpdateRemoteCoordinator } from '../services/AutoUpdateRemoteCoordinator';
+import type { ImageCheckResult } from '../services/ImageUpdateService';
 
 const CAPABLE = { kind: 'ok' as const, meta: { capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1', 'sencho-label-policy-v1'] } };
 const TARGET = { apiUrl: 'https://node.example', apiToken: 'token', trustedLoopback: true };
@@ -255,5 +256,65 @@ describe('remote automatic update coordinator', () => {
     expect(logged).not.toMatch(/[\r\n]/);
     expect(logged).toContain('boom[INFO] forgedline');
     errorSpy.mockRestore();
+  });
+});
+
+describe('remote automatic update with update detection labels', () => {
+  const DETECTING = { kind: 'ok' as const, meta: { capabilities: [...CAPABLE.meta.capabilities, 'sencho-label-detection-v1'] } };
+  const CANDIDATE = `sha256:${'c'.repeat(64)}`;
+  const rebuild = {
+    hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' as const,
+    detection: {
+      hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: '1', digestError: null,
+      tagEnumKind: 'skipped' as const, tagEnumReason: null, checkStatus: 'ok' as const, reason: null,
+      semverBump: 'patch' as const, candidateDigest: CANDIDATE,
+    },
+  };
+  const labeledFacts = (stack: string) => ({
+    ...FACTS, name: stack,
+    services: [{ name: 'app', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+    directives: [{ service: 'app', check: true, ignore: [CANDIDATE], changelogUrl: null }],
+  });
+
+  it('asks a detection-capable target for its labels while still probing every image', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(mocks.inspect).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { detection: true, probeAll: true });
+  });
+
+  it('sends no detection keys to a target without the capability', async () => {
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(mocks.inspect).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), undefined);
+  });
+
+  it('does not update a stack whose only update is skipped, and says so', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    mocks.inspect.mockImplementation(async (_node: number, stack: string) => ({
+      facts: labeledFacts(stack), imageResults: new Map([['nginx:1', rebuild]]),
+    }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({
+      handled: true,
+      result: 'Stack "web": the only available update is skipped by io.sencho.update.ignore (app); no update applied.',
+    });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('names the skipped service a started update also pulls', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    mocks.inspect.mockImplementation(async (_node: number, stack: string) => ({
+      facts: {
+        ...labeledFacts(stack),
+        services: [
+          { name: 'app', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false },
+          { name: 'worker', declaredImage: 'worker:1', runtimeImages: [], hasBuild: false },
+        ],
+        images: [...FACTS.images, { ...FACTS.images[0], ref: 'worker:1' }],
+      },
+      imageResults: new Map<string, ImageCheckResult>([['nginx:1', rebuild], ['worker:1', { hasUpdate: true, digestUpdate: true, checkStatus: 'ok' }]]),
+    }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web": updated (worker:1). Also pulled: app (update skipped).' });
+    expect(JSON.parse(String(mocks.fetch.mock.calls[0][1].body)).digestUpdateImages).toEqual(['worker:1']);
   });
 });

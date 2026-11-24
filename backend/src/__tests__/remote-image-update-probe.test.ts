@@ -64,6 +64,15 @@ describe('hub remote image update probe', () => {
         expect(calls.find(call => call.method === 'HEAD')?.headers).toMatchObject({ Authorization: 'Bearer test-token' });
     });
 
+    it('reports the registry digest of a same-tag rebuild as the candidate digest', async () => {
+        const remote = `sha256:${'b'.repeat(64)}`;
+        transport(url => url.endsWith('/v2/') ? ping : url.includes('/token?') ? token : {
+            headers: { 'docker-content-digest': remote, 'content-type': 'application/vnd.oci.image.manifest.v1+json' },
+        });
+        expect(await probeRemoteImageUpdate(image, new AbortController().signal))
+            .toMatchObject({ checkStatus: 'ok', digestUpdate: true, candidateDigest: remote });
+    });
+
     it('does not probe digest-pinned images or target-owned authority', async () => {
         const { calls } = transport(() => ({}));
         expect(await probeRemoteImageUpdate({ ...image, ref: `127.0.0.1/acme/app@${digest}` }, new AbortController().signal)).toBeNull();

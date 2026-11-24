@@ -82,21 +82,44 @@ describe('image update facts roster', () => {
     const response = await factsRequest({ ...envelope, stack: 'web' }, scope);
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ ...envelope, stacks: [stackFacts] });
-    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, false);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, { includePolicy: false, detection: false, probeAll: false });
   });
 
   it('asks the node to evaluate the unattended policy only when the request opts in', async () => {
     const { collect } = await mockFacts();
     const response = await factsRequest({ ...envelope, stack: 'web', policy: true });
     expect(response.status).toBe(200);
-    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, true);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, { includePolicy: true, detection: false, probeAll: false });
 
     collect.mockClear();
     const all = await factsRequest({ ...envelope, allStacks: true, policy: true });
     expect(all.status).toBe(200);
     expect(collect).toHaveBeenCalledTimes(2);
-    expect(collect).toHaveBeenNthCalledWith(1, nodeId, 'web', requestNonce, true);
-    expect(collect).toHaveBeenNthCalledWith(2, nodeId, 'database', requestNonce, true);
+    expect(collect).toHaveBeenNthCalledWith(1, nodeId, 'web', requestNonce, { includePolicy: true, detection: false, probeAll: false });
+    expect(collect).toHaveBeenNthCalledWith(2, nodeId, 'database', requestNonce, { includePolicy: true, detection: false, probeAll: false });
+  });
+
+  it.each(['node_proxy', 'pilot_tunnel'])('passes the detection request through over %s', async scope => {
+    const { collect } = await mockFacts();
+    const response = await factsRequest({ ...envelope, stack: 'web', detection: true }, scope);
+    expect(response.status).toBe(200);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, { includePolicy: false, detection: true, probeAll: false });
+  });
+
+  it('asks the node for its detection labels only when the request opts in, and probeAll only with detection', async () => {
+    const { collect } = await mockFacts();
+    const response = await factsRequest({ ...envelope, stack: 'web', detection: true, probeAll: true });
+    expect(response.status).toBe(200);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(nodeId, 'web', requestNonce, { includePolicy: false, detection: true, probeAll: true });
+
+    collect.mockClear();
+    const withoutDetection = await factsRequest({ ...envelope, stack: 'web', probeAll: true });
+    expect(withoutDetection.status).toBe(400);
+    const badType = await factsRequest({ ...envelope, stack: 'web', detection: 'yes' });
+    expect(badType.status).toBe(400);
+    const rosterWithDetection = await factsRequest({ ...envelope, roster: true, detection: true });
+    expect(rosterWithDetection.status).toBe(400);
+    expect(collect).not.toHaveBeenCalled();
   });
 
   it('returns all stack facts without changing their observation metadata', async () => {

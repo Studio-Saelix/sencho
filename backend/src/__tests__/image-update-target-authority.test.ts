@@ -23,7 +23,7 @@ describe('target image authority', () => {
                 hasUpdate: false, digestUpdate: false, tagUpdate: false, nextTag: null,
                 digestError: 'Target registry credentials are unavailable', tagEnumKind: 'error',
                 tagEnumReason: 'Target registry credentials are unavailable', checkStatus: 'failed',
-                reason: 'Target registry credentials are unavailable', semverBump: 'none',
+                reason: 'Target registry credentials are unavailable', semverBump: 'none', candidateDigest: null,
             },
         });
     });

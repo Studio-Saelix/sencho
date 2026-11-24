@@ -13,6 +13,8 @@ import {
   type ImageCheckResult,
 } from '../services/ImageUpdateService';
 import type { StackServiceStatus } from '../services/DatabaseService';
+import type { ImageUpdateDetectResult } from '../services/imageUpdateDetect';
+import { checkResultFromDetection } from '../services/updateDetectionDirectives';
 
 function ok(hasUpdate: boolean): ImageCheckResult {
   return { hasUpdate, checkStatus: 'ok', digestUpdate: hasUpdate, tagUpdate: false };
@@ -208,5 +210,69 @@ describe('buildAvailabilityNotifyMessage', () => {
       { service: 'db', image: 'db:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
     ];
     expect(buildAvailabilityNotifyMessage('stackA', services)).toBe('Stack "stackA" has image updates available for service: api.');
+  });
+});
+
+describe('reduceServiceStatus with update detection labels', () => {
+  const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+  const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+  const DEFAULTS = { check: true, ignore: [], changelogUrl: null };
+
+  /** A same-tag rebuild of app:1.0.0 whose registry digest is `candidate`. */
+  function rebuild(candidate: string, tagEnumKind: ImageUpdateDetectResult['tagEnumKind'] = 'complete'): ImageCheckResult {
+    return checkResultFromDetection({
+      hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: '1.0.0', digestError: null,
+      tagEnumKind, tagEnumReason: tagEnumKind === 'error' ? 'tag list failed' : null,
+      checkStatus: 'ok', reason: null, semverBump: 'patch', candidateDigest: candidate,
+    });
+  }
+
+  it('reports nothing for a service with checks off, even when its image has an update', () => {
+    const map = new Map([['app:1.0.0', rebuild(DIGEST_A)]]);
+    const { status, confirmedUpdateThisRun } = reduceServiceStatus(
+      'app', 'app:1.0.0', ['app:1.0.0'], map, { service: 'app', image: 'app:1.0.0', hasUpdate: true, checkStatus: 'ok', lastError: null },
+      { ...DEFAULTS, check: false },
+    );
+    expect(status).toEqual({
+      service: 'app', image: 'app:1.0.0', runtimeImages: ['app:1.0.0'],
+      hasUpdate: false, checkStatus: 'not_checkable', lastError: null, detection: 'off',
+    });
+    expect(confirmedUpdateThisRun).toBe(false);
+  });
+
+  it('marks a service whose only pending update is skipped as ignored, with no update', () => {
+    const map = new Map([['app:1.0.0', rebuild(DIGEST_A)]]);
+    const { status } = reduceServiceStatus('app', 'app:1.0.0', [], map, undefined, {
+      ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
+    });
+    expect(status).toEqual({
+      service: 'app', image: 'app:1.0.0', hasUpdate: false, checkStatus: 'ok', lastError: null, detection: 'ignored',
+    });
+  });
+
+  it('does not carry a prior update over when the skipped check is only partial', () => {
+    const map = new Map([['app:1.0.0', rebuild(DIGEST_A, 'error')]]);
+    const prior: StackServiceStatus = { service: 'app', image: 'app:1.0.0', hasUpdate: true, checkStatus: 'ok', lastError: null };
+    const { status } = reduceServiceStatus('app', 'app:1.0.0', [], map, prior, {
+      ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
+    });
+    expect(status).toMatchObject({ hasUpdate: false, checkStatus: 'partial', detection: 'ignored' });
+  });
+
+  it('reports a newer digest than the one skipped', () => {
+    const map = new Map([['app:1.0.0', rebuild(DIGEST_B)]]);
+    const { status, confirmedUpdateThisRun } = reduceServiceStatus('app', 'app:1.0.0', [], map, undefined, {
+      ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
+    });
+    expect(status).toEqual({ service: 'app', image: 'app:1.0.0', hasUpdate: true, checkStatus: 'ok', lastError: null });
+    expect(confirmedUpdateThisRun).toBe(true);
+  });
+
+  it('reduces exactly as before with the default directive or none', () => {
+    const map = new Map([['app:1.0.0', rebuild(DIGEST_A)]]);
+    const prior: StackServiceStatus = { service: 'app', image: 'app:1.0.0', hasUpdate: false, checkStatus: 'ok', lastError: null };
+    const without = reduceServiceStatus('app', 'app:1.0.0', [], map, prior);
+    expect(reduceServiceStatus('app', 'app:1.0.0', [], map, prior, DEFAULTS)).toEqual(without);
+    expect(without.status).not.toHaveProperty('detection');
   });
 });

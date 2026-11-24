@@ -24,7 +24,9 @@ import {
   normalizeLinkName,
   parseLabelEntries,
   parseSenchoUrl,
+  parseUpdateIgnore,
   resolveSenchoLabels,
+  SENCHO_LABEL_DETECTION_CAPABILITY,
   sanitizeRemoteBehavior,
   unrenderableSenchoLabels,
   type LabelBehavior,
@@ -64,6 +66,10 @@ function backendSourceFiles(): string[] {
   return out;
 }
 
+
+/** The update detection fields of a service with none of the three labels. */
+const DETECTION_DEFAULTS = { updateCheck: true, updateIgnore: [], updateChangelog: null };
+
 describe('registry', () => {
   it('declares one definition per id, all service scoped, and capability gated', () => {
     const ids = SENCHO_LABEL_DEFINITIONS.map(d => d.id);
@@ -76,10 +82,10 @@ describe('registry', () => {
       expect(def.example.startsWith('io.sencho.')).toBe(true);
       expect(['compose', 'compose-or-deployed']).toContain(def.trust);
     }
-    // Presentation is the rule; the protective label and the two behavioral ones
-    // are the documented exceptions.
+    // Presentation is the rule; the protective label, the two behavioral ones,
+    // and the three update detection labels are the documented exceptions.
     expect(SENCHO_LABEL_DEFINITIONS.filter(d => d.effect !== 'presentation').map(d => d.id))
-      .toEqual(['infrastructure', 'update', 'notify-route']);
+      .toEqual(['infrastructure', 'update', 'notify-route', 'update-check', 'update-ignore', 'update-changelog']);
     expect(CAPABILITIES).toContain(SENCHO_LABELS_CAPABILITY);
   });
 
@@ -230,7 +236,7 @@ describe('resolveSenchoLabels', () => {
     ]);
     expect(r.services.web.order).toBe(10);
     expect(r.services.redis.hidden).toBe(true);
-    expect(r.services.plain).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
+    expect(r.services.plain).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null, ...DETECTION_DEFAULTS });
     expect(r.entries.every(e => e.state === 'active')).toBe(true);
   });
 
@@ -253,7 +259,7 @@ describe('resolveSenchoLabels', () => {
     const r = resolveRendered(model({
       web: { 'io.sencho.url': secret, 'io.sencho.hidden': 'maybe', 'io.sencho.order': '1.5' },
     }));
-    expect(r.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
+    expect(r.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null, ...DETECTION_DEFAULTS });
     expect(r.entries.map(e => [e.key, e.state])).toEqual([
       ['io.sencho.hidden', 'invalid'],
       ['io.sencho.order', 'invalid'],
@@ -441,7 +447,7 @@ describe('label behavior annotations', () => {
     expect(invalid?.state).toBe('invalid');
     expect(invalid?.reason).toContain('The only accepted value is true');
     // The protective label changes no presentation metadata.
-    expect(marked.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
+    expect(marked.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null, ...DETECTION_DEFAULTS });
   });
 
   it('reports a deployed infrastructure copy as the guard reads it, not as inert', () => {
@@ -465,7 +471,7 @@ describe('label behavior annotations', () => {
     for (const key of SENCHO_MANAGED_LABELS) {
       const declared = resolveRendered(model({ web: { [key]: 'true' } }));
       expect(declaredLabelBehavior(declared, 'web', key)).toEqual({ state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON });
-      expect(declared.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null });
+      expect(declared.services.web).toEqual({ links: [], order: null, hidden: false, update: null, notifyRoute: null, ...DETECTION_DEFAULTS });
       expect(deployedCopyBehavior(key, 'true', 'runtime')).toEqual({ state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON });
     }
   });
@@ -561,5 +567,94 @@ describe('remote behavior sanitizing', () => {
     expect(mergeLabelBehavior(inert, invalid)).toBe(invalid);
     expect(mergeLabelBehavior(invalid, inert)).toBe(invalid);
     expect(mergeLabelBehavior(undefined, undefined)).toBeUndefined();
+  });
+});
+
+describe('update detection labels', () => {
+  const DIGEST = `sha256:${'d'.repeat(64)}`;
+  const resolveOne = (labels: Record<string, string> | string[]) => {
+    const r = resolveSenchoLabels({ services: { web: { labels } } });
+    if (!r.renderable) throw new Error('expected a rendered resolution');
+    return r;
+  };
+
+  it('gates the three keys on the detection capability', () => {
+    for (const key of ['io.sencho.update.check', 'io.sencho.update.ignore', 'io.sencho.update.changelog']) {
+      expect(findSenchoLabelDefinition(key)?.minCapability).toBe(SENCHO_LABEL_DETECTION_CAPABILITY);
+    }
+    expect(CAPABILITIES).toContain(SENCHO_LABEL_DETECTION_CAPABILITY);
+  });
+
+  it.each([
+    ['true', true], ['false', false], ['TRUE', true], [' false ', false],
+  ])('reads update.check %j as %s', (raw, expected) => {
+    const r = resolveOne({ 'io.sencho.update.check': raw });
+    expect(r.services.web.updateCheck).toBe(expected);
+    expect(r.entries[0].state).toBe('active');
+  });
+
+  it('ignores a non-boolean update.check and keeps checks on', () => {
+    const r = resolveOne({ 'io.sencho.update.check': 'yes' });
+    expect(r.services.web.updateCheck).toBe(true);
+    expect(r.entries[0]).toMatchObject({ state: 'invalid', definition: 'update-check' });
+    expect(r.entries[0].reason).not.toContain('yes');
+  });
+
+  it('reads digests (lowercased) and tags from the skip list, with spaces around entries', () => {
+    expect(parseUpdateIgnore(DIGEST.toUpperCase().replace('SHA256', 'sha256'))).toEqual({
+      ok: true, value: [{ kind: 'digest', digest: DIGEST }],
+    });
+    expect(parseUpdateIgnore('1.27.0')).toEqual({ ok: true, value: [{ kind: 'tag', tag: '1.27.0' }] });
+    expect(parseUpdateIgnore(` ${DIGEST} , v2.0.0-rc1 `)).toEqual({
+      ok: true, value: [{ kind: 'digest', digest: DIGEST }, { kind: 'tag', tag: 'v2.0.0-rc1' }],
+    });
+  });
+
+  it.each([
+    ['empty', ''],
+    ['a truncated digest', 'sha256:abc'],
+    ['nine entries', Array.from({ length: 9 }, (_, i) => `1.0.${i}`).join(',')],
+    ['one bad entry among good ones', `${DIGEST},not a tag`],
+    ['an empty entry', '1.0.0,,1.0.1'],
+  ])('refuses %s as a whole, without echoing it', (_name, raw) => {
+    const parsed = parseUpdateIgnore(raw);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok && raw) expect(parsed.reason).not.toContain(raw);
+    const r = resolveOne({ 'io.sencho.update.ignore': raw });
+    expect(r.services.web.updateIgnore).toEqual([]);
+    expect(r.entries[0].state).toBe('invalid');
+  });
+
+  it('accepts eight entries', () => {
+    const raw = Array.from({ length: 8 }, (_, i) => `1.0.${i}`).join(',');
+    expect(resolveOne({ 'io.sencho.update.ignore': raw }).services.web.updateIgnore).toHaveLength(8);
+  });
+
+  it('reads a changelog link and refuses userinfo and non-http links without echoing them', () => {
+    expect(resolveOne({ 'io.sencho.update.changelog': 'https://github.com/example/app/releases' }).services.web.updateChangelog)
+      .toBe('https://github.com/example/app/releases');
+    for (const raw of ['https://user:secret@example.com/notes', 'ftp://example.com/notes', 'javascript:alert(1)']) {
+      const r = resolveOne({ 'io.sencho.update.changelog': raw });
+      expect(r.services.web.updateChangelog).toBeNull();
+      expect(r.entries[0].state).toBe('invalid');
+      expect(r.entries[0].reason).not.toContain('secret');
+      expect(r.entries[0].reason).not.toContain(raw);
+    }
+  });
+
+  it('defaults when absent, and reads the list label syntax', () => {
+    expect(resolveOne({}).services.web).toMatchObject({ updateCheck: true, updateIgnore: [], updateChangelog: null });
+    const list = resolveOne(['io.sencho.update.check=false', `io.sencho.update.ignore=${DIGEST}`]);
+    expect(list.services.web).toMatchObject({ updateCheck: false, updateIgnore: [{ kind: 'digest', digest: DIGEST }] });
+  });
+
+  it('does not collide with io.sencho.update', () => {
+    const r = resolveOne({ 'io.sencho.update': 'manual', 'io.sencho.update.check': 'false' });
+    expect(r.services.web).toMatchObject({ update: 'manual', updateCheck: false });
+  });
+
+  it('yields nothing for an unrenderable model', () => {
+    expect(resolveSenchoLabels(null)).toEqual({ renderable: false });
+    expect(resolveSenchoLabels({ services: [] })).toEqual({ renderable: false });
   });
 });
