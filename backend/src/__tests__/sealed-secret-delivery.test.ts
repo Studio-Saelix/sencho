@@ -179,6 +179,13 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toMatchObject({ slot: SLOT_A, generation: 1, state: 'delivered' });
     const post = writes(calls)[0];
     expect(post.headers['x-sencho-actor-role']).toBeUndefined();
+    // Every request carries the bearer this hub holds for the node's resolved
+    // target: the stored node token on direct proxy. On Pilot the agent's
+    // loopback replaces it with the tunnel bearer.
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const expected = `Bearer ${NodeRegistry.getInstance().getProxyTarget(transport.nodeId())?.apiToken ?? ''}`;
+    if (transport.name === 'direct proxy') expect(expected).toBe('Bearer stored-node-token');
+    expect(calls.every((call) => call.sentAuthorization === expected)).toBe(true);
     expect(JSON.stringify(post.data)).not.toContain(SECRET.slice(0, 8));
     const lines = audit();
     expect(lines.some((line) => line.startsWith('sealed_secret.delivered:'))).toBe(true);
@@ -251,6 +258,8 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     await refusal(deliver());
     expect(await deliver(SLOT_A, `${SECRET}-new`)).toEqual({ status: 'accepted', generation: 2 });
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-new`);
+    // The reused generation was refused as stale first, then the hub moved past it.
+    expect(audit().some((line) => line.startsWith('sealed_secret.refused:') && line.includes('reason=stale'))).toBe(true);
   });
 
   it('recovers the generation by read-back after the hub lost its record', async () => {
@@ -269,14 +278,16 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
   });
 
-  it('removes the live slot, and a second removal still converges', async () => {
+  it('removes the live slot, and a second removal answers already_deleted without a new generation', async () => {
     transport.setConfidential(true);
-    install();
+    const { calls } = install();
     await deliver();
     expect((await remove()).status).toBe('deleted');
     expect(fake.files.has(VOLUME_FILE)).toBe(false);
     expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('removed');
-    expect(['deleted', 'already_deleted']).toContain((await remove()).status);
+    const writesBefore = writes(calls).length;
+    expect(await remove()).toEqual({ status: 'already_deleted', generation: 2, currentSlot: SLOT_A });
+    expect(writes(calls)).toHaveLength(writesBefore);
     expect(audit().some((line) => line.startsWith('sealed_secret.removed:'))).toBe(true);
   });
 
@@ -327,7 +338,9 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
       throw new Error('database is locked');
     });
     const error = await refusal(deliver());
-    expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
+    // A node failure is a retryable delivery failure, not a refusal.
+    expect(error.code).toBe('SEALED_SECRET_DELIVERY_FAILED');
+    expect(error.status).toBe(502);
     expect(error.details.nodeCode).toBe('SECRET_STORE_UNAVAILABLE');
     expect(fake.files.get(VOLUME_FILE)?.content).toBe(SECRET);
     upsert.mockRestore();
@@ -343,6 +356,99 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
     expect(error.details.nodeCode).toBe('SECRET_VOLUME_FOREIGN');
     expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('sending');
+  });
+
+  /**
+   * Hold the first state read until a second one arrives (two operations in
+   * flight at once) or a short deadline passes (the hub ran them one after the
+   * other). Without the hub's queue both would read the same generation.
+   */
+  function overlapStateReads(): Parameters<typeof installInProcessNodeTransport>[0]['beforeSend'] {
+    let release: (() => void) | null = null;
+    let reads = 0;
+    return async (call) => {
+      if (call.method !== 'GET' || !call.path.includes(`/${PURPOSE}/`)) return;
+      reads += 1;
+      if (reads === 1) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+          setTimeout(resolve, 150);
+        });
+      } else if (release) {
+        (release as () => void)();
+      }
+    };
+  }
+
+  it('serializes two deliveries for one node and purpose: the second never races the first to a generation', async () => {
+    transport.setConfidential(true);
+    install({ beforeSend: overlapStateReads() });
+    const results = await Promise.all([deliver(SLOT_A, SECRET), deliver(SLOT_B, `${SECRET}-b`)]);
+    expect(results).toEqual([{ status: 'accepted', generation: 1 }, { status: 'accepted', generation: 2 }]);
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)).toMatchObject({ slot: SLOT_B, generation: 2, state: 'delivered' });
+    // Serialized on the hub, so the node never had to refuse a colliding generation.
+    expect(audit().some((line) => line.includes('reason=stale'))).toBe(false);
+  });
+
+  it('serializes a removal behind a delivery of the same slot', async () => {
+    transport.setConfidential(true);
+    install({ beforeSend: overlapStateReads() });
+    const [delivered, removed] = await Promise.all([deliver(), remove()]);
+    expect(delivered).toEqual({ status: 'accepted', generation: 1 });
+    expect(removed).toEqual({ status: 'deleted', generation: 2, currentSlot: SLOT_A });
+    expect(fake.files.has(VOLUME_FILE)).toBe(false);
+  });
+
+  it('will not remove the old secret while a replacement is unconfirmed, so the new file survives', async () => {
+    transport.setConfidential(true);
+    install();
+    await deliver();
+    // The node writes the replacement's file but cannot record it.
+    const upsert = vi.spyOn(db, 'upsertSealedSecretRecord').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    expect((await refusal(deliver(SLOT_B, `${SECRET}-b`))).code).toBe('SEALED_SECRET_DELIVERY_FAILED');
+    upsert.mockRestore();
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+    // The node's record still names the old slot; removing it now would remove the new file.
+    const error = await refusal(remove(SLOT_A));
+    expect(error.code).toBe('SEALED_SECRET_TARGET_REFUSED');
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+    // Once the replacement converges, the old slot is simply not current.
+    expect(await deliver(SLOT_B, `${SECRET}-b`)).toEqual({ status: 'accepted', generation: 2 });
+    expect((await remove(SLOT_A)).status).toBe('not_current');
+    expect(fake.files.get(VOLUME_FILE)?.content).toBe(`${SECRET}-b`);
+  });
+
+  it('treats an answer with no known code (a bridge or proxy error) as a retryable failure', async () => {
+    transport.setConfidential(true);
+    install({ respond: (call) => (call.method === 'POST' ? { status: 502, body: { error: 'Bad gateway' } } : undefined) });
+    const error = await refusal(deliver());
+    expect(error.code).toBe('SEALED_SECRET_DELIVERY_FAILED');
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('sending');
+    expect(audit().some((line) => line.startsWith('sealed_secret.delivery_refused:') && line.includes('node_status=502'))).toBe(true);
+  });
+
+  it('reports a node that answers the key read without a usable key, and sends nothing', async () => {
+    const { calls } = install({ respond: (call) => (call.path.endsWith('/key') ? { status: 404, body: { error: 'Not found' } } : undefined) });
+    expect((await service().evaluateReadiness(transport.nodeId())).readiness).toBe('key_invalid');
+    expect((await refusal(deliver())).code).toBe('SEALED_SECRET_DELIVERY_FAILED');
+    expect(writes(calls)).toHaveLength(0);
+  });
+
+  it('refuses a node answer that is not a delivery result', async () => {
+    transport.setConfidential(true);
+    install({ respond: (call) => (call.method === 'POST' ? { status: 200, body: { status: 'accepted', generation: 'one' } } : undefined) });
+    expect((await refusal(deliver())).code).toBe('SEALED_SECRET_DELIVERY_FAILED');
+    expect(db.getSealedSecretDelivery(transport.nodeId(), PURPOSE)?.state).toBe('sending');
+  });
+
+  it('audits a refusal of an invalid secret id', async () => {
+    install();
+    const error = await refusal(service().deliver({ nodeId: transport.nodeId(), purpose: PURPOSE, slot: 'not-a-uuid', secret: SECRET, actor: 'admin' }));
+    expect(error.status).toBe(400);
+    expect(audit().some((line) => line.startsWith('sealed_secret.delivery_refused:') && line.includes('slot=not-a-uuid'))).toBe(true);
   });
 
   it('reports readiness without writing a pin', async () => {
@@ -362,6 +468,29 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     const error = await refusal(service().confirmFingerprint(transport.nodeId(), 'not-the-fingerprint', 'admin'));
     expect(error.code).toBe('SEAL_KEY_MISMATCH');
     expect(db.getNodeSealingPin(transport.nodeId())).toBeNull();
+  });
+});
+
+describe('sealed secret delivery over a Pilot tunnel that goes away', () => {
+  it('refuses as unreachable when the tunnel is gone before the request, and sends nothing', async () => {
+    const { calls } = installInProcessNodeTransport({ app, bearer: transports[1].bearer });
+    const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+    vi.spyOn(PilotTunnelManager.getInstance(), 'getLoopbackUrl').mockReturnValue(null);
+    const error = await refusal(service().deliver({ nodeId: pilotNodeId, purpose: PURPOSE, slot: SLOT_A, secret: SECRET, actor: 'admin' }));
+    expect(error.code).toBe('SEALED_SECRET_TARGET_UNREACHABLE');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('never trusts a key fetched while the tunnel dropped to plaintext mid-fetch', async () => {
+    pilotConfidential = true;
+    installInProcessNodeTransport({
+      app,
+      bearer: transports[1].bearer,
+      beforeSend: (call) => { if (call.path.endsWith('/key')) pilotConfidential = false; },
+    });
+    expect((await refusal(service().deliver({ nodeId: pilotNodeId, purpose: PURPOSE, slot: SLOT_A, secret: SECRET, actor: 'admin' }))).code)
+      .toBe('SEALED_SECRET_TRANSPORT_NOT_CONFIDENTIAL');
+    expect(db.getNodeSealingPin(pilotNodeId)?.confidential).toBe(false);
   });
 });
 

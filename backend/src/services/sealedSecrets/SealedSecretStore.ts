@@ -10,7 +10,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { recordSealedSecretAudit } from './audit';
 import { SealedSecretError } from './errors';
 import { getSealedSecretPurpose, type SealedSecretPurposeId } from './purposes';
-import { runSecretWriter, type SecretWriterOp } from './secretVolumeWriter';
+import { removeLeftoverWriters, runSecretWriter, type SecretWriterOp } from './secretVolumeWriter';
 
 export type AcceptStatus = 'accepted' | 'already_accepted';
 export type RemoveStatus = 'deleted' | 'already_deleted' | 'not_current';
@@ -48,9 +48,10 @@ function stale(record: SealedSecretRecord): SealedSecretError {
  * labelled volume, so one live record and one generation counter per purpose.
  * Operations on a purpose are serialized in process.
  *
- * Order is always "change the file, then record": a failed write leaves the
- * generation unrecorded so the hub can retry it, and a crash after a removal
- * leaves the record `present` with no file, which the hub's retry converges.
+ * Whenever the file changes, the order is "change the file, then record": a
+ * failed write leaves the generation unrecorded so the hub can retry it, and a
+ * crash after a removal leaves the record `present` with no file, which the
+ * hub's retry converges.
  */
 export class SealedSecretStore {
   private static instance: SealedSecretStore | null = null;
@@ -154,19 +155,14 @@ export class SealedSecretStore {
       }
       await this.write(purposeId, { kind: 'write', secret }, facts, who);
 
-      try {
-        db.upsertSealedSecretRecord({
-          purpose: purposeId,
-          slot,
-          generation,
-          state: 'present',
-          fingerprint,
-          acceptedAt: Date.now(),
-        });
-      } catch (error: unknown) {
-        console.error('[SealedSecrets] Record write failed after the file was written:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-        throw new SealedSecretError('SECRET_STORE_UNAVAILABLE', 503, 'The node wrote the secret but could not record it. Retry the delivery.');
-      }
+      this.record(db, {
+        purpose: purposeId,
+        slot,
+        generation,
+        state: 'present',
+        fingerprint,
+        acceptedAt: Date.now(),
+      }, 'The node wrote the secret but could not record it. Retry the delivery.');
 
       const replaced = record?.state === 'present';
       this.audit(replaced ? 'sealed_secret.replaced' : 'sealed_secret.accepted', {
@@ -191,6 +187,7 @@ export class SealedSecretStore {
       // Another slot is live (or nothing was ever accepted): a late removal of
       // an old secret id must never touch the file the live one is in.
       if (!record || record.slot !== slot) {
+        this.audit('sealed_secret.remove_skipped', { ...facts, reason: 'not_current', current_slot: record?.slot }, who, 200);
         return { status: 'not_current' as const, generation: record?.generation ?? 0, currentSlot: record?.slot ?? null };
       }
       if (record.state === 'deleted') {
@@ -201,7 +198,9 @@ export class SealedSecretStore {
           this.audit('sealed_secret.refused', { ...facts, reason: 'stale' }, who, 409);
           throw stale(record);
         }
-        db.upsertSealedSecretRecord({ ...record, generation, acceptedAt: Date.now() });
+        // The file is already gone; only the generation moves.
+        this.record(db, { ...record, generation, acceptedAt: Date.now() }, 'The node could not record the removal. Retry the removal.');
+        this.audit('sealed_secret.removed', { ...facts, reason: 'already_absent' }, who, 200);
         return { status: 'deleted' as const, generation, currentSlot: slot };
       }
       if (generation <= record.generation) {
@@ -209,16 +208,34 @@ export class SealedSecretStore {
         throw stale(record);
       }
 
-      await this.write(purposeId, { kind: 'remove' }, facts, who);
+      // A volume removed outside Sencho holds no file to remove. Running the
+      // writer would only make Docker create the volume again.
+      let volumeExists: boolean;
       try {
-        db.upsertSealedSecretRecord({ ...record, generation, state: 'deleted', fingerprint: null, acceptedAt: Date.now() });
+        volumeExists = await this.inspectVolumeLabels(this.docker(), getSealedSecretPurpose(purposeId).volume) !== null;
       } catch (error: unknown) {
-        console.error('[SealedSecrets] Record write failed after the file was removed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-        throw new SealedSecretError('SECRET_STORE_UNAVAILABLE', 503, 'The node removed the secret but could not record it. Retry the removal.');
+        this.audit('sealed_secret.refused', { ...facts, reason: 'store_unavailable' }, who, 503);
+        throw error;
       }
+      if (volumeExists) await this.write(purposeId, { kind: 'remove' }, facts, who);
+      this.record(
+        db,
+        { ...record, generation, state: 'deleted', fingerprint: null, acceptedAt: Date.now() },
+        'The node removed the secret but could not record it. Retry the removal.',
+      );
       this.audit('sealed_secret.removed', facts, who, 200);
       return { status: 'deleted' as const, generation, currentSlot: slot };
     });
+  }
+
+  /** Write the purpose record; a failure answers 503 so the hub retries the same generation. */
+  private record(db: DatabaseService, next: SealedSecretRecord, message: string): void {
+    try {
+      db.upsertSealedSecretRecord(next);
+    } catch (error: unknown) {
+      console.error('[SealedSecrets] Record write failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      throw new SealedSecretError('SECRET_STORE_UNAVAILABLE', 503, message);
+    }
   }
 
   private async write(
@@ -229,7 +246,7 @@ export class SealedSecretStore {
   ): Promise<void> {
     const purpose = getSealedSecretPurpose(purposeId);
     try {
-      await runSecretWriter(this.docker(), purpose.volume, purpose, op);
+      await runSecretWriter(this.docker(), { name: purpose.volume, purposeId }, purpose, op);
     } catch (error: unknown) {
       const status = error instanceof SealedSecretError ? error.status : 503;
       this.audit('sealed_secret.refused', { ...facts, reason: 'write_failed' }, who, status);
@@ -264,8 +281,13 @@ export class SealedSecretStore {
     if (labels[SECRET_VOLUME_LABEL] !== purposeId) throw this.foreign(volume);
     // Labelled but no record: either the store's own first write failed after
     // creating the volume (safe to retry), or someone else made a look-alike
-    // and may already have it mounted. Only an unmounted volume is adopted.
-    if (!hasRecord && await this.isMounted(docker, volume)) throw this.foreign(volume);
+    // and may already have it mounted. Only an unmounted volume is adopted. A
+    // writer a crashed run left behind is the store's own and is removed first,
+    // so it never counts as a mount.
+    if (!hasRecord) {
+      await removeLeftoverWriters(docker, volume);
+      if (await this.isMounted(docker, volume)) throw this.foreign(volume);
+    }
   }
 
   private async isMounted(docker: Docker, volume: string): Promise<boolean> {
@@ -293,8 +315,9 @@ export class SealedSecretStore {
     return new SealedSecretError(
       'SECRET_VOLUME_FOREIGN',
       409,
-      `Volume "${volume}" exists on this node but was not created by Sencho's secret store, so nothing was written to it. `
-        + 'Remove that volume on the node, then deliver the secret again.',
+      `Volume "${volume}" exists on this node, but Sencho's secret store cannot confirm it made it, so nothing was written to it. `
+        + 'On the node, stop and remove the containers that use that volume, remove the volume with the Docker CLI '
+        + '(Sencho does not remove it), then deliver the secret again.',
     );
   }
 

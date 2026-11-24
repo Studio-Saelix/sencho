@@ -114,15 +114,42 @@ describe('SealedSecretStore.accept', () => {
     expect(db.getSealedSecretRecord(PURPOSE)?.generation).toBe(1);
   });
 
-  it('serializes concurrent accepts for one purpose', async () => {
-    const [first, second] = await Promise.allSettled([
-      store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO),
-      store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO),
-    ]);
-    expect(first.status).toBe('fulfilled');
-    expect(second.status).toBe('fulfilled');
+  it('serializes concurrent accepts for one purpose: the second waits for the first writer to finish', async () => {
+    let release: () => void = () => undefined;
+    fake.holdNextWait = new Promise<void>((resolve) => { release = resolve; });
+    const first = store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    const second = store.accept(PURPOSE, SLOT_B, 2, `${SECRET}-b`, WHO);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The first writer is still running; the second has not started its own.
+    expect(fake.writerRuns()).toBe(1);
+    release();
+    await expect(first).resolves.toMatchObject({ status: 'accepted' });
+    await expect(second).resolves.toMatchObject({ status: 'accepted' });
+    expect(fake.writerRuns()).toBe(2);
     expect(db.getSealedSecretRecord(PURPOSE)).toMatchObject({ slot: SLOT_B, generation: 2 });
     expect(fake.files.get(`${VOLUME}/token`)?.content).toBe(`${SECRET}-b`);
+  });
+
+  it('keeps serving after a failed operation: a refusal does not block the next one', async () => {
+    fake.exitCodes.push(1);
+    const failed = store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    const next = store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    expect((await refusal(failed)).code).toBe('SECRET_STORE_UNAVAILABLE');
+    await expect(next).resolves.toMatchObject({ status: 'accepted', generation: 1 });
+  });
+
+  it('removes a writer a crashed run left behind, and does not count it as a foreign mount', async () => {
+    fake.volumes.set(VOLUME, { 'io.sencho.secret': PURPOSE });
+    fake.leftoverWriters.push({ Id: 'crashed-writer', volume: VOLUME });
+    expect((await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('accepted');
+    expect(fake.removedContainers).toEqual(['crashed-writer']);
+  });
+
+  it('answers 503 when the helper stream fails, and records nothing', async () => {
+    fake.streamErrorNext = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    expect((await refusal(store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO))).code).toBe('SECRET_STORE_UNAVAILABLE');
+    expect(db.getSealedSecretRecord(PURPOSE)).toBeNull();
+    expect(fake.writerRemovals()).toBe(1);
   });
 
   it('refuses an empty or oversize secret before touching Docker', async () => {
@@ -163,7 +190,14 @@ describe('SealedSecretStore.accept', () => {
     expect(opts.HostConfig?.Privileged).toBe(false);
     expect(opts.HostConfig?.SecurityOpt).toEqual(['no-new-privileges:true']);
     expect(opts.HostConfig?.LogConfig?.Type).toBe('none');
-    expect(opts.HostConfig?.Mounts).toEqual([{ Type: 'volume', Source: VOLUME, Target: '/v', ReadOnly: false }]);
+    // If Docker has to create the volume, it gets the store's label, never a bare look-alike.
+    expect(opts.HostConfig?.Mounts).toEqual([{
+      Type: 'volume',
+      Source: VOLUME,
+      Target: '/v',
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: false, Labels: { 'io.sencho.secret': PURPOSE }, DriverConfig: { Name: 'local', Options: {} } },
+    }]);
     expect(opts.OpenStdin).toBe(true);
     expect(opts.Env).toBeUndefined();
     expect(JSON.stringify(opts)).not.toContain(SECRET.slice(0, 8));
@@ -171,6 +205,31 @@ describe('SealedSecretStore.accept', () => {
 });
 
 describe('SealedSecretStore.remove', () => {
+  it('records the removal without starting the writer when the volume was removed outside Sencho', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    fake.volumes.delete(VOLUME);
+    const runs = fake.writerRuns();
+    expect((await store.remove(PURPOSE, SLOT_A, 2, WHO)).status).toBe('deleted');
+    expect(fake.writerRuns()).toBe(runs);
+    // Nothing recreated the volume, labelled or not, so the next delivery creates the store's own.
+    expect(fake.volumes.has(VOLUME)).toBe(false);
+    expect((await store.accept(PURPOSE, SLOT_A, 3, SECRET, WHO)).status).toBe('accepted');
+    expect(fake.volumes.get(VOLUME)).toEqual({ 'io.sencho.secret': PURPOSE });
+  });
+
+  it('audits a removal that names a slot other than the live one', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    await store.remove(PURPOSE, SLOT_B, 2, WHO);
+    expect(auditSummaries().some((line) => line.startsWith('sealed_secret.remove_skipped:') && line.includes('reason=not_current'))).toBe(true);
+  });
+
+  it('answers 503 when recording a removal of an already deleted slot fails', async () => {
+    await store.accept(PURPOSE, SLOT_A, 1, SECRET, WHO);
+    await store.remove(PURPOSE, SLOT_A, 2, WHO);
+    vi.spyOn(db, 'upsertSealedSecretRecord').mockImplementationOnce(() => { throw new Error('database is locked'); });
+    expect((await refusal(store.remove(PURPOSE, SLOT_A, 3, WHO))).code).toBe('SECRET_STORE_UNAVAILABLE');
+  });
+
   it('answers not_current for a slot that is not live and never starts the writer', async () => {
     expect(await store.remove(PURPOSE, SLOT_A, 1, WHO)).toEqual({ status: 'not_current', generation: 0, currentSlot: null });
     await store.accept(PURPOSE, SLOT_B, 1, SECRET, WHO);
@@ -218,5 +277,25 @@ describe('SealedSecretStore.remove', () => {
     restarted.setDockerForTests(fake.docker);
     expect(restarted.describe(PURPOSE, SLOT_A)).toMatchObject({ state: 'present', purposeGeneration: 1 });
     expect((await restarted.accept(PURPOSE, SLOT_A, 1, SECRET, WHO)).status).toBe('already_accepted');
+  });
+});
+
+describe('secret writer lifecycle', () => {
+  it('gives up on a hung helper after its timeout and still force-removes the container', async () => {
+    const { runSecretWriter } = await import('../services/sealedSecrets/secretVolumeWriter');
+    const { getSealedSecretPurpose } = await import('../services/sealedSecrets/purposes');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fake.holdNextWait = new Promise<void>(() => undefined);
+      const run = runSecretWriter(fake.docker, { name: VOLUME, purposeId: PURPOSE }, getSealedSecretPurpose(PURPOSE), { kind: 'write', secret: SECRET });
+      const outcome = refusal(run);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = await outcome;
+      expect(error.code).toBe('SECRET_STORE_UNAVAILABLE');
+      expect(fake.writerRemovals()).toBe(1);
+      expect(fake.files.has(`${VOLUME}/token`)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

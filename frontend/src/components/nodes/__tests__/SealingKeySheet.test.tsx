@@ -47,6 +47,7 @@ describe('SealingKeySheet', () => {
     ['key_mismatch', 'Key changed since it was pinned', { readiness: 'key_mismatch', pinned: pin, presented: { fingerprint: PRESENTED } }],
     ['unsupported', 'This node cannot receive sealed secrets', { readiness: 'unsupported', pinned: null, presented: null }],
     ['unreachable', 'Node unreachable', { readiness: 'unreachable', pinned: pin, presented: null }],
+    ['key_invalid', 'Node answered without a usable key', { readiness: 'key_invalid', pinned: pin, presented: null }],
   ] as const)('answers the %s state in one line', async (state, title, rest) => {
     renderSheet({ kind: 'remote', ...rest } as NodeSealingKeyView);
     const el = await answer();
@@ -141,6 +142,12 @@ describe('SealingKeySheet', () => {
     apiFetchMock.mockReturnValueOnce(json(200, { kind: 'remote', readiness: 'ready', pinned: { ...pin, confidential: true }, presented: { fingerprint: PINNED } }));
     await userEvent.click(within(el).getByRole('button', { name: /Retry/ }));
     await waitFor(() => expect(screen.getByTestId('status-answer')).toHaveAttribute('data-state', 'ready'));
+  });
+
+  it('offers Retry for a node that answered without a usable key', async () => {
+    renderSheet({ kind: 'remote', readiness: 'key_invalid', pinned: pin, presented: null });
+    const el = await answer();
+    expect(within(el).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
   it('offers Retry for an unreachable node', async () => {

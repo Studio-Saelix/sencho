@@ -158,7 +158,7 @@ function loadOrCreateKey(): LoadedSealingKey {
   }
 }
 
-/** Load an existing keypair; never create. Used by openAuths so a missing key fails closed. */
+/** Load an existing keypair; never create. Used wherever a missing key must fail closed (opening an envelope, reading the key for display). */
 function loadExistingKey(): LoadedSealingKey {
   const filePath = keyPath();
   if (cached && cachedKeyPath === filePath) {

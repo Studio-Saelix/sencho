@@ -3,7 +3,41 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 
 /** Whether a remote node can receive a sealed secret, as the control instance sees it. */
-export type SealingKeyReadiness = 'ready' | 'unsupported' | 'unreachable' | 'pin_unconfirmed' | 'key_mismatch';
+export type SealingKeyReadiness = 'ready' | 'unsupported' | 'unreachable' | 'key_invalid' | 'pin_unconfirmed' | 'key_mismatch';
+
+const READINESS: ReadonlySet<string> = new Set<SealingKeyReadiness>([
+  'ready', 'unsupported', 'unreachable', 'key_invalid', 'pin_unconfirmed', 'key_mismatch',
+]);
+
+function isPin(value: unknown): value is SealingKeyPin {
+  if (typeof value !== 'object' || value === null) return false;
+  const raw = value as Record<string, unknown>;
+  return typeof raw.fingerprint === 'string'
+    && typeof raw.registeredAt === 'number'
+    && typeof raw.confidential === 'boolean'
+    && (raw.confirmedBy === null || typeof raw.confirmedBy === 'string')
+    && (raw.confirmedAt === null || typeof raw.confirmedAt === 'number');
+}
+
+/** Narrow a sealing key status answer; anything else is an answer this build cannot show. */
+export function parseNodeSealingKeyView(value: unknown): NodeSealingKeyView {
+  const fail = (): never => { throw new Error('The control instance answered with a sealing key status this page cannot show. Reload the page.'); };
+  if (typeof value !== 'object' || value === null) return fail();
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === 'local') {
+    return typeof raw.fingerprint === 'string' ? { kind: 'local', fingerprint: raw.fingerprint } : fail();
+  }
+  if (raw.kind !== 'remote' || typeof raw.readiness !== 'string' || !READINESS.has(raw.readiness)) return fail();
+  if (raw.pinned !== null && !isPin(raw.pinned)) return fail();
+  const presented = raw.presented as { fingerprint?: unknown } | null;
+  if (presented !== null && (typeof presented !== 'object' || typeof presented.fingerprint !== 'string')) return fail();
+  return {
+    kind: 'remote',
+    readiness: raw.readiness as SealingKeyReadiness,
+    pinned: raw.pinned as SealingKeyPin | null,
+    presented: presented === null ? null : { fingerprint: presented.fingerprint as string },
+  };
+}
 
 export interface SealingKeyPin {
   fingerprint: string;
@@ -113,7 +147,7 @@ export function useNodeSealingKey(
     try {
       const res = await apiFetch(`/nodes/${id}/sealing-key`, { localOnly: true });
       if (!res.ok) throw new Error(await readError(res, 'Could not read the sealing key status.'));
-      const next = await res.json() as NodeSealingKeyView;
+      const next = parseNodeSealingKeyView(await res.json());
       if (!mounted.current || currentNode.current !== id) return;
       adopt(id, next);
     } catch (error: unknown) {
@@ -161,7 +195,7 @@ export function useNodeSealingKey(
         body: JSON.stringify({ fingerprint }),
       });
       if (!res.ok) throw new Error(await readError(res, 'Could not confirm the fingerprint.'));
-      const next = await res.json() as NodeSealingKeyView;
+      const next = parseNodeSealingKeyView(await res.json());
       if (mounted.current && currentNode.current === nodeId) adopt(nodeId, next);
       toast.success(`Fingerprint confirmed for "${nodeName}". Sealed secrets can now be sent to it.`);
       return true;

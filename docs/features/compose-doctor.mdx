@@ -216,7 +216,7 @@ To update Sencho itself, use **Fleet -> Node management -> Node updates** instea
 
 ## Reserved secret volume
 
-Sencho keeps a few secrets for its own use in a dedicated Docker volume on the node, and no Sencho screen opens that volume. The volume name `sencho_edge_secret` and the volume label `io.sencho.secret` are reserved for it. A stack that declares a volume with that name or label, mounts a volume on the node that carries the label, or uses `volumes_from` or `pid: container:` to reach a container that mounts one, gets the **Stack reaches a reserved secret volume** finding.
+The volume name `sencho_edge_secret` and the volume label `io.sencho.secret` are reserved for a secret Sencho keeps in a dedicated Docker volume on the node, which no Sencho screen opens. A stack gets the **Stack reaches a reserved secret volume** finding when one of its volumes resolves to the name `sencho_edge_secret` (an `external` volume, or one with an explicit `name:`), declares that label, or is a volume on the node that carries the label, or when a service uses `volumes_from` or `pid: container:` to reach a container that mounts one.
 
 This rule also connects to an enforcement that is not advisory: Sencho refuses to deploy, update, recreate, or restore such a stack, whether or not the finding is acknowledged, and a down that removes volumes is refused for it too. Rename the volume, remove the `io.sencho.secret` label, or remove the reference to that container. The volume name and label checks run even when the Docker daemon cannot be reached; the checks that read the node's volumes and containers need it. See [Reserved volume](/features/compose-storage#reserved-volume).
 

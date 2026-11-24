@@ -1,4 +1,4 @@
-import { KeyRound, ShieldAlert, ShieldCheck, ShieldQuestion, WifiOff } from 'lucide-react';
+import { KeyRound, ShieldAlert, ShieldCheck, ShieldQuestion, ShieldX, WifiOff } from 'lucide-react';
 import type { StatusPathAnswer } from '@/components/ui/status-path';
 import type { NodeSealingKeyView } from '@/hooks/useNodeSealingKey';
 
@@ -68,6 +68,14 @@ export function sealingKeyAnswer(view: NodeSealingKeyView, isAdmin: boolean): Se
         icon: WifiOff,
         title: 'Node unreachable',
         line: 'Sencho could not reach this node to read its sealing key. Check that the node is online and its connection works, then retry.',
+      };
+    case 'key_invalid':
+      return {
+        tone: 'destructive',
+        status: 'key_invalid',
+        icon: ShieldX,
+        title: 'Node answered without a usable key',
+        line: 'The node answered, but not with a sealing key Sencho can use, so nothing sealed is sent to it. Check the node\'s logs, then retry.',
       };
   }
 }

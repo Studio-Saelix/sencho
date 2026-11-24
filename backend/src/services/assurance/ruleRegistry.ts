@@ -437,7 +437,7 @@ export const ASSURANCE_RULES: readonly AssuranceRule[] = [
     id: 'secret-volume-reference',
     title: 'Stack reaches a reserved secret volume',
     description: 'A volume or container reference reaches a volume Sencho reserves for a secret it keeps on the node, so the deploy is refused.',
-    category: 'compose-semantics',
+    category: 'self-protection',
     defaultSeverity: 'blocker',
     findingClass: 'technical-blocker',
     requires: ['effective-model'],

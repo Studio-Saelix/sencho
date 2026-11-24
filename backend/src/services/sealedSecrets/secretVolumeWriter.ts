@@ -1,6 +1,7 @@
 import { Writable } from 'stream';
 import type Docker from 'dockerode';
 
+import { SECRET_VOLUME_LABEL } from '../../helpers/secretVolume';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { SealedSecretError } from './errors';
@@ -10,6 +11,9 @@ import type { SealedSecretPurpose } from './purposes';
 export const SECRET_WRITER_IMAGE = 'alpine:3.20';
 const MOUNT = '/v';
 const TIMEOUT_MS = 30_000;
+/** Label value that marks a writer container, so a leftover one can be found and removed. */
+export const SECRET_WRITER_HELPER = 'secret-writer';
+const HELPER_LABEL = 'io.sencho.helper';
 
 /**
  * The writer script. The secret arrives on stdin only. The volume root is reset
@@ -72,9 +76,15 @@ async function ensureImage(docker: Docker): Promise<void> {
   }
 }
 
+/** The volume a writer run mounts, and the purpose its label names. */
+export interface SecretWriterVolume {
+  name: string;
+  purposeId: string;
+}
+
 /** Container options for one writer run. Exported for the test that pins the profile. */
 export function buildWriterCreateOptions(
-  volume: string,
+  volume: SecretWriterVolume,
   purpose: SealedSecretPurpose,
   op: SecretWriterOp,
 ): Docker.ContainerCreateOptions {
@@ -98,7 +108,7 @@ export function buildWriterCreateOptions(
     AttachStdin: wantStdin,
     OpenStdin: wantStdin,
     StdinOnce: wantStdin,
-    Labels: { 'io.sencho.helper': 'secret-writer' },
+    Labels: { [HELPER_LABEL]: SECRET_WRITER_HELPER },
     HostConfig: {
       ReadonlyRootfs: true,
       NetworkMode: 'none',
@@ -109,7 +119,20 @@ export function buildWriterCreateOptions(
       PidsLimit: 16,
       Memory: 128 * 1024 * 1024,
       LogConfig: { Type: 'none', Config: {} },
-      Mounts: [{ Type: 'volume', Source: volume, Target: MOUNT, ReadOnly: false }],
+      // Docker creates a missing named volume when the container is created. The
+      // label makes such a volume the store's own, never an unlabelled
+      // look-alike the store would then refuse as foreign.
+      Mounts: [{
+        Type: 'volume',
+        Source: volume.name,
+        Target: MOUNT,
+        ReadOnly: false,
+        VolumeOptions: {
+          NoCopy: false,
+          Labels: { [SECRET_VOLUME_LABEL]: volume.purposeId },
+          DriverConfig: { Name: 'local', Options: {} },
+        },
+      }],
     },
   };
 }
@@ -121,6 +144,34 @@ function exitMessage(code: number): string {
 }
 
 /**
+ * Remove writer containers a crashed or killed run left behind on this volume.
+ * Each run removes its own container when it ends, so any writer found here
+ * belongs to a run that no longer exists. Left in place, it would count as a
+ * container that mounts the volume, and starting it again would replay its
+ * write or removal.
+ */
+export async function removeLeftoverWriters(docker: Docker, volumeName: string): Promise<void> {
+  let leftovers: Docker.ContainerInfo[];
+  try {
+    leftovers = await docker.listContainers({
+      all: true,
+      filters: { label: [`${HELPER_LABEL}=${SECRET_WRITER_HELPER}`], volume: [volumeName] },
+    });
+  } catch (error: unknown) {
+    console.error('[SealedSecrets] Writer sweep failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    throw unavailable('the node could not list its helper containers');
+  }
+  for (const leftover of leftovers) {
+    try {
+      await docker.getContainer(leftover.Id).remove({ force: true });
+    } catch (error: unknown) {
+      console.error('[SealedSecrets] Leftover writer removal failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      throw unavailable('a helper container from an earlier run could not be removed');
+    }
+  }
+}
+
+/**
  * Write or remove the purpose's secret file in its volume with a short-lived,
  * locked-down helper container: uid 0 with only CHOWN and FOWNER, no network,
  * read-only root, logs off. The secret is fed on stdin and never placed in
@@ -128,10 +179,11 @@ function exitMessage(code: number): string {
  */
 export async function runSecretWriter(
   docker: Docker,
-  volume: string,
+  volume: SecretWriterVolume,
   purpose: SealedSecretPurpose,
   op: SecretWriterOp,
 ): Promise<void> {
+  await removeLeftoverWriters(docker, volume.name);
   await ensureImage(docker);
   const stderrChunks: Buffer[] = [];
   const sink = new Writable({ write(_chunk, _enc, cb) { cb(); } });
@@ -153,10 +205,15 @@ export async function runSecretWriter(
   const run = (async (): Promise<number> => {
     const wantStdin = op.kind === 'write';
     const stream = await container.attach({ stream: true, stdin: wantStdin, stdout: true, stderr: true, hijack: wantStdin });
-    const ended = new Promise<void>((resolve) => {
+    // A socket error (the helper exited before reading stdin, or the daemon
+    // connection reset) fails this run instead of escaping as an uncaught error.
+    const ended = new Promise<void>((resolve, reject) => {
       stream.once('end', () => resolve());
       stream.once('close', () => resolve());
+      // `on`, not `once`: writing to a stream that already failed raises a second error.
+      stream.on('error', (error: Error) => reject(error));
     });
+    ended.catch(() => undefined);
     docker.modem.demuxStream(stream, sink, stderr);
     await container.start();
     if (op.kind === 'write') {
@@ -167,6 +224,8 @@ export async function runSecretWriter(
     await ended;
     return typeof exit?.StatusCode === 'number' ? exit.StatusCode : 1;
   })();
+  // When the timeout wins, `run` may still reject later; that outcome is moot.
+  run.catch(() => undefined);
 
   try {
     const code = await Promise.race([run, timeout]);

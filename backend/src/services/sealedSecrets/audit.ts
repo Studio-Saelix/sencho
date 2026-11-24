@@ -5,8 +5,8 @@ export type SealedSecretAuditFacts = Record<string, string | number | null | und
 
 /**
  * Write one sealed secret audit row: the dotted action and its facts as
- * `key=value` pairs. Callers pass purpose, slot, generation, node, actor and
- * reason only: never the secret, any part of it, or its fingerprint. A failed
+ * `key=value` pairs. Facts are identifiers, generations and codes only: never
+ * the secret, any part of it, or its fingerprint. A failed
  * write is logged and does not fail the action it records.
  */
 export function recordSealedSecretAudit(

@@ -71,6 +71,24 @@ afterAll(() => {
   cleanupTestDb(tmpDir);
 });
 
+describe('startup fingerprint line', () => {
+  it('is printed by startServer before the server listens', async () => {
+    // A structural check, as for the GitOps startup order: startServer drives
+    // many unrelated services. Comments are stripped so prose cannot satisfy it.
+    const fs = await import('fs');
+    const path = await import('path');
+    const source = fs.readFileSync(path.join(__dirname, '../bootstrap/startup.ts'), 'utf-8');
+    const body = source.slice(source.indexOf('export async function startServer'))
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    const announce = body.search(/\bannounceSealingKey\s*\(\s*\)/);
+    const listen = body.search(/server\s*\.\s*listen\s*\(/);
+    expect(announce).toBeGreaterThan(-1);
+    expect(listen).toBeGreaterThan(-1);
+    expect(announce).toBeLessThan(listen);
+  });
+});
+
 describe('DELETE /api/nodes/:id/sealing-key', () => {
   it('rejects viewers with 401/403', async () => {
     const res = await request(app)

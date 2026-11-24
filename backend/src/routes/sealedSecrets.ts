@@ -89,8 +89,12 @@ sealedSecretsRouter.get('/key', (_req: Request, res: Response) => {
 });
 
 sealedSecretsRouter.get('/', (_req: Request, res: Response) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({ items: SealedSecretStore.getInstance().list() });
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: SealedSecretStore.getInstance().list() });
+  } catch (error: unknown) {
+    sendError(res, error, 'List');
+  }
 });
 
 sealedSecretsRouter.get('/:purpose/:slot', (req: Request, res: Response) => {
@@ -106,7 +110,7 @@ sealedSecretsRouter.get('/:purpose/:slot', (req: Request, res: Response) => {
 
 const BODY_LIMIT_BYTES = 16 * 1024;
 
-/** A sealed body is small; refuse anything larger than the prefix allows. */
+/** A sealed body is small; refuse a body larger than 16 KiB. */
 function smallJson(req: Request, res: Response, next: NextFunction): void {
   if ((req.rawBody?.length ?? 0) > BODY_LIMIT_BYTES) {
     res.status(413).json({ error: 'Sealed secret request body is too large.', code: 'SEALED_SECRET_REQUEST_INVALID' });
@@ -128,6 +132,9 @@ sealedSecretsRouter.post('/:purpose', smallJson, async (req: Request, res: Respo
       secret = openSecret(body.sealed, { purpose, deliverySourceId: deliverySourceId(), slot, generation, operationId });
     } catch (error: unknown) {
       if (isSealedSecretError(error)) throw error;
+      // The envelope code redacts its own messages, so the cause is safe to log;
+      // without it a corrupt key file reads like a changed key.
+      console.warn('[SealedSecrets] Sealed secret did not open:', sanitizeForLog(getErrorMessage(error, 'unknown')));
       recordSealedSecretAudit('sealed_secret.refused', { purpose, slot, generation, actor, reason: 'open_failed' }, {
         username: actor, path: req.originalUrl, method: req.method, statusCode: 422,
       });

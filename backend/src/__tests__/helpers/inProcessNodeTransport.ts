@@ -8,6 +8,8 @@ export interface InProcessCall {
   method: string;
   path: string;
   headers: Record<string, string>;
+  /** The Authorization header the hub client sent, before the transport swapped in the node-side bearer. */
+  sentAuthorization: string | null;
   data: unknown;
   /** The node's answer, once it arrived. */
   response?: { status: number; body: unknown };
@@ -22,10 +24,18 @@ export interface InProcessNodeTransportOptions {
    * injects in place of whatever the hub sent.
    */
   bearer: () => string;
-  /** Throw to fail the request before the node sees it (a transport error). */
-  beforeSend?: (call: InProcessCall) => void;
+  /**
+   * Throw (or reject) to fail the request before the node sees it (a transport
+   * error); return a promise to hold the request until it settles.
+   */
+  beforeSend?: (call: InProcessCall) => void | Promise<void>;
   /** Throw to lose the node's answer after it was applied (a dropped response). */
   afterAnswer?: (call: InProcessCall, status: number) => void;
+  /**
+   * Answer in place of the node (a bridge or proxy that answered on its own, or
+   * an older node without the route). Return undefined to let the node answer.
+   */
+  respond?: (call: InProcessCall) => { status: number; body: unknown } | undefined;
 }
 
 export interface InProcessNodeTransport {
@@ -49,18 +59,32 @@ export function installInProcessNodeTransport(options: InProcessNodeTransportOpt
     const url = new URL(config.url ?? '');
     const method = (config.method ?? 'GET').toUpperCase();
     const headers: Record<string, string> = {};
+    let sentAuthorization: string | null = null;
     for (const [key, value] of Object.entries((config.headers ?? {}) as Record<string, unknown>)) {
-      if (typeof value === 'string' && key.toLowerCase() !== 'authorization') headers[key.toLowerCase()] = value;
+      if (typeof value !== 'string') continue;
+      if (key.toLowerCase() === 'authorization') sentAuthorization = value;
+      else headers[key.toLowerCase()] = value;
     }
     headers.authorization = `Bearer ${options.bearer()}`;
-    const call: InProcessCall = { method, path: url.pathname, headers, data: config.data };
+    const call: InProcessCall = { method, path: url.pathname, headers, sentAuthorization, data: config.data };
     calls.push(call);
     if (options.beforeSend) {
       try {
-        options.beforeSend(call);
+        await options.beforeSend(call);
       } catch (error: unknown) {
         throw transportError(error instanceof Error ? error.message : 'request failed');
       }
+    }
+    const scripted = options.respond?.(call);
+    if (scripted) {
+      call.response = scripted;
+      return {
+        status: scripted.status,
+        statusText: '',
+        data: scripted.body,
+        headers: {},
+        config: config as AxiosResponse['config'],
+      } as AxiosResponse;
     }
     const agent = request(options.app);
     let pending = method === 'POST' ? agent.post(url.pathname)

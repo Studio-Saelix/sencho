@@ -48,7 +48,10 @@ export function modelReferencesContainers(model: EffectiveModel): boolean {
   return model.services.some((svc) => (svc.volumesFromContainers?.length ?? 0) > 0 || svc.pidContainer !== undefined);
 }
 
-function matchesConsumer(ref: string, consumer: SecretConsumerContainer): boolean {
+function matchesConsumer(rawRef: string, consumer: SecretConsumerContainer): boolean {
+  // The daemon resolves `/name` and `name` to the same container.
+  const ref = rawRef.replace(/^\/+/, '');
+  if (ref === '') return false;
   if (consumer.names.includes(ref)) return true;
   // Docker accepts a unique id prefix as a container reference.
   return /^[0-9a-f]+$/i.test(ref) && consumer.id.toLowerCase().startsWith(ref.toLowerCase());

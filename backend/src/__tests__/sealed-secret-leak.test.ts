@@ -3,12 +3,18 @@
  * delivery on both sides (direct proxy, Pilot, and the local node), then look
  * for the secret, and its first 8 characters, everywhere Sencho writes or
  * answers: node responses, requests on the wire, every audit row, console
- * output, diagnostics, every new table, and the writer container's options.
+ * output, diagnostics, every new table, the writer container's options, and
+ * the stack-side surfaces of a stack that references the secret volume (its
+ * Compose Doctor report and stored findings, its dossier, and the fleet
+ * snapshot capture).
  */
+import fs from 'fs';
+import path from 'path';
 import jwt from 'jsonwebtoken';
+import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { cleanupTestDb, setupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { cleanupTestDb, setupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 import { createFakeSecretDocker } from './helpers/fakeSecretDocker';
 import { installInProcessNodeTransport, type InProcessCall } from './helpers/inProcessNodeTransport';
 
@@ -122,10 +128,44 @@ describe('sealed secret leak sweep', () => {
     calls.push(...transport.calls);
     expect(errors.length).toBeGreaterThan(0);
 
+    // A stack that references the secret volume, read through every stack-side surface.
+    const consumer = 'leak-consumer';
+    const stackDir = path.join(process.env.COMPOSE_DIR as string, consumer);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: alpine:3.20\n    volumes:\n      - tok:/run/tok:ro\nvolumes:\n  tok:\n    external: true\n    name: sencho_edge_secret\n');
+    const { ComposeService } = await import('../services/ComposeService');
+    const DockerController = (await import('../services/DockerController')).default;
+    vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: JSON.stringify({
+        name: consumer,
+        services: { app: { image: 'alpine:3.20', volumes: [{ type: 'volume', source: 'tok', target: '/run/tok', read_only: true }] } },
+        networks: {},
+        volumes: { tok: { name: 'sencho_edge_secret', external: true } },
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    vi.spyOn(DockerController.prototype, 'getDependencySnapshot').mockResolvedValue({
+      containers: [],
+      networks: [],
+      volumes: [{ name: 'sencho_edge_secret', driver: 'local', secret: true, composeProject: null, stack: null }],
+    } as unknown as Awaited<ReturnType<typeof DockerController.prototype.getDependencySnapshot>>);
+    const { ComposeDoctorService } = await import('../services/ComposeDoctorService');
+    const doctorReport = await ComposeDoctorService.getInstance().runPreflight(localId, consumer, 'admin');
+    expect(doctorReport.findings.some((finding) => finding.ruleId === 'secret-volume-reference')).toBe(true);
+    expect((db.getDb().prepare('SELECT COUNT(*) AS n FROM preflight_findings').get() as { n: number }).n).toBeGreaterThan(0);
+    const userBearer = `Bearer ${jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '5m' })}`;
+    const dossier = await request(app).get(`/api/stacks/${consumer}/dossier`).set('Authorization', userBearer);
+    expect(dossier.status).toBe(200);
+    const { captureLocalNodeFiles } = await import('../utils/snapshot-capture');
+    const capture = await captureLocalNodeFiles({ id: localId, name: 'local', mode: 'proxy' }, true);
+
     db.flushAuditLogBuffer();
     const { collectDiagnostics } = await import('../services/DiagnosticsService');
     const diagnostics = await collectDiagnostics();
-    const tables = ['audit_log', 'sealed_secret_generations', 'sealed_secret_deliveries', 'node_sealing_keys', 'managed_stacks', 'global_settings']
+    const tables = ['audit_log', 'sealed_secret_generations', 'sealed_secret_deliveries', 'node_sealing_keys', 'managed_stacks', 'global_settings', 'preflight_findings']
       .map((table) => JSON.stringify(db.getDb().prepare(`SELECT * FROM ${table}`).all()));
     const surfaces: Record<string, string> = {
       requests: JSON.stringify(calls.map((call) => ({ path: call.path, headers: call.headers, data: call.data }))),
@@ -135,6 +175,9 @@ describe('sealed secret leak sweep', () => {
       diagnostics: JSON.stringify(diagnostics),
       tables: tables.join('\n'),
       writerOptions: JSON.stringify(fake.createOptions),
+      doctorReport: JSON.stringify(doctorReport),
+      dossier: JSON.stringify(dossier.body),
+      snapshotCapture: JSON.stringify(capture),
     };
     for (const [surface, text] of Object.entries(surfaces)) {
       expect(text, surface).not.toContain(SENTINEL);

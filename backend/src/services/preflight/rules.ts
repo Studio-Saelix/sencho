@@ -870,8 +870,9 @@ const externalVolumeMissing: PreflightRule = {
 };
 
 /**
- * The same evaluator the deploy guard runs, so Doctor reports ahead of time
- * exactly what a deploy will refuse.
+ * The same evaluator the deploy guard runs. Doctor judges from its stored node
+ * snapshot while the deploy guard reads the node again, so Doctor reports
+ * ahead of time what a deploy will refuse.
  */
 const secretVolumeReference: PreflightRule = {
   id: 'secret-volume-reference',

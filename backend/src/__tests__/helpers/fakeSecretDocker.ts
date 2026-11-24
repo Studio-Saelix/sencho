@@ -31,6 +31,16 @@ export interface FakeSecretDocker {
   writerRuns(): number;
   /** Fail the volume inspect with this status, once. */
   failInspect: number | null;
+  /** Writer containers a crashed run left behind (answer the helper-label list). */
+  leftoverWriters: Array<{ Id: string; volume: string }>;
+  /** Ids of containers removed through `getContainer(id).remove`. */
+  removedContainers: string[];
+  /** Number of writer containers removed after their run. */
+  writerRemovals(): number;
+  /** When set, the next writer's `wait` waits on this promise first (a slow or hung helper). */
+  holdNextWait: Promise<void> | null;
+  /** When set, the next writer's attach stream emits this error after start. */
+  streamErrorNext: Error | null;
 }
 
 export function createFakeSecretDocker(): FakeSecretDocker {
@@ -43,22 +53,43 @@ export function createFakeSecretDocker(): FakeSecretDocker {
     exitCodes: [],
     writerRuns: () => started,
     failInspect: null,
+    leftoverWriters: [],
+    removedContainers: [],
+    writerRemovals: () => removals,
+    holdNextWait: null,
+    streamErrorNext: null,
   };
   let started = 0;
+  let removals = 0;
 
   const createContainer = async (opts: Docker.ContainerCreateOptions) => {
     state.createOptions.push(opts);
     const stream = new PassThrough();
     const chunks: Buffer[] = [];
     stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const ended = new Promise<void>((resolve) => stream.once('end', () => resolve()));
+    const ended = new Promise<void>((resolve) => {
+      stream.once('end', () => resolve());
+      stream.once('close', () => resolve());
+    });
     const cmd = (opts.Cmd ?? []) as string[];
     const [op, file, uid, gid, mode, max] = cmd.slice(4);
-    const volume = opts.HostConfig?.Mounts?.[0]?.Source ?? '';
+    const mount = opts.HostConfig?.Mounts?.[0];
+    const volume = mount?.Source ?? '';
+    // Docker creates a missing named volume on container create, with the
+    // mount's volume labels.
+    if (volume && !state.volumes.has(volume)) state.volumes.set(volume, { ...(mount?.VolumeOptions?.Labels ?? {}) });
+    const hold = state.holdNextWait;
+    state.holdNextWait = null;
+    const streamError = state.streamErrorNext;
+    state.streamErrorNext = null;
     return {
       attach: async () => stream,
-      start: async () => { started += 1; },
+      start: async () => {
+        started += 1;
+        if (streamError) stream.destroy(streamError);
+      },
       wait: async () => {
+        if (hold) await hold;
         if (!opts.OpenStdin) stream.end();
         await ended;
         const forced = state.exitCodes.shift();
@@ -74,7 +105,7 @@ export function createFakeSecretDocker(): FakeSecretDocker {
         state.files.set(key, { content, uid: Number(uid), gid: Number(gid), mode });
         return { StatusCode: 0 };
       },
-      remove: async () => undefined,
+      remove: async () => { removals += 1; },
     };
   };
 
@@ -97,10 +128,22 @@ export function createFakeSecretDocker(): FakeSecretDocker {
       if (!state.volumes.has(Name)) state.volumes.set(Name, { ...Labels });
       return { Name };
     },
-    listContainers: async (opts?: { filters?: { volume?: string[] } }) => {
+    listContainers: async (opts?: { filters?: { volume?: string[]; label?: string[] } }) => {
       const wanted = opts?.filters?.volume ?? [];
-      return wanted.some((name) => state.mounted.has(name)) ? [{ Id: 'consumer' }] : [];
+      if (opts?.filters?.label?.includes('io.sencho.helper=secret-writer')) {
+        return state.leftoverWriters.filter((writer) => wanted.length === 0 || wanted.includes(writer.volume)).map(({ Id }) => ({ Id }));
+      }
+      const consumers = wanted.some((name) => state.mounted.has(name)) ? [{ Id: 'consumer' }] : [];
+      // A leftover writer mounts its volume too, exactly as Docker would report it.
+      const leftovers = state.leftoverWriters.filter((writer) => wanted.includes(writer.volume)).map(({ Id }) => ({ Id }));
+      return [...consumers, ...leftovers];
     },
+    getContainer: (id: string) => ({
+      remove: async () => {
+        state.removedContainers.push(id);
+        state.leftoverWriters = state.leftoverWriters.filter((writer) => writer.Id !== id);
+      },
+    }),
     createContainer,
     modem: {
       demuxStream: () => undefined,

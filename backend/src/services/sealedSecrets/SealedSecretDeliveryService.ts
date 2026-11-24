@@ -22,6 +22,7 @@ export type SealedSecretReadiness =
   | 'local'
   | 'unsupported'
   | 'unreachable'
+  | 'key_invalid'
   | 'pin_unconfirmed'
   | 'key_mismatch';
 
@@ -35,7 +36,10 @@ export interface DeliverInput {
   nodeId: number;
   purpose: SealedSecretPurposeId;
   slot: string;
-  /** Held in memory for this call only. Never stored, logged or audited on the hub. */
+  /**
+   * Held in memory for this call only. Never stored in a hub table, logged or
+   * audited. For the local node it is written only into the secret volume.
+   */
   secret: string;
   actor: string;
 }
@@ -103,6 +107,17 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Responses are small JSON documents; anything larger is not a node's answer. */
 const RESPONSE_LIMIT_BYTES = 64 * 1024;
 const DELIVERY_PATH = 'sealed-secret-delivery';
+/** A node's refusal text is shown to the caller; keep it to a sentence or two. */
+const NODE_MESSAGE_LIMIT = 300;
+const NODE_CODES: ReadonlySet<string> = new Set<SealedSecretNodeCode>([
+  'SEALED_SECRET_PURPOSE_UNKNOWN',
+  'SEALED_SECRET_SLOT_INVALID',
+  'SEALED_SECRET_REQUEST_INVALID',
+  'SEALED_SECRET_OPEN_FAILED',
+  'SEALED_SECRET_GENERATION_STALE',
+  'SECRET_VOLUME_FOREIGN',
+  'SECRET_STORE_UNAVAILABLE',
+]);
 
 function hubError(code: SealedSecretError['code'], status: number, message: string, details: Record<string, string | number | null> = {}) {
   return new SealedSecretError(code, status, message, details);
@@ -112,8 +127,39 @@ function unreachable(): SealedSecretError {
   return hubError('SEALED_SECRET_TARGET_UNREACHABLE', 503, 'Sencho could not reach this node to deliver a sealed secret. Check that it is online, then retry.');
 }
 
-function deliveryFailed(): SealedSecretError {
-  return hubError('SEALED_SECRET_DELIVERY_FAILED', 502, 'The node answered in a way Sencho could not use. Retry; if it keeps failing, check the node\'s logs.');
+function deliveryFailed(details: Record<string, string | number | null> = {}): SealedSecretError {
+  return hubError(
+    'SEALED_SECRET_DELIVERY_FAILED',
+    502,
+    'The node answered in a way Sencho could not use. Retry; if it keeps failing, check the node\'s logs.',
+    details,
+  );
+}
+
+function invalidSlot(): SealedSecretError {
+  return hubError('SEALED_SECRET_DELIVERY_FAILED', 400, 'The secret id is not valid for this purpose.');
+}
+
+function isGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** A node's accept answer, or null when it is not one. */
+function parseDeliveryResult(value: unknown): DeliveryResult | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if ((raw.status !== 'accepted' && raw.status !== 'already_accepted') || !isGeneration(raw.generation)) return null;
+  return { status: raw.status, generation: raw.generation };
+}
+
+/** A node's remove answer, or null when it is not one. */
+function parseRemovalResult(value: unknown): RemovalResult | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.status !== 'deleted' && raw.status !== 'already_deleted' && raw.status !== 'not_current') return null;
+  if (!isGeneration(raw.generation)) return null;
+  if (raw.currentSlot !== null && (typeof raw.currentSlot !== 'string' || raw.currentSlot.length > 64)) return null;
+  return { status: raw.status, generation: raw.generation, currentSlot: raw.currentSlot };
 }
 
 /** Reduce an axios failure to status and code for the log: never the request body. */
@@ -171,7 +217,7 @@ class RemoteChannel implements NodeChannel {
 
   constructor(private readonly target: ProxyTarget, private readonly key: PresentedKey | null) {}
 
-  private async call<T>(method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown): Promise<NodeAnswer<T>> {
+  private async call(method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown): Promise<NodeAnswer<unknown>> {
     const base = this.target.apiUrl.replace(/\/$/, '');
     let res;
     try {
@@ -191,31 +237,33 @@ class RemoteChannel implements NodeChannel {
       console.warn('[SealedSecretDelivery] Request to node failed:', sanitizeForLog(describeTransportError(error)));
       throw unreachable();
     }
-    if (res.status >= 200 && res.status < 300) return { ok: true, body: res.data as T };
+    if (res.status >= 200 && res.status < 300) return { ok: true, body: res.data as unknown };
     const body = (typeof res.data === 'object' && res.data !== null ? res.data : {}) as Record<string, unknown>;
     return {
       ok: false,
       status: res.status,
-      code: typeof body.code === 'string' ? body.code : null,
-      message: typeof body.error === 'string' ? body.error : `The node answered HTTP ${res.status}.`,
-      purposeGeneration: typeof body.purposeGeneration === 'number' ? body.purposeGeneration : null,
+      // Only a code this hub knows is passed on; anything else is an answer it cannot interpret.
+      code: typeof body.code === 'string' && NODE_CODES.has(body.code) ? body.code : null,
+      message: typeof body.error === 'string' ? body.error.slice(0, NODE_MESSAGE_LIMIT) : `The node answered HTTP ${res.status}.`,
+      purposeGeneration: isGeneration(body.purposeGeneration) ? body.purposeGeneration : null,
     };
   }
 
   async fetchKey(): Promise<PresentedKey> {
-    const answer = await this.call<Record<string, unknown>>('GET', '/key');
+    const answer = await this.call('GET', '/key');
     if (!answer.ok) {
       console.warn('[SealedSecretDelivery] Node refused the key read:', answer.status, sanitizeForLog(answer.code ?? ''));
-      throw deliveryFailed();
+      throw deliveryFailed({ nodeCode: answer.code, nodeStatus: answer.status });
     }
-    return parsePresentedKey(answer.body);
+    if (typeof answer.body !== 'object' || answer.body === null) throw deliveryFailed();
+    return parsePresentedKey(answer.body as Record<string, unknown>);
   }
 
   async describe(purpose: SealedSecretPurposeId, slot: string): Promise<SealedSecretDescription> {
-    const answer = await this.call<SealedSecretDescription>('GET', `/${encodeURIComponent(purpose)}/${encodeURIComponent(slot)}`);
+    const answer = await this.call('GET', `/${encodeURIComponent(purpose)}/${encodeURIComponent(slot)}`);
     if (!answer.ok || !isDescription(answer.body)) {
       console.warn('[SealedSecretDelivery] Node state read failed:', answer.ok ? 'bad shape' : answer.status);
-      throw deliveryFailed();
+      throw deliveryFailed(answer.ok ? {} : { nodeCode: answer.code, nodeStatus: answer.status });
     }
     return answer.body;
   }
@@ -225,19 +273,23 @@ class RemoteChannel implements NodeChannel {
     const sealed = sealSecret(this.key.publicKeyRaw, {
       purpose, deliverySourceId: this.key.deliverySourceId, slot, generation, operationId,
     }, secret);
-    const answer = await this.call<DeliveryResult>('POST', `/${encodeURIComponent(purpose)}`, {
+    const answer = await this.call('POST', `/${encodeURIComponent(purpose)}`, {
       slot, generation, operationId, actor, sealed,
     });
-    if (answer.ok && !(answer.body?.status === 'accepted' || answer.body?.status === 'already_accepted')) throw deliveryFailed();
-    return answer;
+    if (!answer.ok) return answer;
+    const body = parseDeliveryResult(answer.body);
+    if (!body) throw deliveryFailed();
+    return { ok: true as const, body };
   }
 
   async remove(purpose: SealedSecretPurposeId, slot: string, generation: number, operationId: string, actor: string) {
-    const answer = await this.call<RemovalResult>('DELETE', `/${encodeURIComponent(purpose)}/${encodeURIComponent(slot)}`, {
+    const answer = await this.call('DELETE', `/${encodeURIComponent(purpose)}/${encodeURIComponent(slot)}`, {
       generation, operationId, actor,
     });
-    if (answer.ok && !['deleted', 'already_deleted', 'not_current'].includes(answer.body?.status)) throw deliveryFailed();
-    return answer;
+    if (!answer.ok) return answer;
+    const body = parseRemovalResult(answer.body);
+    if (!body) throw deliveryFailed();
+    return { ok: true as const, body };
   }
 }
 
@@ -274,10 +326,9 @@ interface RemoteContact {
 }
 
 /**
- * Hub side of sealed secret delivery. Callers (the edge tunnel slice first)
- * deliver, remove and read state per node and purpose. A node that cannot
- * receive a sealed secret is refused with a named code; there is no plaintext
- * path and no pass-through.
+ * Hub side of sealed secret delivery. Callers deliver, remove and read state
+ * per node and purpose. A node that cannot receive a sealed secret is refused
+ * with a named code; there is no plaintext path and no pass-through.
  */
 export class SealedSecretDeliveryService {
   private static instance: SealedSecretDeliveryService | null = null;
@@ -327,9 +378,12 @@ export class SealedSecretDeliveryService {
     if (probe.kind === 'unreachable') throw unreachable();
     const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
     if (!target) throw unreachable();
-    const confidential = isResolvedTargetConfidential(nodeId, target);
+    const confidentialBefore = isResolvedTargetConfidential(nodeId, target);
     const keyChannel = new RemoteChannel(target, null);
     const key = await keyChannel.fetchKey();
+    // A Pilot tunnel keeps its loopback address across a reconnect, so the hop
+    // is confidential only when it was so both before and after the key fetch.
+    const confidential = confidentialBefore && isResolvedTargetConfidential(nodeId, target);
     return { channel: new RemoteChannel(target, key), key, confidential };
   }
 
@@ -354,6 +408,8 @@ export class SealedSecretDeliveryService {
     } catch (error: unknown) {
       if (!isSealedSecretError(error)) throw error;
       if (error.code === 'SEALED_SECRET_TARGET_UNSUPPORTED') return { readiness: 'unsupported', pinned, presented: null };
+      // The node answered, but not with a key this hub can use.
+      if (error.code === 'SEALED_SECRET_DELIVERY_FAILED') return { readiness: 'key_invalid', pinned, presented: null };
       return { readiness: 'unreachable', pinned, presented: null };
     }
     return {
@@ -414,7 +470,14 @@ export class SealedSecretDeliveryService {
 
   private refuse(nodeId: number, input: { purpose: string; slot: string; actor: string }, error: unknown, action: string): never {
     if (isSealedSecretError(error)) {
-      this.audit(action, nodeId, { purpose: input.purpose, slot: input.slot, actor: input.actor, code: error.code }, input.actor, error.status);
+      this.audit(action, nodeId, {
+        purpose: input.purpose,
+        slot: input.slot,
+        actor: input.actor,
+        code: error.code,
+        node_code: error.details.nodeCode,
+        node_status: error.details.nodeStatus,
+      }, input.actor, error.status);
       throw error;
     }
     console.error('[SealedSecretDelivery] Unexpected failure:', sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -422,13 +485,15 @@ export class SealedSecretDeliveryService {
     throw deliveryFailed();
   }
 
-  /** Map a node's refusal to the hub's vocabulary; the node's code travels along. */
+  /**
+   * Map a node's refusal to the hub's vocabulary; the node's code travels along.
+   * A node failure (5xx) or an answer without a known code is a retryable
+   * delivery failure, not a refusal: the node did not decide against it.
+   */
   private nodeRefused(answer: Extract<NodeAnswer<unknown>, { ok: false }>): SealedSecretError {
-    if (answer.status >= 500 && answer.code === null) return deliveryFailed();
-    return hubError('SEALED_SECRET_TARGET_REFUSED', 409, `The node refused the request: ${answer.message}`, {
-      nodeCode: answer.code,
-      nodeStatus: answer.status,
-    });
+    const details = { nodeCode: answer.code, nodeStatus: answer.status };
+    if (answer.status >= 500 || answer.code === null) return deliveryFailed(details);
+    return hubError('SEALED_SECRET_TARGET_REFUSED', 409, `The node refused the request: ${answer.message}`, details);
   }
 
   /**
@@ -450,7 +515,7 @@ export class SealedSecretDeliveryService {
 
   async deliver(input: DeliverInput): Promise<DeliveryResult> {
     if (!isValidSlot(input.purpose, input.slot)) {
-      throw hubError('SEALED_SECRET_DELIVERY_FAILED', 400, 'The secret id is not valid for this purpose.');
+      this.refuse(input.nodeId, input, invalidSlot(), 'sealed_secret.delivery_refused');
     }
     return this.serialize(`${input.nodeId}:${input.purpose}`, async () => {
       try {
@@ -498,7 +563,7 @@ export class SealedSecretDeliveryService {
 
   async remove(input: RemoveInput): Promise<RemovalResult> {
     if (!isValidSlot(input.purpose, input.slot)) {
-      throw hubError('SEALED_SECRET_DELIVERY_FAILED', 400, 'The secret id is not valid for this purpose.');
+      this.refuse(input.nodeId, input, invalidSlot(), 'sealed_secret.removal_refused');
     }
     return this.serialize(`${input.nodeId}:${input.purpose}`, async () => {
       try {
@@ -516,6 +581,21 @@ export class SealedSecretDeliveryService {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const node = await channel.describe(input.purpose, input.slot);
       const row = db.getSealedSecretDelivery(input.nodeId, input.purpose);
+      if (attempt === 0 && row?.state === 'removed' && row.slot === input.slot
+        && node.state === 'deleted' && node.purposeGeneration === row.generation) {
+        // Both sides already record this removal: answer it without a new generation.
+        return { status: 'already_deleted', generation: row.generation, currentSlot: input.slot };
+      }
+      if (row?.state === 'sending' && row.slot !== input.slot) {
+        // A replacement with another secret id is still unconfirmed, so the node
+        // may hold either secret under either record. Removing the old id now
+        // could remove the new secret's file; the replacement converges first.
+        throw hubError(
+          'SEALED_SECRET_TARGET_REFUSED',
+          409,
+          'A replacement of this secret is still pending on this node, so the old one was not removed. Retry the delivery first.',
+        );
+      }
       const { generation, operationId } = attempt === 0
         ? this.nextGeneration(row, 'removing', input.slot, node.purposeGeneration)
         : { generation: Math.max(row?.generation ?? 0, node.purposeGeneration) + 1, operationId: crypto.randomUUID() };

@@ -160,6 +160,14 @@ describe('evaluateSecretVolumeUse', () => {
     }
   });
 
+  it('finds a consumer named with a leading slash, as the daemon resolves it', () => {
+    const facts = { labelledVolumeNames: new Set<string>(), consumers: [CONSUMER] };
+    expect(evaluateSecretVolumeUse(modelOf(withService({ volumes_from: ['container:/edge-consumer'] })), facts))
+      .toEqual([{ kind: 'volumes-from', service: 'app', container: '/edge-consumer' }]);
+    expect(evaluateSecretVolumeUse(modelOf(withService({ pid: 'container:/edge-consumer' })), facts))
+      .toEqual([{ kind: 'pid', service: 'app', container: '/edge-consumer' }]);
+  });
+
   it('finds pid naming a consumer by name and by id prefix', () => {
     const facts = { labelledVolumeNames: new Set<string>(), consumers: [CONSUMER] };
     expect(evaluateSecretVolumeUse(modelOf(withService({ pid: 'container:edge-consumer' })), facts))

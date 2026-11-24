@@ -197,12 +197,6 @@ function loadAcknowledgementInputs(
 }
 
 /**
- * Compose Doctor: renders the effective model and runs the deterministic
- * preflight rule registry against the active node. Advisory only (it never
- * blocks a deploy), read-only with respect to the stack, and node-scoped. It
- * never stores, returns, or logs an environment value.
- */
-/**
  * Secret volumes on the node and the containers that mount them, from the
  * dependency snapshot Doctor already reads (no extra Docker call).
  */
@@ -215,6 +209,12 @@ function secretVolumeFactsOf(snapshot: DependencySnapshot): SecretVolumeNodeFact
   return { labelledVolumeNames, consumers };
 }
 
+/**
+ * Compose Doctor: renders the effective model and runs the deterministic
+ * preflight rule registry against the active node. Advisory only (it never
+ * blocks a deploy), read-only with respect to the stack, and node-scoped. It
+ * never stores, returns, or logs an environment value.
+ */
 export class ComposeDoctorService {
   private static instance: ComposeDoctorService | null = null;
 

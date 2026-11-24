@@ -1731,25 +1731,28 @@ export class DatabaseService {
      * Sealed secret delivery. `sealed_secret_generations` is node state: one
      * row per purpose, the node's record of what its single secret file holds.
      * `sealed_secret_deliveries` is hub state: one row per (node, purpose),
-     * never a secret or a secret fingerprint. `managed_stacks` is created here
-     * with one read helper; the slice that provisions the edge stack owns its
-     * writes. The pin table gains the confidential flag and Admin confirmation.
+     * never a secret or a secret fingerprint. `managed_stacks` records the
+     * stacks Sencho manages itself; this code only reads it (the secret volume
+     * deploy exemption). The pin table gains the confidential flag and Admin
+     * confirmation.
      */
     private migrateSealedSecrets(): void {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS sealed_secret_generations (
                 purpose TEXT PRIMARY KEY,
                 slot TEXT NOT NULL,
-                generation INTEGER NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
                 state TEXT NOT NULL CHECK (state IN ('present', 'deleted')),
                 fingerprint TEXT,
-                accepted_at INTEGER NOT NULL
+                accepted_at INTEGER NOT NULL,
+                -- A present secret has a fingerprint; a deleted one has none.
+                CHECK ((state = 'present') = (fingerprint IS NOT NULL))
             );
             CREATE TABLE IF NOT EXISTS sealed_secret_deliveries (
                 node_id INTEGER NOT NULL,
                 purpose TEXT NOT NULL,
                 slot TEXT NOT NULL,
-                generation INTEGER NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
                 state TEXT NOT NULL CHECK (state IN ('sending', 'delivered', 'removing', 'removed')),
                 operation_id TEXT NOT NULL,
                 requested_by TEXT NOT NULL,
@@ -4457,7 +4460,7 @@ stmt.run('gitops_schema_version', '1');
         return result.changes > 0;
     }
 
-    // --- Managed stacks (schema and read only in this build) ---
+    // --- Managed stacks (read only here) ---
 
     /** The kind Sencho recorded for a stack it manages, or null for an ordinary stack. */
     public getManagedStackKind(stackName: string): string | null {

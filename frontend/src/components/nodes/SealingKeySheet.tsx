@@ -129,7 +129,7 @@ export function SealingKeySheet({ open, onOpenChange, node, isAdmin, canManage, 
         </Button>
       );
     }
-    if (remote.readiness === 'unreachable') {
+    if (remote.readiness === 'unreachable' || remote.readiness === 'key_invalid') {
       return (
         <BusyButton size="sm" variant="outline" pending={key.pending === 'reload'} busyLabel="Retrying…" disabled={key.pending !== null} onClick={() => void key.reload()}>
           Retry

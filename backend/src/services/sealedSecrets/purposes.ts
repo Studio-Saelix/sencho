@@ -31,8 +31,8 @@ export const SEALED_SECRET_PURPOSES = {
   [EDGE_TUNNEL_RUN_TOKEN_PURPOSE]: {
     volume: 'sencho_edge_secret',
     file: 'token',
-    // cloudflared's distroless image runs as nonroot (65532). The slice that
-    // ships the edge stack confirms this against its pinned image digest.
+    // cloudflared's distroless image runs as nonroot (65532); the edge stack's
+    // pinned image digest must keep that user.
     ownerUid: 65532,
     ownerGid: 65532,
     mode: 0o400,

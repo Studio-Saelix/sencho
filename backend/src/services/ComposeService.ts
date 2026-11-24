@@ -2350,19 +2350,19 @@ export class ComposeService {
       invocation ?? null,
       stackDir,
     );
-    // The recovery is about to run this exact invocation, so the Pilot host-path
-    // guard reads the same one: the captured file set, the env selection, the
-    // recovery layer, and the decrypt overlay, all as assembled. Ordinary
-    // deployment already refuses a mismapped overlay; a rollback restoring a
-    // relative mount has the same consequence, so it refuses on the same terms.
+    // The recovery is about to run this exact invocation, so both checks below
+    // read the same one, from one render: the captured file set, the env
+    // selection, the recovery layer, and the decrypt overlay, all as assembled.
     // `buildComposeArgsWithRecoveryOverride` appends the action last, so the
     // global-flag prefix is this argv without those tokens.
-    // The secret volume check reads the same file set, so a captured
-    // generation that reached a secret volume is refused even when the current
-    // files no longer do.
     const composeArgsPrefix = args.slice(0, args.length - upAction.length);
     const render = this.sharedRender(stackName, overlay?.overlayDir, composeArgsPrefix);
+    // A captured generation that reached a secret volume is refused even when
+    // the current files no longer do.
     await this.assertNoSecretVolumeUse(stackName, render);
+    // Ordinary deployment already refuses a mismapped overlay; a rollback
+    // restoring a relative mount has the same consequence, so the Pilot
+    // host-path guard refuses on the same terms.
     await this.assertSafePilotBindMapping(stackName, overlay?.overlayDir, composeArgsPrefix, render);
     await this.withRegistryAuth(async (env) => {
       // The child inherits COMPOSE_ENV_FILES from this process whether or not

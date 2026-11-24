@@ -254,7 +254,8 @@ export class RestoreIntentStore {
     now: number,
   ): RestoreIntentRecord {
     if (!input.targetVolume) throw new RecoveryError('invalid_request');
-    // No restore, on any route or transport, may write a secret volume.
+    // No restore may target a reserved secret volume name. A labelled volume
+    // under another name is refused by the eligibility check (`secret_volume`).
     if (isReservedSecretVolumeName(input.targetVolume)
       || (extra.stagingVolume !== undefined && isReservedSecretVolumeName(extra.stagingVolume))) {
       throw new RecoveryError('invalid_request', { detail: SECRET_VOLUME_RESTORE_REFUSAL });

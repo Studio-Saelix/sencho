@@ -319,6 +319,15 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;
     }
+    if (normalized.startsWith('sealed-secrets/') && (method === 'POST' || method === 'DELETE')) {
+      const outcome = statusCode >= 500 ? 'failed' : 'refused';
+      return method === 'POST'
+        ? `Sealed secret from the control instance ${outcome} (${statusCode})`
+        : `Sealed secret removal ${outcome} (${statusCode})`;
+    }
+    if (method === 'POST' && /^nodes\/[^/]+\/sealing-key\/confirm/.test(normalized)) {
+      return `Node sealing key confirmation refused (${statusCode})`;
+    }
   }
   const normalizedSegments = normalized.split('/');
 

@@ -48,6 +48,13 @@ describe('useNodeSealingKey', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it('refuses an answer it cannot show instead of rendering it', async () => {
+    apiFetchMock.mockReturnValueOnce(json(200, { kind: 'remote', readiness: 'something_new', pinned: null, presented: null }));
+    const { result } = renderHook(() => useNodeSealingKey(node, true));
+    await waitFor(() => expect(result.current.loadError).toMatch(/cannot show/));
+    expect(result.current.view).toBeNull();
+  });
+
   it('keeps the last view on a failed refetch and reports why', async () => {
     apiFetchMock.mockReturnValueOnce(json(200, unconfirmed));
     const { result } = renderHook(() => useNodeSealingKey(node, true));
