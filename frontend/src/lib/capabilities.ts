@@ -66,6 +66,10 @@ export const CAPABILITIES = [
   // an older remote as "this node cannot report its socket access", not as a
   // clean inventory with nothing to show.
   'socket-inventory-v1',
+  // A node that accepts a sealed long-lived secret from its hub and keeps it in
+  // a labelled volume no Sencho reader opens. An older node is unsupported, and
+  // the hub refuses to send rather than falling back to plaintext.
+  'sealed-secret-delivery-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

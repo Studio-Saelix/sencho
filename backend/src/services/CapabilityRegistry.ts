@@ -91,6 +91,10 @@ export const CAPABILITIES = [
   // an older remote as "this node cannot report its socket access", not as a
   // clean inventory with nothing to show.
   'socket-inventory-v1',
+  // A node that accepts a sealed long-lived secret from its hub and keeps it in
+  // a labelled volume no Sencho reader opens. An older node is unsupported, and
+  // the hub refuses to send rather than falling back to plaintext.
+  'sealed-secret-delivery-v1',
 ] as const;
 
 /**
@@ -257,6 +261,10 @@ export const HOST_USAGE_UNKNOWN_HEADER_VALUE = '1';
  */
 export const BLUEPRINT_DIGEST_PINS_V1_CAPABILITY =
   'blueprint-digest-pins-v1' as const satisfies Capability;
+
+/** Sealed long-lived secret delivery to one node (`/api/sealed-secrets/*`). */
+export const SEALED_SECRET_DELIVERY_V1_CAPABILITY =
+  'sealed-secret-delivery-v1' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;
