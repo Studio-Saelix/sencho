@@ -210,6 +210,8 @@ vi.mock('../services/DockerController', () => ({
       createNetwork: mockCreateNetwork,
       getDocker: () => ({
         listContainers: mockListContainers,
+        // The volume-removing down reads the node's secret-labelled volumes; none here.
+        listVolumes: async () => ({ Volumes: [], Warnings: [] }),
         getContainer: () => ({
           inspect: mockContainerInspect,
           logs: mockContainerLogs,
