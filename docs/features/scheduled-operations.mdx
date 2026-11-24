@@ -252,6 +252,8 @@ The sheet paginates at 20 rows per page; navigate with the **Previous** / **Next
 
 An auto-update run that leaves a stack alone because of its update policy appears in **Details** in one of two ways. A stack skipped because a service does not allow unattended updates reads `Stack "x": skipped by update policy (db: manual).`, and the run stays **Success**: nothing was pulled or recreated, and a skip is not a failure. A run aimed at a node that does not evaluate the label reads `Stack "x" failed: node "n" does not evaluate io.sencho.update; update Sencho on that node.`, and the run is **Failed**, because that node cannot tell whether the stack allows the update. See [Sencho Labels · Update policy](/features/sencho-labels#update-policy).
 
+An auto-update run also leaves a stack alone when its only pending update is one the stack's detection labels do not report. **Details** reads `Stack "x": the only available update is skipped by io.sencho.update.ignore (web); no update applied.` or `Stack "x": the only available update belongs to a service with update checks off (sidecar); no update applied.`, and the run stays **Success**. When a run does update a stack, its details end with `Also pulled: web (update skipped), sidecar (update checks off).` for any service the whole-stack update pulled although its labels skip or do not check it. See [Sencho Labels · Update checks](/features/sencho-labels#update-checks).
+
 The CSV export includes every run in the history with columns: Timestamp, Source, Status, Duration (s), Details.
 
 ## How it works

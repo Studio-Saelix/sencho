@@ -230,6 +230,16 @@ components:
         check_status:
           type: string
           enum: [ok, partial, failed, not_checkable]
+        detection:
+          type: string
+          enum: [off, ignored]
+          description: Set when the service's update detection labels changed the result. `off` when `io.sencho.update.check` is false (the image was not checked for this service); `ignored` when every pending update was skipped by `io.sencho.update.ignore`.
+        candidate_digest:
+          type: ["string", "null"]
+          description: The registry's current digest for the tag on a same-tag rebuild, the `io.sencho.update.ignore` entry that skips it. Null when unknown.
+        changelog_url:
+          type: ["string", "null"]
+          description: The service's `io.sencho.update.changelog` link, present on a pending update only.
 
     UpdatePreviewSummary:
       type: object
@@ -269,7 +279,9 @@ components:
         summary:
           $ref: "#/components/schemas/UpdatePreviewSummary"
         rollback_target: { type: ["string", "null"] }
-        changelog: { type: ["string", "null"] }
+        changelog:
+          type: ["string", "null"]
+          description: Always null. A service's release notes link is `changelog_url` on its image.
 
     LabelSource:
       type: string

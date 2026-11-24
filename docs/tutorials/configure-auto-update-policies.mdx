@@ -93,6 +93,8 @@ Check from two places, since a status badge alone can't tell you *what* got upda
   <img src="/images/tutorials/configure-auto-update-policies/run-history-two-runs.png" alt="Execution history sheet showing two runs for Nightly patch check: the newer run at 6:05:54 PM with Status Success, Duration 1.8s, and details ending 'Stack jackett: all images up to date', and the earlier run at 6:03:28 PM with Duration 28.1s and details naming the updated image." />
 </Frame>
 
+**A run is green but says the only available update is skipped.** The details read `Stack "jackett": the only available update is skipped by io.sencho.update.ignore (jackett); no update applied.` (or name a service with update checks off). The stack's Compose file skips that update with an `io.sencho.update.*` label, so the schedule has nothing it should apply. Remove or change the label if you want the update. See [Sencho Labels · Update checks](/features/sencho-labels#update-checks).
+
 **A run is green but says it was skipped by update policy.** The details read `Stack "jackett": skipped by update policy (jackett: manual).`, and the run is **Success** because there was nothing it was allowed to do. A service in the stack declares `io.sencho.update: manual` (or a value Sencho does not recognize), which keeps the whole stack out of unattended updates. Open jackett and use its own **Update** action, or change the label to `auto` or remove it, then click **Run now** again. A run that fails with a message naming a node that does not evaluate `io.sencho.update` is different: update Sencho on that node, or update the stack yourself.
 
 ## Related

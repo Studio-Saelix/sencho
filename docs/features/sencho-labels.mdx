@@ -1,17 +1,17 @@
 ---
 title: "Sencho Labels"
 sidebarTitle: Sencho labels
-description: "Declare io.sencho.* labels in your Compose file to add application links, set display order, tuck helper services out of the way, hold a service back from updates, and route its alerts."
+description: "Declare io.sencho.* labels in your Compose file to add application links, set display order, tuck helper services out of the way, hold a service back from updates, skip or stop update checks, link a changelog, and route its alerts."
 ---
 
-Sencho reads a small set of Compose labels in the reserved `io.sencho.*` namespace. Most of them describe how a service should be presented in Sencho: where its application lives, where it sits in the list, and whether it is a helper that can stay out of the way. One of them marks the service that carries Sencho's Docker connection. Two more decide what Sencho may do to a service and where its alerts go: whether an image update may touch it, and which notification routing rules its alerts reach. The namespace is stable for 1.0: the labels on this page keep their names and meaning. A later release can add labels. A key Sencho does not define is reported as **Unsupported**, and a key Sencho reserves for the containers it creates is reported as **Ignored**; neither changes anything.
+Sencho reads a small set of Compose labels in the reserved `io.sencho.*` namespace. Most of them describe how a service should be presented in Sencho: where its application lives, where it sits in the list, and whether it is a helper that can stay out of the way. One of them marks the service that carries Sencho's Docker connection. Two more decide what Sencho may do to a service and where its alerts go: whether an image update may touch it, and which notification routing rules its alerts reach. Three decide what Sencho reports about a service's image updates: whether it checks them at all, which pending updates it skips, and which changelog it links. The namespace is stable for 1.0: the labels on this page keep their names and meaning. A later release can add labels. A key Sencho does not define is reported as **Unsupported**, and a key Sencho reserves for the containers it creates is reported as **Ignored**; neither changes anything.
 
 These are four different things that are easy to confuse:
 
 | Kind | Where you set it | What it does |
 |------|------------------|--------------|
 | **Docker and Compose labels** | `labels:` on a service | Metadata for Docker, Compose, Traefik, and other tools. Sencho shows them in the [label audit](/features/docker-label-audit) and does not use them to change how a service is presented. `com.docker.compose.*` belongs to Docker. |
-| **`io.sencho.*` labels** | `labels:` on a service | Tell Sencho how to present that service, whether an update may touch it, and which notification routes its alerts reach. This page. |
+| **`io.sencho.*` labels** | `labels:` on a service | Tell Sencho how to present that service, whether an update may touch it, what it reports about the service's updates, and which notification routes its alerts reach. This page. |
 | **[Stack Labels](/features/stack-labels)** | The sidebar | Tags you use to group stacks. They are not Compose labels. |
 | **Node Labels** | Node settings | Tags used for Blueprint placement. They are not Compose labels. |
 
@@ -28,6 +28,9 @@ Every label belongs to one service and applies to all of its replicas.
 | `io.sencho.infrastructure` | `"true"` | Marks the service that carries this node's Docker connection, so Sencho refuses operations that would cut it. See [Updating the proxy](/operations/self-hosting#updating-the-proxy). |
 | `io.sencho.update` | `auto`, `manual`, or `disabled` | Whether an image update may touch the service, and whether unattended updates may run on the stack at all. See [Update policy](#update-policy). |
 | `io.sencho.notify.route` | A routing key | A name for the service's alerts that notification routing rules can match. See [Notification routing key](#notification-routing-key). |
+| `io.sencho.update.check` | `true` or `false` | `false` stops Sencho from checking the service's image for updates. See [Update checks](#update-checks). |
+| `io.sencho.update.ignore` | One to eight image digests or tags, separated by commas | Skips those pending updates for the service; any other update still reports. See [Update checks](#update-checks). |
+| `io.sencho.update.changelog` | An `http://` or `https://` URL | A **Changelog** link shown with the service's pending update. See [Update checks](#update-checks). |
 
 ```yaml
 services:
@@ -123,6 +126,46 @@ An unattended update runs only when every rendered service is `auto` or carries 
 
 **A change made during an update.** A change to the label while an update is already running is caught before containers are recreated. The update stops rather than recreate under a policy you never saw.
 
+### Update checks
+
+Three labels decide what Sencho reports about a service's image updates. They change what Sencho tells you and what can start an unattended update. They never change what an update pulls.
+
+```yaml
+services:
+  web:
+    image: ghcr.io/example/app:1.4.2
+    labels:
+      io.sencho.update.changelog: https://github.com/example/app/releases
+      io.sencho.update.ignore: "1.5.0"
+  cache:
+    image: redis:7
+    labels:
+      io.sencho.update.ignore: "sha256:97c0f3a5cc8128042f43e61c772ea983e932799b5d9d20f2d2a937e12265eebd"
+  sidecar:
+    image: ghcr.io/example/sidecar:latest
+    labels:
+      io.sencho.update.check: "false"
+```
+
+**`io.sencho.update.check: "false"`** takes the service out of update reporting. Scans and update previews do not ask the registry about an image that only this service uses, the service never shows an update badge, it is never named in an **Image update available** notification, and its image alone never starts a scheduled or automatic update. The Updates view and the stack's update banner show it as not checked. The value is `true` or `false`, case-insensitive; the node-wide detection switch still wins when it is off.
+
+**`io.sencho.update.ignore`** skips specific pending updates. Each entry is one of:
+
+- an image digest, `sha256:` followed by 64 hex characters. It matches the digest the registry currently lists for the service's tag, which is the case of a same-tag rebuild such as a new `latest`. For a multi-platform image this is the index digest the registry returns for the tag, not the digest of one platform's image.
+- a tag, such as `1.5.0`. It matches the newer tag Sencho would report for a pinned version. A tag entry cannot skip a rebuild of a moving tag such as `latest`; use the digest for that.
+
+List up to eight entries, separated by commas. A service can have a rebuild and a newer tag pending at the same time; list both to skip both. When the registry publishes something newer than what you listed, that update reports again without touching the label. Digests are compared lowercased. One malformed entry makes the whole value **Ignored**, so a typo never skips a different update than you meant.
+
+The easiest way to get the right value is **Copy skip label** on the pending update in the Updates view or on the stack's update banner. It copies the full line for everything pending on that service, for example `io.sencho.update.ignore: "1.5.0,sha256:..."`. Add it under the service's `labels:` (as `io.sencho.update.ignore=...` if the service lists its labels as `key=value` entries), save, and use the stack's **Recheck**. The verb appears when Sencho knows the pending tag or digest and you may edit the stack.
+
+**`io.sencho.update.changelog`** adds a **Changelog** link, opened in a new tab, wherever Sencho shows that service's pending update: the Updates view card, table row, and phone card, and the stack's update banner. It follows the same rules as `io.sencho.url`: `http://` or `https://`, no username or password. The link is not added to notifications. Without the label, Sencho shows no changelog line.
+
+**Shared images.** When two services use the same image and only one of them has checks off or skips the update, the image is still checked and the update is reported for the service that checks it.
+
+**What these labels do not do.** A whole-stack update, yours or unattended, still pulls every service's image, including a service whose update is skipped or whose checks are off. The update preview says so, for example *Applying also pulls: cache (update skipped), sidecar (not checked)*, and an unattended run that starts names those services in its result. To keep a service on its current image through stack updates, pin the image by digest in Compose. To keep unattended updates away from a stack entirely, use `io.sencho.update: manual`. An unattended update still verifies every image it would pull: a failed check on any of them still stops the run, even for a service with checks off.
+
+**When it takes effect.** A change to these labels applies at the next update check of the stack. Use the stack's **Recheck** to apply it right away.
+
 ### Notification routing key
 
 `io.sencho.notify.route` gives a service's alerts a routing key, a name that a routing rule in notification settings can match. The value is trimmed and lowercased, and must be 1 to 64 characters of lowercase letters, digits, dots, hyphens, and underscores, starting and ending with a letter or a digit. A value that looks like a URL or an address, meaning it contains `:`, `/`, `@`, or whitespace, is refused and reported as ignored in the label audit.
@@ -165,10 +208,10 @@ The **Compose Labels** tab marks every `io.sencho.*` label with its status:
 | **Ignored** | Declared, but Sencho cannot use it, for example an invalid value, a link name that is already taken, or a key Sencho reserves for containers it creates. The reason is shown beside it. |
 | **Unsupported** | A key in the `io.sencho.` namespace that Sencho does not define. |
 | **Inert** | Present on the image or the running container, or the Compose file could not be rendered. Select the badge to read why. Declare it in the Compose file for it to apply. A copy of `io.sencho.infrastructure` on a container is reported as **Active** or **Ignored** instead, because Sencho honors it. |
-| **Not evaluated** | Shown for `io.sencho.update` and `io.sencho.notify.route` when the node does not evaluate these labels. See [Mixed-version fleets](#mixed-version-fleets). |
+| **Not evaluated** | Shown for `io.sencho.update` and `io.sencho.notify.route`, or for the three `io.sencho.update.*` detection labels, when the node does not evaluate them. See [Mixed-version fleets](#mixed-version-fleets). |
 | **Not reported** | The node runs a version that does not report a status for the label. |
 
-On the stack's container list, a service with ignored labels shows a quiet count, such as **1 Sencho label ignored**, with the reasons on hover. The Fleet **Docker Labels** tab reads running containers only, so it marks a presentation label **Inert**; a container's `io.sencho.infrastructure` copy is the exception there too, because Sencho acts on it.
+On the stack's container list, a service with ignored labels shows a quiet count, such as **1 Sencho label ignored**, with the reasons on hover. A service with `io.sencho.update.check: "false"` shows **Update checks: off**, and a service whose last check skipped every pending update shows **Update skipped**. The Updates view and the stack's update banner show the **Changelog** link and **Copy skip label** beside the pending update. The Fleet **Docker Labels** tab reads running containers only, so it marks a presentation label **Inert**; a container's `io.sencho.infrastructure` copy is the exception there too, because Sencho acts on it.
 
 Sencho reads these labels from the saved Compose file, not from the running container, so they do not need a redeploy to take effect. The running container only carries a changed label after it is recreated, which the label audit shows as a difference between **Declared in Compose** and the running container.
 
@@ -189,6 +232,8 @@ On a container, these keys are reported as **Inert** with the reason that Sencho
 A node advertises the `sencho-labels-v1` capability once it resolves these labels. A node that predates them does not apply any of them: its stacks show no named links, no order, and no hidden services, its link pencil is not offered, and the Compose Labels tab tells you to update the node when a stack declares them. Sencho never applies part of the contract on such a node. See [Node compatibility](/features/node-compatibility).
 
 Update policy and notification routing travel under a separate capability, `sencho-label-policy-v1`. A node that does not advertise it evaluates neither label: its alerts carry no routing key, and an unattended update aimed at that node fails and says so rather than assuming the stack is allowed. A scheduled or automatic run reports the node as failed, and a bulk update to that node is refused with a message naming it. Your own single-stack and single-service updates still work there, and the stack's update readiness dialog notes that the node does not evaluate the label when the stack declares it.
+
+The update detection labels travel under `sencho-label-detection-v1`. A node that does not advertise it reports every update for its stacks, whatever these labels say, and the Compose Labels tab shows the three keys as **Not evaluated** rather than as ignored labels. When the control instance checks a remote node that advertises it, the node evaluates the labels on its own Compose file and the result is the same as a check run on that node.
 
 ## Troubleshooting
 
@@ -213,6 +258,15 @@ Update policy and notification routing travel under a separate capability, `senc
   </Accordion>
   <Accordion title="An update was refused or skipped because of a service">
     Read the service's `io.sencho.update` value in the Compose Labels tab. **Ignored** beside that key means the value is not one Sencho recognizes, which blocks unattended updates while still allowing your own. A `disabled` service refuses every update that would touch it, including a whole-stack update, so update the other services on their own or remove the label. A `manual` service allows your own update and skips every unattended one, so update the stack directly instead of through a schedule or a bulk action.
+  </Accordion>
+  <Accordion title="An update still shows after adding a skip label">
+    The label applies at the next update check, so use the stack's **Recheck**. If the update still shows, open the **Compose Labels** tab: **Ignored** beside `io.sencho.update.ignore` names the problem, such as a truncated digest. A digest copied from a registry web page is often the digest of one platform's image; the label needs the digest the registry lists for the tag, which is what **Copy skip label** gives. If the registry published something newer since you copied the line, that newer update reports again by design.
+  </Accordion>
+  <Accordion title="A skipped image was pulled by a stack update">
+    The skip and checks-off labels change what Sencho reports, not what an update pulls: a whole-stack update pulls every service's image. Pin the image by digest in Compose to keep the service on its current image, or set `io.sencho.update: manual` to keep unattended updates away from the stack.
+  </Accordion>
+  <Accordion title="The changelog link does not show">
+    The link shows only on a pending update for that service. Check that the value starts with `http://` or `https://` and has no username or password; otherwise the **Compose Labels** tab marks it **Ignored** with the reason.
   </Accordion>
   <Accordion title="An alert did not reach a routing rule that has routing keys">
     A rule with routing keys matches only the alerts whose keys intersect its own. A service alert carries its own service's key, and a stack-level alert carries every key of the stack's services. A container that is not part of the stack's Compose model carries no key, so its alert does not match a rule keyed to the stack. Check that the routing rule has keys that a service in the stack declares, and that you are editing the rule on the instance that runs the stack.
