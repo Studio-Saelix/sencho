@@ -130,7 +130,8 @@ export class SealedSecretStore {
       const fingerprint = secretFingerprint(purposeId, slot, secret);
       const facts = { purpose: purposeId, slot, generation, actor: who.actor };
 
-      if (Buffer.byteLength(secret, 'utf8') === 0 || Buffer.byteLength(secret, 'utf8') > purpose.maxSecretBytes) {
+      const secretBytes = Buffer.byteLength(secret, 'utf8');
+      if (secretBytes === 0 || secretBytes > purpose.maxSecretBytes) {
         this.audit('sealed_secret.refused', { ...facts, reason: 'size' }, who, 400);
         throw new SealedSecretError('SEALED_SECRET_REQUEST_INVALID', 400, 'The secret is empty or larger than this purpose allows.');
       }

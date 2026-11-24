@@ -121,16 +121,12 @@ const NODE_CODE_RECORD: Record<SealedSecretNodeCode, true> = {
 };
 const NODE_CODES: ReadonlySet<string> = new Set(Object.keys(NODE_CODE_RECORD));
 
-function hubError(code: SealedSecretError['code'], status: number, message: string, details: Record<string, string | number | null> = {}) {
-  return new SealedSecretError(code, status, message, details);
-}
-
 function unreachable(): SealedSecretError {
-  return hubError('SEALED_SECRET_TARGET_UNREACHABLE', 503, 'Sencho could not reach this node to deliver a sealed secret. Check that it is online, then retry.');
+  return new SealedSecretError('SEALED_SECRET_TARGET_UNREACHABLE', 503, 'Sencho could not reach this node to deliver a sealed secret. Check that it is online, then retry.');
 }
 
 function deliveryFailed(details: Record<string, string | number | null> = {}): SealedSecretError {
-  return hubError(
+  return new SealedSecretError(
     'SEALED_SECRET_DELIVERY_FAILED',
     502,
     'The node answered in a way Sencho could not use. Retry; if it keeps failing, check the node\'s logs.',
@@ -139,7 +135,7 @@ function deliveryFailed(details: Record<string, string | number | null> = {}): S
 }
 
 function invalidSlot(): SealedSecretError {
-  return hubError('SEALED_SECRET_DELIVERY_FAILED', 400, 'The secret id is not valid for this purpose.');
+  return new SealedSecretError('SEALED_SECRET_DELIVERY_FAILED', 400, 'The secret id is not valid for this purpose.');
 }
 
 function isGeneration(value: unknown): value is number {
@@ -361,7 +357,7 @@ export class SealedSecretDeliveryService {
 
   private isLocal(nodeId: number): boolean {
     const node = DatabaseService.getInstance().getNode(nodeId);
-    if (!node) throw hubError('SEALED_SECRET_TARGET_UNREACHABLE', 503, 'That node does not exist.');
+    if (!node) throw new SealedSecretError('SEALED_SECRET_TARGET_UNREACHABLE', 503, 'That node does not exist.');
     return node.type !== 'remote';
   }
 
@@ -373,7 +369,7 @@ export class SealedSecretDeliveryService {
   private async contact(nodeId: number): Promise<RemoteContact> {
     const probe = await probeRemoteCapability(nodeId, SEALED_SECRET_DELIVERY_V1_CAPABILITY);
     if (probe.kind === 'unsupported') {
-      throw hubError(
+      throw new SealedSecretError(
         'SEALED_SECRET_TARGET_UNSUPPORTED',
         409,
         'This node runs a Sencho version that cannot receive sealed secrets. Update Sencho on the node, then retry.',
@@ -442,7 +438,7 @@ export class SealedSecretDeliveryService {
     }
     const readiness = this.judge(pin, presented, contact.confidential);
     if (readiness === 'key_mismatch') {
-      throw hubError(
+      throw new SealedSecretError(
         'SEAL_KEY_MISMATCH',
         409,
         'This node presents a different sealing key than the one pinned for it, so nothing was sent. '
@@ -450,7 +446,7 @@ export class SealedSecretDeliveryService {
       );
     }
     if (readiness !== 'ready') {
-      throw hubError(
+      throw new SealedSecretError(
         'SEALED_SECRET_TRANSPORT_NOT_CONFIDENTIAL',
         409,
         'This node\'s sealing key was never seen over a confidential connection, so nothing was sent. '
@@ -498,7 +494,7 @@ export class SealedSecretDeliveryService {
   private nodeRefused(answer: Extract<NodeAnswer<unknown>, { ok: false }>): SealedSecretError {
     const details = { nodeCode: answer.code, nodeStatus: answer.status };
     if (answer.status >= 500 || answer.code === null) return deliveryFailed(details);
-    return hubError('SEALED_SECRET_TARGET_REFUSED', 409, `The node refused the request: ${answer.message}`, details);
+    return new SealedSecretError('SEALED_SECRET_TARGET_REFUSED', 409, `The node refused the request: ${answer.message}`, details);
   }
 
   /**
@@ -515,6 +511,14 @@ export class SealedSecretDeliveryService {
     if (row && row.state === pendingState && row.slot === slot && nodeGeneration <= row.generation) {
       return { generation: row.generation, operationId: row.operationId };
     }
+    return this.freshGeneration(row, nodeGeneration);
+  }
+
+  /** A new generation past both the hub's and the node's, under a new operation id. */
+  private freshGeneration(
+    row: SealedSecretDeliveryRow | null,
+    nodeGeneration: number,
+  ): { generation: number; operationId: string } {
     return { generation: Math.max(row?.generation ?? 0, nodeGeneration) + 1, operationId: crypto.randomUUID() };
   }
 
@@ -551,7 +555,7 @@ export class SealedSecretDeliveryService {
       const row = db.getSealedSecretDelivery(input.nodeId, input.purpose);
       const { generation, operationId } = attempt === 0
         ? this.nextGeneration(row, 'sending', input.slot, node.purposeGeneration)
-        : { generation: Math.max(row?.generation ?? 0, node.purposeGeneration) + 1, operationId: crypto.randomUUID() };
+        : this.freshGeneration(row, node.purposeGeneration);
       // Persist before sending, so a lost response or a hub crash still knows
       // which generation may have landed.
       db.upsertSealedSecretDelivery({
@@ -618,7 +622,7 @@ export class SealedSecretDeliveryService {
         // none) while the file holds the new secret. A removal now could remove
         // the wrong file, or report a secret removed that is still there. The
         // delivery converges first.
-        throw hubError(
+        throw new SealedSecretError(
           'SEALED_SECRET_DELIVERY_PENDING',
           409,
           'A delivery of this secret to this node has not been confirmed, so nothing was removed. Retry that delivery first, '
@@ -627,7 +631,7 @@ export class SealedSecretDeliveryService {
       }
       const { generation, operationId } = attempt === 0
         ? this.nextGeneration(row, 'removing', input.slot, node.purposeGeneration)
-        : { generation: Math.max(row?.generation ?? 0, node.purposeGeneration) + 1, operationId: crypto.randomUUID() };
+        : this.freshGeneration(row, node.purposeGeneration);
       // A hub row that already names a newer slot is the live delivery; a
       // removal of an old slot must not overwrite it.
       const ownsRow = !row || row.slot === input.slot;
@@ -676,7 +680,7 @@ export class SealedSecretDeliveryService {
    */
   async confirmFingerprint(nodeId: number, fingerprint: string, admin: string): Promise<SealingKeyReport> {
     if (this.isLocal(nodeId)) {
-      throw hubError('SEALED_SECRET_TARGET_REFUSED', 400, 'This instance\'s own key needs no confirmation.');
+      throw new SealedSecretError('SEALED_SECRET_TARGET_REFUSED', 400, 'This instance\'s own key needs no confirmation.');
     }
     const db = DatabaseService.getInstance();
     const contact = await this.contact(nodeId);
@@ -684,7 +688,7 @@ export class SealedSecretDeliveryService {
     const pin = db.getNodeSealingPin(nodeId);
     if (fingerprint !== presented || (pin && pin.fingerprint !== presented)) {
       this.audit('sealing_key.confirm_refused', nodeId, { by: admin, code: 'SEAL_KEY_MISMATCH' }, admin, 409);
-      throw hubError(
+      throw new SealedSecretError(
         'SEAL_KEY_MISMATCH',
         409,
         pin && pin.fingerprint !== presented
@@ -695,7 +699,7 @@ export class SealedSecretDeliveryService {
     if (!pin) db.pinNodeSealingKey(nodeId, contact.key.publicKeyRaw.toString('base64'), presented);
     if (!db.markSealingPinConfidential(nodeId, presented, admin)) {
       // A concurrent pin of another key won the insert.
-      throw hubError('SEAL_KEY_MISMATCH', 409, 'The pinned key changed while confirming. Open the sheet again.');
+      throw new SealedSecretError('SEAL_KEY_MISMATCH', 409, 'The pinned key changed while confirming. Open the sheet again.');
     }
     this.audit('sealing_key.confirmed', nodeId, { by: admin }, admin, 200);
     const pinned = db.getNodeSealingPin(nodeId);
