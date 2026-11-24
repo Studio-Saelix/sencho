@@ -51,6 +51,7 @@ const LOCK: readonly (readonly [string, number, string, string, boolean, string]
   ['compose-version-mismatch', 1, 'info', 'information', false, 'active'],
   ['external-network-missing', 1, 'blocker', 'technical-blocker', true, 'active'],
   ['external-volume-missing', 1, 'blocker', 'technical-blocker', true, 'active'],
+  ['secret-volume-reference', 1, 'blocker', 'technical-blocker', true, 'active'],
   ['new-network', 1, 'info', 'information', true, 'active'],
   ['new-volume', 1, 'info', 'information', true, 'active'],
   ['anonymous-volume', 1, 'info', 'information', true, 'active'],

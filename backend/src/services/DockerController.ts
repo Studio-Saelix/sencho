@@ -1,7 +1,7 @@
 import Docker from 'dockerode';
 import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
-import { isSecretVolumeRef, SecretVolumeProtectedError, secretVolumeAccessMessage } from '../helpers/secretVolume';
+import { isSecretVolume, isSecretVolumeRef, SecretVolumeProtectedError, secretVolumeAccessMessage } from '../helpers/secretVolume';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -302,6 +302,8 @@ export interface DependencyNetwork {
 export interface DependencyVolume {
   name: string;
   driver: string;
+  /** Present and true when the volume carries the secret volume label. */
+  secret?: true;
   composeProject: string | null;
   /** Resolved Sencho stack this volume belongs to, or null. */
   stack: string | null;
@@ -2961,6 +2963,7 @@ class DockerController {
         driver: vol.Driver ?? 'local',
         composeProject: project,
         stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
+        ...(isSecretVolume(vol.Labels) ? { secret: true as const } : {}),
       };
     });
 

@@ -415,15 +415,15 @@ export class ComposeService {
     if (refusal) throw new DockerEndpointProtectedError(refusal);
   }
 
-  /**
-   * A memoized render for one operation: the stack's authored model, its
-   * overlay, or the exact global flags of a rebuilt invocation (`composePrefix`).
-   */
   /** A memoized render of the stack's authored model, for a caller that runs several checks on one operation. */
   public createSharedRender(stackName: string): SharedRender {
     return this.sharedRender(stackName);
   }
 
+  /**
+   * A memoized render for one operation: the stack's authored model, its
+   * overlay, or the exact global flags of a rebuilt invocation (`composePrefix`).
+   */
   private sharedRender(stackName: string, stackDirOverride?: string, composePrefix?: string[]): SharedRender {
     let pending: Promise<RenderOutcome> | null = null;
     const opts = composePrefix

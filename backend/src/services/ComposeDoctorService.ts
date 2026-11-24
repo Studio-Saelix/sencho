@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
-import DockerController from './DockerController';
+import DockerController, { type DependencySnapshot } from './DockerController';
+import { isSecretVolumeExemptKind, type SecretVolumeNodeFacts } from './preflight/secretVolumeUse';
+import { secretVolumeNames } from '../helpers/secretVolume';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { DatabaseService, type PreflightAcknowledgement, type PreflightRunRow } from './DatabaseService';
@@ -200,6 +202,19 @@ function loadAcknowledgementInputs(
  * blocks a deploy), read-only with respect to the stack, and node-scoped. It
  * never stores, returns, or logs an environment value.
  */
+/**
+ * Secret volumes on the node and the containers that mount them, from the
+ * dependency snapshot Doctor already reads (no extra Docker call).
+ */
+function secretVolumeFactsOf(snapshot: DependencySnapshot): SecretVolumeNodeFacts {
+  const labelledVolumeNames = new Set(snapshot.volumes.filter(v => v.secret === true).map(v => v.name));
+  const secretNames = new Set([...labelledVolumeNames, ...secretVolumeNames()]);
+  const consumers = snapshot.containers
+    .filter(c => Array.isArray(c.volumes) && c.volumes.some(name => secretNames.has(name)))
+    .map(c => ({ id: c.id, names: [c.name] }));
+  return { labelledVolumeNames, consumers };
+}
+
 export class ComposeDoctorService {
   private static instance: ComposeDoctorService | null = null;
 
@@ -460,7 +475,7 @@ export class ComposeDoctorService {
         || 'Sencho could not run docker compose on this node.';
     }
 
-    const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
+    const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable, secretVolumeFacts } = await this.nodeState(nodeId, fsSvc, stackName);
     const [bindChecks, healthchecks] = await Promise.all([
       model ? this.resolveBindChecks(model, baseDir) : Promise.resolve([] as BindCheck[]),
       model
@@ -489,6 +504,8 @@ export class ComposeDoctorService {
       existingVolumeNames,
       existingContainers,
       nodeStateAvailable,
+      ...(secretVolumeFacts ? { secretVolumeFacts } : {}),
+      secretVolumeExempt: this.isSecretVolumeExempt(stackName),
       bindChecks,
       stackIntent,
       serviceIntents,
@@ -578,6 +595,16 @@ export class ComposeDoctorService {
     };
   }
 
+  /** Whether Sencho recorded this stack as a secret volume's consumer. A read failure is not an exemption. */
+  private isSecretVolumeExempt(stackName: string): boolean {
+    try {
+      return isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName));
+    } catch (error) {
+      console.warn('[ComposeDoctor] Managed stack read failed for %s:', sanitizeForLog(stackName), errorMessageForLog(error));
+      return false;
+    }
+  }
+
   /** Snapshot the node's ports/networks/volumes/containers. Degrades to empty if Docker is unreachable. */
   private async nodeState(nodeId: number, fsSvc: FileSystemService, stackName: string): Promise<{
     nodePorts: NodePortBinding[];
@@ -585,6 +612,7 @@ export class ComposeDoctorService {
     existingVolumeNames: Set<string>;
     existingContainers: { name: string; stack: string | null }[];
     nodeStateAvailable: boolean;
+    secretVolumeFacts?: SecretVolumeNodeFacts;
   }> {
     try {
       const knownStacks = await fsSvc.getStacks();
@@ -597,6 +625,7 @@ export class ComposeDoctorService {
         existingVolumeNames: new Set(snapshot.volumes.map(v => v.name)),
         existingContainers: snapshot.containers.map(c => ({ name: c.name, stack: c.stack })),
         nodeStateAvailable: true,
+        secretVolumeFacts: secretVolumeFactsOf(snapshot),
       };
     } catch (error) {
       console.warn('[ComposeDoctor] Node snapshot unavailable for %s; node-state checks skipped:',

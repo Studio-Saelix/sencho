@@ -1124,7 +1124,7 @@ describe('rule registry completeness', () => {
     'healthcheck-disabled', 'healthcheck-inherited', 'healthcheck-unverifiable', 'healthcheck-inconsistent',
     'deploy-swarm-only',
     'node-state-unavailable', 'compose-version-mismatch',
-    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
+    'external-network-missing', 'external-volume-missing', 'secret-volume-reference', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'exposure-internal-tunneled', 'sensitive-service-broad-exposure',
     'tunnel-exposure', 'exposure-unclassified',
