@@ -211,6 +211,30 @@ describe('bootstrap operation routes: refusals', () => {
     expect(gone.body.code).toBe('OPERATION_NOT_VERIFIABLE');
   });
 
+  it('stops listing an enrolled run once its node is deleted from Fleet, and still opens the run by id', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const nodeId = db.addNode({ name: 'route-deleted', type: 'remote', compose_dir: '/opt/docker/sencho', is_default: false, api_url: '', api_token: '', mode: 'pilot_agent' });
+    const id = '00000000-0000-4000-8000-000000003002';
+    db.insertNodeBootstrapOperation({
+      id, target_key: 'route-deleted.example.com:22', host: 'route-deleted.example.com', port: 22, username: 'ubuntu', address: '192.168.1.92',
+      target_name: 'route-deleted', host_key_fingerprint: 'SHA256:route-deleted', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: 'admin', approved_at: now, attempt: 1, state: 'enrolled', stage: null, step: null,
+      node_id: nodeId, changes_made: 1, agent_started: 1, active: 0, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: now,
+    });
+    const listedIds = async () => ((await request(app).get('/api/nodes/bootstrap/operations').set('Authorization', adminAuth)).body.operations as Array<{ id: string }>).map((entry) => entry.id);
+    expect(await listedIds()).toContain(id);
+
+    const removed = await request(app).delete(`/api/nodes/${nodeId}`).set('Authorization', adminAuth);
+    expect(removed.status).toBe(200);
+
+    expect(await listedIds()).not.toContain(id);
+    const opened = await request(app).get(`/api/nodes/bootstrap/operations/${id}`).set('Authorization', adminAuth);
+    expect(opened.status).toBe(200);
+    expect(opened.body).toMatchObject({ id, state: 'enrolled', nodeId });
+  });
+
   it('refuses a page cursor that is not one the list returned', async () => {
     for (const cursor of ['garbage', 'e30', 'x'.repeat(300), '']) {
       const res = await request(app).get('/api/nodes/bootstrap/operations').query({ cursor }).set('Authorization', adminAuth);

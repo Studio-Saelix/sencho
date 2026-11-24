@@ -6901,10 +6901,19 @@ stmt.run('gitops_schema_version', '1');
         ).all(after.createdAt, after.id, limit) as NodeBootstrapOperation[];
     }
 
-    /** The latest operations that no longer hold their server. */
+    /**
+     * The latest operations that no longer hold their server, without those
+     * whose node was deleted: a finished run has nothing left to follow, retry,
+     * release or verify once its node is gone. A run that never registered a
+     * node (`node_id` is null) stays. The record itself is kept, and is still
+     * read by id. The filter runs before the limit, so hidden runs never take
+     * a place from a run that is shown. Node ids are never reused.
+     */
     public listFinishedNodeBootstrapOperations(limit: number): NodeBootstrapOperation[] {
         return this.db.prepare(
-            'SELECT * FROM node_bootstrap_operations WHERE active = 0 ORDER BY created_at DESC, id DESC LIMIT ?'
+            `SELECT * FROM node_bootstrap_operations
+             WHERE active = 0 AND (node_id IS NULL OR node_id IN (SELECT id FROM nodes))
+             ORDER BY created_at DESC, id DESC LIMIT ?`
         ).all(limit) as NodeBootstrapOperation[];
     }
 
