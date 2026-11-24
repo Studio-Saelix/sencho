@@ -680,7 +680,11 @@ export function EditorView(props: EditorViewProps) {
                         {/* One line at every width: the actions collapse to icons in a
                             narrow pane instead of wrapping. The split save control
                             never shrinks, or its chevron gets clipped. The tab group scrolls
-                            sideways when even the icon-only actions leave it too little room. */}
+                            sideways when even the icon-only actions leave it too little room.
+                            The 40rem breakpoint is the content width the labelled row needs (three
+                            tabs, labelled Git Source and Save & Deploy, the split chevron, full
+                            screen and close), so a standard desktop pane keeps its labels. Save &
+                            Reapply is a little wider; the tab group absorbs the difference. */}
                         <div className="@container p-4 border-b border-muted flex flex-nowrap items-center gap-x-4 shrink-0 min-w-0">
                             <div className="flex flex-1 flex-nowrap items-center gap-4 min-w-0 overflow-x-auto py-1 -my-1 [scrollbar-width:none]">
                                 <Tabs className="shrink-0" value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
@@ -730,16 +734,16 @@ export function EditorView(props: EditorViewProps) {
                                             aria-label="Git Source"
                                             title="Git Source"
                                         >
-                                            <GitBranch className="w-4 h-4 @[46rem]:mr-2" strokeWidth={1.5} />
-                                            <span className="hidden @[46rem]:inline">Git Source</span>
+                                            <GitBranch className="w-4 h-4 @[40rem]:mr-2" strokeWidth={1.5} />
+                                            <span className="hidden @[40rem]:inline">Git Source</span>
                                             {gitSourcePendingMap[stackName] && (
                                                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brand animate-pulse" />
                                             )}
                                         </Button>
                                         <div className="flex shrink-0 items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={(e) => { setEditorFullscreen(false); requestSaveAndDeploy(e); }} disabled={lifecycleBusy || !actionsReady} aria-label={saveLabel} title={saveLabel}>
-                                                <Rocket className="w-4 h-4 @[46rem]:mr-2" strokeWidth={1.5} />
-                                                <span className="hidden @[46rem]:inline">{saveLabel}</span>
+                                                <Rocket className="w-4 h-4 @[40rem]:mr-2" strokeWidth={1.5} />
+                                                <span className="hidden @[40rem]:inline">{saveLabel}</span>
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
