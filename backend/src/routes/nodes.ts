@@ -30,6 +30,9 @@ import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } fro
 import { mintPilotEnrollment as mintPilotEnrollmentForNode } from '../helpers/pilotEnrollment';
 import { resolvePrimaryUrl } from '../helpers/primaryUrl';
 import { isArchiveStorableName } from '../services/cloudBackupArchive';
+import { getExistingSealingKey } from '../helpers/registryEnvelopeSeal';
+import { SealedSecretDeliveryService, type SealingKeyReport } from '../services/sealedSecrets/SealedSecretDeliveryService';
+import { isSealedSecretError } from '../services/sealedSecrets/errors';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 /**
@@ -534,9 +537,107 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   }
 });
 
+function parseNodeIdParam(raw: string, res: Response): number | null {
+  const id = parseInt(raw, 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid node id' });
+    return null;
+  }
+  if (!DatabaseService.getInstance().getNode(id)) {
+    res.status(404).json({ error: 'Node not found' });
+    return null;
+  }
+  return id;
+}
+
+/** The response shape the Sealing key sheet reads. */
+function sealingKeyView(report: SealingKeyReport) {
+  return {
+    kind: 'remote' as const,
+    readiness: report.readiness,
+    pinned: report.pinned
+      ? {
+        fingerprint: report.pinned.fingerprint,
+        registeredAt: report.pinned.registeredAt,
+        confidential: report.pinned.confidential,
+        confirmedBy: report.pinned.confirmedBy,
+        confirmedAt: report.pinned.confirmedAt,
+      }
+      : null,
+    presented: report.presented,
+  };
+}
+
 /**
- * Clear the hub-pinned registry sealing public key for a remote node (TOFU reset).
- * The next credential delivery re-pins whatever key the target advertises.
+ * A node's sealing key status. For this instance: its own fingerprint. For a
+ * remote node: whether it can receive a sealed secret, the pinned key and the
+ * key it presents now (one capability probe and one key fetch, on demand).
+ */
+nodesRouter.get('/:id/sealing-key', async (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  const id = parseNodeIdParam(nodeIdParam, res);
+  if (id === null) return;
+  try {
+    res.set('Cache-Control', 'no-store');
+    const node = DatabaseService.getInstance().getNode(id);
+    if (node?.type !== 'remote') {
+      const own = getExistingSealingKey();
+      if (!own) {
+        res.status(503).json({ error: 'This instance has no sealing key yet. Restart Sencho to create it.' });
+        return;
+      }
+      res.json({ kind: 'local', fingerprint: own.fingerprint });
+      return;
+    }
+    res.json(sealingKeyView(await SealedSecretDeliveryService.getInstance().evaluateReadiness(id)));
+  } catch (error: unknown) {
+    console.error('[Nodes] Sealing key status failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to read the sealing key status' });
+  }
+});
+
+/**
+ * An Admin confirms a remote node's sealing key fingerprint out of band, which
+ * trusts the key for sealed delivery when it was never seen over a
+ * confidential connection.
+ */
+nodesRouter.post('/:id/sealing-key/confirm', async (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  if (req.machineAuthScope) {
+    res.status(403).json({ error: 'Only a signed-in Admin can confirm a sealing key.' });
+    return;
+  }
+  if (!requireAdmin(req, res)) return;
+  const id = parseNodeIdParam(req.params.id as string, res);
+  if (id === null) return;
+  const fingerprint = (req.body as { fingerprint?: unknown } | undefined)?.fingerprint;
+  if (typeof fingerprint !== 'string' || fingerprint.length === 0 || fingerprint.length > 128) {
+    res.status(400).json({ error: 'fingerprint is required' });
+    return;
+  }
+  if (DatabaseService.getInstance().getNode(id)?.type !== 'remote') {
+    res.status(400).json({ error: 'Only a remote node\'s sealing key needs confirmation' });
+    return;
+  }
+  try {
+    const report = await SealedSecretDeliveryService.getInstance().confirmFingerprint(id, fingerprint, req.user?.username ?? 'unknown');
+    res.json(sealingKeyView(report));
+  } catch (error: unknown) {
+    if (isSealedSecretError(error)) {
+      res.status(error.status).json({ error: error.message, code: error.code });
+      return;
+    }
+    console.error('[Nodes] Sealing key confirmation failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to confirm the sealing key' });
+  }
+});
+
+/**
+ * Clear the hub-pinned sealing public key for a remote node (TOFU reset). The
+ * row carries the sealed-delivery trust too, so both go together. The next
+ * contact re-pins whatever key the target presents.
  */
 nodesRouter.delete('/:id/sealing-key', async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
@@ -561,7 +662,7 @@ nodesRouter.delete('/:id/sealing-key', async (req: Request, res: Response) => {
     const previous = db.getNodeSealingKey(id);
     db.clearNodeSealingKey(id);
     console.log(
-      `[Nodes] Registry sealing key pin cleared for node ${id} ("${sanitizeForLog(node.name)}")`,
+      `[Nodes] Sealing key pin cleared for node ${id} ("${sanitizeForLog(node.name)}")`,
       previous ? { fingerprint: previous.fingerprint } : { fingerprint: null },
     );
     res.status(204).send();

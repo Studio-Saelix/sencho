@@ -58,7 +58,10 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
   'POST /nodes/*/uncordon': 'Uncordoned node',
-  'DELETE /nodes/*/sealing-key': 'Reset node registry sealing key pin',
+  'DELETE /nodes/*/sealing-key': 'Reset node sealing key pin',
+  'POST /nodes/*/sealing-key/confirm': 'Confirmed node sealing key fingerprint',
+  'POST /sealed-secrets/*': 'Received a sealed secret from the control instance',
+  'DELETE /sealed-secrets/*/*': 'Removed a sealed secret at the control instance\'s request',
 
   // User management
   'POST /users': 'Created user',

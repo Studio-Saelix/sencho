@@ -194,6 +194,21 @@ function cacheLoadedKey(privateKey: crypto.KeyObject, filePath: string): LoadedS
   return loaded;
 }
 
+/** This instance's sealing key when it exists; never creates one. */
+export function getExistingSealingKey(): SealingKeyPublic | null {
+  try {
+    const loaded = loadExistingKey();
+    return {
+      publicKeyRaw: Buffer.from(loaded.publicKeyRaw),
+      publicKeyBase64: loaded.publicKeyBase64,
+      fingerprint: loaded.fingerprint,
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Registry sealing key not found') return null;
+    throw err;
+  }
+}
+
 /** Lazily generate or load the target sealing keypair from DATA_DIR. */
 export function getOrCreateSealingKey(): SealingKeyPublic {
   const loaded = loadOrCreateKey();

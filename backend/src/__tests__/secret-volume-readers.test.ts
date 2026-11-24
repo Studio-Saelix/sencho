@@ -57,7 +57,7 @@ function stubDocker(labels: Record<string, string>) {
 const SECRET_LABELS = { 'io.sencho.secret': '' };
 
 describe('VolumeBrowserService on a secret volume', () => {
-  const ops: Array<[string, (svc: VolumeBrowserService, name: string) => Promise<unknown>]> = [
+  const ops: Array<[string, (svc: import('../services/VolumeBrowserService').VolumeBrowserService, name: string) => Promise<unknown>]> = [
     ['listDir', (svc, name) => svc.listDir(name, '')],
     ['stat', (svc, name) => svc.stat(name, 'token')],
     ['readFile', (svc, name) => svc.readFile(name, 'token')],
