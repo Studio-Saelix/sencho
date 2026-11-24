@@ -152,7 +152,7 @@ describe('pruneSystem volumes', () => {
   it.each([
     ['without a label filter', undefined, {}],
     ['with a matching label filter', 'com.example=yes', { 'com.example': 'yes' }],
-  ])('keeps plugin, option-backed and driverless volumes %s, as the daemon prune did', async (_case, filter, labels) => {
+  ])('keeps plugin and option-backed volumes %s as the daemon prune did, and a volume with no reported driver', async (_case, filter, labels) => {
     const all = [ORDINARY, PLUGIN, NFS, BIND, NO_DRIVER, EMPTY_OPTIONS]
       .map((volume) => ({ ...volume, Labels: { ...(volume as { Labels?: Record<string, string> }).Labels, ...labels } }));
     mockDocker.listVolumes.mockResolvedValue({ Volumes: all });

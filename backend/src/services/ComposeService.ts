@@ -324,6 +324,13 @@ export type GitOpsDeployHandle = {
   failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
 };
 
+/** A container path as Docker reports it: `/token/` and `//token` are `/token`. */
+function samePath(value: string | undefined): string {
+  if (!value) return '';
+  const normalized = path.posix.normalize(value);
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+}
+
 export class ComposeService {
   private baseDir: string;
   private nodeId: number;
@@ -511,9 +518,11 @@ export class ComposeService {
    *
    * A secret volume is refused too (`SecretVolumeProtectedError`), whether the
    * stack's declaration shows it (reserved name, authored label) or only the
-   * Docker volume of that name carries the label; a label read that fails
-   * refuses. The stack Sencho recorded as the secret's consumer may declare it,
-   * but only as `external`, which Compose never removes.
+   * Docker volume of that name carries the label, and whether it is declared or
+   * a container of the project mounts it anonymously; a label or container read
+   * that fails refuses. The stack Sencho recorded as the secret's consumer may
+   * declare it, but only as `external` and mounted by name, which Compose never
+   * removes. See `assertNoSecretVolumeRemoval`.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declaredVolumes: EffResource[] | null = null;
@@ -572,9 +581,10 @@ export class ComposeService {
    * A volume or container read that fails refuses.
    */
   private async assertNoSecretVolumeRemoval(stackName: string, projectName: string, declaredVolumes: readonly EffResource[]): Promise<void> {
-    const docker = DockerController.getInstance(this.nodeId).getDocker();
+    let docker: Docker;
     let labelledVolumeNames: Set<string>;
     try {
+      docker = DockerController.getInstance(this.nodeId).getDocker();
       const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
       labelledVolumeNames = new Set((listed?.Volumes ?? []).map((volume) => volume.Name));
     } catch (error) {
@@ -609,9 +619,10 @@ export class ComposeService {
    * the mount Docker deletes with the container when volumes are removed. A
    * mount counts as named only when the container's own create spec names the
    * volume at that path (a `volume` mount or a bind entry); anything else is
-   * taken as anonymous. Containers are looked up under the project name
-   * Compose runs under and under the stack name, since the two can differ.
-   * Throws `SecretVolumeProtectedError` when the containers cannot be read.
+   * taken as anonymous. Containers are looked up under the project name the
+   * render gives, which is the one Compose runs the down under and can differ
+   * from the stack name. Throws `SecretVolumeProtectedError` when the
+   * containers cannot be read.
    */
   private async mountsSecretVolumeAnonymously(
     docker: Docker,
@@ -626,23 +637,18 @@ export class ComposeService {
         + 'Check the Docker connection and try again, or run the operation without removing volumes.',
       );
     };
-    const seen = new Set<string>();
+    let listed: Docker.ContainerInfo[];
+    try {
+      listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${projectName}`] } });
+    } catch (error) {
+      throw unreadable(error);
+    }
     const holders: Array<{ id: string; mounts: Array<{ name: string; destination: string }> }> = [];
-    for (const project of new Set([projectName, stackName])) {
-      let listed: Docker.ContainerInfo[];
-      try {
-        listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${project}`] } });
-      } catch (error) {
-        throw unreadable(error);
-      }
-      for (const container of listed ?? []) {
-        if (seen.has(container.Id)) continue;
-        seen.add(container.Id);
-        const mounts = (container.Mounts ?? [])
-          .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && isSecretName(mount.Name))
-          .map((mount) => ({ name: mount.Name as string, destination: mount.Destination }));
-        if (mounts.length > 0) holders.push({ id: container.Id, mounts });
-      }
+    for (const container of listed ?? []) {
+      const mounts = (container.Mounts ?? [])
+        .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && isSecretName(mount.Name))
+        .map((mount) => ({ name: mount.Name as string, destination: samePath(mount.Destination) }));
+      if (mounts.length > 0) holders.push({ id: container.Id, mounts });
     }
     for (const holder of holders) {
       let info: Docker.ContainerInspectInfo;
@@ -656,10 +662,10 @@ export class ComposeService {
       const specMounts = info.HostConfig?.Mounts ?? [];
       const binds = info.HostConfig?.Binds ?? [];
       for (const mount of holder.mounts) {
-        const named = specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && spec.Target === mount.destination)
+        const named = specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && samePath(spec.Target) === mount.destination)
           || binds.some((bind) => {
             const [source, target] = bind.split(':');
-            return source === mount.name && target === mount.destination;
+            return source === mount.name && samePath(target) === mount.destination;
           });
         if (!named) return true;
       }

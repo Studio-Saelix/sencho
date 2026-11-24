@@ -718,6 +718,44 @@ describe('ComposeService secret volume guard', () => {
         expect(mutations()).toEqual([]);
       });
 
+      it('leaves out a container of another project that happens to carry the stack name', async () => {
+        // Compose runs this stack as `edge-project`; a project named like the stack is not its own.
+        renderFor = () => ({ name: 'edge-project', services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = [ANON];
+        holder(stack, ANON);
+
+        await svc().runDown(stack, { removeVolumes: true });
+
+        expect(events).not.toContain('inspect:c-web');
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
+
+      it.each([
+        ['a trailing slash', '/token/'],
+        ['a doubled slash', '//token'],
+      ])('matches a named mount whose spec spells the path with %s', async (_spelling, target) => {
+        recordManagedKind(stack, 'edge-tunnel');
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: { tok: { name: `${stack}_tok`, external: true } } });
+        labelledVolumes = [`${stack}_tok`];
+        holder(stack, `${stack}_tok`);
+        inspectFor['c-web'] = { HostConfig: { Mounts: [{ Type: 'volume', Source: `${stack}_tok`, Target: target }] } };
+
+        await svc().runDown(stack, { removeVolumes: true });
+
+        expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+      });
+
+      it.each(['runDown', 'downStack'] as const)('%s refuses when the spec names the volume only at another path', async (method) => {
+        // Named at /backup, but the mount at /token has no source: that one is anonymous.
+        renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+        labelledVolumes = [ANON];
+        holder(stack, ANON);
+        inspectFor['c-web'] = { HostConfig: { Mounts: [{ Type: 'volume', Source: ANON, Target: '/backup' }, { Type: 'volume', Target: '/token' }] } };
+
+        expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+        expect(mutations()).toEqual([]);
+      });
+
       it.each(['edge-tunnel', 'released-edge-tunnel'])('refuses the recorded %s consumer too, through both methods', async (kind) => {
         recordManagedKind(stack, kind);
         renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } }, volumes: { tok: { name: `${stack}_tok`, external: true } } });

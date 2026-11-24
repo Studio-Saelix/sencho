@@ -109,7 +109,7 @@ export class NodeRegistry extends EventEmitter {
 
     /**
      * The id of the node whose Docker daemon this instance reaches directly:
-     * the default node when it is local, else the first local node. The
+     * the default node when it is local, else the lowest-id local node. The
      * default can legally be a remote node, so code that acts on this
      * instance's own daemon must not follow it. Null only when no local node
      * row exists. No node credential is decrypted to answer.

@@ -126,9 +126,11 @@ async function remoteDefaultWithLocalDaemon(remoteDefaultId: number): Promise<()
 /**
  * Add a remote node whose stored credential this instance cannot decrypt, as
  * after restoring a database without its encryption key, and prove it is
- * unreadable. Returns the restore step.
+ * unreadable. With `asDefault` it also becomes the default node, and the
+ * restore step makes the local node the default again. Returns the restore
+ * step.
  */
-function unreadableUnrelatedRemote(asDefault = false): () => void {
+function unreadableRemote(asDefault = false): () => void {
   const unreadable = `enc:${'00'.repeat(12)}:${'00'.repeat(16)}:00`;
   const id = Number(db.getDb().prepare(
     "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES ('unrecovered', 'remote', '/app/compose', 0, 'offline', ?, 'https://10.0.0.9:1852', ?, 'proxy')",
@@ -252,7 +254,7 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
     install();
     transport.setConfidential(true);
     const restore = await remoteDefaultWithLocalDaemon(directNodeId);
-    const restoreUnreadable = unreadableUnrelatedRemote();
+    const restoreUnreadable = unreadableRemote();
     try {
       const bearer = `Bearer ${transport.bearer()}`;
       expect((await request(app).get('/api/sealed-secrets/key').set('Authorization', bearer)).status).toBe(200);
@@ -270,7 +272,7 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
   });
 
   it('serves its receiving routes when the default node itself has a credential it cannot decrypt', async () => {
-    const restoreUnreadable = unreadableUnrelatedRemote(true);
+    const restoreUnreadable = unreadableRemote(true);
     try {
       const bearer = `Bearer ${transport.bearer()}`;
       expect((await request(app).get('/api/sealed-secrets/key').set('Authorization', bearer)).status).toBe(200);
@@ -648,7 +650,7 @@ describe('sealed secret delivery to the local node', () => {
   it('accepts, replaces and removes in process while an unrelated remote credential cannot be decrypted', async () => {
     const { calls } = installInProcessNodeTransport({ app, bearer: () => '' });
     const restore = await remoteDefaultWithLocalDaemon(pilotNodeId);
-    const restoreUnreadable = unreadableUnrelatedRemote();
+    const restoreUnreadable = unreadableRemote();
     try {
       const deliver = (slot: string, secret: string) => service().deliver({ nodeId: localNodeId, purpose: PURPOSE, slot, secret, actor: 'admin' });
       expect(await deliver(SLOT_A, SECRET)).toEqual({ status: 'accepted', generation: 1 });
