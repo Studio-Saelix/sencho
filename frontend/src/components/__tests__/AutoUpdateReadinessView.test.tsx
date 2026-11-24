@@ -324,6 +324,22 @@ describe('verification preview helpers', () => {
   });
 });
 
+it('shows the service changelog link and Copy skip label on the phone card', () => {
+  mockNodeMeta.set(1, { capabilities: ['sencho-label-detection-v1'] });
+  const digest = `sha256:${'d'.repeat(64)}`;
+  const base = card();
+  render(<MobileReadinessCard card={card({
+    preview: {
+      ...base.preview!,
+      images: [{ ...base.preview!.images[0], candidate_digest: digest, changelog_url: 'https://example.com/nextcloud/releases' }],
+    },
+  })} onApply={vi.fn()} />);
+  expect(screen.getByTestId('update-changelog-link')).toHaveAttribute('href', 'https://example.com/nextcloud/releases');
+  expect(screen.getByTestId('update-copy-skip-label')).toHaveAttribute('title', `io.sencho.update.ignore: "${digest}"`);
+  expect(screen.queryByText(/No changelog available/)).toBeNull();
+  mockNodeMeta.clear();
+});
+
 it('enables Apply for a safe, non-blocked update', async () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  DETECTION_LABEL_KEYS,
   POLICY_LABEL_KEYS,
+  updateCheckOf,
   SENCHO_NOTIFY_ROUTE_LABEL,
   SENCHO_UPDATE_LABEL,
   applicationLink,
@@ -325,5 +327,69 @@ describe('parseServiceUrlResponse', () => {
     const entry = parseServiceUrlResponse(1, 'demo', true, { ...body, renderable: false, senchoLabels: { renderable: false } });
     expect(entry.status).toBe('unavailable');
     expect(senchoLabelsOf(entry)).toBeNull();
+  });
+});
+
+describe('update detection labels', () => {
+  const base = { links: [], order: null, hidden: false };
+
+  it('reads the defaults on an older node that does not send the fields', () => {
+    const r = readSenchoLabels({ renderable: true, services: { web: base }, entries: [] });
+    expect(r?.renderable && r.services.web).toMatchObject({ updateCheck: true, updateIgnore: [], updateChangelog: null });
+    expect(updateCheckOf(r, 'web')).toBe(true);
+  });
+
+  it('reads checks off, skip entries, and a changelog link the node reported', () => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const r = readSenchoLabels({
+      renderable: true,
+      services: {
+        web: {
+          ...base,
+          updateCheck: false,
+          updateIgnore: [{ kind: 'digest', digest }, { kind: 'tag', tag: '1.27.0' }],
+          updateChangelog: 'https://github.com/example/app/releases',
+        },
+      },
+      entries: [],
+    });
+    expect(r?.renderable && r.services.web).toMatchObject({
+      updateCheck: false,
+      updateIgnore: [digest, '1.27.0'],
+      updateChangelog: 'https://github.com/example/app/releases',
+    });
+    expect(updateCheckOf(r, 'web')).toBe(false);
+  });
+
+  it('drops a changelog link that fails the second check, without rejecting the answer', () => {
+    const r = readSenchoLabels({ renderable: true, services: { web: { ...base, updateChangelog: 'javascript:alert(1)' } }, entries: [] });
+    expect(r?.renderable && r.services.web.updateChangelog).toBeNull();
+  });
+
+  it('rejects the whole answer for detection fields outside the contract', () => {
+    for (const bad of [
+      { updateCheck: 'false' },
+      { updateIgnore: 'sha256:abc' },
+      { updateIgnore: [{ kind: 'digest', digest: 'sha256:short' }] },
+      { updateIgnore: [{ kind: 'tag', tag: 'has space' }] },
+      { updateChangelog: 42 },
+    ]) {
+      expect(readSenchoLabels({ renderable: true, services: { web: { ...base, ...bad } }, entries: [] })).toBeNull();
+    }
+  });
+
+  it('does not count the detection keys as ignored on a node too old to evaluate them', () => {
+    const entries = [
+      { service: 'web', key: 'io.sencho.update.check', state: 'unsupported', reason: 'Sencho does not recognize this label.' },
+      { service: 'web', key: 'io.sencho.update.ignore', state: 'invalid', reason: 'Each entry must be an image digest.' },
+      { service: 'web', key: 'io.sencho.bogus', state: 'unsupported', reason: 'Sencho does not recognize this label.' },
+    ];
+    const r = readSenchoLabels({ renderable: true, services: { web: base }, entries });
+    // A node that knows the key reports invalid; only an older node reports it unrecognized.
+    expect(ignoredLabels(r, 'web').map(entry => entry.key)).toEqual(['io.sencho.update.ignore', 'io.sencho.bogus']);
+  });
+
+  it('mirrors the backend registry keys', () => {
+    expect(DETECTION_LABEL_KEYS).toEqual(['io.sencho.update.check', 'io.sencho.update.ignore', 'io.sencho.update.changelog']);
   });
 });

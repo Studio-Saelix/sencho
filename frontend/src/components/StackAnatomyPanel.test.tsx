@@ -259,6 +259,36 @@ describe('StackAnatomyPanel update banner', () => {
     expect(screen.queryByRole('button', { name: 'apply' })).not.toBeInTheDocument();
   });
 
+  it('shows the service changelog link and Copy skip label in the banner', async () => {
+    nodeState.nodeMeta.set(1, { capabilities: ['sencho-label-detection-v1'] });
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [{
+            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor', check_status: 'ok',
+            changelog_url: 'https://nginx.org/en/CHANGES',
+          }],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.26',
+            semver_bump: 'minor', update_kind: 'tag', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false, check_status: 'ok',
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.getByTestId('update-changelog-link')).toHaveAttribute('href', 'https://nginx.org/en/CHANGES');
+    expect(screen.getByTestId('update-copy-skip-label')).toHaveAttribute('title', 'io.sencho.update.ignore: "1.26"');
+    nodeState.nodeMeta.clear();
+  });
+
   it('says the node checks the installed image when it cannot evaluate a candidate', async () => {
     // Default state: no capability reported, so the node cannot see a candidate.
     render(panel(false));
