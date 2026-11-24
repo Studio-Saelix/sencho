@@ -118,6 +118,21 @@ describe.skipIf(!runnable)('sealed secret store on a real Docker volume', () => 
     expect(readAs('65532:65532').out).toBe(before);
   });
 
+  it('leaves the live token in place when the writer script itself refuses an empty or oversize secret', async () => {
+    // The store checks the size first; this drives the script directly to prove its own refusals.
+    const { runSecretWriter } = await import('../../services/sealedSecrets/secretVolumeWriter');
+    const { getSealedSecretPurpose } = await import('../../services/sealedSecrets/purposes');
+    const purpose = getSealedSecretPurpose(PURPOSE);
+    const before = readAs('65532:65532').out;
+    for (const secret of ['', 'x'.repeat(purpose.maxSecretBytes + 1)]) {
+      await expect(runSecretWriter(client, { name: VOLUME, purposeId: PURPOSE }, purpose, { kind: 'write', secret }))
+        .rejects.toMatchObject({ code: 'SEALED_SECRET_REQUEST_INVALID' });
+      expect(readAs('65532:65532').out).toBe(before);
+    }
+    const leftovers = docker(['ps', '-aq', '--filter', 'label=io.sencho.helper=secret-writer']).trim();
+    expect(leftovers).toBe('');
+  });
+
   it('removes the file and keeps the volume', async () => {
     const generation = StoreClass.getInstance().describe(PURPOSE, SLOT).purposeGeneration + 1;
     expect((await StoreClass.getInstance().remove(PURPOSE, SLOT, generation, WHO)).status).toBe('deleted');
