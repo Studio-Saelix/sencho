@@ -6,6 +6,7 @@ import type { Node } from '@/context/NodeContext';
 // the test renders the panel in isolation and can drive the role/permission
 // inputs that gate the write affordances.
 const useAuthMock = vi.fn();
+const experimentalState = vi.hoisted(() => ({ experimental: false, experimentalReady: true }));
 
 const testNode: Node = {
   id: 2,
@@ -24,6 +25,7 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: [testNode], refreshNodeMeta: vi.fn() }),
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
+vi.mock('@/hooks/useExperimental', () => ({ useExperimental: () => experimentalState }));
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(() => Promise.resolve({ ok: false, json: () => Promise.resolve({}) })),
 }));
@@ -51,7 +53,11 @@ function canFor(...granted: string[]) {
   return (action: string) => granted.includes(action);
 }
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  experimentalState.experimental = false;
+  experimentalState.experimentalReady = true;
+});
 
 describe('NodeManager write-affordance gating', () => {
   it('hides every write affordance from a viewer but still shows the node table', () => {
@@ -75,6 +81,33 @@ describe('NodeManager write-affordance gating', () => {
     expect(screen.getByText('Generate Node Token')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit node' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete node' })).toBeInTheDocument();
+    // Bootstrap is experimental, so an admin sees it only when the flag is on.
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
+  });
+
+  it('shows Bootstrap to an admin when the experimental flag is on', () => {
+    experimentalState.experimental = true;
+    useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.getByRole('button', { name: 'Bootstrap new Linux server' })).toBeInTheDocument();
+  });
+
+  it('hides Bootstrap while the experimental flag is still loading', () => {
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = false;
+    useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
+  });
+
+  it('hides Bootstrap from a node-admin even when the experimental flag is on', () => {
+    experimentalState.experimental = true;
+    useAuthMock.mockReturnValue({ isAdmin: false, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
   });
 
   it('lets a node-admin manage nodes but hides the admin-only token card', () => {
