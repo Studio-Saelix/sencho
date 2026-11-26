@@ -8,7 +8,7 @@ import {
     useEdgesState,
     useNodesInitialized,
     useReactFlow,
-    useStore,
+    useNodesStore,
     type Node,
     type Edge,
     type NodeTypes,
@@ -33,6 +33,10 @@ import {
 import type {
     NetworkingTopologyContainerDetail, NetworkingTopologyNetwork,
 } from '@/types/networking';
+
+// React Flow 13 reads a numeric fitView padding as pixels. The percentage
+// below keeps the padding the canvas had on React Flow 12.
+const FIT_VIEW_PADDING = '11.5%';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -310,14 +314,14 @@ function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeI
     // Reading the store's node set (rather than a ref) makes the effect run
     // again after React Flow applies the new `nodes` prop, which happens in a
     // passive effect after this component's own.
-    const storeNodeIds = useStore((state) => state.nodes.map((node) => node.id).sort().join('\u0000'));
+    const storeNodeIds = useNodesStore((state) => state.nodes.map((node) => node.id).sort().join('\u0000'));
     const lastFitted = useRef<string | null>(null);
     useEffect(() => {
         if (!nodesInitialized) return;
         if (storeNodeIds !== nodeIds) return;
         if (lastFitted.current === signature) return;
         lastFitted.current = signature;
-        void fitView({ padding: 0.3 });
+        void fitView({ padding: FIT_VIEW_PADDING });
     }, [fitView, nodeIds, nodesInitialized, signature, storeNodeIds]);
     return null;
 }
@@ -526,7 +530,7 @@ export default function NetworkTopologyView({
                     onNodeClick={handleNodeClick}
                     nodeTypes={nodeTypes}
                     fitView
-                    fitViewOptions={{ padding: 0.3 }}
+                    fitViewOptions={{ padding: FIT_VIEW_PADDING }}
                     proOptions={{ hideAttribution: true }}
                     className="bg-background"
                 >

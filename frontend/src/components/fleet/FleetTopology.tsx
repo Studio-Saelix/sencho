@@ -35,6 +35,10 @@ interface FleetTopologyProps {
     onPositionsChange: (positions: SavedPositions) => void;
 }
 
+// React Flow 13 reads a numeric fitView padding as pixels. The percentage
+// below keeps the padding the canvas had on React Flow 12.
+const FIT_VIEW_PADDING = '8.3%';
+
 // Raw oklch values for MiniMap coloring (ReactFlow cannot resolve CSS vars
 // inside inline styles / SVG fills).
 const MINIMAP_BRAND = 'oklch(0.78 0.11 195)';
@@ -407,7 +411,7 @@ export function FleetTopology({
                     onNodeDragStop={handleNodeDragStop}
                     nodeTypes={nodeTypes}
                     fitView
-                    fitViewOptions={{ padding: 0.2 }}
+                    fitViewOptions={{ padding: FIT_VIEW_PADDING }}
                     proOptions={{ hideAttribution: true }}
                     nodesConnectable={false}
                     className="bg-background"
