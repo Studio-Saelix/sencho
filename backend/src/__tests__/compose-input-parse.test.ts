@@ -590,6 +590,34 @@ services:
         expect(result.parseErrors[0]).toContain('tagged YAML merge keys are not supported');
     });
 
+    it('refuses a YAML 1.1 document before merge expansion', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1
+---
+x-a: &a
+  env_file: secret.env
+services:
+  web:
+    <<: *a
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('YAML 1.1 directives are not supported');
+    });
+
+    it('accepts an explicit YAML 1.2 directive', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.2
+---
+services:
+  web:
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toEqual([]);
+    });
+
     it('accepts a container merge that contributes no entries', () => {
         const { result } = parse({
             'compose.yaml': `x-empty: &empty {}
@@ -645,6 +673,67 @@ services:
         });
         expect(result.parseErrors).toHaveLength(1);
         expect(result.parseErrors[0]).toContain('YAML merge key hides declaration "dockerfile"');
+    });
+
+    it.each([
+        ['include path', `x-i: &i
+  path: base.yaml
+include:
+  - <<: *i
+services: {}
+`, 'path'],
+        ['extends file', `x-e: &e
+  file: base.yaml
+services:
+  web:
+    extends:
+      <<: *e
+      service: base
+`, 'file'],
+        ['env_file path', `x-e: &e
+  path: shared.env
+services:
+  web:
+    env_file:
+      - <<: *e
+        required: true
+`, 'path'],
+        ['volume source', `x-v: &v
+  source: ./data
+  type: bind
+services:
+  web:
+    volumes:
+      - <<: *v
+        target: /data
+`, 'source'],
+        ['config file', `x-c: &c
+  file: ./app.conf
+configs:
+  app:
+    <<: *c
+services: {}
+`, 'file'],
+        ['additional context', `x-a: &a
+  ctx: ./ctx
+services:
+  web:
+    build:
+      context: .
+      additional_contexts:
+        <<: *a
+`, 'additional_contexts'],
+    ])('refuses a merge hiding a %s declaration', (_label, compose, key) => {
+        const { result } = parse({
+            'compose.yaml': compose,
+            'base.yaml': 'services: {}\n',
+            'shared.env': 'A=1\n',
+            'data/.keep': '',
+            'app.conf': 'x',
+            'ctx/.keep': '',
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain(`YAML merge key hides declaration "${key}"`);
     });
 
     it('keeps an explicit declaration over one inherited through a merge', () => {

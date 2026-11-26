@@ -97,7 +97,8 @@ const MAX_DECLARED_INPUTS = 100_000;
 // costs keys x references. Past this many inspected keys the file is refused
 // rather than spending unbounded time on a synchronous request.
 const MAX_MERGE_KEY_SCANS = 100_000;
-// Sentinel key; a YAML mapping key cannot contain NUL, so it cannot collide.
+// Sentinel key; it is only compared against declaration names, which never
+// contain NUL, so a YAML key cannot be mistaken for it.
 const MERGE_KEY_SCAN_EXCEEDED = '\u0000merge-key-scan-exceeded';
 
 // Collected diagnostics bound. A file can multiply invalid declarations through
@@ -244,6 +245,27 @@ function hasTaggedMergeKey(node: unknown): boolean {
         if (record.value !== undefined) stack.push(record.value);
     }
     return false;
+}
+
+/**
+ * Parse a Compose document under the parser's finite alias budget. Explicit
+ * YAML 1.1 documents are refused: yaml expands merge keys automatically for
+ * them regardless of the merge option, which would copy anchors past both the
+ * alias budget and the merge check, and their scalar coercion differs from the
+ * 1.2 view the rest of the inventory uses. Explicitly tagged merges are refused
+ * for the same reason. Both are rejected before the document is materialised.
+ */
+export function parseComposeYaml(content: string): unknown {
+    const document = YAML.parseDocument(content);
+    if (document.errors.length > 0) throw document.errors[0];
+    const version = document.directives?.yaml?.version;
+    if (version !== undefined && version !== '1.2') {
+        throw new Error(`YAML ${version} directives are not supported`);
+    }
+    if (hasTaggedMergeKey(document.contents)) {
+        throw new Error('tagged YAML merge keys are not supported');
+    }
+    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
 }
 
 /**
@@ -684,16 +706,7 @@ function parseFileInner(
 
     let doc: unknown;
     try {
-        const document = YAML.parseDocument(content);
-        if (document.errors.length > 0) throw document.errors[0];
-        if (hasTaggedMergeKey(document.contents)) {
-            pushParseError(
-                refs,
-                `Cannot enumerate compose file ${normalized}: tagged YAML merge keys are not supported`,
-            );
-            return;
-        }
-        doc = document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+        doc = parseComposeYaml(content);
     } catch (e) {
         pushParseError(refs, `Cannot parse compose file ${normalized}: ${e instanceof Error ? e.message : String(e)}`);
         return;
