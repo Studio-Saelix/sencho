@@ -63,33 +63,27 @@ export async function mockExperimentalFlag(page: Page, experimental = true): Pro
 }
 
 export interface HeldExperimentalFlag {
-  /** Resolves once the page has requested /api/meta, so a pending assertion is not a race. */
-  requested: Promise<void>;
   /**
-   * Answer the held request, and any later one, with the given value. Call it
-   * at least once per test so the page never closes with a request in flight.
+   * Wait for the next /api/meta request. Start waiting before the navigation
+   * that triggers it, so a pending assertion cannot run before the page asks.
    */
+  waitForRequest: () => Promise<void>;
+  /** Answer the held request, and any later one, with the given value. */
   release: (experimental: boolean) => Promise<void>;
 }
 
 /**
  * Hold /api/meta unanswered so a test can prove the UI fails closed while
  * experimental discovery is still pending. Register it before the dashboard
- * mounts. Only the discovery field matters to the callers.
+ * mounts. Only the discovery field matters to the callers. Each page load
+ * issues its own request, so wait for the one the assertion depends on.
  */
 export async function holdExperimentalFlag(page: Page): Promise<HeldExperimentalFlag> {
   let released: boolean | null = null;
   const held: Route[] = [];
-  let markRequested: () => void = () => undefined;
-  const requested = new Promise<void>((resolve) => {
-    markRequested = resolve;
-  });
-  let firstRequest = true;
+  const requestWaiters: Array<() => void> = [];
   await page.route('**/api/meta', async (route) => {
-    if (firstRequest) {
-      firstRequest = false;
-      markRequested();
-    }
+    for (const resolve of requestWaiters.splice(0)) resolve();
     if (released === null) {
       held.push(route);
       return;
@@ -97,7 +91,11 @@ export async function holdExperimentalFlag(page: Page): Promise<HeldExperimental
     await fulfillExperimental(route, released);
   });
   return {
-    requested,
+    waitForRequest() {
+      return new Promise<void>((resolve) => {
+        requestWaiters.push(resolve);
+      });
+    },
     async release(experimental: boolean) {
       released = experimental;
       for (const route of held.splice(0)) {

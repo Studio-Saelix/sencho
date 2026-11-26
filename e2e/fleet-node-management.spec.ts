@@ -65,7 +65,10 @@ test.describe('Fleet node management', () => {
     await mockExperimentalFlag(page, false);
     await loginAs(page);
     await mockFleet(page);
+    // Wait for the disabled answer, or the absence check can pass before discovery settles.
+    const flagSettled = page.waitForResponse('**/api/meta');
     await page.goto('/nodes/local/fleet');
+    await flagSettled;
 
     await page.getByRole('button', { name: 'Node management' }).click();
     await expect(page.getByRole('menuitem', { name: /Connect existing node/ })).toBeVisible();
