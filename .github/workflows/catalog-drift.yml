@@ -25,12 +25,21 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # Secrets cannot be read in a step `if`. Publish only their presence, so
+    # the private key never reaches an unrelated step. The value is false for
+    # fork and Dependabot PRs, which do not receive repository secrets.
+    env:
+      HAS_APP_SECRETS: ${{ secrets.APP_ID != '' && secrets.APP_PRIVATE_KEY != '' }}
     steps:
       # Mint a read-only installation token scoped to the website repository
       # only. The default GITHUB_TOKEN cannot read Studio-Saelix/sencho-website.
+      # Fork and Dependabot PRs do not receive repository secrets, so the token
+      # and the website comparison are skipped there. The canonical checks below
+      # still run; main and the scheduled run keep the drift check.
       - name: Generate GitHub App installation token
         id: app-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: ${{ env.HAS_APP_SECRETS == 'true' }}
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -43,6 +52,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/checkout@v7
+        if: steps.app-token.outputs.token != ''
         with:
           repository: ${{ github.repository_owner }}/sencho-website
           token: ${{ steps.app-token.outputs.token }}
@@ -56,6 +66,7 @@ jobs:
       # that snapshot from the canonical file, so the comparison would only
       # ever read back what it just wrote and could never report drift.
       - name: Compare against the committed website snapshot
+        if: steps.app-token.outputs.token != ''
         run: node scripts/website-catalog/check-website-drift.mjs --website-dir website-checkout
       - name: Verify no internal identifiers in canonical file
         run: node scripts/website-catalog/test-catalog-no-leak.mjs
