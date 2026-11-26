@@ -64,7 +64,7 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 // retaining the library's nested-expansion accounting (an anchor's cost is
 // multiplied by the aliases nested inside it, so this is not a raw
 // document-wide reference quota and does not disable hostility checks).
-const MAX_COMPOSE_ALIAS_COUNT = 10_000;
+export const MAX_COMPOSE_ALIAS_COUNT = 10_000;
 
 // Compose expands YAML merge keys (`<<`), but this parser does not: doing so
 // through the yaml option copies an anchor once per merge reference, which the

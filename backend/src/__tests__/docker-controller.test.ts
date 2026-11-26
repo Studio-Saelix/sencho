@@ -3056,6 +3056,19 @@ describe('DockerController - smartFallback stack-dir evidence', () => {
     await expect(orphansWithEmptyPs()).resolves.toEqual([]);
   });
 
+  it('reads an alias-heavy compose file with the finite alias budget', async () => {
+    let compose = 'x-r: &r unless-stopped\n';
+    for (let i = 1; i <= 101; i++) compose += `x-a${i}: *r\n`;
+    compose += 'services:\n  web:\n    image: nginx:alpine\n    restart: *r\n';
+    await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), compose);
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-web', '/web', {
+        'com.docker.compose.project.working_dir': stackDir,
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-web' }]);
+  });
+
   it('includes name-matched containers whose working_dir equals the stack dir', async () => {
     mockDocker.listContainers.mockResolvedValue([
       runningContainer('legacy-web', '/web', {

@@ -1,6 +1,7 @@
 import Docker from 'dockerode';
 import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { MAX_COMPOSE_ALIAS_COUNT } from '../helpers/composeInputParse';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -3597,7 +3598,10 @@ class DockerController {
     }
     if (!yamlContent) return [];
 
-    const parsedYaml = yaml.parse(yamlContent);
+    // This scan only needs service names, but it sits before the update runs.
+    // Use the same finite alias budget as the rollback declaration parser so an
+    // alias-heavy stack is not refused before Compose is reached.
+    const parsedYaml = yaml.parse(yamlContent, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
     if (!parsedYaml || !parsedYaml.services) return [];
 
     const expectedNames: string[] = [];
