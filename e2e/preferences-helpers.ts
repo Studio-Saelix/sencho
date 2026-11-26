@@ -82,7 +82,7 @@ export async function ensureE2EUser(
   request: APIRequestContext,
   username: string,
   password: string,
-  role: 'admin' | 'viewer' = 'viewer',
+  role: 'admin' | 'viewer' | 'node-admin' = 'viewer',
 ): Promise<number> {
   const existing = await request.get('/api/users');
   if (existing.ok()) {

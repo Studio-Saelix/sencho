@@ -86,7 +86,7 @@ Running the agent inside an LXC container needs one extra read-only mount so the
 
 ### Default directories
 
-The guided [bootstrap preflight](/features/node-bootstrap) and manual enrollment share the same layout:
+The guided [bootstrap preflight](/features/node-bootstrap) and manual enrollment share the same layout. The guided workflow has limited availability: an Admin sees the entry on instances where it is enabled.
 
 - **Compose stacks directory:** `/opt/docker/sencho` by default. The agent mounts it at the same absolute path inside the container and sets `COMPOSE_DIR` to it.
 - **Agent installation directory:** `/opt/sencho-agent` by default. Holds the agent's `compose.yaml`, the optional hub CA and a bootstrap marker. It is separate from the stacks directory so the agent is never listed as a stack.
