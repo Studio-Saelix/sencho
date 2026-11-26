@@ -37,6 +37,10 @@ import {
   type DepFlowData,
 } from '@/lib/dependency-map-layout';
 
+// React Flow 13 reads a numeric fitView padding as pixels. The percentage
+// below keeps the padding the canvas had on React Flow 12.
+const FIT_VIEW_PADDING = '8.3%';
+
 // Above this many visible graph nodes the graph becomes unreadable; we prompt
 // the operator to filter or switch to the (uncapped) list instead.
 const GRAPH_NODE_CEILING = 300;
@@ -515,7 +519,7 @@ export function DependencyMapTab({ map }: { map: FleetMapState }) {
                 onNodeClick={handleNodeClick}
                 nodeTypes={nodeTypes}
                 fitView
-                fitViewOptions={{ padding: 0.2 }}
+                fitViewOptions={{ padding: FIT_VIEW_PADDING }}
                 proOptions={{ hideAttribution: true }}
                 nodesConnectable={false}
                 className="bg-background"
