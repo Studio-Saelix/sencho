@@ -123,12 +123,18 @@ function text(spy: { mock: { calls: unknown[][] } }): string {
   return spy.mock.calls.flat().map(String).join(' ');
 }
 
+// Captured before a test installs fake timers: boot must be allowed to reach
+// the real I/O that runs before it arms the helper-pull wait, and only a real
+// turn of the event loop gives it that chance.
+const realSetImmediate = setImmediate;
+
 /** Moves the fake clock until the boot promise settles, however many timers boot arms on the way. */
 async function settleBootWith(booting: Promise<unknown>): Promise<void> {
   let settled = false;
-  void booting.finally(() => { settled = true; });
+  void booting.then(() => { settled = true; }, () => { settled = true; });
   for (let i = 0; i < 200 && !settled; i += 1) {
     await vi.advanceTimersByTimeAsync(PAST_THE_WAIT_MS);
+    await new Promise<void>((resolve) => { realSetImmediate(resolve); });
   }
 }
 
