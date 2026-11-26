@@ -14,6 +14,7 @@ import {
   loginToShell,
   holdExperimentalFlag,
   mockExperimentalFlag,
+  waitForPermissionsReady,
 } from './helpers';
 import { adminApiContext, deleteE2EUser, ensureE2EUser } from './preferences-helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
@@ -59,9 +60,11 @@ async function gotoWithSettledFlag(page: Page, path: string): Promise<void> {
   const settled = page.waitForResponse('**/api/meta');
   await page.goto(path);
   await settled;
+  await waitForPermissionsReady(page);
 }
 
 async function openFleetMenu(page: Page) {
+  await waitForPermissionsReady(page);
   const trigger = page.getByRole('button', { name: 'Node management' });
   await expect(trigger).toBeVisible({ timeout: 15_000 });
   await trigger.click();
@@ -72,6 +75,7 @@ async function expectBootstrapButtonAbsent(page: Page): Promise<void> {
 }
 
 async function expectSettingsReady(page: Page): Promise<void> {
+  await waitForPermissionsReady(page);
   await expect(page.getByRole('button', { name: 'Add node' })).toBeVisible({ timeout: 15_000 });
 }
 

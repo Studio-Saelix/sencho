@@ -68,7 +68,9 @@ test.describe('Authentication', () => {
 async function delayAuthStatus(page: Page, delayMs: number): Promise<void> {
   await page.route('**/api/auth/status', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-    await route.continue();
+    // The post-login re-check can still be in flight when the test ends, and
+    // the page closing rejects a pending continue. That is not a test failure.
+    await route.continue().catch(() => undefined);
   });
 }
 
@@ -120,10 +122,12 @@ test.describe('login readiness', () => {
     const failUntil = Date.now() + 4_000;
     await page.route('**/api/auth/status', async (route) => {
       if (Date.now() < failUntil) {
-        await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+        await route
+          .fulfill({ status: 500, contentType: 'application/json', body: '{}' })
+          .catch(() => undefined);
         return;
       }
-      await route.continue();
+      await route.continue().catch(() => undefined);
     });
     await loginAs(page);
     await expect(page.locator('[data-sn-chrome="topbar"]')).toBeVisible();

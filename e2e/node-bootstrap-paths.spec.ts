@@ -7,7 +7,7 @@
  * plan until the preflight runs again.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
-import { loginToShell, mockExperimentalFlag } from './helpers';
+import { loginToShell, mockExperimentalFlag, waitForPermissionsReady } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
 const NODE: FleetNode = {
@@ -209,6 +209,7 @@ async function mockBootstrap(page: Page): Promise<void> {
 }
 
 async function openWizard(page: Page) {
+  await waitForPermissionsReady(page);
   const trigger = page.getByRole('button', { name: 'Node management' });
   await expect(trigger).toBeVisible({ timeout: 15_000 });
   await trigger.click();

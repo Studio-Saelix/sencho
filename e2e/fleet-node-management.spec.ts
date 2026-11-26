@@ -6,7 +6,7 @@
  * sectioned menu replaced them and that each item reaches its existing surface.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { loginToShell, mockExperimentalFlag } from './helpers';
+import { loginToShell, mockExperimentalFlag, waitForPermissionsReady } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
 const NODE: FleetNode = {
@@ -37,6 +37,7 @@ async function mockFleet(page: Page): Promise<void> {
 }
 
 async function openNodeManagementMenu(page: Page): Promise<void> {
+  await waitForPermissionsReady(page);
   const trigger = page.getByRole('button', { name: 'Node management' });
   await expect(trigger).toBeVisible({ timeout: 15_000 });
   await trigger.click();
@@ -51,6 +52,7 @@ test.describe('Fleet node management', () => {
     await loginToShell(page);
     await mockFleet(page);
     await page.goto('/nodes/local/fleet');
+    await waitForPermissionsReady(page);
 
     const trigger = page.getByRole('button', { name: 'Node management' });
     await expect(trigger).toBeVisible({ timeout: 15_000 });
@@ -101,6 +103,7 @@ test.describe('Fleet node management', () => {
     await loginToShell(page);
     await mockFleet(page);
     await page.goto('/nodes/local/fleet');
+    await waitForPermissionsReady(page);
 
     const trigger = page.getByRole('button', { name: 'Node management' });
     await expect(trigger).toBeVisible({ timeout: 15_000 });

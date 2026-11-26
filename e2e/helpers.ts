@@ -114,25 +114,37 @@ async function hasAuthenticatedChrome(page: Page): Promise<boolean> {
 }
 
 /**
+ * Wait for the boot permission answer. Until it settles every permission-gated
+ * control is hidden, so a role assertion made before this point proves that the
+ * answer is still loading, not what the role can reach. A failed answer never
+ * reaches ready; the shell shows its permission banner instead.
+ */
+export async function waitForPermissionsReady(page: Page): Promise<void> {
+  await expect(page.locator('[data-sn-permissions="ready"]')).toBeAttached({ timeout: 15_000 });
+}
+
+/**
  * Wait for the stacks sidebar to finish loading. Waits for the Create Stack
- * button and the data-stacks-loaded sentinel set by the CommandList after its
- * async refreshStacks() call resolves.
+ * button, the data-stacks-loaded sentinel set by the CommandList after its
+ * async refreshStacks() call resolves, and the permission answer.
  */
 export async function waitForStacksLoaded(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Create Stack' })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
+  await waitForPermissionsReady(page);
 }
 
 /**
  * Role-independent shell readiness. waitForStacksLoaded requires the Create
  * Stack button, which needs stack:create, so viewer-role accounts can never
- * satisfy it. The topbar chrome renders for every authenticated role and the
- * stacks sentinel settles once the (read-only) list resolves, so both are
- * safe readiness signals for any role.
+ * satisfy it. The topbar chrome renders for every authenticated role, the
+ * stacks sentinel settles once the (read-only) list resolves, and the
+ * permission marker covers every role's role-gated controls.
  */
 export async function waitForShellReady(page: Page): Promise<void> {
   await expect(page.locator('[data-sn-chrome="topbar"]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
+  await waitForPermissionsReady(page);
 }
 
 /** Selector for the second-factor challenge screen, in any of its states. */
@@ -298,8 +310,9 @@ export async function loginAs(
 
   // The sign-in screen fails closed: when its own auth discovery request
   // fails, it hides the password form behind an error instead of showing it.
-  // One reload retries those requests. It is a recovery from a transient page
-  // state, not a retry of the test.
+  // One reload retries those requests; it also covers any other page state
+  // that withholds the form, and it runs before credentials are submitted, so
+  // it cannot replay a login. This is a page-state recovery, not a test retry.
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt === 0) await page.goto('/');
     else await page.reload();
@@ -334,7 +347,7 @@ export async function loginAs(
     // ── Login screen ───────────────────────────────────────────────────────
     const usernameField = page.locator('#username');
     const formVisible = await usernameField
-      .waitFor({ state: 'visible', timeout: attempt === 0 ? 10_000 : AUTH_SURFACE_TIMEOUT })
+      .waitFor({ state: 'visible', timeout: attempt === 0 ? 5_000 : AUTH_SURFACE_TIMEOUT })
       .then(() => true)
       .catch(() => false);
     if (!formVisible) continue;
