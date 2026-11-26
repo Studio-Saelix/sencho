@@ -15,7 +15,7 @@ import { withUnixSocketAt } from './helpers/unixSocketFixture';
 // the guard runs first; either message names the file as not a regular file.
 const NOT_A_REGULAR_FILE = /not a regular file/;
 
-/** 110 services reusing a merge anchor and an env_file anchor: 220 flat references. */
+/** 110 services each reusing a merge anchor and an env_file anchor: 110 references to each. */
 function aliasHeavyCompose(): string {
   let compose = `x-defaults: &defaults
   restart: unless-stopped

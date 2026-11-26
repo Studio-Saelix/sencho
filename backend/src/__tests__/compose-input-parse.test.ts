@@ -26,11 +26,11 @@ function byKind(result: ReturnType<typeof parse>['result'], kind: string): Decla
     return result.inputs.filter((i) => i.kind === kind);
 }
 
-/** The reported shape: one flat scalar anchor reused once per service. */
+/** The reported shape: two flat scalar anchors reused once per service. */
 function scalarAliasCompose(serviceCount: number): string {
-    let text = 'x-r: &r unless-stopped\nservices:\n';
+    let text = 'x-r: &r unless-stopped\nx-e: &e shared.env\nservices:\n';
     for (let i = 0; i < serviceCount; i++) {
-        text += `  s${i}:\n    image: alpine\n    restart: *r\n`;
+        text += `  s${i}:\n    image: alpine\n    restart: *r\n    env_file: *e\n`;
     }
     return text;
 }
@@ -57,7 +57,7 @@ services:
     return text;
 }
 
-/** Ten levels of binary nesting: 2^10 terminal aliases from a 215-byte file. */
+/** Ten anchors in a binary chain: nine doubling steps ending in 512 leaves. */
 function nestedAliasCompose(levels: number): string {
     let text = 'x-a0: &a0 [end]\n';
     for (let i = 1; i < levels; i++) {
@@ -481,9 +481,12 @@ configs:
 });
 
 describe('YAML alias budget', () => {
-    it.each([101, 220])('accepts %i ordinary scalar alias references', (serviceCount) => {
+    it.each([101, 220])('accepts %i ordinary scalar alias references per anchor', (serviceCount) => {
         const { result } = parse({ 'compose.yaml': scalarAliasCompose(serviceCount) });
         expect(result.parseErrors).toEqual([]);
+        const envFiles = byKind(result, 'env_file');
+        expect(envFiles).toHaveLength(serviceCount);
+        expect(envFiles.every((e) => e.sourcePath === 'shared.env')).toBe(true);
     });
 
     it('resolves an aliased dependency and collection across 55 services', () => {
@@ -526,7 +529,9 @@ services:
         // Included project, extended service, and the additional -f layer all
         // keep their own path ownership while parsing under the same budget.
         expect(envFiles.filter((e) => e.sourcePath === 'shared/shared.env')).toHaveLength(101);
-        expect(envFiles.filter((e) => e.sourcePath === 'shared.env')).toHaveLength(101);
+        // The extended service's own file and the additional -f layer both
+        // resolve against the primary file's directory.
+        expect(envFiles.filter((e) => e.sourcePath === 'shared.env')).toHaveLength(202);
         expect(byKind(result, 'include').map((e) => e.sourcePath)).toEqual(['shared/common.yaml']);
         expect(byKind(result, 'extends').map((e) => e.sourcePath)).toEqual(['base.yaml']);
     });
@@ -538,7 +543,7 @@ services:
         expect(result.parseErrors[0]).toContain('Excessive alias count');
     });
 
-    it('still refuses flat reuse beyond the finite budget', () => {
+    it('still refuses one anchor referenced beyond the finite budget', () => {
         const refs = Array.from({ length: 10_001 }, () => '*r').join(', ');
         const { result } = parse({
             'compose.yaml': `x-r: &r unless-stopped\nx-refs: [${refs}]\nservices: {}\n`,
@@ -546,6 +551,16 @@ services:
         expect(result.parseErrors).toHaveLength(1);
         expect(result.parseErrors[0]).toContain('Cannot parse compose file compose.yaml');
         expect(result.parseErrors[0]).toContain('Excessive alias count');
+    });
+
+    it('refuses a file that emits more declared inputs than the finite cap', () => {
+        const binds = Array.from({ length: 201 }, (_, i) => `  - ./data${i}:/data${i}`).join('\n');
+        let compose = `x-v: &v\n${binds}\nservices:\n`;
+        for (let i = 0; i < 500; i++) compose += `  s${i}:\n    image: alpine\n    volumes: *v\n`;
+        const { result } = parse({ 'compose.yaml': compose });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('declared-input cap');
+        expect(result.inputs.length).toBeLessThanOrEqual(100_000);
     });
 
     it('keeps an unresolved alias an error', () => {

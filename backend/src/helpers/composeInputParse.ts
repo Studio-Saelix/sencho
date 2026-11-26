@@ -66,6 +66,13 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 // document-wide reference quota and does not disable hostility checks).
 const MAX_COMPOSE_ALIAS_COUNT = 10_000;
 
+// Emitted-declaration bound. Alias resolution shares the anchor's value, but
+// the walk re-reads it for every reference, so a file at the alias budget can
+// otherwise multiply a large anchor into millions of input records. A real
+// project is orders of magnitude below this; past it the file is refused like
+// any other unbounded input.
+const MAX_DECLARED_INPUTS = 100_000;
+
 // Include/extends recursion bound; deeper graphs are refused as unsupported.
 const MAX_INCLUDE_DEPTH = 16;
 
@@ -95,6 +102,7 @@ interface ComposeRefs {
     inputs: DeclaredInput[];
     dynamic: DynamicInput[];
     parseErrors: string[];
+    capReached: boolean;
 }
 
 /**
@@ -154,6 +162,15 @@ function emitInput(
     service: string | null = null,
     required = true,
 ): void {
+    if (refs.inputs.length + refs.dynamic.length >= MAX_DECLARED_INPUTS) {
+        if (!refs.capReached) {
+            refs.capReached = true;
+            refs.parseErrors.push(
+                `Cannot enumerate compose file ${fromFile}: exceeds the ${MAX_DECLARED_INPUTS}-entry declared-input cap`,
+            );
+        }
+        return;
+    }
     if (rawPath !== null && isDynamicPath(rawPath)) {
         refs.dynamic.push({ sourcePath: rawPath, kind, note: DYNAMIC_PATH_NOTE });
         return;
@@ -654,7 +671,7 @@ export function parseDeclaredInputs(
     orderedContents: Array<{ path: string; content: string }>,
     opts: ParseOptions,
 ): ParsedDeclaredInputs {
-    const refs: ComposeRefs = { inputs: [], dynamic: [], parseErrors: [] };
+    const refs: ComposeRefs = { inputs: [], dynamic: [], parseErrors: [], capReached: false };
     const visited = new Set<string>();
     const stack = new Set<string>();
     // Merged (-f) files share the TOP project's bases: the context dir, or
