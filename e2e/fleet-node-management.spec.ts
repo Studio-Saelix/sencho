@@ -6,7 +6,7 @@
  * sectioned menu replaced them and that each item reaches its existing surface.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { loginAs } from './helpers';
+import { loginToShell, mockExperimentalFlag, waitForPermissionsReady } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
 const NODE: FleetNode = {
@@ -36,11 +36,23 @@ async function mockFleet(page: Page): Promise<void> {
   });
 }
 
+async function openNodeManagementMenu(page: Page): Promise<void> {
+  await waitForPermissionsReady(page);
+  const trigger = page.getByRole('button', { name: 'Node management' });
+  await expect(trigger).toBeVisible({ timeout: 15_000 });
+  await trigger.click();
+}
+
 test.describe('Fleet node management', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockExperimentalFlag(page);
+  });
+
   test('replaces the standalone toolbar controls with one sectioned menu', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockFleet(page);
     await page.goto('/nodes/local/fleet');
+    await waitForPermissionsReady(page);
 
     const trigger = page.getByRole('button', { name: 'Node management' });
     await expect(trigger).toBeVisible({ timeout: 15_000 });
@@ -57,12 +69,26 @@ test.describe('Fleet node management', () => {
     await expect(page.getByRole('menuitem', { name: /Node updates/ })).toBeVisible();
   });
 
+  test('hides Bootstrap unless the experimental flag is on', async ({ page }) => {
+    await mockExperimentalFlag(page, false);
+    await loginToShell(page);
+    await mockFleet(page);
+    // Wait for the disabled answer, or the absence check can pass before discovery settles.
+    const flagSettled = page.waitForResponse('**/api/meta');
+    await page.goto('/nodes/local/fleet');
+    await flagSettled;
+
+    await openNodeManagementMenu(page);
+    await expect(page.getByRole('menuitem', { name: /Connect existing node/ })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /Bootstrap new Linux server/ })).toHaveCount(0);
+  });
+
   test('Connect opens the Add node modal without leaving Fleet', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockFleet(page);
     await page.goto('/nodes/local/fleet');
 
-    await page.getByRole('button', { name: 'Node management' }).click();
+    await openNodeManagementMenu(page);
     await page.getByRole('menuitem', { name: /Connect existing node/ }).click();
 
     await expect(page.getByRole('dialog')).toBeVisible();
@@ -74,11 +100,13 @@ test.describe('Fleet node management', () => {
   });
 
   test('Bootstrap opens the wizard and Escape returns focus to the trigger', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockFleet(page);
     await page.goto('/nodes/local/fleet');
+    await waitForPermissionsReady(page);
 
     const trigger = page.getByRole('button', { name: 'Node management' });
+    await expect(trigger).toBeVisible({ timeout: 15_000 });
     await trigger.click();
     await page.getByRole('menuitem', { name: /Bootstrap new Linux server/ }).click();
 
