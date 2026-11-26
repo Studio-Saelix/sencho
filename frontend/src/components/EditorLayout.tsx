@@ -1934,7 +1934,10 @@ export default function EditorLayout() {
         return (
           // h-dvh tracks the visible viewport as the address bar shows and hides, so
           // the bottom tab bar stays on screen (100vh would push it behind the bar).
-          <div className="flex h-dvh w-screen flex-col overflow-hidden app-canvas text-foreground">
+          <div
+            className="flex h-dvh w-screen flex-col overflow-hidden app-canvas text-foreground"
+            data-sn-permissions={permissionsStatus}
+          >
             {commandPaletteEl}
             {mobileSurface === 'content' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
@@ -1983,7 +1986,10 @@ export default function EditorLayout() {
       }
 
       return (
-        <div className="flex h-screen w-screen overflow-hidden app-canvas text-foreground">
+        <div
+          className="flex h-screen w-screen overflow-hidden app-canvas text-foreground"
+          data-sn-permissions={permissionsStatus}
+        >
           {commandPaletteEl}
           {/* Left Sidebar (Stacks) */}
           {sidebarSlotEl}

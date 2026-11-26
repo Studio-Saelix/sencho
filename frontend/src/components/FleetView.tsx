@@ -93,6 +93,8 @@ export function FleetView({
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; permission gates still apply when on.
     const canDiscoverRouting = experimentalReady && experimental;
+    // Bootstrap is experimental too: hidden until /meta confirms the flag.
+    const canBootstrapServer = isAdmin && experimentalReady && experimental;
     const [tabLayout] = useFleetTabLayout();
     const fleetTabs = useMemo(
         () => buildFleetTabs({ isAdmin, containerLabels: containerLabelsEnabled, routing: canDiscoverRouting }),
@@ -183,12 +185,12 @@ export function FleetView({
     const [bootstrapOpen, setBootstrapOpen] = useState(false);
     const nodeManagement = useMemo(() => ({
         canConnectExisting: isAdmin || canManageFleet,
-        canBootstrapServer: isAdmin,
+        canBootstrapServer,
         checkingUpdates: updateStatus.checkingUpdates,
         onConnectExisting: openCreate,
         onBootstrapServer: () => setBootstrapOpen(true),
         onCheckUpdates: updateStatus.checkUpdates,
-    }), [isAdmin, canManageFleet, updateStatus.checkingUpdates, openCreate, updateStatus.checkUpdates]);
+    }), [isAdmin, canManageFleet, canBootstrapServer, updateStatus.checkingUpdates, openCreate, updateStatus.checkUpdates]);
 
     return (
         <div className="h-full overflow-auto p-6">
