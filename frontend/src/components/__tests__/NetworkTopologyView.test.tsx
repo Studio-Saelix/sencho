@@ -60,7 +60,7 @@ vi.mock('@xyflow/react', async () => {
         },
         useEdgesState: <T,>(initial: T[]) => React.useState<T[]>(initial),
         useNodesInitialized: () => flowState.nodesInitialized,
-        useStore: (selector: (state: { nodes: { id: string }[] }) => unknown) => selector({ nodes: flowState.nodes }),
+        useNodesStore: (selector: (state: { nodes: { id: string }[] }) => unknown) => selector({ nodes: flowState.nodes }),
         useReactFlow: () => ({ fitView: flowState.fitView }),
     };
 });
@@ -241,7 +241,7 @@ describe('NetworkTopologyView refresh', () => {
         // The response re-laid out the graph under the preserved canvas, so it
         // is fitted again instead of rendering under the old viewport.
         await waitFor(() => expect(flowState.fitView).toHaveBeenCalledTimes(1));
-        expect(flowState.fitView).toHaveBeenCalledWith({ padding: 0.3 });
+        expect(flowState.fitView).toHaveBeenCalledWith({ padding: '11.5%' });
     });
 
     it('re-fits when a reload reorders the same graph into a new layout', async () => {
