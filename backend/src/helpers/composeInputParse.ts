@@ -255,10 +255,10 @@ function hasTaggedMergeKey(node: unknown): boolean {
  * 1.1 schema makes yaml expand merge keys inside `toJS()` regardless of the
  * merge option, before the fail-closed merge check can inspect them, and its
  * scalar typing (for example `on`, `yes` or a timestamp) would diverge from the
- * 1.2 view every other Compose reader here uses. Compose accepts a 1.1
- * directive, so the directive alone never refuses the file, and its `<<` keys
- * are inspected exactly like a 1.2 document's. Explicitly tagged merges are
- * still refused because yaml expands them under any schema, before
+ * 1.2 view the Compose inventory and the authored source reader use. Compose
+ * accepts a 1.1 directive, so the directive alone never refuses the file, and
+ * its `<<` keys are inspected exactly like a 1.2 document's. Explicitly tagged
+ * merges are still refused because yaml expands them under any schema, before
  * materialisation.
  */
 export function parseComposeYaml(content: string): unknown {

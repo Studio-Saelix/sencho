@@ -634,9 +634,12 @@ services:
   web:
     <<: *a
     image: alpine
+    env_file: shared.env
 `,
+            'shared.env': 'A=1\n',
         });
         expect(result.parseErrors).toEqual([]);
+        expect(byKind(result, 'env_file').map((i) => i.sourcePath)).toEqual(['shared.env']);
     });
 
     it('keeps the declaration-hiding merge check for a YAML 1.1 document', () => {
@@ -657,7 +660,7 @@ services:
         expect(byKind(result, 'env_file')).toHaveLength(0);
     });
 
-    it('reads YAML 1.1 scalars with the same 1.2 core typing as every other reader', () => {
+    it('reads YAML 1.1 scalars with 1.2 core typing', () => {
         const { result } = parse({
             'compose.yaml': `%YAML 1.1
 ---
@@ -776,7 +779,7 @@ services:
         expect(result.parseErrors[0]).toContain('YAML merge key hides declaration "dockerfile"');
     });
 
-    it.each([
+    const mergeHidingRoleCases: Array<[string, string, string]> = [
         ['include path', `x-i: &i
   path: base.yaml
 include:
@@ -824,15 +827,23 @@ services:
       additional_contexts:
         <<: *a
 `, 'additional_contexts'],
-    ])('refuses a merge hiding a %s declaration', (_label, compose, key) => {
-        const { result } = parse({
-            'compose.yaml': compose,
-            'base.yaml': 'services: {}\n',
-            'shared.env': 'A=1\n',
-            'data/.keep': '',
-            'app.conf': 'x',
-            'ctx/.keep': '',
-        });
+    ];
+    const mergeHidingRoleFiles = {
+        'base.yaml': 'services: {}\n',
+        'shared.env': 'A=1\n',
+        'data/.keep': '',
+        'app.conf': 'x',
+        'ctx/.keep': '',
+    };
+
+    it.each(mergeHidingRoleCases)('refuses a merge hiding a %s declaration', (_label, compose, key) => {
+        const { result } = parse({ 'compose.yaml': compose, ...mergeHidingRoleFiles });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain(`YAML merge key hides declaration "${key}"`);
+    });
+
+    it.each(mergeHidingRoleCases)('refuses a merge hiding a %s declaration under a YAML 1.1 directive', (_label, compose, key) => {
+        const { result } = parse({ 'compose.yaml': `%YAML 1.1\n---\n${compose}`, ...mergeHidingRoleFiles });
         expect(result.parseErrors).toHaveLength(1);
         expect(result.parseErrors[0]).toContain(`YAML merge key hides declaration "${key}"`);
     });

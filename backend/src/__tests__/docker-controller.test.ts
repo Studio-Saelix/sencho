@@ -3105,6 +3105,26 @@ services:
     await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-web' }]);
   });
 
+  it('classifies a YAML 1.1 stack through smartFallback when compose ps is empty', async () => {
+    await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), `%YAML 1.1
+---
+services:
+  web:
+    image: nginx:alpine
+`);
+    const dc = DockerController.getInstance(1);
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-web', '/web', {
+        'com.docker.compose.project.working_dir': stackDir,
+      }),
+    ]);
+    await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({
+      status: 'orphans',
+      ids: ['legacy-web'],
+    });
+  });
+
   it('classifies an alias-heavy stack through smartFallback when compose ps is empty', async () => {
     let compose = 'x-r: &r unless-stopped\n';
     for (let i = 1; i <= 101; i++) compose += `x-a${i}: *r\n`;
