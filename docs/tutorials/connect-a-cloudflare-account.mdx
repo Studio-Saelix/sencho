@@ -1,0 +1,103 @@
+---
+title: Get Your Cloudflare Account ID and Create an API Token for Sencho
+sidebarTitle: Connect a Cloudflare account
+description: Find your Cloudflare account ID, create a least-privilege API token with Cloudflare Tunnel and DNS access, and verify it before connecting the account to Sencho.
+---
+
+Sencho reaches Cloudflare through an API token that you create. The token lets Sencho create and delete tunnels for your account and CNAME records in the zones you choose, and read those zones so it can list them when you pick a hostname. This tutorial gets the account ID, builds the token with only those permissions, and checks that Cloudflare accepts it.
+
+## Prerequisites
+
+- A Cloudflare account with at least one active zone (domain).
+- Permission to create API tokens in the Cloudflare account. If **Create Token** is not available, ask an account administrator for access.
+- A secure place to keep the token until you connect the account. Treat it as a password.
+
+## Step 1: Copy the account ID
+
+1. Sign in at [dash.cloudflare.com](https://dash.cloudflare.com).
+2. If the account switcher shows more than one account, select the account that owns the zones Sencho will use.
+3. Look at the address bar. The account ID is the 32-character hexadecimal segment directly after the domain:
+
+   ```text
+   https://dash.cloudflare.com/<account-id>/home
+   ```
+
+   For example, in `https://dash.cloudflare.com/0123456789abcdef0123456789abcdef/home`, the account ID is `0123456789abcdef0123456789abcdef`.
+
+Copy that segment. The account ID is an identifier, not a secret. The API token is the secret.
+
+## Step 2: Create the API token
+
+<Steps>
+  <Step title="Open the token creator">
+    Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) and select **Create Token**.
+  </Step>
+  <Step title="Start a custom token with an account policy">
+    Select **Start from scratch**, then **Start with an Account policy**.
+
+    Under **Account**, leave the rule action on **Include** and select the account whose ID you copied. In the permission list, find **Cloudflare Tunnel** and select **Edit**. Some summaries label this **Cloudflare Tunnel: Edit** or **Cloudflare Tunnel Write**; they are the same permission group.
+  </Step>
+  <Step title="Add the zone policy">
+    Select **Add new policy**, then **Add new Zone policy**.
+
+    Under **Zone resources**, choose one of these scopes:
+
+    - **All zones from an account** and select the same account. Sencho can list and edit DNS in every zone in that account, including zones added later. This is the simplest choice when Sencho manages every zone in the account.
+    - **Specific zone** and add each zone Sencho may use, one rule per zone. This is the narrowest choice.
+
+    In the permission list, select **DNS: Edit** and **Zone: Read**. Zone Read is what lets Sencho list the zones so you can choose one. DNS Edit is what lets it create and remove the CNAME records that point at a tunnel.
+  </Step>
+  <Step title="Set an expiration">
+    Under **Token expiration**, choose an expiry that matches your rotation policy. **No expiration** works, but you then own rotating the token by hand.
+  </Step>
+  <Step title="Review the summary">
+    Select **Continue to summary**. Confirm the summary shows:
+
+    - An account policy on your account with **Cloudflare Tunnel: Edit**
+    - A zone policy on the zones you chose with **DNS: Edit** and **Zone: Read**
+
+    Then select **Create Token** and copy the token. Cloudflare shows it once and cannot show it again.
+  </Step>
+</Steps>
+
+Store the token in the place you use for secrets. Do not commit it, paste it into a ticket or chat, or leave it in shell history.
+
+## Step 3: Verify the token
+
+Cloudflare's verify endpoint reports whether the token is active. It does not prove the scopes, so also list the zones.
+
+```bash
+export CLOUDFLARE_API_TOKEN='<token>'
+curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  https://api.cloudflare.com/client/v4/user/tokens/verify
+```
+
+Expected: `"success":true` and `"status":"active"`.
+
+```bash
+curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  'https://api.cloudflare.com/client/v4/zones?per_page=50'
+```
+
+Expected: `"success":true` and the zones you scoped the token to. An empty list means the zone policy is missing or points at a different account.
+
+## Step 4: Keep both values for the connection
+
+Keep the account ID and the API token together for the Cloudflare connection in Sencho. To rotate the token, create a replacement with the same policies, update the connection, then delete the old token in Cloudflare.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="I cannot see the zones I expected">
+    Check that the zone policy includes **Zone: Read** and that the zones belong to the account selected in the policy. A token only sees zones in its own zone resources.
+  </Accordion>
+  <Accordion title="Sencho reports that Cloudflare Tunnel access is missing">
+    The account policy needs **Cloudflare Tunnel: Edit**, not Read. Edit is what allows tunnel creation and deletion.
+  </Accordion>
+  <Accordion title="Sencho reports that DNS access is missing">
+    Add **DNS: Edit** to the zone policy for the zone that holds the hostname. DNS Read alone is not enough to create or remove records.
+  </Accordion>
+  <Accordion title="I lost the token">
+    Cloudflare cannot show it again. Delete the token, create a replacement with the same policies, and update Sencho.
+  </Accordion>
+</AccordionGroup>
