@@ -248,20 +248,22 @@ function hasTaggedMergeKey(node: unknown): boolean {
 }
 
 /**
- * Parse a Compose document under the parser's finite alias budget. Explicit
- * YAML 1.1 documents are refused: yaml expands merge keys automatically for
- * them regardless of the merge option, which would copy anchors past both the
- * alias budget and the merge check, and their scalar coercion differs from the
- * 1.2 view the rest of the inventory uses. Explicitly tagged merges are refused
- * for the same reason. Both are rejected before the document is materialised.
+ * Parse a Compose document under the parser's finite alias budget.
+ *
+ * Every document is read with the YAML 1.2 core schema, even when it carries an
+ * explicit `%YAML 1.1` directive. Letting the directive select the library's
+ * 1.1 schema makes yaml expand merge keys inside `toJS()` regardless of the
+ * merge option, before the fail-closed merge check can inspect them, and its
+ * scalar typing (for example `on`, `yes` or a timestamp) would diverge from the
+ * 1.2 view every other Compose reader here uses. Compose accepts a 1.1
+ * directive, so the directive alone never refuses the file, and its `<<` keys
+ * are inspected exactly like a 1.2 document's. Explicitly tagged merges are
+ * still refused because yaml expands them under any schema, before
+ * materialisation.
  */
 export function parseComposeYaml(content: string): unknown {
-    const document = YAML.parseDocument(content);
+    const document = YAML.parseDocument(content, { schema: 'core', resolveKnownTags: true });
     if (document.errors.length > 0) throw document.errors[0];
-    const version = document.directives?.yaml?.version;
-    if (version !== undefined && version !== '1.2') {
-        throw new Error(`YAML ${version} directives are not supported`);
-    }
     if (hasTaggedMergeKey(document.contents)) {
         throw new Error('tagged YAML merge keys are not supported');
     }

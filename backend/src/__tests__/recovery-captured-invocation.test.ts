@@ -112,6 +112,44 @@ describe('captured invocation on recovery Compose args', () => {
     });
   });
 
+  it('captures an authored stack whose compose file declares YAML 1.1', async () => {
+    const stackName = 'inv-yaml11';
+    const stackDir = path.join(composeDir, stackName);
+    const compose = `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: shared.env
+`;
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), compose, 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'shared.env'), 'SHARED=1\n', 'utf8');
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    const generationId = await context.backupFromContext('deployment');
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, generationId);
+    const byPath = new Map(manifest.entries.map((entry) => [entry.relativePath, entry]));
+    const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+    expect(byPath.get('compose.yaml')).toMatchObject({
+      dependencyKind: 'compose-root',
+      state: 'present',
+      sizeBytes: Buffer.byteLength(compose),
+      contentSha256: sha256(compose),
+    });
+    expect(byPath.get('shared.env')).toMatchObject({
+      state: 'present',
+      contentSha256: sha256('SHARED=1\n'),
+    });
+  });
+
   it('refuses nested alias expansion and writes no generation', async () => {
     const stackName = 'inv-alias-bomb';
     const stackDir = path.join(composeDir, stackName);

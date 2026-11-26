@@ -2967,6 +2967,27 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
   });
 });
 
+describe('DockerController - resolveProjectNameMap', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reads a top-level name from a YAML 1.1 compose file', async () => {
+    CacheService.getInstance().invalidate('project-name-map');
+    vi.spyOn(fs, 'readFile').mockImplementation(async () => `%YAML 1.1
+---
+name: custom-project
+services:
+  web:
+    image: alpine
+`);
+
+    const map = await DockerController.resolveProjectNameMap(['my-stack']);
+
+    expect(map.get('custom-project')).toBe('my-stack');
+  });
+});
+
 describe('DockerController - classifyLegacyOrphansForUpdate', () => {
   async function classifyDc() {
     const { default: DockerController } = await import('../services/DockerController');
@@ -3061,6 +3082,21 @@ describe('DockerController - smartFallback stack-dir evidence', () => {
     for (let i = 1; i <= 101; i++) compose += `x-a${i}: *r\n`;
     compose += 'services:\n  web:\n    image: nginx:alpine\n    restart: *r\n';
     await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), compose);
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-web', '/web', {
+        'com.docker.compose.project.working_dir': stackDir,
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-web' }]);
+  });
+
+  it('reads a YAML 1.1 compose file in the legacy orphan scan', async () => {
+    await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), `%YAML 1.1
+---
+services:
+  web:
+    image: nginx:alpine
+`);
     mockDocker.listContainers.mockResolvedValue([
       runningContainer('legacy-web', '/web', {
         'com.docker.compose.project.working_dir': stackDir,

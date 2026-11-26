@@ -489,6 +489,23 @@ describe('YAML alias budget', () => {
         expect(envFiles.every((e) => e.sourcePath === 'shared.env')).toBe(true);
     });
 
+    it('applies the same alias budget under a YAML 1.1 directive', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1\n---\n${scalarAliasCompose(101)}`,
+        });
+        expect(result.parseErrors).toEqual([]);
+        expect(byKind(result, 'env_file')).toHaveLength(101);
+    });
+
+    it('still refuses an over-budget alias expansion under a YAML 1.1 directive', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1\n---\n${nestedAliasCompose(10)}`,
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('Cannot parse compose file compose.yaml');
+        expect(result.parseErrors[0]).toContain('Excessive alias count');
+    });
+
     it('resolves an aliased dependency and collection across 55 services', () => {
         const { result } = parse({
             'compose.yaml': aliasHeavyCompose(55),
@@ -590,7 +607,39 @@ services:
         expect(result.parseErrors[0]).toContain('tagged YAML merge keys are not supported');
     });
 
-    it('refuses a YAML 1.1 document before merge expansion', () => {
+    it('accepts a YAML 1.1 document that declares no aliases or merges', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: shared.env
+`,
+            'shared.env': 'A=1\n',
+        });
+        expect(result.parseErrors).toEqual([]);
+        expect(byKind(result, 'env_file').map((i) => i.sourcePath)).toEqual(['shared.env']);
+    });
+
+    it('accepts a harmless merge in a YAML 1.1 document', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1
+---
+x-a: &a
+  restart: unless-stopped
+  logging:
+    driver: json-file
+services:
+  web:
+    <<: *a
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toEqual([]);
+    });
+
+    it('keeps the declaration-hiding merge check for a YAML 1.1 document', () => {
         const { result } = parse({
             'compose.yaml': `%YAML 1.1
 ---
@@ -601,9 +650,61 @@ services:
     <<: *a
     image: alpine
 `,
+            'secret.env': 'A=1\n',
         });
         expect(result.parseErrors).toHaveLength(1);
-        expect(result.parseErrors[0]).toContain('YAML 1.1 directives are not supported');
+        expect(result.parseErrors[0]).toContain('YAML merge key hides declaration "env_file"');
+        expect(byKind(result, 'env_file')).toHaveLength(0);
+    });
+
+    it('reads YAML 1.1 scalars with the same 1.2 core typing as every other reader', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: no
+`,
+            'no': 'A=1\n',
+        });
+        expect(result.parseErrors).toEqual([]);
+        expect(byKind(result, 'env_file').map((i) => i.sourcePath)).toEqual(['no']);
+    });
+
+    it('accepts a YAML 1.1 directive in an included file', () => {
+        const { result } = parse({
+            'compose.yaml': `include:
+  - common/base.yaml
+services: {}
+`,
+            'common/base.yaml': `%YAML 1.1
+---
+services:
+  redis:
+    image: redis
+    env_file: redis.env
+`,
+            'common/redis.env': 'R=1\n',
+        });
+        expect(result.parseErrors).toEqual([]);
+        expect(byKind(result, 'env_file').map((i) => i.sourcePath)).toEqual(['common/redis.env']);
+    });
+
+    it('refuses an explicitly tagged merge key in a YAML 1.1 document', () => {
+        const { result } = parse({
+            'compose.yaml': `%YAML 1.1
+---
+x-a: &a
+  restart: unless-stopped
+services:
+  web:
+    !!merge <<: *a
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('tagged YAML merge keys are not supported');
     });
 
     it('accepts an explicit YAML 1.2 directive', () => {

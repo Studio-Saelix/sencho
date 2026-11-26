@@ -109,6 +109,30 @@ services:
         expect(envFiles[0].contentSha256).toBeTruthy();
     });
 
+    it('discovers a YAML 1.1 compose file that declares no merges', async () => {
+        const clone = makeClone({
+            'compose.yaml': `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: shared.env
+`,
+            'shared.env': 'SHARED=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals).toEqual([]);
+        const envFiles = result.inputs.filter((i) => i.dependencyKind === 'env_file');
+        expect(envFiles).toHaveLength(1);
+        expect(envFiles[0]).toMatchObject({
+            sourcePath: 'shared.env',
+            materializedPath: 'shared.env',
+            ownership: 'managed',
+            state: 'present',
+        });
+    });
+
     it('refuses a merge that would hide an inherited dependency', async () => {
         const clone = makeClone({
             'compose.yaml': `x-defaults: &defaults
