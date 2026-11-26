@@ -7,7 +7,7 @@
  *
  *   E2E_USERNAME=admin E2E_PASSWORD=mypassword npx playwright test
  */
-import { Page, expect, type Route } from '@playwright/test';
+import { Page, expect, type Locator, type Route } from '@playwright/test';
 import { OTP } from 'otplib';
 
 const totp = new OTP({ strategy: 'totp' });
@@ -26,11 +26,6 @@ export function totpNow(secret: string): string {
 
 /** Selector for the dashboard - only present in EditorLayout, not on login/setup pages */
 const DASHBOARD_INDICATOR = 'img[src*="sencho-logo"], button:has-text("Create Stack")';
-
-/** Returns true if the current page is the first-run setup screen */
-async function isSetupPage(page: Page): Promise<boolean> {
-  return page.locator('#confirmPassword, input[placeholder*="Confirm"]').isVisible().catch(() => false);
-}
 
 /** Returns true if the current page is the login screen */
 async function isLoginPage(page: Page): Promise<boolean> {
@@ -109,11 +104,13 @@ export async function holdExperimentalFlag(page: Page): Promise<HeldExperimental
  * Role-independent dashboard probe. DASHBOARD_INDICATOR can false-negative for
  * a viewer account: the logo img may not have resolved yet and a viewer never
  * renders Create Stack, so isDashboard() then reports "not on the dashboard"
- * for a page that is actually ready. The topbar chrome is present for every
- * authenticated role, which makes it a safe identity signal.
+ * for a page that is actually ready. The desktop topbar is present for every
+ * authenticated role; bespoke phone screens drop it, so the bottom tab bar
+ * stands in there. Both appear only once a session exists.
  */
-async function hasTopbarChrome(page: Page): Promise<boolean> {
-  return page.locator('[data-sn-chrome="topbar"]').isVisible().catch(() => false);
+async function hasAuthenticatedChrome(page: Page): Promise<boolean> {
+  if (await page.locator('[data-sn-chrome="topbar"]').isVisible().catch(() => false)) return true;
+  return page.locator('[data-sn-glass="mobile-tabbar"]').isVisible().catch(() => false);
 }
 
 /**
@@ -177,30 +174,85 @@ async function waitForLoginOutcome(page: Page, ready: () => Promise<void>): Prom
   throw readyError;
 }
 
+/** The shared-account MFA failure, at boot or after a submit. */
+function mfaLoginError(username: string): Error {
+  return new Error(
+    `loginAs: login for "${username}" landed on the two-factor challenge, so it can never ` +
+    'reach the dashboard. The shared E2E account still has MFA enrolled, usually because a ' +
+    'previous run aborted before its cleanup ran. Reset it with ' +
+    '`node backend/dist/cli/resetMfa.js ' + username + '` (build the backend first), then re-run.',
+  );
+}
+
+/** Terminal screens the app shows once its boot auth check has resolved. */
+type AuthSurface = 'setup' | 'login' | 'mfa' | 'dashboard';
+
+/** How long the app may spend on its auth check before the test calls it stuck. */
+const AUTH_SURFACE_TIMEOUT = 15_000;
+
+/**
+ * Wait for the app's one-shot auth check to resolve to a screen the helper can
+ * act on. A fixed sleep cannot do this: on a loaded runner the boot splash can
+ * outlast any guess, and a one-shot probe that ran early used to miss the
+ * sign-in screen entirely and then wait fifteen seconds for a dashboard nobody
+ * had logged in to.
+ */
+async function waitForAuthSurface(page: Page): Promise<AuthSurface> {
+  const visible = (locator: Locator) => locator.first().isVisible().catch(() => false);
+  const probes: Array<[AuthSurface, () => Promise<boolean>]> = [
+    ['setup', () => visible(page.locator('#confirmPassword, input[placeholder*="Confirm"]'))],
+    ['login', () => visible(page.getByRole('heading', { name: 'Sign in', exact: true }))],
+    ['mfa', () => visible(page.locator(MFA_CHALLENGE))],
+    ['dashboard', () => hasAuthenticatedChrome(page)],
+  ];
+  const deadline = Date.now() + AUTH_SURFACE_TIMEOUT;
+  for (;;) {
+    for (const [surface, probe] of probes) {
+      if (await probe()) return surface;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `loginAs: the app never finished its auth check within ${AUTH_SURFACE_TIMEOUT / 1000}s. ` +
+        'Expected the setup form, the sign-in screen, the two-factor challenge, or the dashboard; ' +
+        'the page is still on its loading splash. Check the backend log for a stalled ' +
+        '/api/auth/status or /api/auth/check.',
+      );
+    }
+    await page.waitForTimeout(100);
+  }
+}
+
 /**
  * Explain why a login that should have produced a session did not, instead of
  * letting the caller time out on a generic readiness wait.
  *
- * Two states are worth naming, and both are shared-suite problems rather than
- * anything wrong with the test:
+ * Each state is a shared-suite problem rather than anything wrong with the
+ * test:
  *   - The second-factor challenge. The account still has MFA enrolled, so every
  *     login stops here and never reaches the dashboard. E2E tests share one
  *     account, so one spec that leaves MFA on breaks every spec that runs after
  *     it.
+ *   - A permission-metadata failure. The dashboard shell renders, but the
+ *     permission response never arrived, so every permission-gated control
+ *     (including Create Stack) stays hidden.
  *   - Still on the sign-in form after submitting. The credentials were rejected
  *     or the request never completed, and the usual suspect under load is the
  *     shared per-user API rate limit rejecting the login POST.
  *
- * When the page is in neither state, the readiness failure that got us here is
- * the more useful message, so it is carried through rather than discarded.
+ * When the page is in none of these states, the readiness failure that got us
+ * here is the more useful message, so it is carried through rather than
+ * discarded.
  */
 async function explainUnreadyLogin(page: Page, username: string, cause?: unknown): Promise<Error> {
   if (await page.locator(MFA_CHALLENGE).isVisible().catch(() => false)) {
+    return mfaLoginError(username);
+  }
+  const permissionBanner = page.getByText('Permission controls are unavailable');
+  if (await permissionBanner.isVisible().catch(() => false)) {
     return new Error(
-      `loginAs: login for "${username}" landed on the two-factor challenge, so it can never ` +
-      'reach the dashboard. The shared E2E account still has MFA enrolled, usually because a ' +
-      'previous run aborted before its cleanup ran. Reset it with ' +
-      '`node backend/dist/cli/resetMfa.js ' + username + '` (build the backend first), then re-run.',
+      `loginAs: "${username}" reached the dashboard, but its permission metadata could not be ` +
+      'loaded, so permission-gated controls stay hidden. Check GET /api/permissions/me in the ' +
+      'backend log, then retry the test once the endpoint answers.',
     );
   }
   if (await isLoginPage(page)) {
@@ -222,10 +274,15 @@ export interface LoginAsOptions {
   /**
    * Wait for role-independent shell readiness instead of the admin-only
    * Create Stack button. Required for viewer-role accounts, which never
-   * render that button.
+   * render that button, and preferred for any case that does not create a
+   * stack: Create Stack needs stack:create, so a permission-metadata failure
+   * hides it even though the shell the test needs is up.
    */
   viewerSafe?: boolean;
 }
+
+/** How long the login POST may take before the helper calls it stalled. */
+const LOGIN_RESPONSE_TIMEOUT = 10_000;
 
 /**
  * Navigate to the app root, complete first-run setup if needed, then log in.
@@ -238,74 +295,94 @@ export async function loginAs(
   options?: LoginAsOptions,
 ) {
   const ready = options?.viewerSafe ? waitForShellReady : waitForStacksLoaded;
-  await page.goto('/');
 
-  // Wait for the app to finish its auth check (loading spinner disappears)
-  await page.waitForTimeout(500);
+  // The sign-in screen fails closed: when its own auth discovery request
+  // fails, it hides the password form behind an error instead of showing it.
+  // One reload retries those requests. It is a recovery from a transient page
+  // state, not a retry of the test.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt === 0) await page.goto('/');
+    else await page.reload();
 
-  // ── First-run setup ───────────────────────────────────────────────────────
-  if (await isSetupPage(page)) {
-    await page.locator('#username').fill(username);
-    await page.locator('#password').fill(password);
-    const confirmInput = page.locator('#confirmPassword');
-    if (await confirmInput.isVisible()) await confirmInput.fill(password);
-    await page.locator('button[type="submit"]').click();
-    // Setup signs the new admin in and then shows an environment-preflight
-    // step; clicking "Enter Sencho" completes onboarding and lands the dashboard.
-    const enterButton = page.getByRole('button', { name: /enter sencho/i });
-    await expect(enterButton).toBeVisible({ timeout: 10_000 });
-    await enterButton.click();
-    await ready(page);
-    return;
-  }
-
-  // ── Login screen ─────────────────────────────────────────────────────────
-  if (await isLoginPage(page)) {
-    // Confirm the username field is actually visible before filling. If
-    // isLoginPage was a transient false positive (e.g. login form briefly
-    // rendered before auth check redirected to dashboard), the fill would
-    // hang forever waiting for #username to come back.
-    const usernameField = page.locator('#username');
-    const usernameVisible = await usernameField
-      .waitFor({ state: 'visible', timeout: 2_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (usernameVisible) {
-      await usernameField.fill(username);
-      await page.locator('#password').fill(password);
-      await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
-      // Name the reason instead of burning the full readiness timeout: a
-      // challenge screen or a rejected login is a shared-state problem the
-      // reader has to act on, not a slow dashboard.
+    const surface = await waitForAuthSurface(page);
+    if (surface === 'dashboard') {
       try {
-        await waitForLoginOutcome(page, () => ready(page));
+        await ready(page);
       } catch (err) {
         throw await explainUnreadyLogin(page, username, err);
       }
       return;
     }
-    // Fall through to the dashboard check below.
-  }
+    if (surface === 'mfa') throw mfaLoginError(username);
 
-  // ── Already on the dashboard ──────────────────────────────────────────────
-  if (await isDashboard(page)) {
+    // ── First-run setup ────────────────────────────────────────────────────
+    if (surface === 'setup') {
+      await page.locator('#username').fill(username);
+      await page.locator('#password').fill(password);
+      const confirmInput = page.locator('#confirmPassword');
+      if (await confirmInput.isVisible()) await confirmInput.fill(password);
+      await page.locator('button[type="submit"]').click();
+      // Setup signs the new admin in and then shows an environment-preflight
+      // step; clicking "Enter Sencho" completes onboarding and lands the dashboard.
+      const enterButton = page.getByRole('button', { name: /enter sencho/i });
+      await expect(enterButton).toBeVisible({ timeout: 10_000 });
+      await enterButton.click();
+      await ready(page);
+      return;
+    }
+
+    // ── Login screen ───────────────────────────────────────────────────────
+    const usernameField = page.locator('#username');
+    const formVisible = await usernameField
+      .waitFor({ state: 'visible', timeout: attempt === 0 ? 10_000 : AUTH_SURFACE_TIMEOUT })
+      .then(() => true)
+      .catch(() => false);
+    if (!formVisible) continue;
+
+    await usernameField.fill(username);
+    await page.locator('#password').fill(password);
+    // Watch the POST itself: a rejected or stalled login is a call the reader
+    // has to act on, and waiting only for readiness turns it into a generic
+    // timeout. A 2xx here means the session exists; readiness still has to
+    // confirm the shell rendered.
+    const loginResponse = page
+      .waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === '/api/auth/login' &&
+          response.request().method() === 'POST',
+        { timeout: LOGIN_RESPONSE_TIMEOUT },
+      )
+      .catch(() => null);
+    await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
+    const response = await loginResponse;
+    if (response && !response.ok()) {
+      throw new Error(
+        `loginAs: /api/auth/login rejected "${username}" with ${response.status()}. A 429 means ` +
+        'the shared per-user rate limit; a 401 means the credentials were not accepted. Check ' +
+        'the backend log before re-running.',
+      );
+    }
+    try {
+      await waitForLoginOutcome(page, () => ready(page));
+    } catch (err) {
+      throw await explainUnreadyLogin(page, username, err);
+    }
     return;
   }
-  // Same dashboard state, seen through the role-independent chrome probe:
-  // covers a viewer account whose logo img has not painted yet.
-  if (await hasTopbarChrome(page)) {
-    await ready(page);
-    return;
-  }
 
-  // Cookie session may still be restoring after a hard reload.
-  let readyError: unknown;
-  try {
-    await waitForLoginOutcome(page, () => ready(page));
-    return;
-  } catch (err) {
-    readyError = err;
-  }
+  throw new Error(
+    `loginAs: the sign-in form never appeared for "${username}". The sign-in screen fails closed ` +
+    'when its auth discovery fails, so it showed an error instead of the form on two page loads. ' +
+    'Check /api/auth/status and /api/auth/sso/providers in the backend log.',
+  );
+}
 
-  throw await explainUnreadyLogin(page, username, readyError);
+/**
+ * Sign in as the test admin and wait for the role-independent shell, not for
+ * Create Stack. Use this for any case that does not create a stack: Create
+ * Stack needs stack:create, so a permission-metadata failure hides it while the
+ * surface the case actually exercises is already usable.
+ */
+export async function loginToShell(page: Page): Promise<void> {
+  await loginAs(page, TEST_USERNAME, TEST_PASSWORD, { viewerSafe: true });
 }

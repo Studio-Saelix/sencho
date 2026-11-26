@@ -7,7 +7,7 @@
  * plan until the preflight runs again.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
-import { loginAs, mockExperimentalFlag } from './helpers';
+import { loginToShell, mockExperimentalFlag } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
 const NODE: FleetNode = {
@@ -209,7 +209,9 @@ async function mockBootstrap(page: Page): Promise<void> {
 }
 
 async function openWizard(page: Page) {
-  await page.getByRole('button', { name: 'Node management' }).click();
+  const trigger = page.getByRole('button', { name: 'Node management' });
+  await expect(trigger).toBeVisible({ timeout: 15_000 });
+  await trigger.click();
   await page.getByRole('menuitem', { name: /Bootstrap new Linux server/ }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
 }
@@ -227,7 +229,7 @@ test.describe('Node bootstrap wizard', () => {
   });
 
   test('starts with both defaults and one collapsed Advanced section', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockBootstrap(page);
     await page.goto('/nodes/local/fleet');
     await openWizard(page);
@@ -241,7 +243,7 @@ test.describe('Node bootstrap wizard', () => {
   });
 
   test('shows a custom pair in the plan, then invalidates it when a path changes', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockBootstrap(page);
     await page.goto('/nodes/local/fleet');
     await openWizard(page);
@@ -282,7 +284,7 @@ test.describe('Node bootstrap wizard', () => {
   });
 
   test('approves the reviewed plan in two clicks and follows the run to enrolled', async ({ page }) => {
-    await loginAs(page);
+    await loginToShell(page);
     await mockBootstrap(page);
     const operationId = '11111111-1111-4111-8111-111111111111';
     const plan = planFor('/opt/docker/sencho', '/opt/sencho-agent');

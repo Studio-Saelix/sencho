@@ -9,7 +9,12 @@
  * available in every state.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { loginAs, holdExperimentalFlag, mockExperimentalFlag } from './helpers';
+import {
+  loginAs,
+  loginToShell,
+  holdExperimentalFlag,
+  mockExperimentalFlag,
+} from './helpers';
 import { adminApiContext, deleteE2EUser, ensureE2EUser } from './preferences-helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
@@ -73,7 +78,7 @@ async function expectSettingsReady(page: Page): Promise<void> {
 test.describe('Node bootstrap discovery gates', () => {
   test('keeps the Fleet entry hidden while discovery is pending, then opens the wizard', async ({ page }) => {
     const gate = await holdExperimentalFlag(page);
-    await loginAs(page);
+    await loginToShell(page);
     await mockFleet(page);
     const requested = gate.waitForRequest();
     await page.goto('/nodes/local/fleet');
@@ -96,7 +101,7 @@ test.describe('Node bootstrap discovery gates', () => {
 
   test('keeps the Settings entry hidden while discovery is pending, then opens the wizard', async ({ page }) => {
     const gate = await holdExperimentalFlag(page);
-    await loginAs(page);
+    await loginToShell(page);
     const requested = gate.waitForRequest();
     await page.goto('/nodes/local/settings/nodes');
     await expectSettingsReady(page);
@@ -118,7 +123,7 @@ test.describe('Node bootstrap discovery gates', () => {
 
   test('hides the Settings entry when the flag is off and keeps Add node available', async ({ page }) => {
     await mockExperimentalFlag(page, false);
-    await loginAs(page);
+    await loginToShell(page);
     await gotoWithSettledFlag(page, '/nodes/local/settings/nodes');
     await expectSettingsReady(page);
 
