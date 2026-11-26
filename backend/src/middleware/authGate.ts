@@ -36,7 +36,8 @@ export const auditLog: RequestHandler = (req: Request, res: Response, next: Next
   }
 
   const username = req.user?.username || 'unknown';
-  const nodeId = req.nodeId ?? null;
+  // 0 marks a request this instance served with no local node row (sealed secrets).
+  const nodeId = req.nodeId > 0 ? req.nodeId : null;
   const forwarded = req.headers['x-forwarded-for'];
   const xff = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
   const ip = req.ip || xff || '';

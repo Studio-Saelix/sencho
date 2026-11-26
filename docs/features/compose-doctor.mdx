@@ -183,7 +183,7 @@ These rules activate when the stack publishes at least one host port or runs a t
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | This stack is the running Sencho instance | Warning | Sencho discovered its own compose project among the managed stacks. See [Self-management](#self-management) below. |
-| Stack reaches a reserved secret volume | Blocker | A volume uses the reserved name `sencho_edge_secret`, declares the reserved label `io.sencho.secret`, or is a volume on this node that carries that label; or a service takes the volumes of, or joins the process namespace of, a container that mounts one. The deploy is refused. See [Reserved secret volume](#reserved-secret-volume) below. |
+| Stack reaches a reserved secret volume | Blocker | A volume uses the reserved name `sencho_edge_secret`, declares the reserved label `io.sencho.secret`, or is a volume on this node that carries that label; or a service takes the volumes of, or joins the process namespace of, a container that mounts one. The deploy is refused, except for the stack Sencho recorded as the secret's consumer. See [Reserved secret volume](#reserved-secret-volume) below. |
 
 ## Exposure intent checks
 
@@ -226,7 +226,7 @@ The networking-relevant rules on this page (host mode, exposure intent, port con
 
 ## Node-state checks and graceful degradation
 
-Seven of the 46 rules need live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision), one is "Host port is already in use" in Port conflicts, and one is the Compose version note. All seven are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
+Seven of the 46 rules need live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision), one is "Host port is already in use" in Port conflicts, and one is the Compose version note. All seven are skipped when the Docker daemon is unreachable. The reserved-secret-volume check also reads the node's volumes and containers when it can, but it still runs its model checks and degrades instead of being skipped. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
 
 When the daemon is unreachable:
 

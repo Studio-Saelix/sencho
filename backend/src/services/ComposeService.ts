@@ -353,8 +353,10 @@ const DOCKER_ANONYMOUS_VOLUME_NAME = /^[0-9a-f]{64}$/;
  * True when a secret volume could be one Docker created anonymously, the only
  * kind removing a container with its volumes deletes. A volume the label read
  * returned is judged by its own labels; one it did not return falls back to
- * Docker's 64-hex anonymous name. A volume created by name is never removed
- * with a container, so its mount needs no provenance check.
+ * Docker's 64-hex anonymous name. The daemon reports labels for a labelled
+ * volume, so the fallback covers a client or double that omits them. A volume
+ * created by name is never removed with a container, so its mount needs no
+ * provenance check.
  */
 function couldBeAnonymousVolume(
   name: string,
@@ -711,8 +713,9 @@ export class ComposeService {
    * through `volumes_from` from a container whose same mount is named, since
    * Docker copies the donor's spec. Anything else is taken as anonymous.
    *
-   * Throws `SecretVolumeProtectedError` when a container, or a donor it
-   * inherits a possibly-anonymous secret mount from, cannot be read.
+   * Throws `SecretVolumeProtectedError` when a container that is still present
+   * cannot be read, or a donor it inherits a possibly-anonymous secret mount
+   * from cannot be read; a holder gone since the listing is skipped.
    */
   private async mountsSecretVolumeAnonymously(
     docker: Docker,

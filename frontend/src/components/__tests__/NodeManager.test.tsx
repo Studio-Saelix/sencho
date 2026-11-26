@@ -182,6 +182,22 @@ describe('NodeManager sealing key affordance', () => {
     expect(await screen.findByText('LOCALFP')).toBeInTheDocument();
   });
 
+  it('with the flag on, reads the remote row it opened', async () => {
+    nodesRef.current = [localNode, pinnedRemote];
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = true;
+    useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
+    apiFetchMock.mockImplementation((path: string) =>
+      path === '/nodes/2/sealing-key'
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: 'remote', readiness: 'ready', pinned: null, presented: { fingerprint: 'REMOTEFP' } }) })
+        : Promise.resolve({ ok: false, json: () => Promise.resolve({}) }));
+    render(<NodeManager />);
+
+    await userEvent.click(screen.getAllByRole('button', { name: /Sealing key/ })[1]);
+
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/nodes/2/sealing-key', { localOnly: true }));
+  });
+
   it('with the flag on, hides the trigger from a session that cannot manage the node', () => {
     nodesRef.current = [localNode, pinnedRemote];
     experimentalState.experimental = true;

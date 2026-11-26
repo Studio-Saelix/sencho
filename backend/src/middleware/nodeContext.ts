@@ -17,18 +17,19 @@ import { resolveNodeId } from '../helpers/resolveNodeId';
  * A sealed-secret path is exempt too: this instance serves it itself, so it
  * takes this instance's local node id and skips the default-node resolution
  * and the deleted-node check. With no local node row (zero-local recovery)
- * `req.nodeId` is deliberately left unset; sealed-secret handlers and the
- * audit log already read it defensively, and the store answers unavailable.
+ * `req.nodeId` is 0, which is not a node id; the audit gate records it as no
+ * node. The sealed-secret handlers do not read it: key, list and describe
+ * answer from the database, while accept and remove answer 503
+ * SECRET_STORE_UNAVAILABLE from the store.
  */
 export const nodeContextMiddleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
   if (isSealedSecretPath(req.path)) {
     // A sealed secret request belongs to this instance's own local node, never
     // to a node it names or to the default node. An instance with no local
-    // node row (zero-local recovery) leaves req.nodeId unset: falling back to
-    // the default would decrypt a remote node's credential, and the store
-    // answers 503 SECRET_STORE_UNAVAILABLE for that state itself.
-    const localNodeId = NodeRegistry.getInstance().getLocalNodeId();
-    if (localNodeId !== null) req.nodeId = localNodeId;
+    // node row (zero-local recovery) records 0: falling back to the default
+    // would decrypt a remote node's credential, and the store answers 503
+    // SECRET_STORE_UNAVAILABLE for that state itself.
+    req.nodeId = NodeRegistry.getInstance().getLocalNodeId() ?? 0;
     next();
     return;
   }

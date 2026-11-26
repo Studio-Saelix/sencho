@@ -294,8 +294,8 @@ describe.each(transports)('sealed secret delivery over $name', (transport) => {
   ])('with no local node row and a $defaultCredential remote default', ({ defaultCredential }) => {
     it.each([
       { selector: 'no selector', apply: (r: request.Test) => r },
-      { selector: 'an x-node-id header', apply: (r: request.Test) => r.set('x-node-id', String(directNodeId)) },
-      { selector: 'a nodeId query', apply: (r: request.Test) => r.query({ nodeId: directNodeId }) },
+      { selector: 'an x-node-id header', apply: (r: request.Test) => r.set('x-node-id', String(transport.nodeId())) },
+      { selector: 'a nodeId query', apply: (r: request.Test) => r.query({ nodeId: transport.nodeId() }) },
       // The receiving instance ignores selectors, so a deleted, malformed or
       // nonexistent one cannot redirect the request or its audit row.
       { selector: 'a nonexistent x-node-id', apply: (r: request.Test) => r.set('x-node-id', '999999') },
