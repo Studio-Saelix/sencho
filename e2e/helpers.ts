@@ -44,6 +44,23 @@ export async function isDashboard(page: Page): Promise<boolean> {
 }
 
 /**
+ * Serve a chosen experimental discovery value from /api/meta for one page.
+ * Register it before the dashboard mounts, since the frontend reads the flag
+ * once and caches it for the session. The response is built here rather than
+ * fetched from the dev server so the flag settles before the UI reads it;
+ * only the discovery field matters to the callers.
+ */
+export async function mockExperimentalFlag(page: Page, experimental = true): Promise<void> {
+  await page.route('**/api/meta', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ experimental }),
+    });
+  });
+}
+
+/**
  * Role-independent dashboard probe. DASHBOARD_INDICATOR can false-negative for
  * a viewer account: the logo img may not have resolved yet and a viewer never
  * renders Create Stack, so isDashboard() then reports "not on the dashboard"

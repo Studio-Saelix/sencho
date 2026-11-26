@@ -140,7 +140,7 @@ export interface FleetPaletteEntry {
 export interface NodeManagementActions {
     /** Visible when the session has global node:manage. */
     canConnectExisting: boolean;
-    /** Visible to admins only. */
+    /** Visible to admins while the experimental discovery flag is on. */
     canBootstrapServer: boolean;
     /** Locks the update item while a check is in flight. */
     checkingUpdates: boolean;

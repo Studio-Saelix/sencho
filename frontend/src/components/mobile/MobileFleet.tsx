@@ -18,6 +18,7 @@ import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
 import { NodeConnectionPin } from '@/components/FleetView/NodeConnectionPin';
 import { nodeConnection } from '@/components/FleetView/nodeConnection';
 import { NodeReadinessBadge } from '@/components/nodes/NodeReadinessBadge';
+import { useExperimental } from '@/hooks/useExperimental';
 import type { Node } from '@/context/NodeContext';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
@@ -368,6 +369,9 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
   const { nodes, loading, lastSyncAt, refetch } = useMobileFleet();
   const { activeNode, nodes: registryNodes } = useNodes();
   const { isAdmin } = useAuth();
+  const { experimental, experimentalReady } = useExperimental();
+  // Bootstrap is experimental: the desktop entry and this pointer share the gate.
+  const showBootstrapHint = experimentalReady && experimental;
   const updateStatus = useFleetUpdateStatus();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -514,9 +518,11 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
             </div>
           )}
 
-          <p className="px-1 py-2 font-mono text-[10px] text-stat-subtitle">
-            Bootstrap a new server from a desktop browser.
-          </p>
+          {showBootstrapHint && (
+            <p className="px-1 py-2 font-mono text-[10px] text-stat-subtitle">
+              Bootstrap a new server from a desktop browser.
+            </p>
+          )}
         </div>
       </div>
       {overlays}

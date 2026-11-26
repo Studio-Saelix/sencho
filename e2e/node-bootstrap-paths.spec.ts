@@ -7,7 +7,7 @@
  * plan until the preflight runs again.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
-import { loginAs } from './helpers';
+import { loginAs, mockExperimentalFlag } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
 const NODE: FleetNode = {
@@ -222,6 +222,10 @@ async function fillConnection(page: Page) {
 }
 
 test.describe('Node bootstrap wizard', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockExperimentalFlag(page);
+  });
+
   test('starts with both defaults and one collapsed Advanced section', async ({ page }) => {
     await loginAs(page);
     await mockBootstrap(page);

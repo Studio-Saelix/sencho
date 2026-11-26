@@ -17,6 +17,7 @@ import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
 import { NodeLabelPicker } from './blueprints/NodeLabelPicker';
 import { useAuth } from '@/context/AuthContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { resetFleetSyncAnchor, STICKY_CONTROL_IDENTITY_MISMATCH } from '@/lib/fleetSyncApi';
@@ -42,6 +43,9 @@ export function NodeManager() {
   // stay isAdmin-only to match their requireAdmin backend guards.
   const canManageNodes = isAdmin || can('node:manage');
   const { nodes, refreshNodes, refreshNodeMeta } = useNodes();
+  const { experimental, experimentalReady } = useExperimental();
+  // Bootstrap is experimental: hidden until /meta confirms the flag.
+  const canBootstrapServer = isAdmin && experimentalReady && experimental;
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
@@ -221,7 +225,7 @@ export function NodeManager() {
       {canManageNodes && (
         <>
           <div className="flex justify-end gap-2">
-            {isAdmin && (
+            {canBootstrapServer && (
               <Button size="sm" variant="outline" className="shrink-0" onClick={() => setBootstrapOpen(true)}>
                 Bootstrap new Linux server
               </Button>
@@ -583,7 +587,7 @@ export function NodeManager() {
       )}
 
       {NodeActionModals}
-      {isAdmin && (
+      {canBootstrapServer && (
         <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} onNodesChanged={() => { void refreshNodes(); }} />
       )}
     </div>

@@ -13,10 +13,12 @@ import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
 const apiFetchMock = vi.fn();
 const useAuthMock = vi.fn();
 const useNodesMock = vi.fn();
+const experimentalState = vi.hoisted(() => ({ experimental: true, experimentalReady: true }));
 
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => useNodesMock() }));
+vi.mock('@/hooks/useExperimental', () => ({ useExperimental: () => experimentalState }));
 vi.mock('@/lib/nodesApi', () => ({ cordonNode: vi.fn(), uncordonNode: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -60,6 +62,8 @@ beforeEach(() => {
   apiFetchMock.mockReset();
   useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
   useNodesMock.mockReturnValue({ nodes: [], activeNode: null, hasCapability: vi.fn(() => false) });
+  experimentalState.experimental = true;
+  experimentalState.experimentalReady = true;
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -474,6 +478,20 @@ describe('MobileFleet host usage unknown', () => {
     expect(screen.getByText('--')).toBeInTheDocument();
     expect(screen.getByText('400 B total')).toBeInTheDocument();
     expect(screen.getAllByText('Show usage…')).toHaveLength(2);
+  });
+});
+
+describe('MobileFleet bootstrap hint', () => {
+  it('shows the hint only when the experimental flag is on', async () => {
+    setupFetch([makeNode()], [makeUpdateStatus()]);
+    const { unmount } = render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+    expect(await screen.findByText('Bootstrap a new server from a desktop browser.')).toBeInTheDocument();
+
+    unmount();
+    experimentalState.experimental = false;
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+    expect(await screen.findByText('Local')).toBeInTheDocument();
+    expect(screen.queryByText('Bootstrap a new server from a desktop browser.')).toBeNull();
   });
 });
 
