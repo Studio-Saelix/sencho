@@ -195,6 +195,7 @@ describe('NodeManager sealing key affordance', () => {
 
     await userEvent.click(screen.getAllByRole('button', { name: /Sealing key/ })[1]);
 
+    expect(await screen.findByText('REMOTEFP')).toBeInTheDocument();
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/nodes/2/sealing-key', { localOnly: true }));
   });
 

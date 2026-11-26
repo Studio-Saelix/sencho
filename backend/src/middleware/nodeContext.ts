@@ -17,10 +17,11 @@ import { resolveNodeId } from '../helpers/resolveNodeId';
  * A sealed-secret path is exempt too: this instance serves it itself, so it
  * takes this instance's local node id and skips the default-node resolution
  * and the deleted-node check. With no local node row (zero-local recovery)
- * `req.nodeId` is 0, which is not a node id; the audit gate records it as no
- * node. The sealed-secret handlers do not read it: key, list and describe
- * answer from the database, while accept and remove answer 503
- * SECRET_STORE_UNAVAILABLE from the store.
+ * `req.nodeId` is 0, which is not a node id; the audit log records it as no
+ * node. The sealed-secret handlers do not read it: key reads the sealing key
+ * and the database, list and describe read the database, and a write or
+ * removal that needs the storage daemon answers 503
+ * SECRET_STORE_UNAVAILABLE.
  */
 export const nodeContextMiddleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
   if (isSealedSecretPath(req.path)) {

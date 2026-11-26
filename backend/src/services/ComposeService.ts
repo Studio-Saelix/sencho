@@ -352,11 +352,11 @@ const DOCKER_ANONYMOUS_VOLUME_NAME = /^[0-9a-f]{64}$/;
 /**
  * True when a secret volume could be one Docker created anonymously, the only
  * kind removing a container with its volumes deletes. A volume the label read
- * returned is judged by its own labels; one it did not return falls back to
- * Docker's 64-hex anonymous name. The daemon reports labels for a labelled
- * volume, so the fallback covers a client or double that omits them. A volume
- * created by name is never removed with a container, so its mount needs no
- * provenance check.
+ * returned with labels is judged by them; one returned without labels falls
+ * back to Docker's 64-hex anonymous name. The daemon reports labels for a
+ * labelled volume, so the fallback covers a client or a double that omits
+ * them. A volume created by name is never removed with a container, so its
+ * mount needs no provenance check.
  */
 function couldBeAnonymousVolume(
   name: string,
