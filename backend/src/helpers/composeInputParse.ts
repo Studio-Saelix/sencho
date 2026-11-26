@@ -66,12 +66,44 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 // document-wide reference quota and does not disable hostility checks).
 const MAX_COMPOSE_ALIAS_COUNT = 10_000;
 
+// Compose expands YAML merge keys (`<<`), but this parser does not: doing so
+// through the yaml option copies an anchor once per merge reference, which the
+// alias budget and the source-size cap do not bound. A merge that would hide a
+// declaration the inventory must enumerate therefore fails the file closed
+// instead of writing a generation that silently omits it. Harmless merges
+// (restart, logging, image and similar) stay accepted.
+type MergeWalkRole = 'root' | 'service' | 'build' | 'include' | 'resource' | 'extends' | 'env-file' | 'volume';
+
+const MERGE_HIDDEN_DECLARATION_KEYS: Record<MergeWalkRole, ReadonlySet<string>> = {
+    root: new Set(['services', 'include', 'configs', 'secrets']),
+    service: new Set(['env_file', 'label_file', 'build', 'volumes', 'extends']),
+    build: new Set(['context', 'dockerfile', 'additional_contexts', 'secrets']),
+    include: new Set(['path', 'env_file', 'project_directory']),
+    resource: new Set(['file']),
+    extends: new Set(['file']),
+    'env-file': new Set(['path']),
+    volume: new Set(['source', 'type']),
+};
+
 // Emitted-declaration bound. Alias resolution shares the anchor's value, but
 // the walk re-reads it for every reference, so a file at the alias budget can
 // otherwise multiply a large anchor into millions of input records. A real
 // project is orders of magnitude below this; past it the file is refused like
 // any other unbounded input.
 const MAX_DECLARED_INPUTS = 100_000;
+
+// Merge-key inspection bound. The detector re-reads an anchor's keys for every
+// merge that references it, so a large anchor reused across many services
+// costs keys x references. Past this many inspected keys the file is refused
+// rather than spending unbounded time on a synchronous request.
+const MAX_MERGE_KEY_SCANS = 100_000;
+// Sentinel key; a YAML mapping key cannot contain NUL, so it cannot collide.
+const MERGE_KEY_SCAN_EXCEEDED = '\u0000merge-key-scan-exceeded';
+
+// Collected diagnostics bound. A file can multiply invalid declarations through
+// anchors inside the alias and size caps; the error list must stay finite even
+// though the parse is refused.
+const MAX_PARSE_ERRORS = 100;
 
 // Include/extends recursion bound; deeper graphs are refused as unsupported.
 const MAX_INCLUDE_DEPTH = 16;
@@ -150,6 +182,190 @@ function resolveWithinBase(base: string | null, target: string): string | null {
     return normalizeWithinBase(base ? `${base}/${target}` : target);
 }
 
+/** Flatten a `<<` value (a map, a list of maps, or nested merges) into its maps. */
+function mergeSourceMaps(value: unknown): Array<Record<string, unknown>> {
+    const maps: Array<Record<string, unknown>> = [];
+    const stack: unknown[] = [value];
+    const seen = new WeakSet<object>();
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (Array.isArray(item)) {
+            for (const entry of item) stack.push(entry);
+            continue;
+        }
+        if (!item || typeof item !== 'object') continue;
+        if (seen.has(item)) continue;
+        seen.add(item);
+        const record = item as Record<string, unknown>;
+        if (record['<<'] !== undefined) stack.push(record['<<']);
+        maps.push(record);
+    }
+    return maps;
+}
+
+/**
+ * Keys a mapping inherits through `<<` and does not override explicitly.
+ * Null means the inspection budget ran out; the caller refuses the file.
+ */
+function inheritedMergeKeys(record: Record<string, unknown>, budget: { remaining: number }): string[] | null {
+    const merged = new Set<string>();
+    for (const source of mergeSourceMaps(record['<<'])) {
+        for (const key of Object.keys(source)) {
+            if (budget.remaining-- <= 0) return null;
+            if (key !== '<<') merged.add(key);
+        }
+    }
+    for (const key of Object.keys(record)) {
+        if (budget.remaining-- <= 0) return null;
+        if (key !== '<<') merged.delete(key);
+    }
+    return [...merged];
+}
+
+/**
+ * True when the document carries an explicit `!!merge` tag. yaml expands those
+ * even without the merge option, bypassing both the alias budget and the
+ * fail-closed merge check, so they are refused before the document is
+ * materialised.
+ */
+function hasTaggedMergeKey(node: unknown): boolean {
+    const stack: unknown[] = [node];
+    const seen = new WeakSet<object>();
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (!item || typeof item !== 'object' || seen.has(item)) continue;
+        seen.add(item);
+        const record = item as Record<string, unknown>;
+        if (record.tag === 'tag:yaml.org,2002:merge') return true;
+        if (Array.isArray(record.items)) {
+            for (const child of record.items) stack.push(child);
+        }
+        if (record.key !== undefined) stack.push(record.key);
+        if (record.value !== undefined) stack.push(record.value);
+    }
+    return false;
+}
+
+/**
+ * Name the first declaration a merge key could hide from the inventory, walking
+ * only the parts of the document this parser enumerates. Unused anchors and
+ * harmless merges do not match. The walk is iterative and the visited set is
+ * keyed by role, because the same anchor can be reached as a service, a build,
+ * an env_file entry and so on, and each role protects different keys.
+ */
+function findMergeHiddenDeclaration(node: unknown, rootRole: MergeWalkRole): string | null {
+    const seen = new WeakMap<object, Set<MergeWalkRole>>();
+    const budget = { remaining: MAX_MERGE_KEY_SCANS };
+    const stack: Array<{ node: unknown; role: MergeWalkRole }> = [{ node, role: rootRole }];
+    while (stack.length > 0) {
+        const current = stack.pop()!;
+        const value = current.node;
+        const role = current.role;
+        if (!value || typeof value !== 'object') continue;
+        let roles = seen.get(value);
+        if (roles === undefined) {
+            roles = new Set<MergeWalkRole>();
+            seen.set(value, roles);
+        }
+        if (roles.has(role)) continue;
+        roles.add(role);
+
+        if (Array.isArray(value)) {
+            for (const item of value) stack.push({ node: item, role });
+            continue;
+        }
+
+        const record = value as Record<string, unknown>;
+        if (record['<<'] !== undefined) {
+            const declared = MERGE_HIDDEN_DECLARATION_KEYS[role];
+            const merged = inheritedMergeKeys(record, budget);
+            if (merged === null) return MERGE_KEY_SCAN_EXCEEDED;
+            for (const key of merged) {
+                if (declared.has(key)) return key;
+            }
+        }
+
+        if (role === 'root') {
+            const services = record.services;
+            if (services && typeof services === 'object' && !Array.isArray(services)) {
+                // Every inherited key here is a service definition, so a
+                // non-empty merge on the container can hide declarations.
+                const serviceMap = services as Record<string, unknown>;
+                if (serviceMap['<<'] !== undefined) {
+                    const merged = inheritedMergeKeys(serviceMap, budget);
+                    if (merged === null) return MERGE_KEY_SCAN_EXCEEDED;
+                    if (merged.length > 0) return 'services';
+                }
+                for (const service of Object.values(serviceMap)) {
+                    stack.push({ node: service, role: 'service' });
+                }
+            }
+            if (record.include !== undefined) stack.push({ node: record.include, role: 'include' });
+            for (const [key, childRole] of [
+                ['configs', 'resource'],
+                ['secrets', 'resource'],
+            ] as const) {
+                const resources = record[key];
+                if (!resources || typeof resources !== 'object' || Array.isArray(resources)) continue;
+                const resourceMap = resources as Record<string, unknown>;
+                if (resourceMap['<<'] !== undefined) {
+                    const merged = inheritedMergeKeys(resourceMap, budget);
+                    if (merged === null) return MERGE_KEY_SCAN_EXCEEDED;
+                    if (merged.length > 0) return key;
+                }
+                for (const definition of Object.values(resourceMap)) {
+                    stack.push({ node: definition, role: childRole });
+                }
+            }
+        } else if (role === 'service') {
+            for (const [key, childRole] of [
+                ['build', 'build'],
+                ['extends', 'extends'],
+                ['env_file', 'env-file'],
+                ['volumes', 'volume'],
+            ] as const) {
+                if (record[key] === undefined) continue;
+                stack.push({ node: record[key], role: childRole });
+            }
+        } else if (role === 'build') {
+            // Every additional_contexts entry is a path, so any non-empty
+            // merge there hides one regardless of the inherited names.
+            const additional = record.additional_contexts;
+            if (additional && typeof additional === 'object' && !Array.isArray(additional)) {
+                const additionalMap = additional as Record<string, unknown>;
+                if (additionalMap['<<'] !== undefined) {
+                    const merged = inheritedMergeKeys(additionalMap, budget);
+                    if (merged === null) return MERGE_KEY_SCAN_EXCEEDED;
+                    if (merged.length > 0) return 'additional_contexts';
+                }
+            }
+        }
+    }
+    return null;
+}
+
+function pushParseError(refs: ComposeRefs, message: string): void {
+    if (refs.parseErrors.length >= MAX_PARSE_ERRORS) return;
+    refs.parseErrors.push(message);
+}
+
+/**
+ * True once the shared declaration list reaches its finite budget. The error is
+ * emitted once and names the file whose walk reached the bound, so both callers
+ * still turn it into a refusal rather than a truncated inventory.
+ */
+function atDeclaredInputCap(refs: ComposeRefs, fromFile: string): boolean {
+    if (refs.inputs.length + refs.dynamic.length < MAX_DECLARED_INPUTS) return false;
+    if (!refs.capReached) {
+        refs.capReached = true;
+        pushParseError(
+            refs,
+            `Cannot enumerate compose file ${fromFile}: exceeds the ${MAX_DECLARED_INPUTS}-entry declared-input cap`,
+        );
+    }
+    return true;
+}
+
 function emitInput(
     refs: ComposeRefs,
     rawPath: string | null,
@@ -162,15 +378,7 @@ function emitInput(
     service: string | null = null,
     required = true,
 ): void {
-    if (refs.inputs.length + refs.dynamic.length >= MAX_DECLARED_INPUTS) {
-        if (!refs.capReached) {
-            refs.capReached = true;
-            refs.parseErrors.push(
-                `Cannot enumerate compose file ${fromFile}: exceeds the ${MAX_DECLARED_INPUTS}-entry declared-input cap`,
-            );
-        }
-        return;
-    }
+    if (atDeclaredInputCap(refs, fromFile)) return;
     if (rawPath !== null && isDynamicPath(rawPath)) {
         refs.dynamic.push({ sourcePath: rawPath, kind, note: DYNAMIC_PATH_NOTE });
         return;
@@ -367,7 +575,7 @@ function walkService(serviceName: string, service: unknown, fromFile: string, re
             if (p !== undefined) {
                 emitProjectRelative(refs, p.path, 'env_file', 'env', fromFile, ctx, 'compose-file-dir', null, p.required);
             } else {
-                refs.parseErrors.push(`env_file entry in ${fromFile} has no resolvable path`);
+                pushParseError(refs, `env_file entry in ${fromFile} has no resolvable path`);
             }
         }
     }
@@ -436,7 +644,7 @@ function parseFile(
 ): void {
     const normalized = normalizeRepoPath(ctx.repoPath);
     if (stack.has(normalized)) {
-        refs.parseErrors.push(`Include/extends cycle detected at ${normalized}`);
+        pushParseError(refs, `Include/extends cycle detected at ${normalized}`);
         return;
     }
     if (visited.has(normalized)) {
@@ -466,24 +674,48 @@ function parseFileInner(
 ): void {
     const normalized = normalizeRepoPath(ctx.repoPath);
     if (depth > MAX_INCLUDE_DEPTH) {
-        refs.parseErrors.push(`Include/extends graph exceeds depth ${MAX_INCLUDE_DEPTH} at ${normalized}`);
+        pushParseError(refs, `Include/extends graph exceeds depth ${MAX_INCLUDE_DEPTH} at ${normalized}`);
         return;
     }
     if (content.length > MAX_COMPOSE_PARSE_BYTES) {
-        refs.parseErrors.push(`Compose file ${normalized} exceeds the ${MAX_COMPOSE_PARSE_BYTES}-byte parse cap`);
+        pushParseError(refs, `Compose file ${normalized} exceeds the ${MAX_COMPOSE_PARSE_BYTES}-byte parse cap`);
         return;
     }
 
     let doc: unknown;
     try {
-        doc = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+        const document = YAML.parseDocument(content);
+        if (document.errors.length > 0) throw document.errors[0];
+        if (hasTaggedMergeKey(document.contents)) {
+            pushParseError(
+                refs,
+                `Cannot enumerate compose file ${normalized}: tagged YAML merge keys are not supported`,
+            );
+            return;
+        }
+        doc = document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
     } catch (e) {
-        refs.parseErrors.push(`Cannot parse compose file ${normalized}: ${e instanceof Error ? e.message : String(e)}`);
+        pushParseError(refs, `Cannot parse compose file ${normalized}: ${e instanceof Error ? e.message : String(e)}`);
         return;
     }
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return;
 
     const root = doc as Record<string, unknown>;
+    const hiddenMerge = findMergeHiddenDeclaration(root, 'root');
+    if (hiddenMerge === MERGE_KEY_SCAN_EXCEEDED) {
+        pushParseError(
+            refs,
+            `Cannot enumerate compose file ${normalized}: merge keys exceed the ${MAX_MERGE_KEY_SCANS}-key inspection budget`,
+        );
+        return;
+    }
+    if (hiddenMerge !== null) {
+        pushParseError(
+            refs,
+            `Cannot enumerate compose file ${normalized}: YAML merge key hides declaration "${hiddenMerge}"`,
+        );
+        return;
+    }
 
     // Top-level include: list of paths or maps {path, env_file, project_directory}.
     const include = root.include;
@@ -497,7 +729,7 @@ function parseFileInner(
                 // path accepts a string or a list of strings (merged in order).
                 const paths = asStringList(map.path);
                 if (paths.length === 0) {
-                    refs.parseErrors.push(`Include entry in ${normalized} has no resolvable path`);
+                    pushParseError(refs, `Include entry in ${normalized} has no resolvable path`);
                     continue;
                 }
                 processIncludeEntry(refs, paths, map, normalized, ctx, opts, visited, stack, depth);
@@ -583,7 +815,9 @@ function processIncludeEntry(
     let childRuntimeProjectBase: string | null;
     if (projectDir !== undefined) {
         if (opts.reportUnenumerable && isDynamicPath(projectDir)) {
-            refs.dynamic.push({ sourcePath: projectDir, kind: 'include', note: DYNAMIC_PATH_NOTE });
+            if (!atDeclaredInputCap(refs, fromFile)) {
+                refs.dynamic.push({ sourcePath: projectDir, kind: 'include', note: DYNAMIC_PATH_NOTE });
+            }
             emitIncludeEnvFiles();
             return;
         }
@@ -591,7 +825,7 @@ function processIncludeEntry(
         childRuntimeProjectBase = resolveWithinBase(ctx.runtimeProjectBase, projectDir);
         if (childProjectBase === null || childRuntimeProjectBase === null) {
             if (!opts.reportUnenumerable) {
-                refs.parseErrors.push(`Include project_directory ${projectDir} in ${fromFile} escapes its base`);
+                pushParseError(refs, `Include project_directory ${projectDir} in ${fromFile} escapes its base`);
             } else {
                 if (first?.source != null) {
                     // The main included file was followed (it is inside the base) but its
@@ -648,7 +882,7 @@ function readAndRecurse(
     if (resolved.source === null || resolved.materialized === null) return;
     const nested = opts.read(resolved.source);
     if (nested === null) {
-        refs.parseErrors.push(`${errorLabel} ${resolved.source} is unreadable`);
+        pushParseError(refs, `${errorLabel} ${resolved.source} is unreadable`);
         return;
     }
     parseFile(

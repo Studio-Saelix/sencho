@@ -109,6 +109,24 @@ services:
         expect(envFiles[0].contentSha256).toBeTruthy();
     });
 
+    it('refuses a merge that would hide an inherited dependency', async () => {
+        const clone = makeClone({
+            'compose.yaml': `x-defaults: &defaults
+  env_file: shared.env
+services:
+  web:
+    <<: *defaults
+    image: alpine
+`,
+            'shared.env': 'SHARED=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals.some((r) => r.kind === 'parse-error' && r.actionable)).toBe(true);
+        expect(result.refusals.some((r) => r.reason.includes('YAML merge key hides declaration "env_file"'))).toBe(true);
+        expect(result.inputs.some((i) => i.sourcePath === 'shared.env')).toBe(false);
+    });
+
     it('refuses out-of-bound ../ include targets', async () => {
         const clone = makeClone({
             'compose.yaml': 'include:\n  - ../outside.yaml\nservices: {}\n',

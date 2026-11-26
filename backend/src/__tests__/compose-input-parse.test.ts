@@ -35,7 +35,7 @@ function scalarAliasCompose(serviceCount: number): string {
     return text;
 }
 
-/** Ordinary reuse of a merge anchor, a scalar env_file anchor and a sequence anchor. */
+/** Ordinary reuse of a harmless merge anchor, a scalar env_file anchor and a sequence anchor. */
 function aliasHeavyCompose(serviceCount: number): string {
     let text = `x-defaults: &defaults
   restart: unless-stopped
@@ -505,6 +505,167 @@ describe('YAML alias budget', () => {
         expect(binds.every((b) => b.sourcePath === 'data')).toBe(true);
     });
 
+    it('refuses a nested merge that would hide an inherited declaration', () => {
+        const { result } = parse({
+            'compose.yaml': `x-env: &env shared.env
+x-base: &base
+  env_file: *env
+x-defaults: &defaults
+  <<: *base
+  restart: unless-stopped
+services:
+  web:
+    <<: *defaults
+    image: alpine
+`,
+            'shared.env': 'A=1\n',
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('compose.yaml');
+        expect(result.parseErrors[0]).toContain('YAML merge key hides declaration "env_file"');
+        expect(byKind(result, 'env_file')).toHaveLength(0);
+    });
+
+    it.each([
+        ['services', `x-s: &s
+  web:
+    image: alpine
+    env_file: secret.env
+services:
+  <<: *s
+`],
+        ['configs', `x-c: &c
+  app:
+    file: ./secret.txt
+configs:
+  <<: *c
+services: {}
+`],
+        ['secrets', `x-s: &s
+  app:
+    file: ./secret.txt
+secrets:
+  <<: *s
+services: {}
+`],
+    ])('refuses a merge on the %s container', (container, compose) => {
+        const { result } = parse({ 'compose.yaml': compose, 'secret.env': 'A=1\n', 'secret.txt': 'x' });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain(`YAML merge key hides declaration "${container}"`);
+    });
+
+    it('checks a shared anchor under every role that reaches it', () => {
+        const { result } = parse({
+            'compose.yaml': `x-base: &base
+  context: .
+  dockerfile: Dockerfile.dev
+x-shared: &shared
+  <<: *base
+services:
+  b:
+    image: alpine
+    build: *shared
+  a: *shared
+`,
+            'Dockerfile.dev': 'FROM alpine\n',
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toMatch(/YAML merge key hides declaration "(context|dockerfile)"/);
+    });
+
+    it.each([
+        ['compact', '!!merge <<: *a'],
+        ['verbatim', '!<tag:yaml.org,2002:merge> <<: *a'],
+    ])('refuses an explicitly tagged merge key (%s)', (_label, key) => {
+        const { result } = parse({
+            'compose.yaml': `x-a: &a
+  restart: unless-stopped
+services:
+  web:
+    ${key}
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('tagged YAML merge keys are not supported');
+    });
+
+    it('accepts a container merge that contributes no entries', () => {
+        const { result } = parse({
+            'compose.yaml': `x-empty: &empty {}
+services:
+  <<: *empty
+  web:
+    image: alpine
+`,
+        });
+        expect(result.parseErrors).toEqual([]);
+    });
+
+    const bigAnchorCompose = (serviceCount: number): string => {
+        let compose = 'x-big: &big\n';
+        for (let i = 0; i < 1_000; i++) compose += `  k${i}: v\n`;
+        compose += 'services:\n';
+        for (let i = 0; i < serviceCount; i++) compose += `  s${i}:\n    <<: *big\n    image: alpine\n`;
+        return compose;
+    };
+
+    it('accepts merge-key inspection just below the finite budget', () => {
+        const { result } = parse({ 'compose.yaml': bigAnchorCompose(99) });
+        expect(result.parseErrors).toEqual([]);
+    });
+
+    it('refuses a merge whose key inspection exceeds the finite budget', () => {
+        const { result } = parse({ 'compose.yaml': bigAnchorCompose(120) });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('merge keys exceed the 100000-key inspection budget');
+    });
+
+    it('bounds collected parse errors for repeated invalid declarations', () => {
+        let compose = 'x-e: &e\n';
+        for (let i = 0; i < 10; i++) compose += '  - {}\n';
+        compose += 'services:\n';
+        for (let i = 0; i < 20; i++) compose += `  s${i}:\n    image: alpine\n    env_file: *e\n`;
+        const { result } = parse({ 'compose.yaml': compose });
+        expect(result.parseErrors).toHaveLength(100);
+        expect(result.parseErrors[0]).toContain('env_file entry');
+    });
+
+    it('refuses a merge that would hide a build declaration', () => {
+        const { result } = parse({
+            'compose.yaml': `x-build: &build
+  dockerfile: Dockerfile.dev
+services:
+  web:
+    build:
+      <<: *build
+      context: .
+`,
+            'Dockerfile.dev': 'FROM alpine\n',
+        });
+        expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('YAML merge key hides declaration "dockerfile"');
+    });
+
+    it('keeps an explicit declaration over one inherited through a merge', () => {
+        const { result } = parse({
+            'compose.yaml': `x-base: &base
+  env_file: hidden.env
+services:
+  web:
+    <<: *base
+    image: alpine
+    env_file: explicit.env
+`,
+            'explicit.env': 'A=1\n',
+            'hidden.env': 'B=1\n',
+        });
+        expect(result.parseErrors).toEqual([]);
+        const envFiles = byKind(result, 'env_file');
+        expect(envFiles).toHaveLength(1);
+        expect(envFiles[0].sourcePath).toBe('explicit.env');
+    });
+
     it('applies the same allowance to includes, extends targets and additional layers', () => {
         const r = repo({
             'compose.yaml': `include:
@@ -559,8 +720,9 @@ services:
         for (let i = 0; i < 500; i++) compose += `  s${i}:\n    image: alpine\n    volumes: *v\n`;
         const { result } = parse({ 'compose.yaml': compose });
         expect(result.parseErrors).toHaveLength(1);
+        expect(result.parseErrors[0]).toContain('compose.yaml');
         expect(result.parseErrors[0]).toContain('declared-input cap');
-        expect(result.inputs.length).toBeLessThanOrEqual(100_000);
+        expect(result.inputs.length).toBe(100_000);
     });
 
     it('keeps an unresolved alias an error', () => {
