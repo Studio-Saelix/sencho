@@ -58,6 +58,14 @@ import type {
 // in composeDependencyParse.ts / composePreview.ts.
 const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 
+// Ordinary Compose files share configuration through YAML anchors, and the
+// yaml package's default budget of 100 references refuses them long before
+// they stop being ordinary. Keep a finite budget far above that reuse while
+// retaining the library's nested-expansion accounting (an anchor's cost is
+// multiplied by the aliases nested inside it, so this is not a raw
+// document-wide reference quota and does not disable hostility checks).
+const MAX_COMPOSE_ALIAS_COUNT = 10_000;
+
 // Include/extends recursion bound; deeper graphs are refused as unsupported.
 const MAX_INCLUDE_DEPTH = 16;
 
@@ -451,7 +459,7 @@ function parseFileInner(
 
     let doc: unknown;
     try {
-        doc = YAML.parse(content);
+        doc = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
     } catch (e) {
         refs.parseErrors.push(`Cannot parse compose file ${normalized}: ${e instanceof Error ? e.message : String(e)}`);
         return;

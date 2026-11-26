@@ -77,6 +77,38 @@ describe('discoverFromClone', () => {
         expect(envFiles[0].contentSha256).toBeTruthy();
     });
 
+    it('discovers an aliased dependency across many services reusing anchors', async () => {
+        let compose = `x-defaults: &defaults
+  restart: unless-stopped
+x-env-file: &env-file shared.env
+services:
+`;
+        for (let i = 0; i < 101; i++) {
+            compose += `  svc${i}:
+    <<: *defaults
+    image: alpine
+    env_file: *env-file
+`;
+        }
+        const clone = makeClone({
+            'compose.yaml': compose,
+            'shared.env': 'SHARED=1\n',
+            '.env': 'PROJECT=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals).toEqual([]);
+        const envFiles = result.inputs.filter((i) => i.dependencyKind === 'env_file');
+        expect(envFiles).toHaveLength(1);
+        expect(envFiles[0]).toMatchObject({
+            sourcePath: 'shared.env',
+            materializedPath: 'shared.env',
+            ownership: 'managed',
+            state: 'present',
+        });
+        expect(envFiles[0].contentSha256).toBeTruthy();
+    });
+
     it('refuses out-of-bound ../ include targets', async () => {
         const clone = makeClone({
             'compose.yaml': 'include:\n  - ../outside.yaml\nservices: {}\n',
