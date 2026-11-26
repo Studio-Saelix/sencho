@@ -4,6 +4,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME } from './helpers/setupTestDb
 import { DatabaseService } from '../services/DatabaseService';
 import {
   NodeBootstrapOperationService,
+  OPERATION_HISTORY_LIMIT,
   stablePlanDigest,
   type ExecuteRequest,
 } from '../services/nodeBootstrap/NodeBootstrapOperationService';
@@ -264,7 +265,7 @@ class FakeTunnels extends EventEmitter {
 let tmpDir: string;
 let db: DatabaseService;
 
-/** Every row, held ones first, as the tests need to find a run by its host. */
+/** Every held run and every finished run whose node still exists (or never registered one), held ones first, as the tests need to find a run by its host. */
 function allOperations() {
   return [...db.listActiveNodeBootstrapOperations(10_000), ...db.listFinishedNodeBootstrapOperations(500)];
 }
@@ -2265,5 +2266,103 @@ describe('bootstrap operations: B2 a failed read of the previous compose file re
     expect(newToken).toBeNull();
     if (h.service.get(op.id).active) h.service.release(op.id, AUDIT);
     db.deleteNode(nodeId);
+  });
+});
+
+describe('bootstrap operations: a finished run whose node was deleted is not listed', () => {
+  let rowSerial = 0;
+
+  function addTestNode(label: string): number {
+    return db.addNode({ name: `listed-${label}-${rowSerial}`, type: 'remote', compose_dir: '/opt/docker/sencho', is_default: false, api_url: 'http://192.168.1.98:1852', api_token: 't', mode: 'proxy' });
+  }
+
+  /** A finished run row written directly: `at` orders it (a higher one is newer), `nodeId` is the node it registered, if any. */
+  function insertRun(at: number, nodeId: number | null): string {
+    rowSerial += 1;
+    const id = `00000000-0000-4000-9000-${String(rowSerial).padStart(12, '0')}`;
+    db.insertNodeBootstrapOperation({
+      id, target_key: `listed-${rowSerial}.example.com:22`, host: `listed-${rowSerial}.example.com`, port: 22, username: 'ubuntu', address: '192.168.1.80',
+      target_name: `listed-${rowSerial}`, host_key_fingerprint: `SHA256:listed-${rowSerial}`, compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: TEST_USERNAME, approved_at: at, attempt: 1, state: 'enrolled', stage: null, step: null, node_id: nodeId,
+      changes_made: 1, agent_started: 1, active: 0, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: at, updated_at: at, finished_at: at,
+    });
+    return id;
+  }
+
+  const listedIds = (h: Harness) => h.service.list().operations.map((op) => op.id);
+
+  beforeEach(() => {
+    for (const row of db.listActiveNodeBootstrapOperations(10_000)) db.transitionNodeBootstrapOperation(row.id, [row.state], { active: 0 }, Date.now());
+    db.getDb().prepare('DELETE FROM node_bootstrap_events').run();
+    db.getDb().prepare('DELETE FROM node_bootstrap_operations WHERE active = 0').run();
+  });
+
+  it('stops listing an enrolled run once its node is deleted, and still reads it by id', async () => {
+    const h = harness();
+    const { request } = approve(h);
+    const started = h.service.start(request, context());
+    await h.service.settled();
+    const enrolled = h.service.get(started.id);
+    expect(enrolled.state).toBe('enrolled');
+    expect(listedIds(h)).toContain(started.id);
+
+    db.deleteNode(enrolled.nodeId as number);
+
+    expect(listedIds(h)).not.toContain(started.id);
+    expect(h.service.get(started.id)).toMatchObject({ id: started.id, state: 'enrolled', nodeId: enrolled.nodeId });
+    expect(h.service.get(started.id).events.length).toBeGreaterThan(0);
+  });
+
+  it('keeps listing an enrolled run whose node still exists', () => {
+    const h = harness();
+    const nodeId = addTestNode('live');
+    const id = insertRun(Date.now(), nodeId);
+    db.deleteNode(addTestNode('other'));
+    expect(listedIds(h)).toContain(id);
+    db.deleteNode(nodeId);
+  });
+
+  it('keeps listing a finished run that never registered a node, after an unrelated node is deleted', () => {
+    const h = harness();
+    const id = insertRun(Date.now(), null);
+    db.deleteNode(addTestNode('unrelated'));
+    expect(listedIds(h)).toContain(id);
+  });
+
+  it('keeps listing a hold whose node was deleted, with retry and release still offered', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const { request } = approve(h);
+    const started = h.service.start(request, context());
+    await h.service.settled();
+    const stopped = h.service.get(started.id);
+    expect(stopped).toMatchObject({ state: 'partial', active: true });
+    expect(stopped.nodeId).not.toBeNull();
+    db.deleteNode(stopped.nodeId as number);
+
+    const listed = h.service.list().operations.find((op) => op.id === started.id);
+    expect(listed).toMatchObject({ active: true, nodeId: stopped.nodeId });
+    expect(listed?.actions).toMatchObject({ retry: true, release: true });
+
+    // Released after its node was deleted, the run is finished and leaves the list.
+    h.service.release(started.id, AUDIT);
+    expect(h.service.get(started.id).active).toBe(false);
+    expect(listedIds(h)).not.toContain(started.id);
+  });
+
+  it('fills the history with runs that are shown when the newest finished runs belong to a deleted node', () => {
+    const h = harness();
+    const deleted = addTestNode('deleted');
+    const live = addTestNode('live');
+    const base = Date.now();
+    const shown = Array.from({ length: OPERATION_HISTORY_LIMIT }, (_, index) => insertRun(base + index, index % 2 === 0 ? live : null));
+    const hidden = Array.from({ length: 5 }, (_, index) => insertRun(base + OPERATION_HISTORY_LIMIT + index, deleted));
+    db.deleteNode(deleted);
+
+    const ids = listedIds(h);
+    expect(ids).toHaveLength(OPERATION_HISTORY_LIMIT);
+    expect(new Set(ids)).toEqual(new Set(shown));
+    for (const id of hidden) expect(ids).not.toContain(id);
+    db.deleteNode(live);
   });
 });

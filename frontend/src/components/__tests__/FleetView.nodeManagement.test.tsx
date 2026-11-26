@@ -8,10 +8,12 @@ const mocks = vi.hoisted(() => ({
   checkUpdates: vi.fn(),
   nodeManagement: null as NodeManagementActions | null,
   auth: { isAdmin: true, can: () => true as boolean },
+  experimental: true,
+  experimentalReady: true,
 }));
 
 vi.mock('@/hooks/useExperimental', () => ({
-  useExperimental: () => ({ experimental: false, experimentalReady: true }),
+  useExperimental: () => ({ experimental: mocks.experimental, experimentalReady: mocks.experimentalReady }),
 }));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => mocks.auth,
@@ -131,6 +133,8 @@ describe('FleetView node management', () => {
     vi.clearAllMocks();
     mocks.nodeManagement = null;
     mocks.auth = { isAdmin: true, can: () => true };
+    mocks.experimental = true;
+    mocks.experimentalReady = true;
   });
 
   it('opens the existing Add node modal in place instead of navigating to Settings', async () => {
@@ -171,5 +175,19 @@ describe('FleetView node management', () => {
     renderFleet();
     expect(mocks.nodeManagement?.canConnectExisting).toBe(true);
     expect(mocks.nodeManagement?.canBootstrapServer).toBe(false);
+  });
+
+  it('hides Bootstrap from an admin unless the experimental flag is on', () => {
+    mocks.experimental = false;
+    renderFleet();
+    expect(mocks.nodeManagement?.canBootstrapServer).toBe(false);
+    expect(screen.queryByRole('button', { name: 'call-bootstrap' })).toBeNull();
+  });
+
+  it('hides Bootstrap until the experimental flag resolves', () => {
+    mocks.experimentalReady = false;
+    renderFleet();
+    expect(mocks.nodeManagement?.canBootstrapServer).toBe(false);
+    expect(screen.queryByRole('button', { name: 'call-bootstrap' })).toBeNull();
   });
 });

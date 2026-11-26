@@ -7,8 +7,8 @@ import type { Node } from '@/context/NodeContext';
 // the test renders the panel in isolation and can drive the role/permission
 // inputs that gate the write affordances.
 const useAuthMock = vi.fn();
-const { experimentalMock, apiFetchMock, nodesRef } = vi.hoisted(() => ({
-  experimentalMock: vi.fn(() => ({ experimental: false, experimentalReady: true })),
+const { experimentalState, apiFetchMock, nodesRef } = vi.hoisted(() => ({
+  experimentalState: { experimental: false, experimentalReady: true },
   apiFetchMock: vi.fn(),
   nodesRef: { current: [] as unknown[] },
 }));
@@ -31,8 +31,8 @@ nodesRef.current = [testNode];
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: nodesRef.current, refreshNodes: vi.fn(() => Promise.resolve()), refreshNodeMeta: vi.fn() }),
 }));
-vi.mock('@/hooks/useExperimental', () => ({ useExperimental: () => experimentalMock() }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
+vi.mock('@/hooks/useExperimental', () => ({ useExperimental: () => experimentalState }));
 vi.mock('@/lib/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
@@ -67,7 +67,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
   nodesRef.current = [testNode];
-  experimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+  experimentalState.experimental = false;
+  experimentalState.experimentalReady = true;
 });
 
 describe('NodeManager write-affordance gating', () => {
@@ -92,6 +93,33 @@ describe('NodeManager write-affordance gating', () => {
     expect(screen.getByText('Generate Node Token')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit node' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete node' })).toBeInTheDocument();
+    // Bootstrap is experimental, so an admin sees it only when the flag is on.
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
+  });
+
+  it('shows Bootstrap to an admin when the experimental flag is on', () => {
+    experimentalState.experimental = true;
+    useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.getByRole('button', { name: 'Bootstrap new Linux server' })).toBeInTheDocument();
+  });
+
+  it('hides Bootstrap while the experimental flag is still loading', () => {
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = false;
+    useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
+  });
+
+  it('hides Bootstrap from a node-admin even when the experimental flag is on', () => {
+    experimentalState.experimental = true;
+    useAuthMock.mockReturnValue({ isAdmin: false, can: canFor('node:manage') });
+    render(<NodeManager />);
+
+    expect(screen.queryByRole('button', { name: 'Bootstrap new Linux server' })).not.toBeInTheDocument();
   });
 
   it('lets a node-admin manage nodes but hides the admin-only token card', () => {
@@ -129,7 +157,8 @@ describe('NodeManager sealing key affordance', () => {
 
   it('with the flag on, offers Sealing key on local and remote rows instead of the Seal line', () => {
     nodesRef.current = [localNode, pinnedRemote];
-    experimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = true;
     useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
     render(<NodeManager />);
 
@@ -140,7 +169,8 @@ describe('NodeManager sealing key affordance', () => {
 
   it('with the flag on, opens the sheet for the row and reads that node', async () => {
     nodesRef.current = [localNode, pinnedRemote];
-    experimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = true;
     useAuthMock.mockReturnValue({ isAdmin: true, can: canFor('node:manage') });
     apiFetchMock.mockImplementation((path: string) =>
       path === '/nodes/1/sealing-key'
@@ -154,7 +184,8 @@ describe('NodeManager sealing key affordance', () => {
 
   it('with the flag on, hides the trigger from a session that cannot manage the node', () => {
     nodesRef.current = [localNode, pinnedRemote];
-    experimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+    experimentalState.experimental = true;
+    experimentalState.experimentalReady = true;
     useAuthMock.mockReturnValue({ isAdmin: false, can: canFor() });
     render(<NodeManager />);
 

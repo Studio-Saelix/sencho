@@ -45,6 +45,9 @@ export function NodeManager() {
   // stay isAdmin-only to match their requireAdmin backend guards.
   const canManageNodes = isAdmin || can('node:manage');
   const { nodes, refreshNodes, refreshNodeMeta } = useNodes();
+  const { experimental, experimentalReady } = useExperimental();
+  // Bootstrap is experimental: hidden until /meta confirms the flag.
+  const canBootstrapServer = isAdmin && experimentalReady && experimental;
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
@@ -73,7 +76,6 @@ export function NodeManager() {
   const { statuses: syncStatuses, refresh: refreshSyncStatuses } = useFleetSyncStatus();
   const [resettingAnchor, setResettingAnchor] = useState<number | null>(null);
   const [resettingSealPin, setResettingSealPin] = useState<number | null>(null);
-  const { experimental } = useExperimental();
   // The node stays set after close so the sheet keeps its content while it animates out.
   const [sealingKeyNodeId, setSealingKeyNodeId] = useState<number | null>(null);
   const [sealingKeyOpen, setSealingKeyOpen] = useState(false);
@@ -222,7 +224,7 @@ export function NodeManager() {
       {canManageNodes && (
         <>
           <div className="flex justify-end gap-2">
-            {isAdmin && (
+            {canBootstrapServer && (
               <Button size="sm" variant="outline" className="shrink-0" onClick={() => setBootstrapOpen(true)}>
                 Bootstrap new Linux server
               </Button>
@@ -607,7 +609,7 @@ export function NodeManager() {
           onPinCleared={() => { void refreshNodes(); }}
         />
       )}
-      {isAdmin && (
+      {canBootstrapServer && (
         <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} onNodesChanged={() => { void refreshNodes(); }} />
       )}
     </div>

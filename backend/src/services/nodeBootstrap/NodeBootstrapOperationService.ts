@@ -556,7 +556,9 @@ export class NodeBootstrapOperationService {
 
   /**
    * The runs that still hold their server, a page at a time (newest first),
-   * and with the first page the latest finished ones. A hold is the way back
+   * and with the first page the latest finished ones (a finished run whose
+   * node was deleted is not listed, as it has nothing left to come back to; a
+   * hold is listed whether or not its node exists). A hold is the way back
    * to a run that needs recovery, so every one is reachable: each page names
    * where the next begins, and a page reads one row more than it returns (to
    * know whether another follows) and no others: the database seeks to the
