@@ -608,7 +608,23 @@ export class ComposeService {
       // Same scope as the other node-side guards: a remote node's operation
       // runs on that node, which applies this check itself.
       if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
-      const result = await render();
+      let result: Awaited<ReturnType<SharedRender>>;
+      try {
+        result = await render();
+      } catch (error) {
+        if (cleanup.kind === 'teardown') {
+          // renderConfig rejects only when the docker CLI cannot be spawned.
+          // The teardown command cannot run either, so it can clean up no
+          // hook container and there is nothing to refuse.
+          console.warn(
+            '[ComposeService] Compose cannot be spawned for %s, so the teardown cannot clean up hook containers:',
+            sanitizeForLog(stackName),
+            sanitizeForLog(getErrorMessage(error, 'unknown')),
+          );
+          return null;
+        }
+        throw error;
+      }
       // Sencho's own refusal of the Compose inputs is a refusal of the
       // operation itself, not a missing model: keep its type and wording so
       // the route maps it like every other lifecycle caller.

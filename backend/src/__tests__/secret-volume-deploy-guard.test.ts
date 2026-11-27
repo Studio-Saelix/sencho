@@ -1649,6 +1649,18 @@ describe('ComposeService secret volume guard', () => {
       expect(mutations()).toEqual([]);
     });
 
+    it.each(['runDown', 'downStack'] as const)('%s still takes the stack down when Compose cannot be spawned', async (method) => {
+      // A render rejection means the docker CLI cannot be spawned, so the
+      // teardown cannot run either and can clean up no hook container.
+      h.endpointReadsRender = false;
+      vi.spyOn(ComposeService.prototype, 'renderConfig').mockRejectedValue(new Error('Docker CLI unavailable on this node'));
+
+      await svc()[method](stack);
+
+      expect(mutations()).toHaveLength(1);
+      expect(events).not.toContain('inspect:c-hook');
+    });
+
     it('refuses a hook holder on a plain HTTP down too', async () => {
       renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
       retainedHook();
