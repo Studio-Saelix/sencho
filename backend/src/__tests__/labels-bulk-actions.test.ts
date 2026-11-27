@@ -7,6 +7,7 @@ let mockFsStacks: string[] = [];
 const deployStack = vi.fn();
 const evaluateDockerEndpoint = vi.fn();
 const evaluateSecretVolumeUse = vi.fn();
+const evaluateHookVolumeCleanup = vi.fn();
 const createSharedRender = vi.fn(() => vi.fn());
 const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
@@ -25,7 +26,7 @@ vi.mock('../services/FileSystemService', () => ({
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
-    getInstance: vi.fn(() => ({ deployStack, evaluateDockerEndpoint, evaluateSecretVolumeUse, createSharedRender })),
+    getInstance: vi.fn(() => ({ deployStack, evaluateDockerEndpoint, evaluateSecretVolumeUse, evaluateHookVolumeCleanup, createSharedRender })),
   },
 }));
 
@@ -81,6 +82,7 @@ beforeEach(() => {
   deployStack.mockResolvedValue(undefined);
   evaluateDockerEndpoint.mockResolvedValue(null);
   evaluateSecretVolumeUse.mockResolvedValue(null);
+  evaluateHookVolumeCleanup.mockResolvedValue(null);
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);

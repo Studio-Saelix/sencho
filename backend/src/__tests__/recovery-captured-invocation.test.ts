@@ -43,6 +43,7 @@ describe('captured invocation on recovery Compose args', () => {
     const { ComposeService } = await import('../services/ComposeService');
     vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
     vi.spyOn(ComposeService.prototype, 'evaluateSecretVolumeUse').mockResolvedValue(null);
+    vi.spyOn(ComposeService.prototype, 'evaluateHookVolumeCleanup').mockResolvedValue(null);
   });
 
   afterEach(() => {

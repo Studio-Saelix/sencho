@@ -72,6 +72,7 @@ afterAll(() => {
 // one first; secret-volume-deploy-guard.test.ts covers it.
 function passSecretVolumeGuard(): void {
   vi.spyOn(ComposeService.prototype, 'evaluateSecretVolumeUse').mockResolvedValue(null);
+  vi.spyOn(ComposeService.prototype, 'evaluateHookVolumeCleanup').mockResolvedValue(null);
 }
 
 beforeEach(() => {

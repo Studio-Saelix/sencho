@@ -274,6 +274,25 @@ describe('ComposeService secret volume guard', () => {
       .run(stackName, kind, null, Date.now());
   }
 
+  /**
+   * The labels Compose stamps on a service container. Compose lists ordinary
+   * containers by a present config hash and `oneoff=False`, so a double without
+   * them is not a container Compose's teardown selects.
+   */
+  function composeLabels(
+    project: string,
+    service: string,
+    extra: Record<string, string> = {},
+  ): Record<string, string> {
+    return {
+      'com.docker.compose.project': project,
+      'com.docker.compose.service': service,
+      'com.docker.compose.config-hash': 'test-config-hash',
+      'com.docker.compose.oneoff': 'False',
+      ...extra,
+    };
+  }
+
   async function failureOf(run: Promise<unknown>): Promise<unknown> {
     return run.then(() => null, (error: unknown) => error);
   }
@@ -691,7 +710,7 @@ describe('ComposeService secret volume guard', () => {
         containers = [{
           Id: 'c-web',
           Names: [`/${project}-web-1`],
-          Labels: { 'com.docker.compose.project': project, 'com.docker.compose.service': 'web' },
+          Labels: composeLabels(project, 'web'),
           Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
         }];
         inspectFor = {
@@ -857,13 +876,13 @@ describe('ComposeService secret volume guard', () => {
             {
               Id: 'c-web',
               Names: [`/${donorProject}-${donorService}-1`],
-              Labels: { 'com.docker.compose.project': donorProject, 'com.docker.compose.service': donorService },
+              Labels: composeLabels(donorProject, donorService),
               Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
             },
             {
               Id: 'c-side',
               Names: [`/${stack}-side-1`],
-              Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+              Labels: composeLabels(stack, 'side'),
               Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
             },
           ];
@@ -932,7 +951,7 @@ describe('ComposeService secret volume guard', () => {
           containers = [{
             Id: 'c-side',
             Names: [`/${stack}-side-1`],
-            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Labels: composeLabels(stack, 'side'),
             Mounts: [{ Type: 'volume', Name: tok, Destination: '/token' }],
           }];
           inspectFor = { 'c-side': { Id: 'c-side', Mounts: [{ Type: 'volume', Name: tok, Destination: '/token' }], HostConfig: { VolumesFrom: ['retired-donor:ro'] } } };
@@ -949,7 +968,7 @@ describe('ComposeService secret volume guard', () => {
           containers = [{
             Id: 'c-side',
             Names: [`/${stack}-side-1`],
-            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Labels: composeLabels(stack, 'side'),
             Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
           }];
           inspectFor = { 'c-side': { Id: 'c-side', Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }], HostConfig: { VolumesFrom: ['retired-donor:ro'] } } };
@@ -991,15 +1010,57 @@ describe('ComposeService secret volume guard', () => {
           expect(mutations()).toEqual([]);
         });
 
-        it('treats a 64-hex volume the daemon labels as named without reading the container', async () => {
+        it.each([
+          ['ordinary', null],
+          ['edge-tunnel', 'edge-tunnel'],
+          ['released-edge-tunnel', 'released-edge-tunnel'],
+        ] as const)('refuses a legacy anonymous 64-hex volume without the automatic label through both methods (%s)', async (_what, kind) => {
+          // A daemon older than the anonymous label created anonymous volumes
+          // with a 64-hex name and stored no label at all. The upgrade keeps
+          // the metadata, and removal still follows the mount's source, so the
+          // missing label is not evidence that the volume was created by name.
+          if (kind) recordManagedKind(stack, kind);
           renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
           labelledVolumes = [{ Name: namedId, Labels: { 'io.sencho.secret': '' } }];
           holder(stack, namedId);
           inspectFor['c-web'] = { HostConfig: {} };
 
-          await svc().runDown(stack, { removeVolumes: true });
+          for (const method of ['runDown', 'downStack'] as const) {
+            const error = await failureOf(svc()[method](stack, { removeVolumes: true }));
 
-          expect(events).not.toContain('inspect:c-web');
+            expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+            expect((error as Error).message).toContain('mounts without naming it');
+          }
+          expect(events).toContain('inspect:c-web');
+          expect(mutations()).toEqual([]);
+        });
+
+        it.each([
+          ['ordinary', null],
+          ['edge-tunnel', 'edge-tunnel'],
+          ['released-edge-tunnel', 'released-edge-tunnel'],
+        ] as const)('refuses a legacy anonymous mount inherited through volumes_from (%s)', async (_what, kind) => {
+          if (kind) recordManagedKind(stack, kind);
+          renderFor = () => ({ name: stack, services: { side: { image: 'alpine:3.20', volumes_from: ['container:tunnel'] } } });
+          labelledVolumes = [{ Name: namedId, Labels: { 'io.sencho.secret': '' } }];
+          donorAndInheritor(namedId, true, 'tunnel', 'edge');
+
+          for (const method of ['runDown', 'downStack'] as const) {
+            expect(await failureOf(svc()[method](stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+          }
+          expect(mutations()).toEqual([]);
+        });
+
+        it.each(['runDown', 'downStack'] as const)('%s permits a genuine named 64-hex volume whose spec names it', async (method) => {
+          // A 64-hex name stays a candidate, and the mount's own spec is what
+          // proves the volume was created by name and survives removal.
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [{ Name: namedId, Labels: { 'io.sencho.secret': '' } }];
+          holder(stack, namedId, true);
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(events).toContain('inspect:c-web');
           expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
         });
 
@@ -1024,7 +1085,7 @@ describe('ComposeService secret volume guard', () => {
           containers = [{
             Id: 'c-side',
             Names: [`/${stack}-side-1`],
-            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Labels: composeLabels(stack, 'side'),
             Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
           }];
           const mounts = [{ Type: 'volume' as const, Name: namedId, Destination: '/token' }];
@@ -1059,7 +1120,7 @@ describe('ComposeService secret volume guard', () => {
           containers = [{
             Id: 'c-side',
             Names: [`/${stack}-side-1`],
-            Labels: { 'com.docker.compose.project': stack, 'com.docker.compose.service': 'side' },
+            Labels: composeLabels(stack, 'side'),
             Mounts: [{ Type: 'volume', Name: namedId, Destination: '/token' }],
           }];
           const mounts = [{ Type: 'volume' as const, Name: namedId, Destination: '/token' }];
@@ -1141,6 +1202,7 @@ describe('ComposeService secret volume guard', () => {
       });
 
       describe('a container the down does not remove with its volumes', () => {
+        const ordinary = { 'com.docker.compose.config-hash': 'test-config-hash', 'com.docker.compose.oneoff': 'False' };
         function oneHolder(labels: Record<string, string>) {
           containers = [{
             Id: 'c-held',
@@ -1152,14 +1214,14 @@ describe('ComposeService secret volume guard', () => {
         }
 
         it.each([
-          ['runDown', 'a service the project no longer declares', { 'com.docker.compose.service': 'retired' }],
-          ['downStack', 'a service the project no longer declares', { 'com.docker.compose.service': 'retired' }],
-          ['runDown', 'a service the project does not enable', { 'com.docker.compose.service': 'debug' }],
-          ['downStack', 'a service the project does not enable', { 'com.docker.compose.service': 'debug' }],
-          ['downStack', 'a one-off of a service the project no longer declares', { 'com.docker.compose.service': 'retired', 'com.docker.compose.oneoff': 'True' }],
-          ['runDown', 'a one-off of a service the project no longer declares', { 'com.docker.compose.service': 'retired', 'com.docker.compose.oneoff': 'True' }],
-          ['runDown', 'no service label', {}],
-          ['downStack', 'no service label', {}],
+          ['runDown', 'a service the project no longer declares', { ...ordinary, 'com.docker.compose.service': 'retired' }],
+          ['downStack', 'a service the project no longer declares', { ...ordinary, 'com.docker.compose.service': 'retired' }],
+          ['runDown', 'a service the project does not enable', { ...ordinary, 'com.docker.compose.service': 'debug' }],
+          ['downStack', 'a service the project does not enable', { ...ordinary, 'com.docker.compose.service': 'debug' }],
+          ['downStack', 'a one-off of a service the project no longer declares', { ...ordinary, 'com.docker.compose.service': 'retired', 'com.docker.compose.oneoff': 'True' }],
+          ['runDown', 'a one-off of a service the project no longer declares', { ...ordinary, 'com.docker.compose.service': 'retired', 'com.docker.compose.oneoff': 'True' }],
+          ['runDown', 'no service label', ordinary],
+          ['downStack', 'no service label', ordinary],
         ] as const)('%s leaves an orphan with %s alone, as Compose keeps its volumes', async (method, _what, labels) => {
           renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
           labelledVolumes = [ANON];
@@ -1171,11 +1233,42 @@ describe('ComposeService secret volume guard', () => {
           expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
         });
 
+        it.each(['runDown', 'downStack'] as const)('%s leaves a container without a config hash alone, as Compose does not list it', async (method) => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'False' });
+
+          await svc()[method](stack, { removeVolumes: true });
+
+          expect(events).not.toContain('inspect:c-held');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('lets runDown through for a container without a oneoff label, which a plain down does not list', async () => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.config-hash': 'test-config-hash' });
+
+          await svc().runDown(stack, { removeVolumes: true });
+
+          expect(events).not.toContain('inspect:c-held');
+          expect(mutations()).toEqual([expect.arrayContaining(['down', '--volumes'])]);
+        });
+
+        it('refuses downStack for a container without a oneoff label, which --remove-orphans lists with its volumes', async () => {
+          renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+          labelledVolumes = [ANON];
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.config-hash': 'test-config-hash' });
+
+          expect(await failureOf(svc().downStack(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+          expect(mutations()).toEqual([]);
+        });
+
         it.each(['edge-tunnel', 'released-edge-tunnel'] as const)('ignores an orphan of the recorded %s consumer, with its volumes kept', async (kind) => {
           recordManagedKind(stack, kind);
           renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
           labelledVolumes = [ANON];
-          oneHolder({ 'com.docker.compose.service': 'retired' });
+          oneHolder({ ...ordinary, 'com.docker.compose.service': 'retired' });
 
           await svc().downStack(stack, { removeVolumes: true });
 
@@ -1186,7 +1279,7 @@ describe('ComposeService secret volume guard', () => {
         it('lets runDown through for a one-off run container, which a plain down never lists', async () => {
           renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
           labelledVolumes = [ANON];
-          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' });
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.config-hash': 'test-config-hash', 'com.docker.compose.oneoff': 'True' });
 
           await svc().runDown(stack, { removeVolumes: true });
 
@@ -1196,7 +1289,7 @@ describe('ComposeService secret volume guard', () => {
         it('refuses downStack for a one-off run container of a declared service, which --remove-orphans removes with its volumes', async () => {
           renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
           labelledVolumes = [ANON];
-          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' });
+          oneHolder({ 'com.docker.compose.service': 'web', 'com.docker.compose.config-hash': 'test-config-hash', 'com.docker.compose.oneoff': 'True' });
 
           expect(await failureOf(svc().downStack(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
           expect(mutations()).toEqual([]);
@@ -1267,6 +1360,396 @@ describe('ComposeService secret volume guard', () => {
     });
   });
 
+  describe('an environment-controlled orphan policy', () => {
+    const stack = 'guard-down-env-orphans';
+    const ANON = 'a'.repeat(64);
+    let savedOrphans: string | undefined;
+    const composeDown = () => mutations().find((args) => args.includes('down'));
+
+    function oneOffHolder(volume: string, service = 'web', project = stack) {
+      containers = [{
+        Id: 'c-oneoff',
+        Names: [`/${project}-${service}-run-abc`],
+        Labels: composeLabels(project, service, { 'com.docker.compose.oneoff': 'True' }),
+        Mounts: [{ Type: 'volume', Name: volume, Destination: '/token' }],
+      }];
+      inspectFor = { 'c-oneoff': { HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } } };
+    }
+
+    beforeEach(() => {
+      writeStack(stack);
+      savedOrphans = process.env.COMPOSE_REMOVE_ORPHANS;
+      delete process.env.COMPOSE_REMOVE_ORPHANS;
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      labelledVolumes = [ANON];
+    });
+
+    afterEach(() => {
+      if (savedOrphans === undefined) delete process.env.COMPOSE_REMOVE_ORPHANS;
+      else process.env.COMPOSE_REMOVE_ORPHANS = savedOrphans;
+    });
+
+    it.each(['1', 'true', 'TRUE', 'y'])('runDown refuses a one-off of a declared service under COMPOSE_REMOVE_ORPHANS=%s', async (value) => {
+      process.env.COMPOSE_REMOVE_ORPHANS = value;
+      oneOffHolder(ANON);
+
+      const error = await failureOf(svc().runDown(stack, { removeVolumes: true }));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('mounts without naming it');
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['0', '0'],
+      ['false', 'false'],
+      ['yes', 'yes'],
+    ] as const)('runDown passes no --remove-orphans and leaves a one-off alone when the value is %s', async (_what, value) => {
+      if (value !== undefined) process.env.COMPOSE_REMOVE_ORPHANS = value;
+      oneOffHolder(ANON);
+
+      await svc().runDown(stack, { removeVolumes: true });
+
+      const down = composeDown();
+      expect(down?.slice(down.indexOf('down'))).toEqual(['down', '--volumes']);
+    });
+
+    it('runDown passes the flag the environment enables, and keeps a genuine orphan volumes', async () => {
+      process.env.COMPOSE_REMOVE_ORPHANS = '1';
+      oneOffHolder(ANON, 'retired');
+
+      await svc().runDown(stack, { removeVolumes: true });
+
+      const down = composeDown();
+      expect(down?.slice(down.indexOf('down'))).toEqual(['down', '--volumes', '--remove-orphans']);
+      expect(events).not.toContain('inspect:c-oneoff');
+    });
+
+    it.each(['edge-tunnel', 'released-edge-tunnel'] as const)('runDown refuses a one-off of the recorded %s consumer under the environment default', async (kind) => {
+      process.env.COMPOSE_REMOVE_ORPHANS = '1';
+      recordManagedKind(stack, kind);
+      oneOffHolder(ANON);
+
+      expect(await failureOf(svc().runDown(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it('downStack removes the one-off with its volumes whatever the environment says', async () => {
+      process.env.COMPOSE_REMOVE_ORPHANS = 'false';
+      oneOffHolder(ANON);
+
+      expect(await failureOf(svc().downStack(stack, { removeVolumes: true }))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it('refuses the HTTP down the environment would widen, before it mutates', async () => {
+      process.env.COMPOSE_REMOVE_ORPHANS = '1';
+      oneOffHolder(ANON);
+
+      const res = await request(app).post(`/api/stacks/${stack}/down?removeVolumes=true`).set('Cookie', cookie);
+
+      expect(res.status).toBe(423);
+      expect(res.body.code).toBe('secret_volume_protected');
+      expect(mutations()).toEqual([]);
+    });
+  });
+
+  describe('a retained pre_start hook container', () => {
+    const stack = 'guard-down-hooks';
+    const ANON = 'b'.repeat(64);
+    const composeDown = () => mutations().find((args) => args.includes('down'));
+
+    /**
+     * A retained hook of `service` that inherits `volume` from the service
+     * container: `named` makes the donor's create spec name the volume, the
+     * only way Docker keeps it when the hook goes.
+     */
+    function retainedHook(options: { service?: string; named?: boolean; hook?: string; volume?: string } = {}) {
+      const service = options.service ?? 'web';
+      const volume = options.volume ?? ANON;
+      const hook = options.hook ?? 'pre_start';
+      const mounts = [{ Type: 'volume' as const, Name: volume, Destination: '/token' }];
+      containers = [
+        {
+          Id: 'c-service',
+          Names: [`/${stack}-${service}-1`],
+          Labels: composeLabels(stack, service),
+          Mounts: mounts,
+        },
+        {
+          Id: 'c-hook',
+          Names: [`/${stack}-${service}-${hook}-0`],
+          Labels: {
+            'com.docker.compose.project': stack,
+            'com.docker.compose.service': service,
+            'com.docker.compose.hook': hook,
+            'com.docker.compose.hook-index': '0',
+          },
+          Mounts: mounts,
+        },
+      ];
+      const donor = {
+        Id: 'c-service',
+        Mounts: mounts,
+        HostConfig: { Mounts: [{ Type: 'volume', ...(options.named ? { Source: volume } : {}), Target: '/token' }] },
+      };
+      inspectFor = {
+        'c-service': donor,
+        [`${stack}-${service}-1`]: donor,
+        'c-hook': { Id: 'c-hook', Mounts: mounts, HostConfig: { VolumesFrom: ['c-service:rw'] } },
+      };
+      labelledVolumes = [volume];
+    }
+
+    beforeEach(() => writeStack(stack));
+
+    it.each([
+      ['ordinary', null],
+      ['edge-tunnel', 'edge-tunnel'],
+      ['released-edge-tunnel', 'released-edge-tunnel'],
+    ] as const)('both down methods refuse an anonymous hook mount of the %s kind even without --volumes', async (_what, kind) => {
+      if (kind) recordManagedKind(stack, kind);
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook();
+
+      for (const method of ['runDown', 'downStack'] as const) {
+        const error = await failureOf(svc()[method](stack));
+
+        expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+        expect((error as Error).message).toContain('retained pre_start hook container');
+      }
+      expect(events).toContain('inspect:c-hook');
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s sweeps a hook of a service the stack no longer declares', async (method) => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook({ service: 'retired' });
+
+      const error = await failureOf(svc()[method](stack));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s sweeps a hook of a service the project does not enable', async (method) => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook({ service: 'debug' });
+
+      expect(await failureOf(svc()[method](stack))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s permits a hook whose inherited mount the donor names', async (method) => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook({ named: true });
+
+      await svc()[method](stack);
+
+      const down = composeDown();
+      expect(down?.slice(down.indexOf('down'))).toEqual(method === 'runDown' ? ['down'] : ['down', '--remove-orphans']);
+      expect(events).toContain('inspect:c-hook');
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s does not select another hook type, which Compose leaves to the service path', async (method) => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook({ hook: 'post_stop' });
+
+      await svc()[method](stack);
+
+      expect(mutations()).toHaveLength(1);
+      expect(events).not.toContain('inspect:c-hook');
+    });
+
+    it('finds the hook under the project name Compose runs the stack as', async () => {
+      renderFor = () => ({ name: 'edge-project', services: { web: { image: 'alpine:3.20' } } });
+      containers = [{
+        Id: 'c-hook',
+        Names: ['/edge-project-web-pre_start-0'],
+        Labels: {
+          'com.docker.compose.project': 'edge-project',
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.hook': 'pre_start',
+          'com.docker.compose.hook-index': '0',
+        },
+        Mounts: [{ Type: 'volume', Name: ANON, Destination: '/token' }],
+      }];
+      inspectFor = {
+        'c-hook': { Id: 'c-hook', Mounts: [], HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } },
+      };
+      labelledVolumes = [ANON];
+
+      expect(await failureOf(svc().runDown(stack))).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: ['com.docker.compose.project=edge-project'] } });
+      expect(mutations()).toEqual([]);
+    });
+
+    it('ignores a hook of another project that happens to carry the stack name', async () => {
+      renderFor = () => ({ name: 'edge-project', services: { web: { image: 'alpine:3.20' } } });
+      retainedHook();
+      // `retainedHook` labels the containers with the stack name, not the project Compose runs.
+      await svc().runDown(stack);
+
+      expect(events).not.toContain('inspect:c-hook');
+      expect(mutations()).toHaveLength(1);
+    });
+
+    it('refuses the scheduled down path too', async () => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook();
+
+      const error = await failureOf(svc().runCommand(stack, 'down'));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect(mutations()).toEqual([]);
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s resolves the project Compose down loads when the full render cannot be read', async (method) => {
+      // A service env_file makes `compose config` fail while `compose down`
+      // still loads the project. The hook check must use down's loading rules,
+      // not the stack folder name, or a custom `name:` hides the hook.
+      h.endpointReadsRender = false;
+      renderFor = (args) => (args.includes('--no-env-resolution')
+        ? { name: 'edge-project', services: { web: { image: 'alpine:3.20' } } }
+        : null);
+      containers = [{
+        Id: 'c-hook',
+        Names: ['/edge-project-web-pre_start-0'],
+        Labels: {
+          'com.docker.compose.project': 'edge-project',
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.hook': 'pre_start',
+          'com.docker.compose.hook-index': '0',
+        },
+        Mounts: [{ Type: 'volume', Name: ANON, Destination: '/token' }],
+      }];
+      inspectFor = {
+        'c-hook': { Id: 'c-hook', Mounts: [], HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } },
+      };
+      labelledVolumes = [ANON];
+
+      const error = await failureOf(svc()[method](stack));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('retained pre_start hook container');
+      expect(configSpawns().some((args) => args.includes('--no-env-resolution'))).toBe(true);
+      expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: ['com.docker.compose.project=edge-project'] } });
+      expect(mutations()).toEqual([]);
+    });
+
+    it('refuses a teardown when even the down project name cannot be resolved', async () => {
+      h.endpointReadsRender = false;
+      renderFor = () => null;
+
+      const error = await failureOf(svc().runDown(stack));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('could not resolve the Compose project');
+      expect(mutations()).toEqual([]);
+    });
+
+    it('refuses a hook holder on a plain HTTP down too', async () => {
+      renderFor = () => ({ name: stack, services: { web: { image: 'alpine:3.20' } } });
+      retainedHook();
+
+      const res = await request(app).post(`/api/stacks/${stack}/down`).set('Cookie', cookie);
+
+      expect(res.status).toBe(423);
+      expect(res.body.code).toBe('secret_volume_protected');
+      expect(mutations()).toEqual([]);
+    });
+  });
+
+  describe.each(ENTRY_POINTS)('%s hook cleanup', (entry, run) => {
+    const stack = `guard-hook-${entry.toLowerCase()}`;
+    const ANON = 'c'.repeat(64);
+    /** The exact lifecycle action each entry point hands to Compose. */
+    const EXPECTED_UP: Record<string, string[]> = {
+      deployStack: ['up', '-d', '--remove-orphans'],
+      updateStack: ['up', '-d', '--remove-orphans', '--pull', 'never'],
+      updateService: ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', 'web'],
+      recreateServiceFromLocal: ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', '--no-build', 'web'],
+      composeUpWithRecoveryOverride: ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
+    };
+    const upSpawn = () => mutations().find((args) => args.includes('up'));
+
+    function retainedHook(options: { service?: string; named?: boolean } = {}) {
+      const service = options.service ?? 'web';
+      const mounts = [{ Type: 'volume' as const, Name: ANON, Destination: '/token' }];
+      containers = [
+        {
+          Id: 'c-service',
+          Names: [`/${stack}-${service}-1`],
+          Labels: composeLabels(stack, service),
+          Mounts: mounts,
+        },
+        {
+          Id: 'c-hook',
+          Names: [`/${stack}-${service}-pre_start-0`],
+          Labels: {
+            'com.docker.compose.project': stack,
+            'com.docker.compose.service': service,
+            'com.docker.compose.hook': 'pre_start',
+            'com.docker.compose.hook-index': '0',
+          },
+          Mounts: mounts,
+        },
+      ];
+      const donor = {
+        Id: 'c-service',
+        Mounts: mounts,
+        HostConfig: { Mounts: [{ Type: 'volume', ...(options.named ? { Source: ANON } : {}), Target: '/token' }] },
+      };
+      inspectFor = {
+        'c-service': donor,
+        [`${stack}-${service}-1`]: donor,
+        'c-hook': { Id: 'c-hook', Mounts: mounts, HostConfig: { VolumesFrom: ['c-service:rw'] } },
+      };
+      labelledVolumes = [ANON];
+    }
+
+    beforeEach(() => writeEntryStack(stack));
+
+    it.each([
+      ['ordinary', null],
+      ['edge-tunnel', 'edge-tunnel'],
+      ['released-edge-tunnel', 'released-edge-tunnel'],
+    ] as const)('refuses an anonymous hook mount of the %s kind before any lifecycle command', async (_what, kind) => {
+      if (kind) recordManagedKind(stack, kind);
+      renderFor = () => ordinary(stack);
+      retainedHook();
+
+      const error = await failureOf(run(stack));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('retained pre_start hook container');
+      expect(events).toContain('inspect:c-hook');
+      expect(mutations()).toEqual([]);
+    });
+
+    it('runs its exact up when the hook mount is named', async () => {
+      renderFor = () => ordinary(stack);
+      retainedHook({ named: true });
+
+      const error = await failureOf(run(stack));
+
+      expect(error).not.toBeInstanceOf(SecretVolumeProtectedError);
+      const up = upSpawn();
+      expect(up?.slice(up.indexOf('up'))).toEqual(EXPECTED_UP[entry]);
+    });
+
+    it('leaves a hook of a retired service to the orphan cleanup, which keeps its volumes', async () => {
+      renderFor = () => ordinary(stack);
+      retainedHook({ service: 'retired' });
+
+      const error = await failureOf(run(stack));
+
+      expect(error).not.toBeInstanceOf(SecretVolumeProtectedError);
+      expect(upSpawn()).toBeDefined();
+    });
+  });
+
   describe('POST /api/labels/:id/action dry-run deploy', () => {
     const stack = 'guard-labels-dry';
     let labelId: number;
@@ -1309,6 +1792,35 @@ describe('ComposeService secret volume guard', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.results).toEqual([expect.objectContaining({ stackName: stack, success: true, dryRun: true })]);
+      expect(mutations()).toEqual([]);
+    });
+
+    it('reports the hook cleanup refusal the real deploy would give, without running Compose', async () => {
+      const ANON = 'd'.repeat(64);
+      renderFor = () => ordinary(stack);
+      containers = [{
+        Id: 'c-hook',
+        Names: [`/${stack}-web-pre_start-0`],
+        Labels: {
+          'com.docker.compose.project': stack,
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.hook': 'pre_start',
+          'com.docker.compose.hook-index': '0',
+        },
+        Mounts: [{ Type: 'volume', Name: ANON, Destination: '/token' }],
+      }];
+      inspectFor = {
+        'c-hook': { Id: 'c-hook', Mounts: [], HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } },
+      };
+      labelledVolumes = [ANON];
+
+      const res = await request(app).post(`/api/labels/${labelId}/action`).set('Cookie', cookie)
+        .send({ action: 'deploy', dryRun: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toEqual([
+        { stackName: stack, success: false, dryRun: true, error: expect.stringContaining('retained pre_start hook container') },
+      ]);
       expect(mutations()).toEqual([]);
     });
   });
