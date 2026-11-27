@@ -111,6 +111,7 @@ describe('checked candidate decisions', () => {
         const directives = new Map([['a', directive({ check: false })], ['b', directive({ check: false })]]);
         expect(checkableRefsForStack(services, directives)).toEqual([]);
         expect(digestTriggerAllowed(['a', 'b'], directives, DIGEST_A)).toBe(false);
+        expect(digestTriggerAllowed(['a', 'b'], directives, null)).toBe(false);
     });
 
     it('refuses a shared ref when every checking owner skips the candidate, and keeps build refs out', () => {
