@@ -609,38 +609,50 @@ export class ComposeService {
       // runs on that node, which applies this check itself.
       if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
       let result: Awaited<ReturnType<SharedRender>>;
+      let projectNames: ReadonlySet<string> | null = null;
+      let services: ReadonlySet<string> | null = null;
       try {
         result = await render();
       } catch (error) {
-        if (cleanup.kind === 'teardown') {
-          // renderConfig rejects only when the docker CLI cannot be spawned.
-          // The teardown command cannot run either, so it can clean up no
-          // hook container and there is nothing to refuse.
-          console.warn(
-            '[ComposeService] Compose cannot be spawned for %s, so the teardown cannot clean up hook containers:',
-            sanitizeForLog(stackName),
-            sanitizeForLog(getErrorMessage(error, 'unknown')),
-          );
-          return null;
+        if (cleanup.kind !== 'teardown') throw error;
+        if (error instanceof ComposeExpansionRefusal || error instanceof SecretVolumeProtectedError) throw error;
+        // The Compose CLI could not be spawned, so the project the teardown
+        // would act on cannot be resolved. A retained hook of any project on
+        // the node could be one this stack owns, so allow the teardown only
+        // when the node has no hook container at all.
+        let hooks: Docker.ContainerInfo[];
+        try {
+          hooks = await DockerController.getInstance(this.nodeId).getDocker().listContainers({
+            all: true,
+            filters: { label: [`${COMPOSE_HOOK_LABEL}=${COMPOSE_PRE_START_HOOK}`] },
+          });
+        } catch (listError) {
+          return this.hookCleanupUnreadable(stackName, listError);
         }
-        throw error;
+        if ((hooks ?? []).length === 0) return null;
+        return 'Sencho could not spawn Compose to resolve the project of this stack, and a retained pre_start hook container exists on the node, so taking the stack down could delete a secret volume it holds. '
+          + 'Fix the Compose configuration, or remove the retained hook container without deleting its volumes.';
       }
       // Sencho's own refusal of the Compose inputs is a refusal of the
       // operation itself, not a missing model: keep its type and wording so
       // the route maps it like every other lifecycle caller.
       if (result.refusal) throw new ComposeExpansionRefusal(result.refusal);
-      let projectName = stackName;
-      let services: ReadonlySet<string> | null = null;
       if (result.rendered !== null) {
         const parsed: unknown = JSON.parse(result.rendered);
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const model = parseEffectiveModel(parsed, stackName);
-          projectName = model.projectName;
+          projectNames = new Set([model.projectName]);
           services = new Set(model.services.map((service) => service.name));
         } else if (cleanup.kind !== 'teardown') {
           return secretVolumeUnverifiedMessage(stackName, 'the rendered configuration is not a model');
         }
-      } else if (cleanup.kind === 'teardown') {
+      }
+      if (projectNames === null) {
+        if (cleanup.kind !== 'teardown') {
+          // Up already refused an unreadable render in the deploy guard, which
+          // runs first.
+          return null;
+        }
         // A teardown loads the project with fewer checks than `config` (it
         // discards service env files and skips environment resolution), so it
         // can still run under a project name the full render cannot report.
@@ -651,17 +663,17 @@ export class ComposeService {
           return 'Sencho could not resolve the Compose project of this stack, so it could not check that taking it down does not delete a secret volume, and the operation was not run. '
             + 'Fix the Compose configuration, then try again.';
         }
-        projectName = resolved;
-      } else {
-        // Up already refused an unreadable render in the deploy guard, which
-        // runs first.
-        return null;
+        projectNames = new Set([resolved]);
       }
+      if (projectNames.size === 0) return null;
 
       const docker = DockerController.getInstance(this.nodeId).getDocker();
-      let listed: Docker.ContainerInfo[];
+      const listed: Docker.ContainerInfo[] = [];
       try {
-        listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${projectName}`] } });
+        for (const name of projectNames) {
+          const projectContainers = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${name}`] } });
+          listed.push(...projectContainers);
+        }
       } catch (error) {
         return this.hookCleanupUnreadable(stackName, error);
       }

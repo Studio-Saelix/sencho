@@ -1649,9 +1649,9 @@ describe('ComposeService secret volume guard', () => {
       expect(mutations()).toEqual([]);
     });
 
-    it.each(['runDown', 'downStack'] as const)('%s still takes the stack down when Compose cannot be spawned', async (method) => {
-      // A render rejection means the docker CLI cannot be spawned, so the
-      // teardown cannot run either and can clean up no hook container.
+    it.each(['runDown', 'downStack'] as const)('%s still takes the stack down when Compose cannot be spawned and no hook exists', async (method) => {
+      // A render rejection means the docker CLI cannot be spawned. With no
+      // hook container on the node there is nothing Compose can clean up.
       h.endpointReadsRender = false;
       vi.spyOn(ComposeService.prototype, 'renderConfig').mockRejectedValue(new Error('Docker CLI unavailable on this node'));
 
@@ -1659,6 +1659,34 @@ describe('ComposeService secret volume guard', () => {
 
       expect(mutations()).toHaveLength(1);
       expect(events).not.toContain('inspect:c-hook');
+    });
+
+    it.each(['runDown', 'downStack'] as const)('%s refuses when a hook container exists after a render rejection', async (method) => {
+      // The CLI cannot tell which project the down acts on, so any hook on the
+      // node could be the one this teardown sweeps.
+      h.endpointReadsRender = false;
+      vi.spyOn(ComposeService.prototype, 'renderConfig').mockRejectedValue(new Error('Docker CLI unavailable on this node'));
+      containers = [{
+        Id: 'c-hook',
+        Names: ['/other-project-web-pre_start-0'],
+        Labels: {
+          'com.docker.compose.project': 'other-project',
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.hook': 'pre_start',
+          'com.docker.compose.hook-index': '0',
+        },
+        Mounts: [{ Type: 'volume', Name: ANON, Destination: '/token' }],
+      }];
+      inspectFor = {
+        'c-hook': { Id: 'c-hook', Mounts: [], HostConfig: { Mounts: [{ Type: 'volume', Target: '/token' }] } },
+      };
+      labelledVolumes = [ANON];
+
+      const error = await failureOf(svc()[method](stack));
+
+      expect(error).toBeInstanceOf(SecretVolumeProtectedError);
+      expect((error as Error).message).toContain('could not spawn Compose');
+      expect(mutations()).toEqual([]);
     });
 
     it('refuses a hook holder on a plain HTTP down too', async () => {
