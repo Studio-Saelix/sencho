@@ -10,7 +10,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
 
-const STACK = 'qp-changelog-skip';
+const STACK = 'qp-skip-label';
 const DIGEST = `sha256:${'5'.repeat(64)}`;
 const CHANGELOG = 'https://github.com/example/app/releases';
 
