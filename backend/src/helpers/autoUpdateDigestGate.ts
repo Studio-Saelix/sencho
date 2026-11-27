@@ -102,18 +102,21 @@ export async function localDetectionDirectives(nodeId: number, stackName: string
 
 /**
  * The images of a local stack's containers, each with the Compose services that
- * run it. A container without a service label adds its image with no owner,
- * which always counts for the trigger.
+ * run it. `getContainersByStack` reports the Compose service as `Service` (from
+ * `docker compose ps`, or derived from the project label on the engine
+ * fallback) and does not carry `Labels`; a raw Dockerode container carries the
+ * label. A container with neither adds its image with no owner, which always
+ * counts for the trigger.
  */
 export function triggerImagesFromContainers(
-  containers: readonly { Image?: string; Labels?: Record<string, string> }[],
+  containers: readonly { Image?: string; Service?: string; Labels?: Record<string, string> }[],
 ): AutoUpdateTriggerImage[] {
   const owners = new Map<string, Set<string>>();
   for (const container of containers) {
     const ref = container.Image;
     if (!ref || ref.startsWith('sha256:')) continue;
     const set = owners.get(ref) ?? new Set<string>();
-    const service = container.Labels?.[COMPOSE_SERVICE_LABEL];
+    const service = container.Labels?.[COMPOSE_SERVICE_LABEL] || container.Service;
     if (service) set.add(service);
     owners.set(ref, set);
   }
@@ -170,6 +173,26 @@ export function messageWhenDigestApplyBlockedByCheckErrors(
   return `Stack "${stackName}": WARNING - digest update available but ${state.checkErrors.length} image check(s) failed; skipped auto-update (${state.checkErrors.join('; ')}).`;
 }
 
+/**
+ * The sentence naming what the detection labels kept from starting a run.
+ * `actionable` is for a stack that also has a non-actionable tag-only update,
+ * so the sentence does not claim there is no other pending update.
+ */
+function suppressionSentence(
+  suppressed: readonly { service: string; reason: TriggerSuppression }[],
+  actionable: boolean,
+): string | null {
+  if (suppressed.length === 0) return null;
+  const subject = actionable ? 'the only actionable update' : 'the only available update';
+  const ignored = suppressed.filter(entry => entry.reason === 'ignored').map(entry => entry.service);
+  if (ignored.length > 0) {
+    return `${subject} is skipped by ${SENCHO_UPDATE_IGNORE_LABEL} (${ignored.join(', ')}); no update applied`;
+  }
+  const names = suppressed.map(entry => entry.service);
+  const noun = names.length === 1 ? 'a service' : 'services';
+  return `${subject} belongs to ${noun} with update checks off (${names.join(', ')}); no update applied`;
+}
+
 /** Operator message when no digest-actionable update was found. */
 export function messageWhenNoDigestUpdate(
   stackName: string,
@@ -179,18 +202,16 @@ export function messageWhenNoDigestUpdate(
   const errNote = state.checkErrors.length > 0
     ? ` (${state.checkErrors.length} check(s) failed)`
     : '';
-  if (state.hasTagOnlyUpdate) {
-    return `Stack "${stackName}": newer tag available but Compose pin unchanged; skipped auto-update${errNote}.`;
-  }
   // A skipped update is never reported as "up to date".
   const suppressed = state.suppressed ?? [];
-  if (suppressed.length > 0) {
-    const ignored = suppressed.filter(entry => entry.reason === 'ignored').map(entry => entry.service);
-    if (ignored.length > 0) {
-      return `Stack "${stackName}": the only available update is skipped by ${SENCHO_UPDATE_IGNORE_LABEL} (${ignored.join(', ')}); no update applied${errNote}.`;
-    }
-    const off = suppressed.map(entry => entry.service);
-    return `Stack "${stackName}": the only available update belongs to a service with update checks off (${off.join(', ')}); no update applied${errNote}.`;
+  if (state.hasTagOnlyUpdate) {
+    const blocked = suppressionSentence(suppressed, true);
+    const tail = blocked ? ` ${blocked.charAt(0).toUpperCase()}${blocked.slice(1)}.` : '';
+    return `Stack "${stackName}": newer tag available but Compose pin unchanged; skipped auto-update${errNote}.${tail}`;
+  }
+  const blocked = suppressionSentence(suppressed, false);
+  if (blocked) {
+    return `Stack "${stackName}": ${blocked}${errNote}.`;
   }
   if (state.checkErrors.length > 0 && state.checkErrors.length === imageRefCount) {
     return `Stack "${stackName}": WARNING - all image checks failed (${state.checkErrors.join('; ')}). Unable to determine update status.`;

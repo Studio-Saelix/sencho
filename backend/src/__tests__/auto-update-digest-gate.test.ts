@@ -103,6 +103,20 @@ describe('evaluateAutoUpdateTrigger with update detection labels', () => {
     expect(alsoPullsNote(state)).toBe(' Also pulled: api (update skipped), db (update checks off).');
   });
 
+  it('names the suppressed service when a non-actionable tag update is also pending', async () => {
+    const tagOnly = { hasUpdate: true, digestUpdate: false, tagUpdate: true, checkStatus: 'ok' as const };
+    const state = await evaluateAutoUpdateTrigger(
+      [{ ref: 'web:latest', owners: ['web'] }, { ref: 'db:latest', owners: ['db'] }],
+      new Map([['db', off]]),
+      async ref => (ref === 'web:latest' ? tagOnly : rebuild()),
+    );
+    expect(state.hasDigestUpdate).toBe(false);
+    expect(messageWhenNoDigestUpdate('site', state, 2)).toBe(
+      'Stack "site": newer tag available but Compose pin unchanged; skipped auto-update. '
+      + 'The only actionable update belongs to a service with update checks off (db); no update applied.',
+    );
+  });
+
   it('behaves as before for an unlabeled stack', async () => {
     const state = await evaluateAutoUpdateTrigger(
       [{ ref: 'web:latest', owners: ['web'] }, { ref: 'db:latest', owners: ['db'] }],
@@ -136,5 +150,21 @@ describe('evaluateAutoUpdateTrigger with update detection labels', () => {
       { Image: `sha256:${'c'.repeat(64)}` },
       {},
     ])).toEqual([{ ref: 'shared:1', owners: ['a', 'b'] }, { ref: 'loose:1', owners: [] }]);
+  });
+
+  it('reads the Compose service from the `Service` field the stack container list reports', () => {
+    // DockerController.getContainersByStack returns `Service` and no `Labels`;
+    // a label-only reader saw every image as ownerless and started the run.
+    expect(triggerImagesFromContainers([
+      { Image: 'web:1', Service: 'web' },
+      { Image: 'shared:1', Service: 'b' },
+      { Image: 'shared:1', Service: 'a' },
+      { Image: 'shared:1', Service: 'a' },
+      { Image: 'labelled:1', Service: 'fallback', Labels: { 'com.docker.compose.service': 'label' } },
+    ])).toEqual([
+      { ref: 'web:1', owners: ['web'] },
+      { ref: 'shared:1', owners: ['a', 'b'] },
+      { ref: 'labelled:1', owners: ['label'] },
+    ]);
   });
 });
