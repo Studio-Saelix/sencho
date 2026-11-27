@@ -63,6 +63,7 @@ export const CAPABILITIES = [
   'sencho-labels-v1',
   'sencho-label-policy-v1',
   'sencho-label-detection-v1',
+  'sencho-checked-candidate-digest-v1',
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',

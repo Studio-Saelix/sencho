@@ -151,9 +151,13 @@ function hasUnverifiedOtherImage(summary: UpdatePreviewSummary, images: UpdatePr
   if (!images || images.length === 0) {
     return summary.verification_failed && (summary.has_update || summary.rebuild_available);
   }
-  const hasPureFailureImage = images.some((i) => Boolean(i.check_error) && !i.has_update);
-  if (!hasPureFailureImage) return false;
-  return images.some((i) => i.has_update) || summary.rebuild_available;
+  // digest_error survives a tag confirmation that nulls check_error, and it
+  // also backs a checks-off service whose image is in the pull roster. A
+  // failed current-digest lookup is never collateral-safe.
+  const hasUnverifiedImage = images.some((i) => Boolean(i.digest_error)
+    || (Boolean(i.check_error) && !i.has_update));
+  if (!hasUnverifiedImage) return false;
+  return images.some((i) => i.has_update) || Boolean(summary.rebuild_available);
 }
 
 export function updatePreviewSignal(input: UpdatePreviewSummary | Errored, images?: UpdatePreviewImage[]): ReadinessSignal {

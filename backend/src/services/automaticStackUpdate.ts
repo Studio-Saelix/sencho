@@ -28,6 +28,13 @@ export interface AutomaticStackUpdateInput {
   policyOptions: PolicyEnforcementOptions;
   verificationOwner: 'hub_authority' | 'target_local';
   observation?: { verify: () => Promise<void>; consume: () => Promise<void> };
+  /**
+   * Re-evaluates the trigger under the stack lock, immediately before Compose.
+   * Returns why the update must not run, or null to proceed. The local API
+   * route uses it; the scheduler calls the same revalidation directly because
+   * it owns its lock.
+   */
+  revalidateTrigger?: () => Promise<string | null>;
   /** Defaults to `automatic`; a scheduled run carries `scheduled` so the two never blur. */
   trigger?: AutomaticUpdateTrigger;
 }
@@ -101,6 +108,13 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
           message: `Stack "${stackName}": ${endpointRefusal.message}`, endpointRefusal: endpointRefusal.message,
         };
       }
+      // Last point before mutation: the labels that justified this run could
+      // have changed while the run waited for the lock. A suppressed trigger
+      // leaves Compose uncalled and the observation unspent.
+      const triggerRefusal = await input.revalidateTrigger?.();
+      if (triggerRefusal) {
+        return { result: 'rejected' as const, applied: false, healthGateId: null, message: triggerRefusal };
+      }
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId, stackName, target: { scope: 'stack' }, trigger, actor: input.policyOptions.actor, policy: updatePolicy },
@@ -130,7 +144,7 @@ async function finishAutomaticUpdate(input: AutomaticStackUpdateInput, healthGat
   let recheckWarning: string | undefined;
   if (input.verificationOwner === 'target_local') {
     try {
-      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName);
+      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName, { verification: true });
       recheckWarning = recheck.warning ?? undefined;
     } catch (error) {
       console.warn('[AutoUpdate] Post-update verification failed for %s:', sanitizeForLog(stackName), error);

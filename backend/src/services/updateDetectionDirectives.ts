@@ -14,10 +14,13 @@ import {
     type SenchoLabelResolution,
     type UpdateIgnoreTarget,
 } from '../helpers/senchoLabels';
-import type { ImageUpdateDirectiveFacts, ImageUpdateStackFacts } from './imageUpdateFacts';
+import type {
+    ImageUpdateDirectiveFacts, ImageUpdateServiceFacts, ImageUpdateStackFacts,
+} from './imageUpdateFacts';
 import { parseImageRef } from './registry-api';
 import {
     computeSemverBump,
+    isMovingTag,
     resolveImageCheckStatus,
     uncertaintyReason,
     type ImageUpdateDetectResult,
@@ -114,8 +117,10 @@ export function directivesFromFacts(facts: Pick<ImageUpdateStackFacts, 'directiv
 
 /**
  * The image refs no checking service uses: every service that owns the ref has
- * update checks off. A scan or preview does not ask the registry about them.
- * A ref with no owner in `services` is never in the result.
+ * update checks off. A background scan, a facts request without `probeAll`,
+ * and a recheck outside verification do not ask the registry about them; a
+ * whole-stack preview and pre-flight do. A ref with no owner in `services` is
+ * never in the result.
  */
 export function uncheckedRefs(
     services: readonly { name: string; refs: readonly string[] }[],
@@ -263,18 +268,93 @@ export function triggerResultForRef(
         digest ||= applied.digestUpdate === true;
         tag ||= applied.tagUpdate === true;
     }
+    const remainingDigest = result.digestUpdate === true && digest;
+    const remainingTag = result.tagUpdate === true && tag;
     const suppressedDigest = result.digestUpdate === true && !digest;
     const suppressedTag = result.tagUpdate === true && !tag;
     if (!suppressedDigest && !suppressedTag) return { result, suppressed: null };
+    // Only a fully cleared image is "the only available update skipped"; a
+    // remaining candidate keeps its own report.
+    const suppression = !remainingDigest && !remainingTag
+        ? (hasIgnoreMatch(ref, owners, result, directives) ? 'ignored' : 'off')
+        : null;
+    const detection = result.detection;
+    if (!detection) {
+        return {
+            suppressed: suppression,
+            result: { ...result, digestUpdate: remainingDigest, tagUpdate: remainingTag, hasUpdate: remainingDigest || remainingTag },
+        };
+    }
+    // Clearing every candidate must not turn a failed digest comparison into
+    // "up to date": the value still gates the pre-flight of a whole-stack pull.
+    const tagApplicable = !isMovingTag(parseImageRef(ref)?.tag ?? '');
+    const checkStatus = resolveImageCheckStatus({
+        digest: remainingDigest ? 'update' : detection.digestError ? 'error' : 'match',
+        tagApplicable,
+        tagOutcome: tagOutcomeOf(detection.tagEnumKind),
+        hasUpdate: remainingDigest || remainingTag,
+    });
     return {
-        suppressed: hasIgnoreMatch(ref, owners, result, directives) ? 'ignored' : 'off',
-        result: {
-            ...result,
-            digestUpdate: result.digestUpdate === true && digest,
-            tagUpdate: result.tagUpdate === true && tag,
-            hasUpdate: (result.digestUpdate === true && digest) || (result.tagUpdate === true && tag),
-        },
+        suppressed: suppression,
+        result: checkResultFromDetection({
+            ...detection,
+            digestUpdate: remainingDigest,
+            tagUpdate: remainingTag,
+            hasUpdate: remainingDigest || remainingTag,
+            nextTag: remainingTag ? detection.nextTag : remainingDigest ? parseImageRef(ref)?.tag ?? null : null,
+            semverBump: remainingTag ? detection.semverBump : remainingDigest ? 'patch' : 'none',
+            candidateDigest: remainingDigest ? detection.candidateDigest : null,
+            checkStatus,
+            reason: uncertaintyReason(checkStatus, detection.digestError, detection.tagEnumReason),
+        }),
     };
+}
+
+/**
+ * The refs that at least one checking, non-build-backed owner uses. The target
+ * binds this set into the checked observation, so a checked request cannot name
+ * an image the current labels have taken out of reporting, including from a hub
+ * that never asked for the labels. The candidate digest is evaluated separately
+ * under the lock, so a hub with registry credentials can still start a check the
+ * target itself could not authenticate.
+ */
+export function checkableRefsForStack(
+    services: readonly Pick<ImageUpdateServiceFacts, 'name' | 'declaredImage' | 'runtimeImages' | 'hasBuild'>[],
+    directives: DetectionDirectives,
+): string[] {
+    const owners = new Map<string, string[]>();
+    for (const service of services) {
+        if (service.hasBuild) continue;
+        for (const ref of new Set([
+            ...(service.declaredImage ? [service.declaredImage] : []),
+            ...service.runtimeImages,
+        ])) {
+            owners.set(ref, [...(owners.get(ref) ?? []), service.name]);
+        }
+    }
+    return [...owners]
+        .filter(([, names]) => names.some(name => directiveFor(directives, name).check))
+        .map(([ref]) => ref)
+        .sort();
+}
+
+/**
+ * Whether a known digest candidate may start an unattended update: at least one
+ * checking owner must still report it. Without a candidate, a digest ignore
+ * cannot be disproved, so a service that carries one refuses the ref.
+ */
+export function digestTriggerAllowed(
+    owners: readonly string[],
+    directives: DetectionDirectives,
+    candidateDigest: string | null,
+): boolean {
+    const checking = owners.filter(owner => directiveFor(directives, owner).check);
+    if (checking.length === 0) return false;
+    if (!candidateDigest) {
+        return checking.every(owner =>
+            !directiveFor(directives, owner).ignore.some(entry => entry.kind === 'digest'));
+    }
+    return checking.some(owner => !skipsDigest(directiveFor(directives, owner).ignore, candidateDigest));
 }
 
 function hasIgnoreMatch(

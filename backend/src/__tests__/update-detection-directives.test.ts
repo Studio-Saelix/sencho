@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
     applyIgnore,
     applyIgnoreToCheck,
+    checkableRefsForStack,
     checkResultFromDetection,
+    digestTriggerAllowed,
     directivesFromFacts,
     directivesFromResolution,
     directivesToFacts,
@@ -79,6 +81,46 @@ describe('uncheckedRefs', () => {
             { name: 'a', refs: ['x:1'] }, { name: 'b', refs: ['x:1'] },
         ], directives)).toEqual(new Set(['x:1']));
         expect(uncheckedRefs([], directives).size).toBe(0);
+    });
+});
+
+describe('checked candidate decisions', () => {
+    const services = [
+        { name: 'a', declaredImage: 'shared:1', runtimeImages: [], hasBuild: false },
+        { name: 'b', declaredImage: 'shared:1', runtimeImages: [], hasBuild: false },
+        { name: 'builder', declaredImage: 'built:1', runtimeImages: [], hasBuild: true },
+    ];
+
+    it('keeps a shared ref checkable while any owner checks it and allows a candidate another owner does not skip', () => {
+        const directives = new Map([['a', directive({ ignore: [{ kind: 'digest', digest: DIGEST_A }] })]]);
+        expect(checkableRefsForStack(services, directives)).toEqual(['shared:1']);
+        expect(digestTriggerAllowed(['a', 'b'], directives, DIGEST_A)).toBe(true);
+    });
+
+    it('ignores a checks-off owner when a checking owner shares the ref', () => {
+        const directives = new Map([
+            ['a', directive({ ignore: [{ kind: 'digest', digest: DIGEST_A }] })],
+            ['b', directive({ check: false })],
+        ]);
+        expect(checkableRefsForStack(services, directives)).toEqual(['shared:1']);
+        expect(digestTriggerAllowed(['a', 'b'], directives, DIGEST_A)).toBe(false);
+        expect(digestTriggerAllowed(['a', 'b'], directives, null)).toBe(false);
+    });
+
+    it('excludes and refuses a shared ref when every owner checks off', () => {
+        const directives = new Map([['a', directive({ check: false })], ['b', directive({ check: false })]]);
+        expect(checkableRefsForStack(services, directives)).toEqual([]);
+        expect(digestTriggerAllowed(['a', 'b'], directives, DIGEST_A)).toBe(false);
+    });
+
+    it('refuses a shared ref when every checking owner skips the candidate, and keeps build refs out', () => {
+        const directives = new Map([
+            ['a', directive({ ignore: [{ kind: 'digest', digest: DIGEST_A }] })],
+            ['b', directive({ ignore: [{ kind: 'digest', digest: DIGEST_A }] })],
+        ]);
+        expect(checkableRefsForStack(services, directives)).toEqual(['shared:1']);
+        expect(digestTriggerAllowed(['a', 'b'], directives, DIGEST_A)).toBe(false);
+        expect(digestTriggerAllowed(['a', 'b'], directives, null)).toBe(false);
     });
 });
 
@@ -187,6 +229,22 @@ describe('triggerResultForRef', () => {
         const out = triggerResultForRef('app:1.0.0', ['a', 'b'], check, directives);
         expect(out.suppressed).toBe('ignored');
         expect(out.result.digestUpdate).toBe(false);
+    });
+
+    it('keeps the tag advisory when only the digest trigger is suppressed', () => {
+        const skipDigest = directive({ ignore: [{ kind: 'digest', digest: DIGEST_A }] });
+        const out = triggerResultForRef('app:1.0.0', ['a'], checkResultFromDetection(both), new Map([['a', skipDigest]]));
+        expect(out.suppressed).toBeNull();
+        expect(out.result).toMatchObject({ digestUpdate: false, tagUpdate: true, hasUpdate: true });
+        expect(out.result.detection?.nextTag).toBe('1.1.0');
+    });
+
+    it('keeps the digest trigger when only the tag advisory is suppressed', () => {
+        const skipTag = directive({ ignore: [{ kind: 'tag', tag: '1.1.0' }] });
+        const out = triggerResultForRef('app:1.0.0', ['a'], checkResultFromDetection(both), new Map([['a', skipTag]]));
+        expect(out.suppressed).toBeNull();
+        expect(out.result).toMatchObject({ digestUpdate: true, tagUpdate: false, hasUpdate: true });
+        expect(out.result.detection?.nextTag).toBe('1.0.0');
     });
 
     it('passes a check error through untouched', () => {

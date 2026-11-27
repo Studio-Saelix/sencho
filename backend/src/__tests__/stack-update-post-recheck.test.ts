@@ -154,6 +154,7 @@ describe('POST /api/stacks/:name/update post-compose verification', () => {
     expect(callOrder.indexOf('recheckStack')).toBeLessThan(callOrder.indexOf('broadcastEvent'));
     expect(callOrder).not.toContain('clearStackUpdateStatus');
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockRecheckStack).toHaveBeenCalledWith(expect.any(Number), 'web', { verification: true });
   });
 
   it('returns recheckWarning when the update condition remains', async () => {

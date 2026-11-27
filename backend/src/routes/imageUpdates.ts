@@ -13,10 +13,10 @@ import { CacheService } from '../services/CacheService';
 import {
   alsoPullsNote,
   evaluateAutoUpdateTrigger,
-  localDetectionDirectives,
+  localTriggerRoster,
   messageWhenDigestApplyBlockedByCheckErrors,
   messageWhenNoDigestUpdate,
-  triggerImagesFromContainers,
+  revalidateLocalAutoUpdateTrigger,
 } from '../helpers/autoUpdateDigestGate';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { ImageUpdateFactsService, ImageUpdateFactsError } from '../services/ImageUpdateFactsService';
@@ -760,22 +760,20 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        const images = triggerImagesFromContainers(containers);
-        const imageRefs = images.map(image => image.ref);
+        const roster = await localTriggerRoster(req.nodeId, stackName, containers);
+        const check = (ref: string) => imageUpdateService.checkImage(docker, ref);
 
-        if (imageRefs.length === 0) {
+        if (roster.images.length === 0) {
           results.push(`Stack "${stackName}": no pullable images; skipped.`);
           continue;
         }
 
-        const gate = await evaluateAutoUpdateTrigger(
-          images,
-          await localDetectionDirectives(req.nodeId, stackName),
-          ref => imageUpdateService.checkImage(docker, ref),
-        );
+        const gate = await evaluateAutoUpdateTrigger(roster.images, roster.directives, check, {
+          buildServices: roster.buildServices,
+        });
 
         if (!gate.hasDigestUpdate) {
-          results.push(messageWhenNoDigestUpdate(stackName, gate, imageRefs.length));
+          results.push(messageWhenNoDigestUpdate(stackName, gate, roster.images.length));
           continue;
         }
         const checkErrorBlock = messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
@@ -790,6 +788,9 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
             bypass: false, actor: `auto-update:${req.user?.username ?? 'scheduler'}`,
           }),
           verificationOwner: 'target_local',
+          revalidateTrigger: () => revalidateLocalAutoUpdateTrigger(
+            req.nodeId, stackName, () => docker.getContainersByStack(stackName), check,
+          ),
           // This route is the automatic-update entry point; a scheduled task on
           // a remote node carries `scheduled` through the checked request instead.
           trigger: 'automatic',

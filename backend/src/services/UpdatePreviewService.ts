@@ -1,13 +1,5 @@
 import DockerController from './DockerController';
-import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
-import {
-    extractServiceImagesFromCompose,
-    loadDotEnv,
-    loadEffectiveServiceImages,
-    loadStackBuildServices,
-    type ComposeServiceImage,
-} from './ImageUpdateService';
 import {
     configIdForLocalBuild,
     parseImageRef,
@@ -38,7 +30,7 @@ import {
     applyIgnore,
     directiveFor,
     directivesFromResolution,
-    uncheckedRefs,
+    ignoreEntryText,
     type ServiceDetectionDirective,
     type ServiceDetectionState,
 } from './updateDetectionDirectives';
@@ -101,6 +93,8 @@ export interface UpdatePreviewImage {
     candidate_digest?: string | null;
     /** The service's `io.sencho.update.changelog` link, on a pending update only. */
     changelog_url?: string | null;
+    /** The entries already saved in the service's `io.sencho.update.ignore` label. */
+    ignore_entries?: string[];
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -159,32 +153,6 @@ function maxBump(a: SemverBump, b: SemverBump): SemverBump {
     return rank(a) >= rank(b) ? a : b;
 }
 
-async function loadStackImages(
-    nodeId: number,
-    stackName: string,
-): Promise<ComposeServiceImage[]> {
-    // A multi-file / context-dir Git stack resolves images from the effective
-    // merged model so override-only services are included; single-file stacks
-    // fall through to the root-compose parse below.
-    const effective = await loadEffectiveServiceImages(nodeId, stackName);
-    if (effective) return effective;
-
-    const fs = FileSystemService.getInstance(nodeId);
-    const composeContent = await fs.getStackContent(stackName);
-    let envVars: Record<string, string> = {};
-    try {
-        const envContent = await fs.getEnvContent(stackName);
-        envVars = loadDotEnv(envContent);
-    } catch {
-        // No env file - fall back to process.env only
-    }
-    const merged: Record<string, string> = { ...envVars };
-    for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined) merged[k] = v;
-    }
-    return extractServiceImagesFromCompose(composeContent, merged);
-}
-
 export type LocalDigestEmptyReason = 'not_checkable' | 'inspect_failed' | 'unresolved';
 
 export interface LocalDigestInfo {
@@ -228,11 +196,29 @@ function imageFromDetect(
     };
 }
 
-/** The image a checks-off service shows: not checked, never "up to date". */
-function uncheckedServiceImage(service: string, imageRef: string): UpdatePreviewImage {
+/**
+ * The image a checks-off service shows: not checked and never "up to date",
+ * but carrying the raw verification of the image in the pull roster. A failed
+ * digest lookup must stay visible to the full-stack gates even though the
+ * service reports nothing.
+ */
+function uncheckedServiceImage(
+    service: string,
+    base: UpdatePreviewImage,
+    detected: ImageUpdateDetectResult | null,
+): UpdatePreviewImage {
     return {
-        ...notCheckableImage(service, imageRef),
-        current_tag: parseImageRef(imageRef)?.tag ?? 'unknown',
+        ...(detected
+            ? imageFromDetect(service, base.image, base.current_tag, detected)
+            : { ...base }),
+        service,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        next_tag: null,
+        semver_bump: 'none',
+        candidate_digest: null,
+        changelog_url: null,
         detection: 'off',
     };
 }
@@ -249,7 +235,7 @@ export function servicePreviewImage(
     detected: ImageUpdateDetectResult | null,
     directive: ServiceDetectionDirective,
 ): UpdatePreviewImage {
-    if (!directive.check) return uncheckedServiceImage(service, base.image);
+    if (!directive.check) return uncheckedServiceImage(service, base, detected);
     let image: UpdatePreviewImage = { ...base, service };
     if (detected && directive.ignore.length > 0) {
         const applied = applyIgnore(detected, directive.ignore, base.current_tag);
@@ -259,6 +245,11 @@ export function servicePreviewImage(
                 ...(applied.result.hasUpdate ? {} : { detection: 'ignored' as const }),
             };
         }
+    }
+    // The saved entries ride along so the Copy skip verb can keep them instead
+    // of replacing the label with only the newest candidate.
+    if (directive.ignore.length > 0) {
+        image = { ...image, ignore_entries: directive.ignore.map(ignoreEntryText) };
     }
     return image.has_update && directive.changelogUrl
         ? { ...image, changelog_url: directive.changelogUrl }
@@ -427,9 +418,11 @@ export function buildSummary(
 /** True when a preview is safe to clear sticky scanner state. */
 export function isAuthoritativeNegativePreview(preview: UpdatePreview): boolean {
     // Every declared image must be explicitly ok. Mixed ok + not_checkable must
-    // not clear sticky rows that may still track unresolved services.
+    // not clear sticky rows that may still track unresolved services. A label
+    // that hides or clears an update is not a negative either: deleting its row
+    // would erase the evidence Security reads for a skipped candidate.
     return preview.images.length > 0
-        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.images.every((i) => i.check_status === 'ok' && i.detection === undefined)
         && preview.summary.has_update === false;
 }
 
@@ -483,12 +476,19 @@ export class UpdatePreviewService {
             const { RemoteImageUpdateService } = await import('./RemoteImageUpdateService');
             return RemoteImageUpdateService.getInstance().getPreview(nodeId, stackName, AbortSignal.timeout(90_000));
         }
-        const [stackImages, buildServices, facts] = await Promise.all([
-            loadStackImages(nodeId, stackName),
-            loadStackBuildServices(nodeId, stackName),
-            readEffectiveStackFacts(nodeId, stackName),
-        ]);
-        const directives = directivesFromResolution(facts.model.renderable ? facts.labels : null);
+        // One effective snapshot for the image roster, the build services and
+        // the labels, so the preview describes exactly what a whole-stack
+        // Compose update would pull and rebuild (includes and overrides alike).
+        const facts = await readEffectiveStackFacts(nodeId, stackName);
+        if (!facts.model.renderable) throw new Error(facts.model.error);
+        // A build-backed service is built, not pulled, so its registry image is
+        // not part of the update operation and must not hold or drive it.
+        const stackImages = facts.model.services.flatMap(service =>
+            service.declaredImage && !service.hasBuild
+                ? [{ service: service.name, image: service.declaredImage }]
+                : []);
+        const buildServices = facts.model.services.filter(service => service.hasBuild).map(service => service.name);
+        const directives = directivesFromResolution(facts.labels);
         if (stackImages.length === 0) {
             return buildSummary(stackName, [], buildServices);
         }
@@ -522,18 +522,15 @@ export class UpdatePreviewService {
             },
         };
 
-        // A ref only checks-off services use never reaches the registry.
-        const byService = new Map<string, string[]>();
-        for (const { service, image } of stackImages) byService.set(service, [...(byService.get(service) ?? []), image]);
-        const unchecked = uncheckedRefs([...byService].map(([name, refs]) => ({ name, refs })), directives);
-
-        // Memoize service-independent detection by image ref so shared images
-        // hit the registry once, then apply each service's directive separately.
+        // Every image in the pull roster is verified, including one only
+        // checks-off services use: a whole-stack apply pulls it as collateral.
+        // The service's directive hides the result from reporting, never from
+        // the pre-flight. Memoize detection by ref so shared images hit the
+        // registry once, then apply each service's directive separately.
         const detectByRef = new Map<string, ReturnType<typeof computeImageDetection>>();
         const results = await Promise.all(
             stackImages.map(async ({ service, image }) => {
                 const directive = directiveFor(directives, service);
-                if (unchecked.has(image)) return uncheckedServiceImage(service, image);
                 let shared = detectByRef.get(image);
                 if (!shared) {
                     shared = computeImageDetection('_shared_', image, deps);

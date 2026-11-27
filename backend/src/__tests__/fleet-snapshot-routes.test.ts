@@ -1491,7 +1491,7 @@ describe('Snapshot restore: recovery generation contract', () => {
             .set('Cookie', adminCookie).send({ nodeId: remoteId, stackName: 'verified-stack', redeploy: true })
             .then(response => { settled = true; return response; });
         if (mode !== 'mixed') {
-            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteId, 'verified-stack', expect.any(AbortSignal)));
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteId, 'verified-stack', expect.any(AbortSignal), { verification: true }));
             expect(settled).toBe(false);
             expect(fetchMock).toHaveBeenCalledTimes(2);
             release();

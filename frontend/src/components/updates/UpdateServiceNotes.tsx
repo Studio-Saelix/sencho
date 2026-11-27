@@ -6,6 +6,7 @@ import { copyToClipboard } from '@/lib/clipboard';
 import { SENCHO_LABEL_DETECTION_CAPABILITY } from '@/lib/capabilities';
 import { cn } from '@/lib/utils';
 import {
+  MAX_SKIP_LABEL_ENTRIES,
   alsoPulledLine,
   alsoPulledServices,
   serviceUpdateNotes,
@@ -25,7 +26,7 @@ async function copySkipLabel(service: string, entries: readonly string[]): Promi
   try {
     await copyToClipboard(skipLabelLine(entries));
     toast.success(
-      `Skip label copied. Add it under the ${service} service's labels (as key=value in a list), save, then Recheck. A stack update still pulls the image.`,
+      `Skip label copied. Add it under the ${service} service's labels (as key=value in a list), save, then Recheck. A stack update still pulls its registry image; a build-backed service is built instead.`,
     );
   } catch (error) {
     console.error('[UpdateServiceNotes] Copy failed:', error);
@@ -34,7 +35,7 @@ async function copySkipLabel(service: string, entries: readonly string[]): Promi
 }
 
 interface UpdateServiceNotesProps {
-  preview: Pick<UpdatePreview, 'images' | 'summary'> | null | undefined;
+  preview: Pick<UpdatePreview, 'images' | 'summary' | 'build_services'> | null | undefined;
   stack: string;
   nodeId: number | undefined;
   /** `list` is a row per service (cards, table detail, phone); `inline` is one quiet line (the Anatomy banner). */
@@ -56,8 +57,12 @@ export function UpdateServiceNotes({ preview, stack, nodeId, variant, className 
     && (nodeMeta.get(nodeId)?.capabilities.includes(SENCHO_LABEL_DETECTION_CAPABILITY) ?? false);
   const canSkip = nodeEvaluatesDetection && can('stack:edit', 'stack', stack, nodeId);
   const notes = serviceUpdateNotes(preview?.images ?? [])
-    .map(note => ({ ...note, skipEntries: canSkip ? note.skipEntries : [] }))
-    .filter(note => note.changelogUrl || note.skipEntries.length > 0);
+    .map(note => ({
+      ...note,
+      skipEntries: canSkip ? note.skipEntries : [],
+      skipLimitReached: canSkip && note.skipLimitReached,
+    }))
+    .filter(note => note.changelogUrl || note.skipEntries.length > 0 || note.skipLimitReached);
   const alsoPulled = alsoPulledLine(alsoPulledServices(preview));
   if (notes.length === 0 && !alsoPulled) return null;
   const named = (preview?.images.filter(image => image.has_update).length ?? 0) > 1 || variant === 'inline';
@@ -94,6 +99,11 @@ export function UpdateServiceNotes({ preview, stack, nodeId, variant, className 
             >
               Copy skip label
             </button>
+          )}
+          {note.skipLimitReached && (
+            <span className="font-mono text-[11px] text-stat-subtitle" data-testid="update-skip-limit">
+              Skip label is full ({MAX_SKIP_LABEL_ENTRIES} entries); remove one before adding another.
+            </span>
           )}
         </div>
       ))}

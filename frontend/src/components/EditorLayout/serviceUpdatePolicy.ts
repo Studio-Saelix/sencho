@@ -70,13 +70,13 @@ export function detectionChips(
     chips.push({
       key: 'off',
       label: 'Update checks: off',
-      title: `${SENCHO_UPDATE_CHECK_LABEL}: false. Sencho does not check this service's image for updates. A stack update still pulls it.`,
+      title: `${SENCHO_UPDATE_CHECK_LABEL}: false. Sencho does not check this service's image for updates. A stack update still pulls its registry image; a build-backed service is built instead.`,
     });
   } else if (status?.detection === 'ignored') {
     chips.push({
       key: 'ignored',
       label: 'Update skipped',
-      title: `${SENCHO_UPDATE_IGNORE_LABEL} skips the pending update for this service. A newer update reports again. A stack update still pulls it.`,
+      title: `${SENCHO_UPDATE_IGNORE_LABEL} skips the pending update for this service. A newer update reports again. A stack update still pulls its registry image; a build-backed service is built instead.`,
     });
   }
   return chips;

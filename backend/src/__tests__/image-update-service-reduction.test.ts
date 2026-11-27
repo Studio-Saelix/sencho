@@ -246,17 +246,34 @@ describe('reduceServiceStatus with update detection labels', () => {
       ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
     });
     expect(status).toEqual({
-      service: 'app', image: 'app:1.0.0', hasUpdate: false, checkStatus: 'ok', lastError: null, detection: 'ignored',
+      service: 'app', image: 'app:1.0.0', hasUpdate: false, checkStatus: 'ok', lastError: null,
+      detection: 'ignored', ignoredRefs: ['app:1.0.0'],
     });
   });
 
-  it('does not carry a prior update over when the skipped check is only partial', () => {
+  it('keeps a prior update when a skipped candidate leaves the tag listing partial', () => {
     const map = new Map([['app:1.0.0', rebuild(DIGEST_A, 'error')]]);
     const prior: StackServiceStatus = { service: 'app', image: 'app:1.0.0', hasUpdate: true, checkStatus: 'ok', lastError: null };
     const { status } = reduceServiceStatus('app', 'app:1.0.0', [], map, prior, {
       ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
     });
-    expect(status).toMatchObject({ hasUpdate: false, checkStatus: 'partial', detection: 'ignored' });
+    expect(status).toMatchObject({ hasUpdate: true, checkStatus: 'partial', ignoredRefs: ['app:1.0.0'] });
+    expect(status).not.toHaveProperty('detection');
+  });
+
+  it('does not clear a prior positive because one of a service\'s distinct runtime refs timed out', () => {
+    const map = new Map([
+      ['app:1.0.0', rebuild(DIGEST_A)],
+      ['app:1.1.0', errored('registry timeout')],
+    ]);
+    const prior: StackServiceStatus = { service: 'app', image: 'app:1.0.0', hasUpdate: true, checkStatus: 'ok', lastError: null };
+    const { status } = reduceServiceStatus('app', 'app:1.0.0', ['app:1.1.0'], map, prior, {
+      ...DEFAULTS, ignore: [{ kind: 'digest', digest: DIGEST_A }],
+    });
+    expect(status).toMatchObject({
+      hasUpdate: true, checkStatus: 'partial', lastError: 'registry timeout', ignoredRefs: ['app:1.0.0'],
+    });
+    expect(status).not.toHaveProperty('detection');
   });
 
   it('reports a newer digest than the one skipped', () => {

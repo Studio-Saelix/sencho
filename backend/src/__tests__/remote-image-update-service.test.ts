@@ -17,11 +17,16 @@ vi.mock('../helpers/remoteCapabilities', () => ({
 const owner = vi.hoisted(() => ({
     reserveStackWriteGeneration: vi.fn(),
     commitRemoteObservation: vi.fn(),
+    recordRemoteCheckFailure: vi.fn(),
     runRemoteScan: vi.fn(),
 }));
 vi.mock('../services/ImageUpdateService', () => ({
     ImageUpdateService: { getInstance: () => owner, isChecksEnabled: () => true },
     UPDATE_VERIFICATION_INCOMPLETE_WARNING: 'Incomplete',
+}));
+const database = vi.hoisted(() => ({ detail: vi.fn().mockReturnValue({}) }));
+vi.mock('../services/DatabaseService', () => ({
+    DatabaseService: { getInstance: () => ({ getStackUpdateDetail: database.detail }) },
 }));
 const failed: ImageUpdateDetectResult = {
     hasUpdate: false, digestUpdate: false, tagUpdate: false, nextTag: null, digestError: 'Authentication required',
@@ -43,6 +48,7 @@ beforeEach(() => {
     vi.mocked(fetchRemoteImageUpdateRoster).mockResolvedValue(['web']);
     vi.mocked(probeRemoteCapability).mockResolvedValue({ kind: 'supported' });
     vi.mocked(probeRemoteImageUpdate).mockResolvedValue(success);
+    database.detail.mockReturnValue({});
     owner.runRemoteScan.mockImplementation(async (_nodeId: number, _manual: boolean, scan: () => Promise<void>) => {
         await scan();
         return true;
@@ -97,6 +103,20 @@ it('reserves a hub generation before fetching facts and never uses the target re
     expect(probeRemoteCapability).toHaveBeenCalledWith(2, SENCHO_LABEL_DETECTION_CAPABILITY);
 });
 
+it('verifies a post-update recheck with every image and forwards the verification contract', async () => {
+    owner.reserveStackWriteGeneration.mockReturnValue(7);
+    owner.commitRemoteObservation.mockResolvedValue({ outcome: 'cleared', warning: null });
+    await RemoteImageUpdateService.getInstance().recheckRemoteStack(
+        2, 'web', new AbortController().signal, { verification: true },
+    );
+    expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), {
+        includePolicy: true, detection: true, probeAll: true,
+    });
+    expect(owner.commitRemoteObservation).toHaveBeenCalledWith(
+        2, facts, expect.any(Map), 7, { verification: true },
+    );
+});
+
 it('asks a policy-capable target for the decision on a full node scan', async () => {
     owner.reserveStackWriteGeneration.mockReturnValue(7);
     owner.commitRemoteObservation.mockResolvedValue({ outcome: 'cleared', warning: null });
@@ -147,16 +167,20 @@ describe('update detection labels on hub-run checks', () => {
     it('asks a detection-capable target for its labels and shows skipped and unchecked services in the preview', async () => {
         vi.mocked(fetchRemoteImageUpdateFacts).mockResolvedValue(labeled());
         const preview = await RemoteImageUpdateService.getInstance().getPreview(2, 'web', new AbortController().signal);
-        expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { detection: true });
+        // The preview verifies every image a whole-stack apply would pull; the
+        // service labels only hide the result from reporting.
+        expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { detection: true, probeAll: true });
         // The hub probe won the authority merge, and its candidate digest is the one skipped.
         expect(preview.images.find(image => image.service === 'app')).toMatchObject({
             has_update: false, detection: 'ignored', check_status: 'ok',
         });
+        // The off service still carries the raw verification of the image the
+        // whole-stack apply would pull; only its reporting is suppressed.
         expect(preview.images.find(image => image.service === 'cache')).toMatchObject({
-            has_update: false, detection: 'off', check_status: 'not_checkable',
+            has_update: false, detection: 'off', check_status: 'ok',
         });
         expect(preview.summary.has_update).toBe(false);
-        expect(probeRemoteImageUpdate).toHaveBeenCalledTimes(1);
+        expect(probeRemoteImageUpdate).toHaveBeenCalledTimes(2);
     });
 
     it('matches a skip against the target credential result too', async () => {
@@ -164,7 +188,9 @@ describe('update detection labels on hub-run checks', () => {
         body.images[0].authority = { source: 'target_credential', result: success, observedAt: 1 };
         vi.mocked(fetchRemoteImageUpdateFacts).mockResolvedValue(body);
         const preview = await RemoteImageUpdateService.getInstance().getPreview(2, 'web', new AbortController().signal);
-        expect(probeRemoteImageUpdate).not.toHaveBeenCalled();
+        // Only the unchecked sibling is probed; the target credential result
+        // wins for the app image.
+        expect(vi.mocked(probeRemoteImageUpdate).mock.calls.map(call => call[0].ref)).toEqual(['redis:7']);
         expect(preview.images.find(image => image.service === 'app')).toMatchObject({ has_update: false, detection: 'ignored' });
     });
 
@@ -182,5 +208,41 @@ describe('update detection labels on hub-run checks', () => {
         const preview = await RemoteImageUpdateService.getInstance().getPreview(2, 'web', new AbortController().signal);
         expect(fetchRemoteImageUpdateFacts).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { detection: false });
         expect(preview.images[0]).toMatchObject({ has_update: true, candidate_digest: CANDIDATE });
+    });
+
+    it('omits a build-backed service from preview images but keeps its rebuild', async () => {
+        const body = structuredClone(facts);
+        body.services.push({ name: 'builder', declaredImage: 'builder:latest', runtimeImages: [], hasBuild: true });
+        body.images.push({
+            ref: 'builder:latest', localDigests: [], platform: null, emptyReason: 'no_repo_digests',
+            authority: { source: 'unchecked', result: null, observedAt: 1 },
+        });
+        vi.mocked(fetchRemoteImageUpdateFacts).mockResolvedValue(body);
+        const preview = await RemoteImageUpdateService.getInstance().getPreview(2, 'web', new AbortController().signal);
+        expect(preview.images.map(image => image.service)).toEqual(['app']);
+        expect(preview.build_services).toEqual(['builder']);
+        expect(vi.mocked(probeRemoteImageUpdate).mock.calls.map(call => call[0].ref)).toEqual(['nginx:latest']);
+    });
+
+    it('records known stacks failed when a scan cannot probe target metadata', async () => {
+        database.detail.mockReturnValue({ known: { hasUpdate: true, checkStatus: 'ok' } });
+        owner.reserveStackWriteGeneration.mockReturnValue(9);
+        vi.mocked(probeRemoteCapability).mockResolvedValue({ kind: 'unreachable', detail: 'transport_failure' });
+        await expect(RemoteImageUpdateService.getInstance().checkRemoteNode(2, true))
+            .rejects.toThrow('metadata is unavailable');
+        expect(owner.recordRemoteCheckFailure).toHaveBeenCalledWith(2, 'known', 9);
+    });
+
+    it('does not read a metadata outage as an older target on preview or recheck', async () => {
+        vi.mocked(probeRemoteCapability).mockResolvedValue({ kind: 'unreachable', detail: 'transport_failure' });
+        await expect(RemoteImageUpdateService.getInstance().getPreview(
+            2, 'web', new AbortController().signal,
+        )).rejects.toThrow('metadata is unavailable');
+        expect(fetchRemoteImageUpdateFacts).not.toHaveBeenCalled();
+
+        await expect(RemoteImageUpdateService.getInstance().recheckRemoteStack(
+            2, 'web', new AbortController().signal,
+        )).rejects.toThrow('metadata is unavailable');
+        expect(owner.commitRemoteObservation).not.toHaveBeenCalled();
     });
 });

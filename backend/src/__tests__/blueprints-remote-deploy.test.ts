@@ -114,7 +114,7 @@ describe('BlueprintService remote deploy', () => {
         const outcome = BlueprintService.getInstance().deployToNode(bpObj, nodeObj)
             .then(result => { settled = true; return result; });
         if (mode !== 'mixed') {
-            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(node.id, bpObj.name, expect.any(AbortSignal)));
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(node.id, bpObj.name, expect.any(AbortSignal), { verification: true }));
             expect(settled).toBe(false);
             release();
         }

@@ -2161,6 +2161,15 @@ describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
     })).toBe(true);
   });
 
+  it('retains a negative preview whose image a detection label hid or cleared', () => {
+    for (const detection of ['ignored', 'off'] as const) {
+      expect(isAuthoritativeNegativePreview({
+        images: [{ check_status: 'ok', detection }],
+        summary: { has_update: false, check_status: 'ok' },
+      })).toBe(false);
+    }
+  });
+
   it('retains when image check_status is missing', () => {
     expect(isAuthoritativeNegativePreview({
       images: [{}],

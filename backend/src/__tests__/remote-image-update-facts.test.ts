@@ -108,6 +108,20 @@ describe('update detection labels on the wire', () => {
         expect(parseRemoteImageUpdateFacts(body, nonce, 'web', true)).toEqual(body);
     });
 
+    it('requires the negotiated fields rather than reading an omission as no label', () => {
+        const noDirectives = detectionResponse();
+        delete noDirectives.stacks[0].directives;
+        expect(() => parseRemoteImageUpdateFacts(noDirectives, nonce, 'web', true)).toThrow('Invalid remote image facts');
+
+        const noCandidate = detectionResponse();
+        delete noCandidate.stacks[0].images[0].authority.result!.candidateDigest;
+        expect(() => parseRemoteImageUpdateFacts(noCandidate, nonce, 'web', true)).toThrow('Invalid remote image facts');
+
+        const empty = detectionResponse();
+        empty.stacks[0].directives = [];
+        expect(parseRemoteImageUpdateFacts(empty, nonce, 'web', true)).toEqual(empty);
+    });
+
     it('refuses directives or a candidate digest the hub did not ask for', () => {
         const withDirectives = detectionResponse();
         const result = withDirectives.stacks[0].images[0].authority.result!;

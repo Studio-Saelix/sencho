@@ -71,6 +71,8 @@ export const SENCHO_LABEL_POLICY_CAPABILITY = 'sencho-label-policy-v1';
  * request keys only to a node that advertises it.
  */
 export const SENCHO_LABEL_DETECTION_CAPABILITY = 'sencho-label-detection-v1';
+/** A checked target that understands `digestCandidates` on the execute request. */
+export const SENCHO_CHECKED_CANDIDATE_DIGEST_CAPABILITY = 'sencho-checked-candidate-digest-v1';
 
 export type SenchoLabelId =
   | 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure' | 'update' | 'notify-route'

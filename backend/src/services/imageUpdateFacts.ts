@@ -5,6 +5,12 @@ export const IMAGE_UPDATE_FACTS_VERSION = 1;
 export const IMAGE_UPDATE_FACTS_IMAGE_LIMIT = 24;
 export const IMAGE_UPDATE_FACTS_STACK_LIMIT = 500;
 export const IMAGE_UPDATE_FACTS_BYTE_LIMIT = 1024 * 1024;
+/**
+ * The observation token binds the trigger refs, up to the image limit. The
+ * ceiling stays below the checked request's 64 KB delivery budget so a long
+ * but legitimate ref list is not rejected by the body limit.
+ */
+export const IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT = 48 * 1024;
 
 /**
  * A detection result on the wire. `candidateDigest` is sent only when the hub
@@ -43,6 +49,12 @@ export interface ImageUpdateBoundFacts {
     model: ImageUpdateFactsModel;
     services: ImageUpdateServiceFacts[];
     images: ImageUpdateLocalFacts[];
+    /**
+     * The detection directives of the same render. Part of the canonical
+     * evidence hash, so a label-only edit between observation and execution
+     * makes the observation stale. Absent when every service is at its default.
+     */
+    directives?: ImageUpdateDirectiveFacts[];
 }
 
 export interface ImageUpdateStackFacts extends ImageUpdateBoundFacts {
@@ -103,5 +115,10 @@ export function hashImageUpdateFacts(facts: ImageUpdateBoundFacts): string {
         platform: image.platform ? { os: image.platform.os, architecture: image.platform.architecture } : null,
         emptyReason: image.emptyReason,
     })).sort((a, b) => a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0);
-    return createHash('sha256').update(JSON.stringify({ model, services, images })).digest('hex');
+    const directives = (facts.directives ?? [])
+        .map(entry => ({
+            service: entry.service, check: entry.check, ignore: [...entry.ignore], changelogUrl: entry.changelogUrl,
+        }))
+        .sort((a, b) => a.service < b.service ? -1 : a.service > b.service ? 1 : 0);
+    return createHash('sha256').update(JSON.stringify({ model, services, images, directives })).digest('hex');
 }

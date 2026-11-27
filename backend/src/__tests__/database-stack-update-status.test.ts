@@ -191,9 +191,9 @@ describe('stack_update_status services_json (per-service reduction)', () => {
     expect(db().getStackServicesJson(NODE, 'stackA')).toEqual([]);
   });
 
-  it('round-trips the detection field and drops only an unknown detection value', () => {
+  it('round-trips the detection and ignoredRefs fields and drops only an unknown value', () => {
     const labeled = [
-      { ...SERVICES[0], hasUpdate: false, detection: 'ignored' as const },
+      { ...SERVICES[0], hasUpdate: false, detection: 'ignored' as const, ignoredRefs: ['app:1'] },
       { ...SERVICES[1], checkStatus: 'not_checkable' as const, detection: 'off' as const },
     ];
     db().upsertStackUpdateStatus(NODE, 'stackA', false, 1000, 'ok', null, labeled, 1);
@@ -203,6 +203,16 @@ describe('stack_update_status services_json (per-service reduction)', () => {
     raw.prepare('UPDATE stack_update_status SET services_json = ? WHERE node_id = ? AND stack_name = ?')
       .run(JSON.stringify({ version: 1, generation: 1, services: [{ ...SERVICES[0], detection: 'snoozed' }] }), NODE, 'stackA');
     expect(db().getStackServicesJson(NODE, 'stackA')).toEqual([SERVICES[0]]);
+
+    raw.prepare('UPDATE stack_update_status SET services_json = ? WHERE node_id = ? AND stack_name = ?')
+      .run(JSON.stringify({ version: 1, generation: 1, services: [
+        { ...SERVICES[0], detection: 'ignored', ignoredRefs: ['app:1', 7] },
+        { ...SERVICES[1], ignoredRefs: 'not-a-list' },
+      ] }), NODE, 'stackA');
+    expect(db().getStackServicesJson(NODE, 'stackA')).toEqual([
+      { ...SERVICES[0], detection: 'ignored', ignoredRefs: ['app:1'] },
+      SERVICES[1],
+    ]);
   });
 
   it('filters out malformed entries within an otherwise valid services_json array', () => {

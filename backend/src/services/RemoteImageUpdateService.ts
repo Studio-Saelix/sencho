@@ -71,17 +71,31 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
     }
 
     public async getPreview(nodeId: number, stack: string, signal: AbortSignal) {
-        const options = { detection: await this.targetEvaluatesDetection(nodeId) };
+        // A failed metadata probe is not an older target. Treating it as one
+        // would drop the labels and overwrite a capable target's suppression.
+        const detection = await this.detectionCapability(nodeId);
+        if (detection.kind === 'unreachable') {
+            throw new Error('Target metadata is unavailable; update status was not refreshed');
+        }
+        // The preview verifies every image a whole-stack apply would pull,
+        // including one only checks-off services use.
+        const options = detection.kind === 'supported'
+            ? { detection: true, probeAll: true }
+            : { detection: false };
         const facts = await fetchRemoteImageUpdateFacts(nodeId, stack, signal, options);
         if (!facts.model.renderable) throw new Error(facts.model.error);
         const directives = directivesFromFacts(facts);
         const unchecked = hubUncheckedRefs(facts, options);
+        const previewServices = facts.services.filter(service => !service.hasBuild);
+        const previewRefs = new Set(previewServices.flatMap(service =>
+            [...new Set([service.declaredImage, ...service.runtimeImages].filter((ref): ref is string => ref !== null))]));
+        const imagesToProbe = facts.images.filter(image => previewRefs.has(image.ref));
         const previews = new Map<string, { preview: UpdatePreviewImage; detected: ImageUpdateDetectResult | null }>();
         let next = 0;
         const worker = async () => {
-            while (next < facts.images.length) {
+            while (next < imagesToProbe.length) {
                 signal.throwIfAborted();
-                const image = facts.images[next++];
+                const image = imagesToProbe[next++];
                 const notCheckable = image.ref.includes('@') || image.emptyReason === 'not_checkable' || unchecked.has(image.ref);
                 const result = notCheckable ? null : await this.detectImage(image, signal);
                 previews.set(image.ref, { detected: result, preview: {
@@ -98,7 +112,9 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         };
         await Promise.all(Array.from({ length: Math.min(4, facts.images.length) }, worker));
         signal.throwIfAborted();
-        const images = facts.services.flatMap(service => {
+        // A build-backed service is built, not pulled, so its registry image is
+        // not part of the update operation.
+        const images = facts.services.filter(service => !service.hasBuild).flatMap(service => {
             const refs = [...new Set([service.declaredImage, ...service.runtimeImages].filter((ref): ref is string => ref !== null))];
             return refs.map(ref => {
                 const entry = previews.get(ref);
@@ -124,22 +140,43 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         return checkResultFromDetection(result);
     }
 
-    public async recheckRemoteStack(nodeId: number, stack: string, signal: AbortSignal) {
+    public async recheckRemoteStack(
+        nodeId: number,
+        stack: string,
+        signal: AbortSignal,
+        options: { verification?: boolean } = {},
+    ) {
         const owner = ImageUpdateService.getInstance();
         if (!ImageUpdateService.isChecksEnabled()) return { warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
         const generation = owner.reserveStackWriteGeneration(nodeId, stack);
-        const options = await this.scanOptions(nodeId);
-        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, options);
+        const scanOptions = await this.scanOptions(nodeId);
+        // Verification reads every image the operation would pull, whatever
+        // the reporting labels project.
+        const factsOptions = options.verification && scanOptions.detection
+            ? { ...scanOptions, probeAll: true }
+            : scanOptions;
+        const { facts, imageResults } = await this.inspectRemoteStack(nodeId, stack, signal, factsOptions);
         signal.throwIfAborted();
-        return owner.commitRemoteObservation(nodeId, facts, imageResults, generation);
+        return owner.commitRemoteObservation(
+            nodeId, facts, imageResults, generation,
+            ...(options.verification ? [options] : []),
+        );
     }
 
     public async checkRemoteNode(nodeId: number, manual = false): Promise<boolean> {
         const owner = ImageUpdateService.getInstance();
         return owner.runRemoteScan(nodeId, manual, async () => {
-            const options = await this.scanOptions(nodeId);
             const known = Object.keys(DatabaseService.getInstance().getStackUpdateDetail(nodeId));
             const failureGenerations = new Map(known.map(stack => [stack, owner.reserveStackWriteGeneration(nodeId, stack)]));
+            let options: RemoteImageUpdateFactsOptions;
+            try {
+                options = await this.scanOptions(nodeId);
+            } catch (error) {
+                for (const [stack, generation] of failureGenerations) {
+                    await owner.recordRemoteCheckFailure(nodeId, stack, generation);
+                }
+                throw error;
+            }
             let stacks: string[];
             try {
                 stacks = await this.getRemoteRoster(nodeId, AbortSignal.timeout(90_000));
@@ -164,22 +201,25 @@ export class RemoteImageUpdateService implements RemoteAutoUpdateScanner {
         });
     }
 
-    /** The facts a hub-run scan asks for: whatever the target can evaluate. */
+    /**
+     * The facts a hub-run scan asks for: whatever the target can evaluate. A
+     * metadata probe that did not answer is not a legacy target; the caller
+     * records a failed check instead of overwriting filtered evidence.
+     */
     private async scanOptions(nodeId: number): Promise<RemoteImageUpdateFactsOptions> {
         const [includePolicy, detection] = await Promise.all([
             this.targetEvaluatesPolicy(nodeId),
-            this.targetEvaluatesDetection(nodeId),
+            this.detectionCapability(nodeId),
         ]);
-        return { includePolicy, detection };
+        if (detection.kind === 'unreachable') {
+            throw new Error('Target metadata is unavailable; update status was not refreshed');
+        }
+        return { includePolicy, detection: detection.kind === 'supported' };
     }
 
-    /**
-     * Whether the target evaluates the update detection labels. An older target
-     * is never sent the request keys, and its stacks report every update.
-     */
-    public async targetEvaluatesDetection(nodeId: number): Promise<boolean> {
-        const capability = await probeRemoteCapability(nodeId, SENCHO_LABEL_DETECTION_CAPABILITY);
-        return capability.kind === 'supported';
+    /** Whether the target evaluates the update detection labels, is older, or did not answer. */
+    public async detectionCapability(nodeId: number) {
+        return probeRemoteCapability(nodeId, SENCHO_LABEL_DETECTION_CAPABILITY);
     }
 
     /**

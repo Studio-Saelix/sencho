@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { isValidStackName } from '../utils/validation';
 import { MAX_UPDATE_IGNORE_ENTRIES, parseSenchoUrl, parseUpdateIgnoreEntry } from '../helpers/senchoLabels';
 import {
-    IMAGE_UPDATE_FACTS_IMAGE_LIMIT, IMAGE_UPDATE_FACTS_STACK_LIMIT,
+    IMAGE_UPDATE_FACTS_IMAGE_LIMIT, IMAGE_UPDATE_FACTS_STACK_LIMIT, IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT,
     type ImageUpdateFactsResponse,
 } from './imageUpdateFacts';
 
@@ -20,8 +20,10 @@ const detectionShape = {
 const timestamp = z.number().finite().nonnegative();
 /** The candidate digest is part of a result only when the hub asked for detection. */
 function authoritySchema(withDetection: boolean) {
+    // A negotiated response always carries the candidate digest; an omitted
+    // key would silently turn a known candidate into "no skip possible".
     const result = z.object(withDetection
-        ? { ...detectionShape, candidateDigest: digest.nullable().optional() }
+        ? { ...detectionShape, candidateDigest: digest.nullable() }
         : detectionShape,
     ).strict().refine(value => value.hasUpdate === (value.digestUpdate || value.tagUpdate));
     return z.discriminatedUnion('source', [
@@ -59,11 +61,13 @@ function stackSchema(withDetection: boolean) {
     }).strict();
     const base = {
         name: stackName, observationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-        observationToken: z.string().min(1).max(4096), model,
+        observationToken: z.string().min(1).max(IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT), model,
         services: z.array(service), images: z.array(image).max(IMAGE_UPDATE_FACTS_IMAGE_LIMIT),
         unattendedPolicy: unattendedPolicy.optional(),
     };
-    return z.object(withDetection ? { ...base, directives: z.array(directive).optional() } : base)
+    // A negotiated response always carries the (possibly empty) directives
+    // list; absence is a malformed or different contract, never "no labels".
+    return z.object(withDetection ? { ...base, directives: z.array(directive) } : base)
         .strict().superRefine((value, context) => {
             const names = new Set(value.services.map(entry => entry.name));
             const directives = 'directives' in value ? value.directives : undefined;

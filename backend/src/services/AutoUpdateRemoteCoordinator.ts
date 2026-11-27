@@ -13,7 +13,12 @@ import type { RemoteImageUpdateFactsOptions } from './remoteImageUpdateClient';
 import { awaitHubPostUpdateVerification, type HubVerificationTransport } from './hubPostUpdateVerification';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { SENCHO_LABEL_DETECTION_CAPABILITY, SENCHO_LABEL_POLICY_CAPABILITY, SENCHO_UPDATE_LABEL } from '../helpers/senchoLabels';
+import {
+  SENCHO_CHECKED_CANDIDATE_DIGEST_CAPABILITY,
+  SENCHO_LABEL_DETECTION_CAPABILITY,
+  SENCHO_LABEL_POLICY_CAPABILITY,
+  SENCHO_UPDATE_LABEL,
+} from '../helpers/senchoLabels';
 import { buildSystemPolicyGateOptions, remoteCandidateGateRefusal } from '../helpers/policyGate';
 import {
   describePolicySkip,
@@ -115,10 +120,12 @@ export class AutoUpdateRemoteCoordinator {
     // The pre-flight verifies every image it would pull, so the target is asked
     // for its detection labels and still probes every image.
     const detection = meta.meta.capabilities.includes(SENCHO_LABEL_DETECTION_CAPABILITY);
+    const digestCandidates = detection
+      && meta.meta.capabilities.includes(SENCHO_CHECKED_CANDIDATE_DIGEST_CAPABILITY);
     const results: string[] = [];
     for (const stack of stacks) {
       try {
-        results.push(await this.executeStack(input, stack, detection));
+        results.push(await this.executeStack(input, stack, detection, digestCandidates));
       } catch (error) {
         console.error(
           `[AutoUpdateCoordinator] Remote stack update failed for ${sanitizeForLog(stack)}:`,
@@ -168,7 +175,12 @@ export class AutoUpdateRemoteCoordinator {
       .join('\n');
   }
 
-  private async executeStack(input: RemoteAutoUpdateInput, stack: string, detection: boolean): Promise<string> {
+  private async executeStack(
+    input: RemoteAutoUpdateInput,
+    stack: string,
+    detection: boolean,
+    digestCandidates: boolean,
+  ): Promise<string> {
     // The target's own gate decides the candidate when its build can see one. A
     // build that cannot is a different decision, and it is the hub's to make:
     // there is nobody on the target to ask. Checking here, before the forward,
@@ -183,7 +195,7 @@ export class AutoUpdateRemoteCoordinator {
     );
     if (candidateRefusal) return `Stack "${stack}": ${candidateRefusal}`;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const prepared = await this.prepare(input, stack, detection);
+      const prepared = await this.prepare(input, stack, detection, digestCandidates);
       if ('message' in prepared) return prepared.message;
       const target = NodeRegistry.getInstance().getProxyTarget(input.nodeId);
       if (!target) throw new Error('Remote target is unavailable');
@@ -224,6 +236,7 @@ export class AutoUpdateRemoteCoordinator {
     input: RemoteAutoUpdateInput,
     stack: string,
     detection: boolean,
+    digestCandidates: boolean,
   ): Promise<{ message: string } | { body: Record<string, unknown>; images: string[]; alsoPulls: string }> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -240,14 +253,27 @@ export class AutoUpdateRemoteCoordinator {
       }
       const owners = new Map<string, string[]>();
       for (const service of facts.services) {
+        // A build-backed service is built, not pulled by a build-aware update.
+        if (service.hasBuild) continue;
         for (const ref of new Set([...(service.declaredImage ? [service.declaredImage] : []), ...service.runtimeImages])) {
           owners.set(ref, [...(owners.get(ref) ?? []), service.name]);
         }
       }
+      const triggerImages = facts.images.flatMap(image => {
+        const refOwners = owners.get(image.ref);
+        if (refOwners) return [{ ref: image.ref, owners: refOwners.slice().sort() }];
+        // No owner recorded: the ref still counts, unless every service that
+        // uses it builds its image and a build-aware update never pulls it.
+        const using = facts.services.filter(service =>
+          service.declaredImage === image.ref || service.runtimeImages.includes(image.ref));
+        return using.length > 0 && using.every(service => service.hasBuild)
+          ? [] : [{ ref: image.ref, owners: [] }];
+      });
       const gate = await evaluateAutoUpdateTrigger(
-        facts.images.map(image => ({ ref: image.ref, owners: (owners.get(image.ref) ?? []).sort() })),
+        triggerImages,
         directivesFromFacts(facts),
         async ref => imageResults.get(ref) ?? null,
+        { buildServices: facts.services.filter(service => service.hasBuild).map(service => service.name) },
       );
       if (!gate.hasDigestUpdate) return { message: messageWhenNoDigestUpdate(stack, gate, facts.images.length) };
       const blocked = messageWhenDigestApplyBlockedByCheckErrors(stack, gate);
@@ -258,6 +284,13 @@ export class AutoUpdateRemoteCoordinator {
           contractVersion: 1,
           stack,
           digestUpdateImages: gate.updatedImages,
+          // A target that evaluates the labels can enforce a digest ignore
+          // under its lock without holding the hub's registry credentials.
+          ...(digestCandidates ? {
+            digestCandidates: Object.fromEntries(gate.updatedImages.map(ref => [
+              ref, imageResults.get(ref)?.detection?.candidateDigest ?? null,
+            ])),
+          } : {}),
           observationToken: facts.observationToken,
           // The trigger travels with the request so a remote run is recorded as
           // the scheduled or automatic run it actually was.

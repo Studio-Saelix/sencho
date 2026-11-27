@@ -113,7 +113,7 @@ describe('evaluateAutoUpdateTrigger with update detection labels', () => {
     expect(state.hasDigestUpdate).toBe(false);
     expect(messageWhenNoDigestUpdate('site', state, 2)).toBe(
       'Stack "site": newer tag available but Compose pin unchanged; skipped auto-update. '
-      + 'The only actionable update belongs to a service with update checks off (db); no update applied.',
+      + 'Another pending update belongs to a service with update checks off (db); no update applied.',
     );
   });
 
@@ -127,6 +127,49 @@ describe('evaluateAutoUpdateTrigger with update detection labels', () => {
     expect(alsoPullsNote(state)).toBe('');
     const quiet = await evaluateAutoUpdateTrigger([{ ref: 'db:latest', owners: ['db'] }], new Map(), async () => upToDate);
     expect(messageWhenNoDigestUpdate('site', quiet, 1)).toBe('Stack "site": all images up to date.');
+  });
+
+  it('blocks a sibling digest apply when a tag listing succeeded but the current digest lookup failed', async () => {
+    const tagWithFailedDigest = checkResultFromDetection({
+      hasUpdate: true, digestUpdate: false, tagUpdate: true, nextTag: '1.1.0', digestError: 'digest lookup failed',
+      tagEnumKind: 'complete', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'minor',
+      candidateDigest: null,
+    });
+    const state = await evaluateAutoUpdateTrigger(
+      [{ ref: 'web:latest', owners: ['web'] }, { ref: 'db:1.0.0', owners: ['db'] }],
+      new Map(),
+      async ref => (ref === 'web:latest' ? rebuild() : tagWithFailedDigest),
+    );
+    expect(state.hasDigestUpdate).toBe(true);
+    expect(state.checkErrors).toEqual(['digest lookup failed']);
+    expect(messageWhenDigestApplyBlockedByCheckErrors('site', state)).toContain('1 image check(s) failed');
+  });
+
+  it("keeps a suppressed tag update's failed digest lookup as an error", async () => {
+    const tagWithFailedDigest = checkResultFromDetection({
+      hasUpdate: true, digestUpdate: false, tagUpdate: true, nextTag: '1.1.0', digestError: 'digest lookup failed',
+      tagEnumKind: 'complete', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'minor',
+      candidateDigest: null,
+    });
+    const skipTag = { check: true, ignore: [{ kind: 'tag' as const, tag: '1.1.0' }], changelogUrl: null };
+    const state = await evaluateAutoUpdateTrigger(
+      [{ ref: 'web:latest', owners: ['web'] }, { ref: 'db:1.0.0', owners: ['db'] }],
+      new Map([['db', skipTag]]),
+      async ref => (ref === 'web:latest' ? rebuild() : tagWithFailedDigest),
+    );
+    expect(state.hasDigestUpdate).toBe(true);
+    expect(state.checkErrors).toEqual(['digest lookup failed']);
+    expect(state.suppressed).toEqual([{ service: 'db', reason: 'ignored' }]);
+  });
+
+  it('does not name a build-backed service among the images a pull fetches', async () => {
+    const state = await evaluateAutoUpdateTrigger(
+      [{ ref: 'web:latest', owners: ['web'] }, { ref: 'builder:latest', owners: ['builder'] }],
+      new Map([['builder', off]]),
+      async () => rebuild(),
+      { buildServices: ['builder'] },
+    );
+    expect(alsoPullsNote(state)).toBe('');
   });
 
   it('records a thrown or missing check as an error', async () => {

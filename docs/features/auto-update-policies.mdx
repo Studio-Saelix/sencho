@@ -150,25 +150,25 @@ Each node group renders its own card grid under a header showing the node name, 
 
 For each stack with a pending image update, Sencho computes a preview by:
 
-1. Parsing the compose file to enumerate every service that pulls a registry image (a service declaring only `build:`, with no `image:` key, has no registry reference to check and is excluded from this preview).
+1. Rendering the effective Compose model and enumerating every service that pulls a registry image. A build-backed service is built instead, so it is not part of the registry preview.
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
 3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If a higher tag exists, the stack surfaces as a tag-only advisory (`Newer tag · edit Compose`); scheduled auto-update and **Apply now** do not rewrite Compose pins. If the highest available tag matches the current one but the remote digest has changed, the stack surfaces as a Compose-actionable `Rebuild available` / digest update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
-5. Applying each service's update detection labels: an image only checks-off services use is not sent to the registry, and an update a service skips is not reported for it. See [Update checks](/features/sencho-labels#update-checks).
+5. Applying each service's update detection labels. An update a service skips is not reported for it. A checks-off service's registry image is still verified because a whole-stack update pulls it, but its update is not reported; a build-backed service is excluded by step 1. See [Update checks](/features/sencho-labels#update-checks).
 
 The preview is recomputed each time the readiness board loads, so it reflects the live state of your registries and local images.
 
-A stack that mixes registry images and `build:` services still gets a card, scored from its registry images. Triggering **Update** on that stack, from this board or a schedule, always rebuilds the `build:` services from source in the same run, whether or not the registry portion has a pending update. See [Controlling a running stack](/features/stack-management#controlling-a-running-stack) for what a build-aware update runs.
+A stack that mixes registry images and `build:` services still gets a card, scored from its registry images. Triggering **Update** on that stack from this board always rebuilds the `build:` services from source in the same run. A scheduled auto-update does the same only when it has a registry digest update to apply; with nothing to apply it skips the stack. See [Controlling a running stack](/features/stack-management#controlling-a-running-stack) for what a build-aware update runs.
 
 ## Skip one update
 
 To stop an update from being reported without silencing the next one:
 
-1. On the update's row (expand it with the chevron), card, or phone card, or on the stack's update banner, click **Copy skip label** beside the service. It copies a line such as `io.sencho.update.ignore: "1.5.0"`.
+1. On the update's row (expand it with the chevron), card, or phone card, or on the stack's update banner, click **Copy skip label** beside the service. It copies a line such as `io.sencho.update.ignore: "1.5.0"`, keeping any entries the label already has so a replaced line does not re-enable an earlier skip.
 2. Open the stack, add the line under that service's `labels:`, and save.
 3. Click **Recheck** on the stack. The update no longer shows, and the service shows **Update skipped** on its card.
 
-When the registry publishes something newer than what you skipped, it reports again. Skipping an update does not stop a whole-stack update from pulling that image; the update preview names the services it also pulls. To stop checking a service entirely, use `io.sencho.update.check: "false"`. See [Update checks](/features/sencho-labels#update-checks).
+When the registry publishes something newer than what you skipped, it reports again. Skipping an update does not stop a whole-stack update from pulling that image, unless the service declares `build:` and is built instead; the update preview names the services it also pulls. To stop checking a service entirely, use `io.sencho.update.check: "false"`. See [Update checks](/features/sencho-labels#update-checks).
 
 ## Troubleshooting
 

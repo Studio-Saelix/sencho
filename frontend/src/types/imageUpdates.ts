@@ -77,6 +77,8 @@ export interface StackServiceUpdateStatus {
      * an older node.
      */
     detection?: 'off' | 'ignored';
+    /** Refs whose every pending candidate the last check skipped; Security reads this. */
+    ignoredRefs?: string[];
 }
 
 /**
@@ -126,15 +128,16 @@ export function isConfirmedServiceUpdate(info: {
  * True when a live update-preview is safe to treat as "no update" for Fleet
  * card drops and similar UI reconcile. Mirrors backend
  * UpdatePreviewService.isAuthoritativeNegativePreview: every image must be
- * explicitly ok, and !has_update. Empty / mixed not_checkable previews never clear.
+ * explicitly ok with no detection label that hid or cleared it, and
+ * !has_update. Empty / mixed not_checkable previews never clear.
  */
 export function isAuthoritativeNegativePreview(preview: {
-    images: Array<{ check_status?: string | null }>;
+    images: Array<{ check_status?: string | null; detection?: 'off' | 'ignored' }>;
     summary: { has_update: boolean; check_status?: string | null };
 } | null | undefined): boolean {
     if (!preview) return false;
     return preview.images.length > 0
-        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.images.every((i) => i.check_status === 'ok' && i.detection === undefined)
         && preview.summary.has_update === false;
 }
 
@@ -169,6 +172,8 @@ export interface UpdatePreviewImage {
     candidate_digest?: string | null;
     /** The service's `io.sencho.update.changelog` link, on a pending update only. */
     changelog_url?: string | null;
+    /** The entries already saved in the service's `io.sencho.update.ignore` label. */
+    ignore_entries?: string[];
 }
 
 export interface UpdatePreviewSummary {

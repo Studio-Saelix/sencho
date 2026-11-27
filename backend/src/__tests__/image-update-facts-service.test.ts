@@ -41,8 +41,9 @@ function labelsFor(services: Record<string, Partial<import('../helpers/senchoLab
 vi.mock('../services/imageUpdateTargetAuthority', () => ({
     collectTargetImageAuthority: vi.fn(),
 }));
+const observation = vi.hoisted(() => ({ issue: vi.fn(() => 'signed-observation') }));
 vi.mock('../services/ImageUpdateObservationService', () => ({
-    ImageUpdateObservationService: { getInstance: () => ({ issue: () => 'signed-observation' }) },
+    ImageUpdateObservationService: { getInstance: () => ({ issue: observation.issue }) },
 }));
 vi.mock('../services/DockerController', () => ({
     default: { getInstance: () => docker },
@@ -50,6 +51,7 @@ vi.mock('../services/DockerController', () => ({
 
 beforeEach(() => {
     vi.clearAllMocks();
+    observation.issue.mockReturnValue('signed-observation');
     ImageUpdateFactsService.resetForTests();
     labels.read.mockResolvedValue(null);
     vi.mocked(collectTargetImageAuthority).mockResolvedValue({ source: 'unchecked', result: null, observedAt: 0 });
@@ -264,5 +266,30 @@ describe('update detection labels in the facts', () => {
         }
         // Labels never stop a probe the hub did not ask to skip.
         expect(collectTargetImageAuthority).toHaveBeenCalledTimes(2);
+    });
+
+    it('binds the target trigger decision for an older hub without changing its response', async () => {
+        const facts = await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32));
+        expect(facts).not.toHaveProperty('directives');
+        // The checking owner keeps its ref checkable; the checks-off cache is out.
+        expect(observation.issue).toHaveBeenCalledWith(expect.objectContaining({ triggerRefs: ['nginx:1.27'] }));
+
+        labels.read.mockResolvedValue(null);
+        await ImageUpdateFactsService.getInstance().collect(1, 'site', 'a'.repeat(32));
+        expect(observation.issue).toHaveBeenLastCalledWith(expect.objectContaining({
+            triggerRefs: ['nginx:1.27', 'redis:7'],
+        }));
+    });
+
+    it('changes the observation hash when only a detection label changes', async () => {
+        const { hashImageUpdateFacts } = await import('../services/imageUpdateFacts');
+        const quiet = await ImageUpdateFactsService.getInstance().readLocal(1, 'site');
+        labels.read.mockResolvedValue(null);
+        const unlabeled = await ImageUpdateFactsService.getInstance().readLocal(1, 'site');
+        expect(hashImageUpdateFacts(quiet)).not.toBe(hashImageUpdateFacts(unlabeled));
+        expect(quiet.directives).toEqual([
+            { service: 'cache', check: false, ignore: [], changelogUrl: null },
+            { service: 'web', check: true, ignore: [CANDIDATE], changelogUrl: 'https://example.com/notes' },
+        ]);
     });
 });

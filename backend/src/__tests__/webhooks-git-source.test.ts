@@ -260,7 +260,7 @@ describe('node-aware Git source webhooks', () => {
         const execution = WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'git-pull', 'test')
             .then(result => { settled = true; return result; });
         if (mode !== 'mixed') {
-            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', expect.any(AbortSignal)));
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', expect.any(AbortSignal), { verification: true }));
             expect(fetchMock).toHaveBeenCalledTimes(1);
             expect(settled).toBe(false);
             release();

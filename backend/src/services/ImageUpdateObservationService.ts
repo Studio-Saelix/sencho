@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { DatabaseService } from './DatabaseService';
+import { IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT } from './imageUpdateFacts';
 
 const AUDIENCE = 'image-update-observation';
 const TTL_SECONDS = 300;
@@ -11,6 +12,12 @@ export interface ImageUpdateObservationBinding {
     stack: string;
     observationRevision: number;
     factsHash: string;
+    /**
+     * The refs the target's labels allow to start this update. Bound into the
+     * token so a checked request cannot use an image whose current directive
+     * suppresses it, including from a hub that never asked for the labels.
+     */
+    triggerRefs: string[];
 }
 
 export class ImageUpdateObservationError extends Error {
@@ -60,7 +67,9 @@ export class ImageUpdateObservationService {
         const secret = this.getSecret();
         let payload: jwt.JwtPayload | string;
         try {
-            if (typeof token !== 'string' || token.length > 4096) throw new Error('Invalid observation length');
+            if (typeof token !== 'string' || token.length > IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT) {
+                throw new Error('Invalid observation length');
+            }
             payload = jwt.verify(token, secret, { algorithms: ['HS256'], audience: AUDIENCE });
         } catch (error) {
             if (!(error instanceof Error)) throw error;
@@ -73,6 +82,10 @@ export class ImageUpdateObservationService {
             || typeof payload.observationRevision !== 'number' || !Number.isSafeInteger(payload.observationRevision)
             || payload.observationRevision < 1
             || typeof payload.factsHash !== 'string' || !/^[a-f0-9]{64}$/.test(payload.factsHash)
+            || !Array.isArray(payload.triggerRefs)
+            || payload.triggerRefs.length > 24
+            || !payload.triggerRefs.every((ref: unknown) => typeof ref === 'string' && ref.length > 0 && ref.length <= 2048)
+            || new Set(payload.triggerRefs).size !== payload.triggerRefs.length
             || typeof payload.jti !== 'string' || !/^[a-f0-9]{32}$/.test(payload.jti)
             || typeof payload.exp !== 'number' || typeof payload.iat !== 'number'
             || payload.iat > Math.floor(Date.now() / 1000)
@@ -84,6 +97,7 @@ export class ImageUpdateObservationService {
             binding: {
                 contractVersion: 1, requestNonce: payload.requestNonce, stack: payload.stack,
                 observationRevision: payload.observationRevision, factsHash: payload.factsHash,
+                triggerRefs: payload.triggerRefs as string[],
             },
             jti: payload.jti, expiresAt: payload.exp * 1000,
         };
@@ -94,7 +108,8 @@ export class ImageUpdateObservationService {
         const actual = verified.binding;
         if (binding.contractVersion !== actual.contractVersion || binding.requestNonce !== actual.requestNonce
             || binding.stack !== actual.stack || binding.observationRevision !== actual.observationRevision
-            || binding.factsHash !== actual.factsHash) {
+            || binding.factsHash !== actual.factsHash
+            || binding.triggerRefs.join('\0') !== actual.triggerRefs.join('\0')) {
             throw new ImageUpdateObservationError('IMAGE_UPDATE_OBSERVATION_STALE', 409);
         }
         return { jti: verified.jti, expiresAt: verified.expiresAt };

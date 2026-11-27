@@ -3335,7 +3335,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             targetResponse: { status: res.status, body: payload },
             caller: 'mesh',
             transport: { recheckRemoteStack: (id, stack, signal) =>
-                import('./RemoteImageUpdateService').then(m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal)) },
+                import('./RemoteImageUpdateService').then(m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal, { verification: true })) },
         });
         // Mesh redeploy success is the mutation result alone. The hub recheck
         // status rides along as an activity detail so a failed verification

@@ -55,8 +55,10 @@ export async function evaluateAutoUpdateTrigger(
   images: readonly AutoUpdateTriggerImage[],
   directives: DetectionDirectives,
   check: (ref: string) => Promise<ImageCheckResult | null>,
+  options: { buildServices?: readonly string[] } = {},
 ): Promise<AutoUpdateDigestGateState> {
   const state = createAutoUpdateDigestGateState();
+  const buildServices = new Set(options.buildServices ?? []);
   const alsoPulls = new Map<string, TriggerSuppression>();
   for (const image of images) {
     let raw: ImageCheckResult | null;
@@ -78,7 +80,11 @@ export async function evaluateAutoUpdateTrigger(
       const reason: TriggerSuppression | null = !directive.check ? 'off'
         : applyIgnoreToCheck(image.ref, raw, directive.ignore).ignored ? 'ignored' : null;
       if (!reason) continue;
-      if (!alsoPulls.has(owner) || reason === 'ignored') alsoPulls.set(owner, reason);
+      // A build-backed service is built, not pulled, so a whole-stack update
+      // does not fetch its registry image and the run result must not say so.
+      if (!buildServices.has(owner) && (!alsoPulls.has(owner) || reason === 'ignored')) {
+        alsoPulls.set(owner, reason);
+      }
       if (suppressed && !state.suppressed.some(entry => entry.service === owner)) {
         state.suppressed.push({ service: owner, reason });
       }
@@ -91,13 +97,84 @@ export async function evaluateAutoUpdateTrigger(
 
 const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
 
+export interface LocalTriggerRoster {
+  images: AutoUpdateTriggerImage[];
+  directives: DetectionDirectives;
+  buildServices: string[];
+}
+
 /**
- * The detection directives of a local stack, from one render. A model that
- * does not render applies no label, so every update still counts.
+ * The images a local whole-stack update would pull, derived from the same
+ * effective model the operation uses. A declared service with no container yet
+ * is still pulled by Compose, so it belongs in the pre-flight roster; a
+ * build-backed service is built instead, so its registry image is not.
  */
-export async function localDetectionDirectives(nodeId: number, stackName: string): Promise<DetectionDirectives> {
+export async function localTriggerRoster(
+  nodeId: number,
+  stackName: string,
+  containers: readonly { Image?: string; Service?: string; Labels?: Record<string, string> }[],
+): Promise<LocalTriggerRoster> {
   const facts = await readEffectiveStackFacts(nodeId, stackName);
-  return directivesFromResolution(facts.model.renderable ? facts.labels : null);
+  const directives = directivesFromResolution(facts.model.renderable ? facts.labels : null);
+  const owners = new Map<string, Set<string>>();
+  for (const image of triggerImagesFromContainers(containers)) {
+    owners.set(image.ref, new Set(image.owners));
+  }
+  const buildServices: string[] = [];
+  if (facts.model.renderable) {
+    const built = new Set(facts.model.services.filter(service => service.hasBuild).map(service => service.name));
+    const declared = new Set(facts.model.services.map(service => service.name));
+    for (const service of facts.model.services) {
+      if (service.hasBuild) buildServices.push(service.name);
+      if (!service.declaredImage || service.hasBuild) continue;
+      const set = owners.get(service.declaredImage) ?? new Set<string>();
+      set.add(service.name);
+      owners.set(service.declaredImage, set);
+    }
+    // The declared roster comes from the effective model. A running image of a
+    // model service is also verified, but an orphan container or a build-backed
+    // service is not pulled, so it is not a trigger.
+    for (const [ref, services] of owners) {
+      // An ownerless image still counts: the container list could not name its
+      // Compose service, and a pre-flight that drops it would miss a pull.
+      if (services.size === 0) continue;
+      const keep = [...services].filter(name => declared.has(name) && !built.has(name));
+      if (keep.length === 0) owners.delete(ref);
+      else owners.set(ref, new Set(keep));
+    }
+  }
+  return {
+    images: [...owners].map(([ref, services]) => ({ ref, owners: [...services].sort() })),
+    directives,
+    buildServices,
+  };
+}
+
+/**
+ * Re-evaluate an unattended trigger at the mutation boundary. The caller ran
+ * the gate before waiting for the stack lock; labels, declared services, or
+ * containers can change while it waits. Any reason string means Compose must
+ * not run.
+ */
+export async function revalidateLocalAutoUpdateTrigger(
+  nodeId: number,
+  stackName: string,
+  readContainers: () => Promise<Array<{ Image?: string; Service?: string; Labels?: Record<string, string> }> | null | undefined>,
+  check: (ref: string) => Promise<ImageCheckResult | null>,
+): Promise<string | null> {
+  const containers = await readContainers();
+  if (!containers || containers.length === 0) {
+    return `Stack "${stackName}": no containers found; skipped.`;
+  }
+  const roster = await localTriggerRoster(nodeId, stackName, containers);
+  if (roster.images.length === 0) {
+    return `Stack "${stackName}": no pullable images; skipped.`;
+  }
+  const gate = await evaluateAutoUpdateTrigger(roster.images, roster.directives, check, {
+    buildServices: roster.buildServices,
+  });
+  if (!gate.hasDigestUpdate) return messageWhenNoDigestUpdate(stackName, gate, roster.images.length);
+  return messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
 }
 
 /**
@@ -146,6 +223,10 @@ export function recordAutoUpdateImageCheck(
   imageRef: string,
   result: ImageCheckResult,
 ): void {
+  // A confirmed higher tag does not verify the current tag's content. A
+  // whole-stack update pulls that content as collateral, so its failed digest
+  // comparison still blocks the run.
+  if (result.detection?.digestError) state.checkErrors.push(result.detection.digestError);
   if (result.digestUpdate) {
     state.hasDigestUpdate = true;
     state.updatedImages.push(imageRef);
@@ -156,7 +237,9 @@ export function recordAutoUpdateImageCheck(
     return;
   }
   if (result.error || result.checkStatus === 'failed' || result.checkStatus === 'partial') {
-    state.checkErrors.push(result.error ?? 'Update check incomplete');
+    const error = result.error ?? 'Update check incomplete';
+    // The digest error was already recorded above for this same image.
+    if (error !== result.detection?.digestError) state.checkErrors.push(error);
   }
 }
 
@@ -175,22 +258,23 @@ export function messageWhenDigestApplyBlockedByCheckErrors(
 
 /**
  * The sentence naming what the detection labels kept from starting a run.
- * `actionable` is for a stack that also has a non-actionable tag-only update,
- * so the sentence does not claim there is no other pending update.
+ * A tag-only advisory is never called "actionable": Compose cannot apply it
+ * without a Compose edit. When one tag is reported, the update a label
+ * suppressed is another pending update, not "the only" one.
  */
 function suppressionSentence(
   suppressed: readonly { service: string; reason: TriggerSuppression }[],
-  actionable: boolean,
+  subject: 'only available update' | 'another pending update',
 ): string | null {
   if (suppressed.length === 0) return null;
-  const subject = actionable ? 'the only actionable update' : 'the only available update';
+  const phrase = subject === 'only available update' ? 'the only available update' : subject;
   const ignored = suppressed.filter(entry => entry.reason === 'ignored').map(entry => entry.service);
   if (ignored.length > 0) {
-    return `${subject} is skipped by ${SENCHO_UPDATE_IGNORE_LABEL} (${ignored.join(', ')}); no update applied`;
+    return `${phrase} is skipped by ${SENCHO_UPDATE_IGNORE_LABEL} (${ignored.join(', ')}); no update applied`;
   }
   const names = suppressed.map(entry => entry.service);
   const noun = names.length === 1 ? 'a service' : 'services';
-  return `${subject} belongs to ${noun} with update checks off (${names.join(', ')}); no update applied`;
+  return `${phrase} belongs to ${noun} with update checks off (${names.join(', ')}); no update applied`;
 }
 
 /** Operator message when no digest-actionable update was found. */
@@ -205,11 +289,11 @@ export function messageWhenNoDigestUpdate(
   // A skipped update is never reported as "up to date".
   const suppressed = state.suppressed ?? [];
   if (state.hasTagOnlyUpdate) {
-    const blocked = suppressionSentence(suppressed, true);
+    const blocked = suppressionSentence(suppressed, 'another pending update');
     const tail = blocked ? ` ${blocked.charAt(0).toUpperCase()}${blocked.slice(1)}.` : '';
     return `Stack "${stackName}": newer tag available but Compose pin unchanged; skipped auto-update${errNote}.${tail}`;
   }
-  const blocked = suppressionSentence(suppressed, false);
+  const blocked = suppressionSentence(suppressed, 'only available update');
   if (blocked) {
     return `Stack "${stackName}": ${blocked}${errNote}.`;
   }

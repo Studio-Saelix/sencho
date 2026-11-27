@@ -78,6 +78,18 @@ describe('UpdateServiceNotes', () => {
     expect(screen.queryByTestId('update-copy-skip-label')).toBeNull();
   });
 
+  it('shows the full-label note instead of a copy verb when the saved entries reach the limit', () => {
+    const saved = Array.from({ length: 8 }, (_, i) => `1.0.${i}`);
+    render(
+      <UpdateServiceNotes
+        preview={preview([{ tag_update: true, next_tag: '2.0.0', ignore_entries: saved }])}
+        stack="site" nodeId={1} variant="list"
+      />,
+    );
+    expect(screen.queryByTestId('update-copy-skip-label')).toBeNull();
+    expect(screen.getByTestId('update-skip-limit')).toHaveTextContent('8 entries');
+  });
+
   it('reports a clipboard failure through the error toast', async () => {
     copy.mockRejectedValue(new Error('blocked'));
     vi.spyOn(console, 'error').mockImplementation(() => undefined);

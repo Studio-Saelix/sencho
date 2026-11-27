@@ -30,7 +30,13 @@ vi.mock('../services/hubPostUpdateVerification', () => ({ skippedVerification: (
 import { checkedAutoUpdateRouter } from '../routes/checkedAutoUpdate';
 import { hashImageUpdateFacts } from '../services/imageUpdateFacts';
 
-const facts = { model: { renderable: true as const }, services: [], images: [{ ref: 'nginx:1', localDigests: ['sha256:abc'], platform: { os: 'linux', architecture: 'amd64' }, emptyReason: 'none' as const }] };
+const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+const facts = {
+  model: { renderable: true as const },
+  services: [{ name: 'web', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+  images: [{ ref: 'nginx:1', localDigests: ['sha256:abc'], platform: { os: 'linux', architecture: 'amd64' }, emptyReason: 'none' as const }],
+};
 const body = { contractVersion: 1, stack: 'web', digestUpdateImages: ['nginx:1'], observationToken: 'token' };
 const app = express();
 app.use(express.json());
@@ -39,7 +45,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.permission.mockReturnValue(true);
   mocks.readLocal.mockResolvedValue(facts);
-  mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(facts) });
+  mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(facts), triggerRefs: ['nginx:1'] });
   mocks.apply.mockImplementation(async ({ observation }) => {
     await observation.verify();
     await observation.consume();
@@ -53,6 +59,19 @@ describe('checked automatic update route', () => {
     expect(response.status).toBe(403);
     expect(mocks.apply).not.toHaveBeenCalled();
   });
+  it('rejects malformed or unknown candidate digests', async () => {
+    for (const digestCandidates of [
+      { 'nginx:1': 'not-a-digest' },
+      { 'other:1': `sha256:${'a'.repeat(64)}` },
+      Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`img:${i}`, `sha256:${'a'.repeat(64)}`])),
+    ]) {
+      const response = await request(app).post('/api/auto-update/execute-checked')
+        .set('x-test-machine', 'yes').send({ ...body, digestCandidates });
+      expect(response.status).toBe(400);
+    }
+    expect(mocks.apply).not.toHaveBeenCalled();
+  });
+
   it('validates singular contract and deduplicated nonempty image list', async () => {
     for (const invalid of [{ ...body, target: '*' }, { ...body, digestUpdateImages: [] }, { ...body, digestUpdateImages: ['nginx:1', 'nginx:1'] }, { ...body, contractVersion: 2 }]) {
       const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(invalid);
@@ -66,6 +85,53 @@ describe('checked automatic update route', () => {
     expect(response.body).toMatchObject({ applied: false, result: 'stale_observation', code: 'IMAGE_UPDATE_OBSERVATION_STALE' });
     expect(mocks.consume).not.toHaveBeenCalled();
   });
+  it('refuses a trigger the target labels suppress, even when the facts hash is unchanged', async () => {
+    mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(facts), triggerRefs: [] });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ applied: false, result: 'stale_observation' });
+    expect(mocks.consume).not.toHaveBeenCalled();
+  });
+  it('accepts a hub-credential trigger when the current label does not skip its candidate', async () => {
+    const labeled = {
+      ...facts,
+      directives: [{ service: 'web', check: true, ignore: [DIGEST_A], changelogUrl: null }],
+    };
+    mocks.readLocal.mockResolvedValue(labeled);
+    mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(labeled), triggerRefs: ['nginx:1'] });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes')
+      .send({ ...body, digestCandidates: { 'nginx:1': DIGEST_B } });
+    expect(response.status).toBe(200);
+    expect(mocks.consume).toHaveBeenCalled();
+  });
+
+  it('refuses a hub-credential trigger whose candidate the current label skips', async () => {
+    const labeled = {
+      ...facts,
+      directives: [{ service: 'web', check: true, ignore: [DIGEST_A], changelogUrl: null }],
+    };
+    mocks.readLocal.mockResolvedValue(labeled);
+    mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(labeled), triggerRefs: ['nginx:1'] });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes')
+      .send({ ...body, digestCandidates: { 'nginx:1': DIGEST_A } });
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ applied: false, result: 'stale_observation' });
+    expect(mocks.consume).not.toHaveBeenCalled();
+  });
+
+  it('refuses a digest-ignore ref from an older hub that sent no candidate', async () => {
+    const labeled = {
+      ...facts,
+      directives: [{ service: 'web', check: true, ignore: [DIGEST_A], changelogUrl: null }],
+    };
+    mocks.readLocal.mockResolvedValue(labeled);
+    mocks.verify.mockReturnValue({ factsHash: hashImageUpdateFacts(labeled), triggerRefs: ['nginx:1'] });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ applied: false, result: 'stale_observation' });
+    expect(mocks.consume).not.toHaveBeenCalled();
+  });
+
   it('rereads facts before consuming the observation and preserves health metadata', async () => {
     const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
     expect(response.status).toBe(200);

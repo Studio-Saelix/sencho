@@ -415,6 +415,18 @@ describe('updatePreviewSignal verification failure', () => {
     expect(signal.status).toBe('ok');
   });
 
+  it('holds a confirmed update for review when a sibling digest lookup failed behind a tag confirmation', () => {
+    const signal = updatePreviewSignal(
+      summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: false, verification_error: null }),
+      [
+        image({ service: 'confirmed', has_update: true, check_error: null, digest_error: null }),
+        image({ service: 'unverified', has_update: true, tag_update: true, check_error: null, digest_error: 'digest lookup failed' }),
+      ],
+    );
+    expect(signal.status).toBe('attention');
+    expect(signal.detail).toMatch(/digest verification/);
+  });
+
   it('holds a confirmed update for review when per-image detail proves a genuinely different image failed verification', () => {
     const signal = updatePreviewSignal(
       summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: true, verification_error: 'Registry unreachable' }),

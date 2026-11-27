@@ -89,6 +89,13 @@ export interface StackServiceStatus {
      * `io.sencho.update.ignore`. Absent when no label changed the result.
      */
     detection?: 'off' | 'ignored';
+    /**
+     * The service image refs whose every pending candidate this check skipped
+     * with `io.sencho.update.ignore`. Reporting reads `detection`; Security
+     * reads this list so a skipped declared ref is not attributed to a
+     * different runtime ref the service also runs.
+     */
+    ignoredRefs?: string[];
 }
 
 /**
@@ -234,11 +241,21 @@ function parseServicesJson(raw: string | null | undefined): StackServiceStatus[]
     try {
         const parsed = JSON.parse(raw) as { version?: unknown; services?: unknown };
         if (parsed?.version !== SERVICES_JSON_VERSION || !Array.isArray(parsed.services)) return [];
-        // A detection value this version does not know drops only that field.
         return parsed.services.filter(isStackServiceStatus).map(service => {
-            if (service.detection === undefined || service.detection === 'off' || service.detection === 'ignored') return service;
-            const { detection: _unknown, ...rest } = service;
-            return rest;
+            // A detection value or ref list this version does not know drops
+            // only that field, never the whole row.
+            const { detection, ...rest } = service;
+            const clean: StackServiceStatus = detection === undefined || detection === 'off' || detection === 'ignored'
+                ? service : rest;
+            if (!Array.isArray(clean.ignoredRefs)) {
+                if (clean.ignoredRefs === undefined) return clean;
+                const { ignoredRefs: _ignored, ...withoutRefs } = clean;
+                return withoutRefs;
+            }
+            const ignoredRefs = clean.ignoredRefs.filter((ref): ref is string => typeof ref === 'string' && ref.length > 0);
+            if (ignoredRefs.length > 0) return { ...clean, ignoredRefs };
+            const { ignoredRefs: _ignored, ...withoutRefs } = clean;
+            return withoutRefs;
         });
     } catch {
         return [];

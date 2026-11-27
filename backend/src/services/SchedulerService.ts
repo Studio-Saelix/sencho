@@ -22,10 +22,10 @@ import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
 import {
     alsoPullsNote,
     evaluateAutoUpdateTrigger,
-    localDetectionDirectives,
+    localTriggerRoster,
     messageWhenDigestApplyBlockedByCheckErrors,
     messageWhenNoDigestUpdate,
-    triggerImagesFromContainers,
+    revalidateLocalAutoUpdateTrigger,
 } from '../helpers/autoUpdateDigestGate';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
@@ -85,7 +85,13 @@ interface PolicySkipped {
     policy: UpdatePolicyResult;
 }
 
-type UpdateRunOutcome = PolicySkipped | OrchestratorResult;
+/** The trigger no longer holds under the current labels or image roster, or its checks now fail. */
+interface TriggerSuppressed {
+    kind: 'trigger_suppressed';
+    message: string;
+}
+
+type UpdateRunOutcome = PolicySkipped | TriggerSuppressed | OrchestratorResult;
 
 export class SchedulerService {
     private static instance: SchedulerService;
@@ -1391,7 +1397,7 @@ export class SchedulerService {
                 caller: 'scheduler',
                 transport: {
                     recheckRemoteStack: (id, stack, signal) =>
-                        RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+                        RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal, { verification: true }),
                 },
             });
             if (verification.source === 'hub_authority' && verification.status !== 'verified') {
@@ -1422,25 +1428,23 @@ export class SchedulerService {
             return `Stack "${stackName}": no containers found; skipped.`;
         }
 
-        const images = triggerImagesFromContainers(containers);
-        const imageRefs = images.map(image => image.ref);
+        const roster = await localTriggerRoster(nodeId, stackName, containers);
+        const check = (ref: string) => imageUpdateService.checkImage(docker, ref);
 
-        if (imageRefs.length === 0) {
+        if (roster.images.length === 0) {
             return `Stack "${stackName}": no pullable images; skipped.`;
         }
 
         if (isDebugEnabled()) {
-            console.log(`[SchedulerService] Stack "${stackName}": checking ${imageRefs.length} image(s): ${imageRefs.join(', ')}`);
+            console.log(`[SchedulerService] Stack "${stackName}": checking ${roster.images.length} image(s): ${roster.images.map(image => image.ref).join(', ')}`);
         }
 
-        const gate = await evaluateAutoUpdateTrigger(
-            images,
-            await localDetectionDirectives(nodeId, stackName),
-            ref => imageUpdateService.checkImage(docker, ref),
-        );
+        const gate = await evaluateAutoUpdateTrigger(roster.images, roster.directives, check, {
+            buildServices: roster.buildServices,
+        });
 
         if (!gate.hasDigestUpdate) {
-            return messageWhenNoDigestUpdate(stackName, gate, imageRefs.length);
+            return messageWhenNoDigestUpdate(stackName, gate, roster.images.length);
         }
         const checkErrorBlock = messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
         if (checkErrorBlock) return checkErrorBlock;
@@ -1469,6 +1473,11 @@ export class SchedulerService {
                     'Auto-update',
                     `/api/scheduled-tasks/auto-update/${stackName}`,
                 );
+                // The labels that justified this run were read before the lock.
+                const triggerRefusal = await revalidateLocalAutoUpdateTrigger(
+                    nodeId, stackName, () => docker.getContainersByStack(stackName), check,
+                );
+                if (triggerRefusal) return { kind: 'trigger_suppressed', message: triggerRefusal };
                 return StackUpdateOrchestrator.getInstance().execute(
                     { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler', policy },
                     {
@@ -1485,6 +1494,7 @@ export class SchedulerService {
         if (lock.result?.kind === 'update_policy_skipped') {
             return `Stack "${stackName}": ${describePolicySkip(lock.result.policy)}.`;
         }
+        if (lock.result?.kind === 'trigger_suppressed') return lock.result.message;
 
         // Health observation starts immediately after Compose; registry recheck is
         // isolated so a verification failure cannot turn Compose success into a failure.
@@ -1499,7 +1509,7 @@ export class SchedulerService {
         // Recheck persists digest-cleared / tag-advisory state. Do not blind-clear.
         let recheckWarning: string | undefined;
         try {
-            const recheck = await imageUpdateService.recheckStack(nodeId, stackName);
+            const recheck = await imageUpdateService.recheckStack(nodeId, stackName, { verification: true });
             if (recheck.warning) recheckWarning = recheck.warning;
         } catch (recheckErr) {
             console.warn(

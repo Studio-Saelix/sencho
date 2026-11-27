@@ -3298,7 +3298,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
 
     let recheckWarning: string | undefined;
     try {
-      const recheck = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName);
+      const recheck = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName, { verification: true });
       if (recheck.warning) recheckWarning = recheck.warning;
     } catch (recheckErr) {
       console.warn(

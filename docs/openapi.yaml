@@ -233,13 +233,17 @@ components:
         detection:
           type: string
           enum: [off, ignored]
-          description: Set when the service's update detection labels changed the result. `off` when `io.sencho.update.check` is false (the image was not checked for this service); `ignored` when every pending update was skipped by `io.sencho.update.ignore`.
+          description: Set when the service's update detection labels changed the result. `off` when `io.sencho.update.check` is false (the image is not reported for this service, though a whole-stack preview still verifies it unless the service is build-backed); `ignored` when a skip in `io.sencho.update.ignore` cleared every candidate this preview reported.
         candidate_digest:
           type: ["string", "null"]
           description: The registry's current digest for the tag on a same-tag rebuild, the `io.sencho.update.ignore` entry that skips it. Null when unknown.
         changelog_url:
           type: ["string", "null"]
           description: The service's `io.sencho.update.changelog` link, present on a pending update only.
+        ignore_entries:
+          type: array
+          items: { type: string }
+          description: The entries already saved in the service's `io.sencho.update.ignore` label, so a Copy skip line can keep them.
 
     UpdatePreviewSummary:
       type: object

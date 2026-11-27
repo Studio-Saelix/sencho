@@ -88,6 +88,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `sencho-labels-v1` | `io.sencho.*` Compose labels: application and named links, display order, hidden helper services, and their label audit status |
 | `sencho-label-policy-v1` | The `io.sencho.update` update policy and the `io.sencho.notify.route` notification routing key |
 | `sencho-label-detection-v1` | The `io.sencho.update.check`, `io.sencho.update.ignore`, and `io.sencho.update.changelog` update detection labels |
+| `sencho-checked-candidate-digest-v1` | Carries the observed digest candidate with a checked remote update, so the target enforces `io.sencho.update.ignore` without needing the hub's registry credentials |
 | `project-env-files` | Project-level env file selection in the Environment tab |
 | `compose-storage` | Stack Storage tab (volume explorer) |
 | `cross-node-rbac` | Role enforcement on requests forwarded to a remote node |
