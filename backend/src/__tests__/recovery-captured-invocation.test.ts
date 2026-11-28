@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import path from 'path';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { withUnixSocketAt } from './helpers/unixSocketFixture';
 
@@ -14,6 +14,32 @@ import { withUnixSocketAt } from './helpers/unixSocketFixture';
 // pre-spawn check both refuse a process-selected env file that is a pipe, and
 // the guard runs first; either message names the file as not a regular file.
 const NOT_A_REGULAR_FILE = /not a regular file/;
+
+/** 110 services reusing a harmless merge anchor and an env_file anchor: 110 references to each. */
+function aliasHeavyCompose(): string {
+  let compose = `x-defaults: &defaults
+  restart: unless-stopped
+x-env-file: &env-file shared.env
+services:
+`;
+  for (let i = 0; i < 110; i++) {
+    compose += `  svc${i}:
+    <<: *defaults
+    image: alpine
+    env_file: *env-file
+`;
+  }
+  return compose;
+}
+
+/** Ten levels of binary nesting: far past the finite parser allowance from a tiny file. */
+function nestedAliasCompose(): string {
+  let compose = 'x-a0: &a0 [end]\n';
+  for (let i = 1; i < 10; i++) {
+    compose += `x-a${i}: &a${i} [*a${i - 1}, *a${i - 1}]\n`;
+  }
+  return `${compose}services: {}\n`;
+}
 
 describe('captured invocation on recovery Compose args', () => {
   let tmpDir: string;
@@ -45,6 +71,154 @@ describe('captured invocation on recovery Compose args', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('captures an authored stack that reuses ordinary aliases beyond the library default', async () => {
+    const stackName = 'inv-alias-reuse';
+    const stackDir = path.join(composeDir, stackName);
+    const compose = aliasHeavyCompose();
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), compose, 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'shared.env'), 'SHARED=1\n', 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, '.env'), 'PROJECT=1\n', 'utf8');
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    const generationId = await context.backupFromContext('deployment');
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, generationId);
+    const byPath = new Map(manifest.entries.map((entry) => [entry.relativePath, entry]));
+    const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+    expect(byPath.get('compose.yaml')).toMatchObject({
+      dependencyKind: 'compose-root',
+      state: 'present',
+      sizeBytes: Buffer.byteLength(compose),
+      contentSha256: sha256(compose),
+    });
+    expect(byPath.get('shared.env')).toMatchObject({
+      state: 'present',
+      sizeBytes: Buffer.byteLength('SHARED=1\n'),
+      contentSha256: sha256('SHARED=1\n'),
+    });
+    expect(byPath.get('.env')).toMatchObject({
+      state: 'present',
+      sizeBytes: Buffer.byteLength('PROJECT=1\n'),
+      contentSha256: sha256('PROJECT=1\n'),
+    });
+  });
+
+  it('captures an authored stack whose compose file declares YAML 1.1', async () => {
+    const stackName = 'inv-yaml11';
+    const stackDir = path.join(composeDir, stackName);
+    const compose = `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: shared.env
+`;
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), compose, 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'shared.env'), 'SHARED=1\n', 'utf8');
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toBeNull();
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    const generationId = await context.backupFromContext('deployment');
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, generationId);
+    const byPath = new Map(manifest.entries.map((entry) => [entry.relativePath, entry]));
+    const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+    expect(byPath.get('compose.yaml')).toMatchObject({
+      dependencyKind: 'compose-root',
+      state: 'present',
+      sizeBytes: Buffer.byteLength(compose),
+      contentSha256: sha256(compose),
+    });
+    expect(byPath.get('shared.env')).toMatchObject({
+      state: 'present',
+      contentSha256: sha256('SHARED=1\n'),
+    });
+  });
+
+  it('refuses nested alias expansion and writes no generation', async () => {
+    const stackName = 'inv-alias-bomb';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), nestedAliasCompose(), 'utf8');
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const generationsRoot = RollbackGenerationStore.getGenerationsRoot(nodeId, stackName);
+    const listGenerations = async (): Promise<string[]> => {
+      try {
+        return (await fs.promises.readdir(generationsRoot)).sort();
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw e;
+      }
+    };
+    const before = await listGenerations();
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toContain('Cannot parse compose file compose.yaml');
+    expect(inventory.coverageRefusal).toContain('Excessive alias count');
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    await expect(context.backupFromContext('deployment')).rejects.toMatchObject({
+      code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+      message: expect.stringContaining('Excessive alias count'),
+    });
+    expect(await listGenerations()).toEqual(before);
+  });
+
+  it('refuses a merge that hides an authored dependency and writes no generation', async () => {
+    const stackName = 'inv-merge-hidden';
+    const stackDir = path.join(composeDir, stackName);
+    await fs.promises.mkdir(stackDir, { recursive: true });
+    await fs.promises.writeFile(path.join(stackDir, 'compose.yaml'), `x-defaults: &defaults
+  env_file: shared.env
+services:
+  web:
+    <<: *defaults
+    image: alpine
+`, 'utf8');
+    await fs.promises.writeFile(path.join(stackDir, 'shared.env'), 'SHARED=1\n', 'utf8');
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    const generationsRoot = RollbackGenerationStore.getGenerationsRoot(nodeId, stackName);
+    const listGenerations = async (): Promise<string[]> => {
+      try {
+        return (await fs.promises.readdir(generationsRoot)).sort();
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw e;
+      }
+    };
+    const before = await listGenerations();
+
+    const { resolveRollbackInventory } = await import('../services/rollbackInventory');
+    const inventory = await resolveRollbackInventory(nodeId, stackName);
+    expect(inventory.coverageRefusal).toContain('Cannot enumerate compose file compose.yaml');
+    expect(inventory.coverageRefusal).toContain('YAML merge key hides declaration "env_file"');
+
+    const { resolveComposeProjectContext } = await import('../services/composeProjectContext');
+    const context = await resolveComposeProjectContext(nodeId, stackName);
+    await expect(context.backupFromContext('deployment')).rejects.toMatchObject({
+      code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+      message: expect.stringContaining('YAML merge key hides declaration'),
+    });
+    expect(await listGenerations()).toEqual(before);
   });
 
   it('uses captured -f order and env-file when live settings diverge', async () => {
