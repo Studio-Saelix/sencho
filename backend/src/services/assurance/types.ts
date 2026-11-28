@@ -188,6 +188,7 @@ export type CanonicalRuleId =
   | 'compose-version-mismatch'
   | 'external-network-missing'
   | 'external-volume-missing'
+  | 'secret-volume-reference'
   | 'new-network'
   | 'new-volume'
   | 'anonymous-volume'

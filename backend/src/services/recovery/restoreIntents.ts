@@ -5,6 +5,7 @@ import { recoveryDb } from './recoveryDb';
 import { RecoveryError } from './redaction';
 import { HELPER_LABEL_RESTORE_INTENT } from './restic/helperRunner';
 import type { IntegrityMethod, RecoveryErrorClass, RestoreIntentPhase } from './types';
+import { isReservedSecretVolumeName, SECRET_VOLUME_RESTORE_REFUSAL } from '../../helpers/secretVolume';
 
 /**
  * Durable restore intents.
@@ -253,6 +254,12 @@ export class RestoreIntentStore {
     now: number,
   ): RestoreIntentRecord {
     if (!input.targetVolume) throw new RecoveryError('invalid_request');
+    // No restore may target a reserved secret volume name. A labelled volume
+    // under another name is refused by the eligibility check (`secret_volume`).
+    if (isReservedSecretVolumeName(input.targetVolume)
+      || (extra.stagingVolume !== undefined && isReservedSecretVolumeName(extra.stagingVolume))) {
+      throw new RecoveryError('invalid_request', { detail: SECRET_VOLUME_RESTORE_REFUSAL });
+    }
     const db = recoveryDb();
     const id = input.id ?? randomUUID();
     try {

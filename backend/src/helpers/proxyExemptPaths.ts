@@ -15,14 +15,35 @@ export const PROXY_EXEMPT_PREFIXES: readonly string[] = [
   '/api/gitops/hooks',
   '/api/meta',
   '/api/build-info',
+  // Sealed secrets are served by whichever instance receives the request, and
+  // only to the hub's own background call (the route refuses a signed-in
+  // session, an API token and any request with a forwarded role). Exempt, not
+  // hub-only: the hub never forwards a request here, and a receiving node whose
+  // operator made a remote node its default still serves the call itself
+  // instead of resolving it to that remote node.
+  '/api/sealed-secrets',
 ];
 
-/** Returns true when the path should bypass the remote proxy (handled locally). */
+/**
+ * Returns true when the path should bypass the remote proxy (handled locally).
+ * Case-insensitive, as Express routing is: `/api/Sealed-Secrets` reaches the
+ * same local router, so it must not be forwarded either.
+ */
 export function isProxyExemptPath(path: string): boolean {
+  const normalized = path.toLowerCase();
   for (const prefix of PROXY_EXEMPT_PREFIXES) {
-    if (path.startsWith(prefix)) return true;
+    if (normalized.startsWith(prefix)) return true;
   }
   return false;
+}
+
+/**
+ * True for the sealed secret routes, which act on this instance's own Docker
+ * daemon whatever node the request names, so the request belongs to the local
+ * node (for its audit row too), never to the default node.
+ */
+export function isSealedSecretPath(path: string): boolean {
+  return path.toLowerCase().startsWith('/api/sealed-secrets');
 }
 
 // Path prefixes that are hub-only: they must be served on the instance you are

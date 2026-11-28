@@ -62,11 +62,14 @@ describe('captured invocation on recovery Compose args', () => {
     if (tmpDir) cleanupTestDb(tmpDir);
   });
 
-  // These tests are about the captured invocation, not the Docker endpoint guard,
-  // which would render the stack's Compose files once more on its own.
+  // These tests are about the captured invocation, not the Docker endpoint guard
+  // or the secret volume guard, which would render the stack's Compose files on
+  // their own (secret-volume-deploy-guard.test.ts covers the recovery up).
   beforeEach(async () => {
     const { ComposeService } = await import('../services/ComposeService');
     vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+    vi.spyOn(ComposeService.prototype, 'evaluateSecretVolumeUse').mockResolvedValue(null);
+    vi.spyOn(ComposeService.prototype, 'evaluateHookVolumeCleanup').mockResolvedValue(null);
   });
 
   afterEach(() => {

@@ -24,6 +24,15 @@ vi.mock('../services/NodeRegistry', () => ({
     NodeRegistry: { getInstance: () => ({ getProxyTarget: mockGetProxyTarget }) },
 }));
 
+const mockDockerGetInstance = vi.fn(() => {
+    throw new Error('fleet snapshot capture must not reach Docker');
+});
+
+vi.mock('../services/DockerController', () => ({
+    default: { getInstance: mockDockerGetInstance },
+    DockerController: { getInstance: mockDockerGetInstance },
+}));
+
 vi.mock('../services/DatabaseService', () => ({
     DatabaseService: { getInstance: () => ({ getStackDossier: mockGetStackDossier }) },
 }));
@@ -127,6 +136,19 @@ describe('captureLocalNodeFiles', () => {
 
         expect(result.stacks[0].files.map(f => f.filename)).toEqual(['compose.yaml']);
         expect(result.warnings[0].reason).toContain('exceeds');
+    });
+});
+
+describe('captureLocalNodeFiles and secret volumes', () => {
+    it('captures only files and makes no Docker volume call for a stack that mounts a secret volume', async () => {
+        mockGetStacks.mockResolvedValue(['edge']);
+        mockGetStackContent.mockResolvedValue('services:\n  cloudflared:\n    volumes: [sencho_edge_secret:/etc/secret:ro]\nvolumes:\n  sencho_edge_secret: { external: true }\n');
+        mockGetEnvContent.mockRejectedValue(Object.assign(new Error('no file'), { code: 'ENOENT' }));
+
+        const result = await captureLocalNodeFiles(localNode);
+
+        expect(result.stacks[0].files.map(f => f.filename)).toEqual(['compose.yaml']);
+        expect(mockDockerGetInstance).not.toHaveBeenCalled();
     });
 });
 

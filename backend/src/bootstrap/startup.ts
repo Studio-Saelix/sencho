@@ -50,6 +50,7 @@ import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 import { NodeBootstrapOperationService } from '../services/nodeBootstrap/NodeBootstrapOperationService';
 import { NodeReadinessService } from '../services/nodeBootstrap/NodeReadinessService';
 import { getErrorMessage } from '../utils/errors';
+import { getOrCreateSealingKey } from '../helpers/registryEnvelopeSeal';
 
 function isPilotMode(): boolean {
   return process.env.SENCHO_MODE === 'pilot';
@@ -76,6 +77,23 @@ export function ensurePilotJwtSecret(): boolean {
   dbSvc.updateGlobalSetting('auth_jwt_secret', generated);
   console.log('[Startup] pilot-agent: generated local auth_jwt_secret');
   return true;
+}
+
+/**
+ * Load or create this instance's sealing key and print its public
+ * fingerprint. The line is the out-of-band value an Admin compares before
+ * confirming the key on a control instance; it works for Pilot agents (which
+ * serve no UI) and needs no feature flag. A public-key fingerprint is not a
+ * secret. A failure is logged and does not block startup: sealing then fails
+ * closed on first use.
+ */
+export function announceSealingKey(): void {
+  try {
+    const { fingerprint } = getOrCreateSealingKey();
+    console.log(`[Sealing] This node's sealing key fingerprint: ${fingerprint}`);
+  } catch (err) {
+    console.error('[Sealing] Could not load or create the sealing key:', (err as Error).message);
+  }
 }
 
 /** Keep the pilot's persisted local node aligned with its configured mount. */
@@ -222,6 +240,7 @@ export async function startServer(server: Server): Promise<void> {
   }
 
   ensurePilotJwtSecret();
+  announceSealingKey();
 
   if (isPilotMode()) {
     applyPilotModeCapabilityFilter();

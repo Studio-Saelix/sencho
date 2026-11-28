@@ -366,6 +366,16 @@ describe('POST /api/recovery/points/:id/restore', () => {
     expect(res.body.errorClass).toBe('invalid_request');
   });
 
+  it('refuses a reserved secret volume name as the new volume', async () => {
+    service().markReadyForTests();
+    const pointId = await seedPoint();
+    const res = await request(app).post(`/api/recovery/points/${pointId}/restore`).set('Cookie', adminCookie)
+      .send({ targetVolumeName: 'sencho_edge_secret', idempotencyKey: randomUUID() });
+    expect(res.status).toBe(400);
+    expect(res.body.errorClass).toBe('invalid_request');
+    expect(JSON.stringify(res.body)).toMatch(/reserved for a secret/);
+  });
+
   it('refuses a mode this release does not implement', async () => {
     service().markReadyForTests();
     const pointId = await seedPoint();

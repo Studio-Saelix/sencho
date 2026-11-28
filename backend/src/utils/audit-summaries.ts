@@ -58,7 +58,10 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
   'POST /nodes/*/uncordon': 'Uncordoned node',
-  'DELETE /nodes/*/sealing-key': 'Reset node registry sealing key pin',
+  'DELETE /nodes/*/sealing-key': 'Reset node sealing key pin',
+  'POST /nodes/*/sealing-key/confirm': 'Confirmed node sealing key fingerprint',
+  'POST /sealed-secrets/*': 'Received a sealed secret from the control instance',
+  'DELETE /sealed-secrets/*/*': 'Removed a sealed secret at the control instance\'s request',
 
   // User management
   'POST /users': 'Created user',
@@ -315,6 +318,19 @@ export function getAuditSummary(method: string, apiPath: string, statusCode?: nu
     }
     if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
       return `Prune plan failed (${statusCode})`;
+    }
+    if (normalized.startsWith('sealed-secrets/') && (method === 'POST' || method === 'DELETE')) {
+      const outcome = statusCode >= 500 ? 'failed' : 'refused';
+      return method === 'POST'
+        ? `Sealed secret from the control instance ${outcome} (${statusCode})`
+        : `Sealed secret removal ${outcome} (${statusCode})`;
+    }
+    const sealingKeyOutcome = statusCode >= 500 ? 'failed' : 'refused';
+    if (method === 'POST' && /^nodes\/[^/]+\/sealing-key\/confirm\/?$/.test(normalized)) {
+      return `Node sealing key confirmation ${sealingKeyOutcome} (${statusCode})`;
+    }
+    if (method === 'DELETE' && /^nodes\/[^/]+\/sealing-key\/?$/.test(normalized)) {
+      return `Node sealing key pin reset ${sealingKeyOutcome} (${statusCode})`;
     }
   }
   const normalizedSegments = normalized.split('/');

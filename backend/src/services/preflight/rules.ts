@@ -14,6 +14,7 @@ import {
   type TunnelConnector,
 } from '../network/tunnelDetection';
 import { redactImageForDisplay } from '../../utils/safeLog';
+import { describeSecretVolumeUse, evaluateSecretVolumeUse, SECRET_VOLUME_REMEDY } from './secretVolumeUse';
 import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 import { enumeratedHostPorts } from '../../helpers/composePortSpec';
 import {
@@ -868,6 +869,36 @@ const externalVolumeMissing: PreflightRule = {
   },
 };
 
+/**
+ * The same evaluator the deploy guard runs. Doctor judges from the node
+ * snapshot it takes for this report, and the deploy guard reads the node again
+ * at deploy time, so Doctor reports ahead of time what a deploy will refuse.
+ */
+const secretVolumeReference: PreflightRule = {
+  id: 'secret-volume-reference',
+  run(ctx) {
+    if (!ctx.model || ctx.secretVolumeExempt) return [];
+    const facts = ctx.secretVolumeFacts ?? { labelledVolumeNames: new Set<string>(), consumers: null };
+    return evaluateSecretVolumeUse(ctx.model, facts).map((finding): RuleHit => {
+      const onVolume = 'volumeKey' in finding;
+      return {
+        ruleId: 'secret-volume-reference',
+        severity: 'blocker',
+        title: 'Stack reaches a reserved secret volume',
+        message: `${describeSecretVolumeUse(finding)} Sencho refuses to deploy a stack that reaches it.`,
+        sourcePath: onVolume
+          ? `volumes.${finding.volumeKey}`
+          : `services.${finding.service}.${finding.kind === 'pid' ? 'pid' : 'volumes_from'}`,
+        ...(onVolume ? {} : { service: finding.service }),
+        subject: onVolume
+          ? { kind: 'volume', key: finding.volumeName }
+          : { kind: 'service', key: `${finding.service}:${finding.kind}:${finding.container}` },
+        remediation: SECRET_VOLUME_REMEDY,
+      };
+    });
+  },
+};
+
 const newNetwork: PreflightRule = {
   id: 'new-network',
   run(ctx) {
@@ -1280,6 +1311,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   composeVersionMismatch,
   externalNetworkMissing,
   externalVolumeMissing,
+  secretVolumeReference,
   newNetwork,
   newVolume,
   anonymousVolume,

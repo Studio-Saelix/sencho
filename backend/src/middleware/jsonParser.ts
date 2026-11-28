@@ -55,12 +55,16 @@ const gitProviderHookJsonParser = jsonWithRawBody(PROVIDER_WEBHOOK_BODY_LIMIT);
  *
  * The target node is resolved via `resolveNodeId` (header, then `?nodeId=`,
  * then the default node) rather than only the header, so this bypass agrees
- * with `nodeContextMiddleware` on every request, not just header-targeted
- * ones.
+ * with `nodeContextMiddleware` on every proxyable `/api/` request, not just
+ * header-targeted ones. A proxy-exempt path is always parsed here and needs no
+ * node lookup.
  */
 export const conditionalJsonParser: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  const node = NodeRegistry.getInstance().getNode(resolveNodeId(req));
-  if (node?.type === 'remote' && req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
+  // The node is looked up only for a request that could be proxied: a path
+  // served on this instance whatever node it names (the sealed secret routes
+  // among them) must not depend on reading the default node's record.
+  if (req.path.startsWith('/api/') && !isProxyExemptPath(req.path)
+    && NodeRegistry.getInstance().getNode(resolveNodeId(req))?.type === 'remote') {
     next();
     return;
   }

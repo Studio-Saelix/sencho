@@ -190,3 +190,20 @@ describe('the staged-overwrite phase table', () => {
     })).not.toThrow();
   });
 });
+
+describe('secret volume targets', () => {
+  it('refuses a restore into or staged through a reserved secret volume name', () => {
+    const { pointId, operationId } = seed();
+    expect(refuses(() => intents.RestoreIntentStore.getInstance().record({
+      operationId, pointId, targetVolume: 'sencho_edge_secret', actor: 'admin', processEpoch: 'e',
+    }))).toBe('invalid_request');
+    expect(refuses(() => intents.RestoreIntentStore.getInstance().recordOverwrite({
+      operationId, pointId, targetVolume: 'sencho_edge_secret', actor: 'admin', processEpoch: 'e',
+      stagingVolume: 'sencho-recovery-stage-s', expectedGenerationToken: 'token-1',
+    }))).toBe('invalid_request');
+    expect(refuses(() => intents.RestoreIntentStore.getInstance().recordOverwrite({
+      operationId, pointId, targetVolume: 'data-s', actor: 'admin', processEpoch: 'e',
+      stagingVolume: 'sencho_edge_secret', expectedGenerationToken: 'token-1',
+    }))).toBe('invalid_request');
+  });
+});

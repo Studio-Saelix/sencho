@@ -1,3 +1,4 @@
+import type { SecretVolumeNodeFacts } from './secretVolumeUse';
 import type { EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import type { LiteralDollarWarning } from '../../helpers/unsetEnvClassification';
@@ -197,6 +198,11 @@ export interface PreflightContext {
   nodePorts: NodePortBinding[];
   existingNetworkNames: Set<string>;
   existingVolumeNames: Set<string>;
+  /** Secret volumes and the containers that mount them, for `secret-volume-reference`.
+   *  Absent when the node snapshot was not read; the name and label checks still run. */
+  secretVolumeFacts?: SecretVolumeNodeFacts;
+  /** True when Sencho recorded this stack as a secret volume's consumer. */
+  secretVolumeExempt?: boolean;
   existingContainers: { name: string; stack: string | null }[];
   /** Whether the node's Docker snapshot was collected; gates node-state checks so
    *  an unavailable snapshot cannot be mistaken for an empty node. */

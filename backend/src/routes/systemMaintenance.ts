@@ -15,6 +15,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { sendIfSecretVolumeProtected } from '../helpers/secretVolume';
 import { activeBulkActions } from '../helpers/bulkActionLocks';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
 import { isValidDockerNetworkName } from '../services/network/dockerNetworkName';
@@ -595,6 +596,7 @@ systemMaintenanceRouter.post('/volumes/delete', async (req: Request, res: Respon
     invalidateNodeCaches(req.nodeId);
     res.json({ success: true, message: 'Volume deleted' });
   } catch (error: unknown) {
+    if (sendIfSecretVolumeProtected(res, error)) return;
     console.error('Failed to delete volume:', error);
     res.status(500).json({ error: 'Failed to delete volume' });
   }

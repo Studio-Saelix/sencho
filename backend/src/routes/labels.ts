@@ -245,10 +245,16 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             allowedEvidence = allowedPolicyEvidence(gate);
             if (isDryRun) {
               // A dry run answers what the real run would, and the real run is
-              // refused when it would recreate the container carrying the Docker connection.
-              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: 'up' });
+              // refused when it would recreate the container carrying the Docker
+              // connection, or when it would reach a secret volume on the node.
+              // Both checks read one render, as the deploy does.
+              const compose = ComposeService.getInstance(req.nodeId);
+              const render = compose.createSharedRender(stackName);
+              const refusal = (await compose.evaluateDockerEndpoint(stackName, { kind: 'up' }, undefined, render))?.message
+                ?? await compose.evaluateSecretVolumeUse(stackName, render)
+                ?? await compose.evaluateHookVolumeCleanup(stackName, { kind: 'project-up' }, render);
               results.push(refusal
-                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                ? { stackName, success: false, error: refusal, dryRun: true }
                 : { stackName, success: true, dryRun: true, ...allowedEvidence });
               continue;
             }

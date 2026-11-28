@@ -434,6 +434,16 @@ export const ASSURANCE_RULES: readonly AssuranceRule[] = [
     subject: 'volume',
   }),
   doctorRule({
+    id: 'secret-volume-reference',
+    title: 'Stack reaches a reserved secret volume',
+    description: 'A volume or container reference reaches a volume Sencho reserves for a secret it keeps on the node, so the deploy is refused.',
+    category: 'self-protection',
+    defaultSeverity: 'blocker',
+    findingClass: 'technical-blocker',
+    requires: ['effective-model'],
+    subject: 'volume',
+  }),
+  doctorRule({
     id: 'new-network',
     title: 'New network will be created',
     description: 'Deploying creates a network the node does not have yet.',

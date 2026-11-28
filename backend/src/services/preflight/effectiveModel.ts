@@ -17,6 +17,7 @@ import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
 import { PROXY_API_FLAG_KEYS } from '../../helpers/socketProxyIdentity';
+import { SECRET_VOLUME_LABEL } from '../../helpers/secretVolume';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -128,6 +129,10 @@ export interface EffService {
    * itself stays off this model; anatomy is the reader that returns it.
    */
   hasServiceUrl?: boolean;
+  /** Container names or ids named by `volumes_from: container:<name>`. Present only when non-empty. */
+  volumesFromContainers?: string[];
+  /** Container name or id named by `pid: container:<name>`. Present only when set. */
+  pidContainer?: string;
 }
 
 /**
@@ -167,6 +172,8 @@ export interface EffResource {
   ipv6Enabled?: boolean;
   /** True when `labels` is a non-empty object (values are never retained). */
   hasLabels?: boolean;
+  /** True when `labels` declares the reserved secret volume label key. Present only when true; values are never retained. */
+  hasSecretLabel?: boolean;
 }
 
 export interface EffectiveModel {
@@ -513,6 +520,26 @@ function hasCustomIpam(ipam: unknown): boolean {
   return false;
 }
 
+/** Whether `labels` (map or `key=value` list form) declares the reserved secret volume label key. */
+function declaresSecretLabel(labels: unknown): boolean {
+  return labelKeysOf(labels).includes(SECRET_VOLUME_LABEL);
+}
+
+/** The container named by a `container:<name>` reference, or null for any other form. */
+function containerRefOf(value: unknown): string | null {
+  const raw = str(value);
+  if (!raw || !raw.startsWith('container:')) return null;
+  // `volumes_from` may carry an access mode suffix (`container:name:ro`).
+  const name = raw.slice('container:'.length).replace(/:(ro|rw)$/, '');
+  return name === '' ? null : name;
+}
+
+/** Container references named by `volumes_from` entries of the `container:` form. */
+function volumesFromContainersOf(volumesFrom: unknown): string[] {
+  if (!Array.isArray(volumesFrom)) return [];
+  return volumesFrom.map(containerRefOf).filter((name): name is string => name !== null);
+}
+
 function parseResourceEntry(key: string, entry: unknown): EffResource {
   const o = (entry ?? {}) as Record<string, unknown>;
   return {
@@ -526,6 +553,7 @@ function parseResourceEntry(key: string, entry: unknown): EffResource {
     ipv4Enabled: o.enable_ipv4 !== false,
     ipv6Enabled: o.enable_ipv6 === true,
     hasLabels: isNonEmptyObject(o.labels),
+    ...(declaresSecretLabel(o.labels) ? { hasSecretLabel: true } : {}),
   };
 }
 
@@ -557,6 +585,8 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
     const { binds, named } = parseVolumes(svc.volumes);
     const storageMounts = parseStorageMounts(svc.volumes, svc.tmpfs);
     const composeHealthcheck = classifyComposeHealthcheck(svc.healthcheck);
+    const volumesFromContainers = volumesFromContainersOf(svc.volumes_from);
+    const pidContainer = containerRefOf(svc.pid);
     services.push({
       name,
       image: str(svc.image),
@@ -586,6 +616,8 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       // `TS_EXTRA_ARGS` is unset, so the empty lookup is the whole environment.
       tailscaleFlags: tailscaleForwardFlags(svc.environment, () => undefined),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
+      ...(volumesFromContainers.length > 0 ? { volumesFromContainers } : {}),
+      ...(pidContainer !== null ? { pidContainer } : {}),
     });
   }
 

@@ -1489,6 +1489,88 @@ export const AUDIT_ANOMALY_HISTORY_CAP = 20_000;
 
 export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
 
+/** A hub's pin of a remote node's sealing key, with its sealed-delivery trust. */
+export interface NodeSealingPin {
+    pubkey: string;
+    fingerprint: string;
+    registeredAt: number;
+    /** Pinned or re-confirmed over a confidential transport, or confirmed by an Admin. */
+    confidential: boolean;
+    confirmedBy: string | null;
+    confirmedAt: number | null;
+}
+
+export type SealedSecretRecordState = 'present' | 'deleted';
+
+/** A node's record of the one secret file a purpose holds. */
+export interface SealedSecretRecord {
+    purpose: string;
+    slot: string;
+    generation: number;
+    state: SealedSecretRecordState;
+    /** Node-keyed HMAC of the secret; null once deleted. Never computable off the node. */
+    fingerprint: string | null;
+    acceptedAt: number;
+}
+
+interface SealedSecretRecordRow {
+    purpose: string;
+    slot: string;
+    generation: number;
+    state: SealedSecretRecordState;
+    fingerprint: string | null;
+    accepted_at: number;
+}
+
+function toSealedSecretRecord(row: SealedSecretRecordRow): SealedSecretRecord {
+    return {
+        purpose: row.purpose,
+        slot: row.slot,
+        generation: row.generation,
+        state: row.state,
+        fingerprint: row.fingerprint,
+        acceptedAt: row.accepted_at,
+    };
+}
+
+export type SealedSecretDeliveryState = 'sending' | 'delivered' | 'removing' | 'removed';
+
+/** A hub's record of the last delivery or removal it started for a node and purpose. */
+export interface SealedSecretDeliveryRow {
+    nodeId: number;
+    purpose: string;
+    slot: string;
+    generation: number;
+    state: SealedSecretDeliveryState;
+    operationId: string;
+    requestedBy: string;
+    updatedAt: number;
+}
+
+interface SealedSecretDeliveryDbRow {
+    node_id: number;
+    purpose: string;
+    slot: string;
+    generation: number;
+    state: SealedSecretDeliveryState;
+    operation_id: string;
+    requested_by: string;
+    updated_at: number;
+}
+
+function toSealedSecretDeliveryRow(row: SealedSecretDeliveryDbRow): SealedSecretDeliveryRow {
+    return {
+        nodeId: row.node_id,
+        purpose: row.purpose,
+        slot: row.slot,
+        generation: row.generation,
+        state: row.state,
+        operationId: row.operation_id,
+        requestedBy: row.requested_by,
+        updatedAt: row.updated_at,
+    };
+}
+
 export class DatabaseService {
     private static instance: DatabaseService;
     private db: Database.Database;
@@ -1572,6 +1654,7 @@ export class DatabaseService {
         this.migrateRecoverySchema();
         this.migrateNodeBootstrapTrustHostCase();
         this.migratePublicExposure();
+        this.migrateSealedSecrets();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1642,6 +1725,50 @@ export class DatabaseService {
                 created_at INTEGER NOT NULL
             );
         `);
+    }
+
+    /**
+     * Sealed secret delivery. `sealed_secret_generations` is node state: one
+     * row per purpose, the node's record of what its single secret file holds.
+     * `sealed_secret_deliveries` is hub state: one row per (node, purpose),
+     * never a secret or a secret fingerprint. `managed_stacks` records the
+     * stacks Sencho manages itself; this code only reads it (the secret volume
+     * deploy exemption). The pin table gains the confidential flag and Admin
+     * confirmation.
+     */
+    private migrateSealedSecrets(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS sealed_secret_generations (
+                purpose TEXT PRIMARY KEY,
+                slot TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
+                state TEXT NOT NULL CHECK (state IN ('present', 'deleted')),
+                fingerprint TEXT,
+                accepted_at INTEGER NOT NULL,
+                -- A present secret has a fingerprint; a deleted one has none.
+                CHECK ((state = 'present') = (fingerprint IS NOT NULL))
+            );
+            CREATE TABLE IF NOT EXISTS sealed_secret_deliveries (
+                node_id INTEGER NOT NULL,
+                purpose TEXT NOT NULL,
+                slot TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
+                state TEXT NOT NULL CHECK (state IN ('sending', 'delivered', 'removing', 'removed')),
+                operation_id TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (node_id, purpose)
+            );
+            CREATE TABLE IF NOT EXISTS managed_stacks (
+                stack_name TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                template_version TEXT,
+                created_at INTEGER NOT NULL
+            );
+        `);
+        this.tryAddColumn('node_sealing_keys', 'pinned_confidential', 'INTEGER NOT NULL DEFAULT 0');
+        this.tryAddColumn('node_sealing_keys', 'confirmed_by', 'TEXT');
+        this.tryAddColumn('node_sealing_keys', 'confirmed_at', 'INTEGER');
     }
 
     /**
@@ -4190,14 +4317,31 @@ stmt.run('gitops_schema_version', '1');
         fingerprint: string;
         registeredAt: number;
     } | null {
+        const pin = this.getNodeSealingPin(nodeId);
+        if (!pin) return null;
+        return { pubkey: pin.pubkey, fingerprint: pin.fingerprint, registeredAt: pin.registeredAt };
+    }
+
+    /** The full pin, including whether it is trusted for sealed secret delivery. */
+    public getNodeSealingPin(nodeId: number): NodeSealingPin | null {
         const row = this.db.prepare(
-            'SELECT pubkey, fingerprint, registered_at FROM node_sealing_keys WHERE node_id = ?',
-        ).get(nodeId) as { pubkey: string; fingerprint: string; registered_at: number } | undefined;
+            'SELECT pubkey, fingerprint, registered_at, pinned_confidential, confirmed_by, confirmed_at FROM node_sealing_keys WHERE node_id = ?',
+        ).get(nodeId) as {
+            pubkey: string;
+            fingerprint: string;
+            registered_at: number;
+            pinned_confidential: number;
+            confirmed_by: string | null;
+            confirmed_at: number | null;
+        } | undefined;
         if (!row) return null;
         return {
             pubkey: row.pubkey,
             fingerprint: row.fingerprint,
             registeredAt: row.registered_at,
+            confidential: row.pinned_confidential === 1,
+            confirmedBy: row.confirmed_by,
+            confirmedAt: row.confirmed_at,
         };
     }
 
@@ -4210,12 +4354,15 @@ stmt.run('gitops_schema_version', '1');
         nodeId: number,
         pubkey: string,
         fingerprint: string,
+        confidential = false,
     ): { pubkey: string; fingerprint: string; registeredAt: number } {
+        // `confidential` applies only when this call inserts the pin; an
+        // existing pin is never upgraded here (see markSealingPinConfidential).
         this.db.prepare(`
-            INSERT INTO node_sealing_keys (node_id, pubkey, fingerprint, registered_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO node_sealing_keys (node_id, pubkey, fingerprint, registered_at, pinned_confidential)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO NOTHING
-        `).run(nodeId, pubkey, fingerprint, Date.now());
+        `).run(nodeId, pubkey, fingerprint, Date.now(), confidential ? 1 : 0);
         const pinned = this.getNodeSealingKey(nodeId);
         if (!pinned) {
             throw new Error('Failed to pin node sealing key');
@@ -4225,6 +4372,123 @@ stmt.run('gitops_schema_version', '1');
 
     public clearNodeSealingKey(nodeId: number): void {
         this.db.prepare('DELETE FROM node_sealing_keys WHERE node_id = ?').run(nodeId);
+    }
+
+    /**
+     * Trust an existing pin for sealed secret delivery: it was re-fetched over
+     * a confidential transport, or an Admin confirmed its fingerprint. Keyed on
+     * the fingerprint, so the flag can never attach to a key other than the one
+     * that was checked. Returns whether a row changed.
+     */
+    public markSealingPinConfidential(nodeId: number, fingerprint: string, confirmedBy?: string): boolean {
+        const result = confirmedBy
+            ? this.db.prepare(`
+                UPDATE node_sealing_keys SET pinned_confidential = 1, confirmed_by = ?, confirmed_at = ?
+                WHERE node_id = ? AND fingerprint = ?
+            `).run(confirmedBy, Date.now(), nodeId, fingerprint)
+            : this.db.prepare(`
+                UPDATE node_sealing_keys SET pinned_confidential = 1
+                WHERE node_id = ? AND fingerprint = ?
+            `).run(nodeId, fingerprint);
+        return result.changes > 0;
+    }
+
+    // --- Sealed secrets: node records (one row per purpose) ---
+
+    public getSealedSecretRecord(purpose: string): SealedSecretRecord | null {
+        const row = this.db.prepare(
+            'SELECT purpose, slot, generation, state, fingerprint, accepted_at FROM sealed_secret_generations WHERE purpose = ?',
+        ).get(purpose) as SealedSecretRecordRow | undefined;
+        return row ? toSealedSecretRecord(row) : null;
+    }
+
+    public listSealedSecretRecords(): SealedSecretRecord[] {
+        const rows = this.db.prepare(
+            'SELECT purpose, slot, generation, state, fingerprint, accepted_at FROM sealed_secret_generations ORDER BY purpose',
+        ).all() as SealedSecretRecordRow[];
+        return rows.map(toSealedSecretRecord);
+    }
+
+    public upsertSealedSecretRecord(record: SealedSecretRecord): void {
+        this.db.prepare(`
+            INSERT INTO sealed_secret_generations (purpose, slot, generation, state, fingerprint, accepted_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(purpose) DO UPDATE SET
+                slot = excluded.slot,
+                generation = excluded.generation,
+                state = excluded.state,
+                fingerprint = excluded.fingerprint,
+                accepted_at = excluded.accepted_at
+        `).run(record.purpose, record.slot, record.generation, record.state, record.fingerprint, record.acceptedAt);
+    }
+
+    // --- Sealed secrets: hub delivery rows (one row per node and purpose) ---
+
+    public getSealedSecretDelivery(nodeId: number, purpose: string): SealedSecretDeliveryRow | null {
+        const row = this.db.prepare(`
+            SELECT node_id, purpose, slot, generation, state, operation_id, requested_by, updated_at
+            FROM sealed_secret_deliveries WHERE node_id = ? AND purpose = ?
+        `).get(nodeId, purpose) as SealedSecretDeliveryDbRow | undefined;
+        return row ? toSealedSecretDeliveryRow(row) : null;
+    }
+
+    public upsertSealedSecretDelivery(row: SealedSecretDeliveryRow): void {
+        this.db.prepare(`
+            INSERT INTO sealed_secret_deliveries (node_id, purpose, slot, generation, state, operation_id, requested_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(node_id, purpose) DO UPDATE SET
+                slot = excluded.slot,
+                generation = excluded.generation,
+                state = excluded.state,
+                operation_id = excluded.operation_id,
+                requested_by = excluded.requested_by,
+                updated_at = excluded.updated_at
+        `).run(row.nodeId, row.purpose, row.slot, row.generation, row.state, row.operationId, row.requestedBy, row.updatedAt);
+    }
+
+    /** Move a delivery row to a new state only if it still describes the same operation. */
+    public setSealedSecretDeliveryState(
+        nodeId: number,
+        purpose: string,
+        operationId: string,
+        state: SealedSecretDeliveryState,
+    ): boolean {
+        const result = this.db.prepare(`
+            UPDATE sealed_secret_deliveries SET state = ?, updated_at = ?
+            WHERE node_id = ? AND purpose = ? AND operation_id = ?
+        `).run(state, Date.now(), nodeId, purpose, operationId);
+        return result.changes > 0;
+    }
+
+    /**
+     * Put back the row an operation replaced, when the node refused that
+     * operation outright and so changed nothing. Only while the row still
+     * describes that operation; with no earlier row, the row goes.
+     */
+    public restoreSealedSecretDelivery(
+        nodeId: number,
+        purpose: string,
+        operationId: string,
+        previous: SealedSecretDeliveryRow | null,
+    ): void {
+        this.db.transaction(() => {
+            const current = this.getSealedSecretDelivery(nodeId, purpose);
+            if (!current || current.operationId !== operationId) return;
+            if (previous) {
+                this.upsertSealedSecretDelivery(previous);
+            } else {
+                this.db.prepare('DELETE FROM sealed_secret_deliveries WHERE node_id = ? AND purpose = ? AND operation_id = ?')
+                    .run(nodeId, purpose, operationId);
+            }
+        })();
+    }
+
+    // --- Managed stacks (read only here) ---
+
+    /** The kind Sencho recorded for a stack it manages, or null for an ordinary stack. */
+    public getManagedStackKind(stackName: string): string | null {
+        const row = this.db.prepare('SELECT kind FROM managed_stacks WHERE stack_name = ?').get(stackName) as { kind: string } | undefined;
+        return row?.kind ?? null;
     }
 
     // --- Agents ---
@@ -6485,6 +6749,20 @@ stmt.run('gitops_schema_version', '1');
         return this.decryptNodeRow(row);
     }
 
+    /**
+     * The id of the local node this instance's own Docker daemon belongs to:
+     * the default node when it is local, else the lowest-id local node; null
+     * when there is none. Reads ids only and decrypts no row, so a remote
+     * node's credential that cannot be decrypted (a database restored without
+     * its encryption key) never stands between this instance and its own node.
+     */
+    public getLocalNodeId(): number | null {
+        const row = this.db.prepare(
+            "SELECT id FROM nodes WHERE type = 'local' ORDER BY is_default DESC, id ASC LIMIT 1",
+        ).get() as { id: number } | undefined;
+        return row?.id ?? null;
+    }
+
     public getDefaultNode(): Node | undefined {
         const stmt = this.db.prepare(`SELECT ${DatabaseService.NODE_COLUMNS} FROM nodes WHERE is_default = 1 LIMIT 1`);
         const row = stmt.get() as any;
@@ -6623,6 +6901,7 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_sealing_keys WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM sealed_secret_deliveries WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_readiness WHERE node_id = ?').run(id);
             this.db.prepare(
                 'DELETE FROM notification_suppression_pending_retractions WHERE node_id = ?',

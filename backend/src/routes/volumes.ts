@@ -5,6 +5,7 @@ import { requirePermission } from '../middleware/permissions';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { isSecretVolumeProtectedError } from '../helpers/secretVolume';
 
 export const volumesRouter = Router();
 
@@ -20,6 +21,8 @@ function mapServiceError(error: unknown, res: Response, fallback: string): Respo
   // The volume is owned by a restore in progress. 409 with a code the client can
   // switch on, because "try again after the restore" is actionable and 404 is not.
   if (isDataRestoreFenceError(error)) return res.status(409).json({ error: error.message, code: error.code });
+  // A secret volume is never opened by any Sencho reader.
+  if (isSecretVolumeProtectedError(error)) return res.status(423).json({ error: error.message, code: error.code });
   if (error instanceof HelperImageError) return res.status(503).json({ error: error.message });
   if (error instanceof ExecError) return res.status(error.status).json({ error: error.message });
   console.error(`[Volumes] ${fallback}:`, error);

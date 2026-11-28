@@ -236,6 +236,24 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/system/prune/system', 500)).toBe('Prune failed (500)');
     expect(getAuditSummary('POST', '/system/prune/system', 200)).toBe('Pruned system resources');
   });
+
+  it('never reports a refused sealed secret request or confirmation as done', () => {
+    expect(getAuditSummary('POST', '/sealed-secrets/edge-tunnel-run-token', 200))
+      .toBe('Received a sealed secret from the control instance: edge-tunnel-run-token');
+    expect(getAuditSummary('POST', '/sealed-secrets/edge-tunnel-run-token', 403))
+      .toBe('Sealed secret from the control instance refused (403)');
+    expect(getAuditSummary('POST', '/sealed-secrets/edge-tunnel-run-token', 503))
+      .toBe('Sealed secret from the control instance failed (503)');
+    expect(getAuditSummary('DELETE', '/sealed-secrets/edge-tunnel-run-token/0b9f3c2e-1d4a-4b5c-8d6e-7f8091a2b3c4', 409))
+      .toBe('Sealed secret removal refused (409)');
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm', 409)).toBe('Node sealing key confirmation refused (409)');
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm', 502)).toBe('Node sealing key confirmation failed (502)');
+    expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 403)).toBe('Node sealing key pin reset refused (403)');
+    expect(getAuditSummary('DELETE', '/nodes/3/sealing-key', 204)).toBe('Reset node sealing key pin: 3');
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key/confirm/', 409)).toBe('Node sealing key confirmation refused (409)');
+    // No such route: a refused POST to the bare path is not called a confirmation.
+    expect(getAuditSummary('POST', '/nodes/3/sealing-key', 404)).not.toContain('confirmation');
+  });
 });
 
 // ---- DatabaseService audit methods ----

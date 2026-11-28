@@ -151,6 +151,35 @@ describe('volume eligibility', () => {
     expect(volumeSources.classifyVolumeEligibility({ ...base, name: 'bind_data', options: { type: 'none', o: 'bind' } })).toBe('driver_options');
   });
 
+  it('refuses a secret volume first, by label or reserved name, whatever else is true of it', () => {
+    expect(volumeSources.classifyVolumeEligibility({ ...base, name: 'app_tok', labels: { 'io.sencho.secret': '' } })).toBe('secret_volume');
+    expect(volumeSources.classifyVolumeEligibility({ ...base, name: 'sencho_edge_secret' })).toBe('secret_volume');
+    // Ahead of the repository label and Sencho's own volumes.
+    expect(volumeSources.classifyVolumeEligibility({
+      ...base, name: 'repo', labels: { 'io.sencho.secret': 'x', 'dev.sencho.recovery.repository': 'r1' }, isOwnVolume: () => true,
+    })).toBe('secret_volume');
+    expect(volumeSources.describeIneligible('secret_volume')).toMatch(/never captured or restored/);
+  });
+
+  it('lists a secret volume as ineligible instead of omitting it', async () => {
+    const sources = await volumeSources.listVolumeSources(fakeDocker([
+      { Name: 'sencho_edge_secret', Driver: 'local', Labels: { 'io.sencho.secret': 'edge-tunnel-run-token' } },
+      { Name: 'ok', Driver: 'local', Labels: {} },
+    ]), () => false);
+    expect(sources.map((s) => s.volumeName)).toEqual(['sencho_edge_secret', 'ok']);
+    expect(sources[0]).toMatchObject({ eligible: false, ineligibleReason: 'secret_volume' });
+  });
+
+  it('keeps a missing reserved secret volume refused as a secret, not as missing', async () => {
+    const missing = {
+      getVolume: () => ({ inspect: async () => { throw Object.assign(new Error('no such volume'), { statusCode: 404 }); } }),
+    } as unknown as Pick<Docker, 'getVolume'>;
+    const described = await volumeSources.describeStoredLocator({ docker: missing, ownerNodeKey: 'docker-engine:a', locator: 'sencho_edge_secret' });
+    expect(described).toMatchObject({ eligible: false, ineligibleReason: 'secret_volume' });
+    const other = await volumeSources.describeStoredLocator({ docker: missing, ownerNodeKey: 'docker-engine:a', locator: 'gone' });
+    expect(other.ineligibleReason).toBe('volume_missing');
+  });
+
   it('never omits a volume from the listing', async () => {
     const sources = await volumeSources.listVolumeSources(fakeDocker([
       { Name: 'ok', Driver: 'local', Labels: {}, CreatedAt: '2026-01-01T00:00:00Z' },

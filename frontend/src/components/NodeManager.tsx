@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { NodeReadinessBadge } from './nodes/NodeReadinessBadge';
 import { BootstrapServerDialog } from './nodes/bootstrap/BootstrapServerDialog';
+import { SealingKeySheet } from './nodes/SealingKeySheet';
+import { resetNodeSealingKeyPin } from '@/hooks/useNodeSealingKey';
+import { useExperimental } from '@/hooks/useExperimental';
 import { useNodes } from '@/context/NodeContext';
 import type { Node } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
@@ -17,7 +20,6 @@ import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
 import { NodeLabelPicker } from './blueprints/NodeLabelPicker';
 import { useAuth } from '@/context/AuthContext';
-import { useExperimental } from '@/hooks/useExperimental';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { resetFleetSyncAnchor, STICKY_CONTROL_IDENTITY_MISMATCH } from '@/lib/fleetSyncApi';
@@ -74,6 +76,10 @@ export function NodeManager() {
   const { statuses: syncStatuses, refresh: refreshSyncStatuses } = useFleetSyncStatus();
   const [resettingAnchor, setResettingAnchor] = useState<number | null>(null);
   const [resettingSealPin, setResettingSealPin] = useState<number | null>(null);
+  // The node stays set after close so the sheet keeps its content while it animates out.
+  const [sealingKeyNodeId, setSealingKeyNodeId] = useState<number | null>(null);
+  const [sealingKeyOpen, setSealingKeyOpen] = useState(false);
+  const sealingKeyNode = sealingKeyNodeId === null ? null : nodes.find(n => n.id === sealingKeyNodeId) ?? null;
 
   // Per-node aggregate of CONTROL_IDENTITY_MISMATCH sticky errors. All resources
   // for one peer share the same root cause (the peer's cached fingerprint), so
@@ -117,14 +123,7 @@ export function NodeManager() {
   const handleResetSealingKey = async (node: Node) => {
     setResettingSealPin(node.id);
     try {
-      const res = await apiFetch(`/nodes/${node.id}/sealing-key`, {
-        method: 'DELETE',
-        localOnly: true,
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error || 'Failed to reset sealing key pin');
-      }
+      await resetNodeSealingKeyPin(node.id);
       toast.success(`Sealing key pin cleared for "${node.name}". The next private-image deploy will re-pin.`);
       await refreshNodes();
     } catch (error) {
@@ -369,7 +368,7 @@ export function NodeManager() {
                       {node.name}
                       <NodeReadinessBadge readiness={node.readiness} />
                     </div>
-                    {node.type === 'remote' && node.sealingKeyFingerprint && (
+                    {!experimental && node.type === 'remote' && node.sealingKeyFingerprint && (
                       <div className="flex flex-wrap items-center gap-2 pl-6 text-xs text-muted-foreground max-md:pl-0">
                         <span className="font-mono truncate" title={node.sealingKeyFingerprint}>
                           Seal {node.sealingKeyFingerprint.slice(0, 12)}…
@@ -385,6 +384,19 @@ export function NodeManager() {
                             {resettingSealPin === node.id ? 'Resetting…' : 'Reset seal pin'}
                           </Button>
                         )}
+                      </div>
+                    )}
+                    {experimental && canManageThis && (
+                      <div className="flex items-center pl-6 max-md:pl-0">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 gap-1 px-2 text-xs text-muted-foreground"
+                          onClick={() => { setSealingKeyNodeId(node.id); setSealingKeyOpen(true); }}
+                        >
+                          <KeyRound className="h-3 w-3" strokeWidth={1.5} />
+                          Sealing key
+                        </Button>
                       </div>
                     )}
                   </div>
@@ -587,6 +599,16 @@ export function NodeManager() {
       )}
 
       {NodeActionModals}
+      {experimental && (
+        <SealingKeySheet
+          open={sealingKeyOpen && sealingKeyNode !== null}
+          onOpenChange={setSealingKeyOpen}
+          node={sealingKeyNode}
+          isAdmin={isAdmin}
+          canManage={sealingKeyNode !== null && (isAdmin || can('node:manage', 'node', String(sealingKeyNode.id)))}
+          onPinCleared={() => { void refreshNodes(); }}
+        />
+      )}
       {canBootstrapServer && (
         <BootstrapServerDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} onNodesChanged={() => { void refreshNodes(); }} />
       )}

@@ -9,7 +9,7 @@
  * so it must always roll back, and its own message must reach the operator
  * rather than being replaced by a rule's paraphrase.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
@@ -65,6 +65,18 @@ beforeAll(async () => {
 afterAll(() => {
   vi.restoreAllMocks();
   cleanupTestDb(tmpDir);
+});
+
+// These tests are about the external-network gate and the rollback. The secret
+// volume guard renders the stack on its own and would refuse an unrenderable
+// one first; secret-volume-deploy-guard.test.ts covers it.
+function passSecretVolumeGuard(): void {
+  vi.spyOn(ComposeService.prototype, 'evaluateSecretVolumeUse').mockResolvedValue(null);
+  vi.spyOn(ComposeService.prototype, 'evaluateHookVolumeCleanup').mockResolvedValue(null);
+}
+
+beforeEach(() => {
+  passSecretVolumeGuard();
 });
 
 describe('POST /api/templates/deploy refused by the external-network gate', () => {
@@ -150,6 +162,7 @@ describe('POST /api/templates/deploy refused after the candidate pull', () => {
 describe('POST /api/templates/deploy rolled back through the real teardown', () => {
   it('still removes the files of a stack Compose cannot render, taking it down without volumes, so the same name can be retried', async () => {
     vi.restoreAllMocks();
+    passSecretVolumeGuard();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
@@ -301,5 +314,32 @@ describe('POST /api/templates/deploy refused by the alias-expansion guard', () =
     const { FileSystemService } = await import('../services/FileSystemService');
     expect(await FileSystemService.getInstance().getStacks()).not.toContain('refused-template');
     expect(res.body.rolledBack).toBe(true);
+  });
+});
+
+describe('POST /api/templates/deploy when the template reaches a reserved secret volume', () => {
+  it('answers 423, takes the stack down without removing volumes, and removes its files', async () => {
+    const { SecretVolumeProtectedError } = await import('../helpers/secretVolume');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'deployStack')
+      .mockRejectedValueOnce(new SecretVolumeProtectedError('Sencho refused to run "secret-template" because it would reach a secret volume.'));
+    const downStack = vi.spyOn(ComposeService.prototype, 'downStack')
+      .mockRejectedValueOnce(new SecretVolumeProtectedError('This stack declares a volume Sencho reserves for a secret.'))
+      .mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'secret-template', template: minimalTemplate });
+
+    expect(res.status).toBe(423);
+    expect(res.body).toMatchObject({ code: 'secret_volume_protected', rolledBack: true });
+    expect(downStack.mock.calls).toEqual([
+      ['secret-template', { removeVolumes: true }],
+      ['secret-template'],
+    ]);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('secret-template');
   });
 });

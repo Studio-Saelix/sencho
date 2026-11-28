@@ -1124,7 +1124,7 @@ describe('rule registry completeness', () => {
     'healthcheck-disabled', 'healthcheck-inherited', 'healthcheck-unverifiable', 'healthcheck-inconsistent',
     'deploy-swarm-only',
     'node-state-unavailable', 'compose-version-mismatch',
-    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
+    'external-network-missing', 'external-volume-missing', 'secret-volume-reference', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'exposure-internal-tunneled', 'sensitive-service-broad-exposure',
     'tunnel-exposure', 'exposure-unclassified',
@@ -1132,5 +1132,69 @@ describe('rule registry completeness', () => {
   ];
   it('the registry contains exactly the expected rules', () => {
     expect([...RULE_IDS].sort()).toEqual([...EXPECTED_RULE_IDS].sort());
+  });
+});
+
+describe('secret-volume-reference', () => {
+  const RESERVED = 'sencho_edge_secret';
+  const consumer = { id: 'abc123def4567890', names: ['edge-consumer'] };
+  const hits = (over: Partial<PreflightContext>) => ids(runRules(ctx(over)), 'secret-volume-reference');
+
+  it('blocks the reserved name with no node facts at all', () => {
+    const m = model([svc()], { volumes: { secret: { name: RESERVED, external: true, internal: false } } });
+    const f = hits({ model: m });
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: 'blocker', sourcePath: 'volumes.secret' });
+    expect(f[0].message).toContain(`"${RESERVED}"`);
+    expect(f[0].message).toContain('Sencho refuses to deploy a stack that reaches it.');
+    expect(f[0].remediation).toContain('io.sencho.secret');
+  });
+
+  it('blocks a volume that declares the reserved label', () => {
+    const m = model([svc()], { volumes: { data: { name: 'proj_data', external: false, internal: false, hasSecretLabel: true } } });
+    const f = hits({ model: m });
+    expect(f).toHaveLength(1);
+    expect(f[0].message).toContain('declares the label io.sencho.secret');
+  });
+
+  it('blocks a volume the node labels as a secret volume', () => {
+    const m = model([svc()], { volumes: { creds: { name: 'tunnel_creds', external: true, internal: false } } });
+    const f = hits({ model: m, secretVolumeFacts: { labelledVolumeNames: new Set(['tunnel_creds']), consumers: null } });
+    expect(f).toHaveLength(1);
+    expect(f[0].message).toContain('The volume "tunnel_creds" holds a secret');
+    expect(hits({ model: m })).toHaveLength(0);
+  });
+
+  it('blocks volumes_from and pid naming a consumer, scoped to the service', () => {
+    const m = model([
+      svc({ name: 'web', volumesFromContainers: ['edge-consumer'] }),
+      svc({ name: 'sidecar', pidContainer: 'abc123' }),
+    ]);
+    const f = hits({ model: m, secretVolumeFacts: { labelledVolumeNames: new Set(), consumers: [consumer] } });
+    expect(f.map(x => [x.service, x.sourcePath])).toEqual([
+      ['web', 'services.web.volumes_from'],
+      ['sidecar', 'services.sidecar.pid'],
+    ]);
+    // Without node facts the container references cannot be resolved, so nothing is claimed.
+    expect(hits({ model: m })).toHaveLength(0);
+  });
+
+  it('stays silent for the recorded consumer stack', () => {
+    const m = model([svc({ volumesFromContainers: ['edge-consumer'] })], {
+      volumes: { secret: { name: RESERVED, external: true, internal: false } },
+    });
+    expect(hits({
+      model: m,
+      secretVolumeExempt: true,
+      secretVolumeFacts: { labelledVolumeNames: new Set([RESERVED]), consumers: [consumer] },
+    })).toHaveLength(0);
+  });
+
+  it('stays silent on an ordinary model and an unrenderable one', () => {
+    const m = model([svc({ volumesFromContainers: ['bystander'] })], {
+      volumes: { data: { name: 'proj_data', external: false, internal: false } },
+    });
+    expect(hits({ model: m, secretVolumeFacts: { labelledVolumeNames: new Set(['tunnel_creds']), consumers: [consumer] } })).toHaveLength(0);
+    expect(hits({ model: null, renderable: false, renderError: 'boom' })).toHaveLength(0);
   });
 });

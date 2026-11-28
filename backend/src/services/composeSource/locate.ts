@@ -955,6 +955,11 @@ export function locateFinding(
       if (!key) return undefined;
       return toLocation(correlateTopLevel(project, 'networks', key));
     }
+    case 'secret-volume-reference':
+      if (hit.service) {
+        return toLocation(correlateField(project, hit.service, hit.sourcePath?.endsWith('.pid') ? 'pid' : 'volumes_from'));
+      }
+      return toLocation(correlateTopLevel(project, 'volumes', topLevelKey(hit.sourcePath) ?? ''));
     case 'external-volume-missing':
     case 'new-volume': {
       const key = topLevelKey(hit.sourcePath);

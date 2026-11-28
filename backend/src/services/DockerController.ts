@@ -1,6 +1,7 @@
 import Docker from 'dockerode';
 import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isSecretVolume, isSecretVolumeRef, SecretVolumeProtectedError, secretVolumeAccessMessage } from '../helpers/secretVolume';
 import { parseComposeYaml } from '../helpers/composeInputParse';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
@@ -301,6 +302,8 @@ export interface DependencyNetwork {
 export interface DependencyVolume {
   name: string;
   driver: string;
+  /** Present and true when the volume carries the secret volume label. */
+  secret?: true;
   composeProject: string | null;
   /** Resolved Sencho stack this volume belongs to, or null. */
   stack: string | null;
@@ -683,7 +686,8 @@ class DockerController {
 
   // Sencho's own image, networks, and named volumes are always in use by the
   // running container, so Docker's server-side prune APIs (pruneContainers,
-  // pruneImages, pruneNetworks, pruneVolumes) skip them by definition. No
+  // pruneImages, pruneNetworks) skip them by definition, and so does the
+  // volume prune, which lists only unused volumes (pruneVolumesEnumerated). No
   // extra self-guard is needed at this layer; the `managed` scope path goes
   // through `pruneManagedOnly`, which adds an explicit self filter for
   // defense-in-depth.
@@ -713,21 +717,73 @@ class DockerController {
       const r = await this.docker.pruneNetworks({ filters });
       spaceReclaimed = (r as { SpaceReclaimed?: number }).SpaceReclaimed || 0;
     } else if (target === 'volumes') {
-      const filters: Record<string, string[]> = { all: ['true'] };
-      if (labelFilter) filters.label = [labelFilter];
-      // The recovery repository is Sencho's own infrastructure: it holds every
-      // volume point this node has taken, and no prune may remove it. The daemon
-      // filter is a second line of defense beside `isOwnVolume` in the plan and
-      // managed paths, which cannot see a volume that no container mounts.
-      filters['label!'] = [`dev.sencho.recovery.repository`];
-      const r = await this.docker.pruneVolumes({ filters });
-      spaceReclaimed = r.SpaceReclaimed || 0;
+      // Never Docker's bulk volume prune. The recovery repository could be
+      // excluded there with one `label!` filter, but a secret volume needs a
+      // second one, and the daemon ANDs several `label!` values (a volume is
+      // kept only when it carries all of them). Choosing the bulk call from a
+      // listing taken first is no answer either: a first secret delivery can
+      // create its volume between that listing and the prune. Removing one
+      // listed volume at a time checks each volume's own labels instead, and a
+      // volume created after the listing is not on it.
+      return this.pruneVolumesEnumerated(labelFilter);
     }
 
     return {
       success: true,
       reclaimedBytes: spaceReclaimed
     };
+  }
+
+  /** True when a volume's labels satisfy a Docker `label` filter (`key` or `key=value`). */
+  private static matchesLabelFilter(labels: Record<string, string> | null | undefined, labelFilter: string): boolean {
+    const eq = labelFilter.indexOf('=');
+    const key = eq === -1 ? labelFilter : labelFilter.slice(0, eq);
+    if (!labels || !Object.prototype.hasOwnProperty.call(labels, key)) return false;
+    return eq === -1 || labels[key] === labelFilter.slice(eq + 1);
+  }
+
+  /**
+   * True when the daemon's own volume prune would consider this volume: the
+   * `local` driver with no driver options. The daemon leaves plugin volumes
+   * and option-backed local volumes (an NFS mount, a bind) out of every prune,
+   * so the enumerated prune must too. A volume whose driver is not reported is
+   * kept.
+   */
+  private static isDaemonPrunableVolume(vol: { Driver?: string | null; Options?: Record<string, string> | null }): boolean {
+    if (vol.Driver !== 'local') return false;
+    return !vol.Options || Object.keys(vol.Options).length === 0;
+  }
+
+  /**
+   * The volume prune: every unused volume the daemon prune would remove
+   * (`all=true`, so named volumes too, and only plain local volumes), except
+   * secret volumes and the recovery repository, removed one by one. A volume
+   * that gains a container between the listing and its removal is refused by
+   * Docker and kept.
+   */
+  private async pruneVolumesEnumerated(labelFilter?: string): Promise<{ success: boolean; reclaimedBytes: number }> {
+    const usage = DockerController.mapVolumeUsageFromDf(await this.safeVolumeDfSnapshot());
+    const listed = await this.docker.listVolumes({ filters: { dangling: ['true'] } });
+    const volumes = (listed?.Volumes ?? []) as Array<{
+      Name: string;
+      Labels?: Record<string, string> | null;
+      Driver?: string | null;
+      Options?: Record<string, string> | null;
+    }>;
+    let reclaimedBytes = 0;
+    for (const vol of volumes) {
+      if (!DockerController.isDaemonPrunableVolume(vol)) continue;
+      if (isSecretVolumeRef(vol.Name, vol.Labels)) continue;
+      if (DockerController.isRecoveryRepositoryLabel(vol.Labels ?? undefined)) continue;
+      if (labelFilter && !DockerController.matchesLabelFilter(vol.Labels, labelFilter)) continue;
+      try {
+        await this.docker.getVolume(vol.Name).remove({ force: false });
+        reclaimedBytes += usage.get(vol.Name)?.size ?? 0;
+      } catch (e) {
+        console.warn(`[pruneSystem] Kept volume ${sanitizeForLog(vol.Name)}:`, sanitizeForLog(getErrorMessage(e, String(e))));
+      }
+    }
+    return { success: true, reclaimedBytes };
   }
 
   // Prune ONLY dangling (untagged) images. Distinct from pruneSystem('images'),
@@ -1033,6 +1089,7 @@ class DockerController {
         if (!usage || usage.refCount !== 0) return false;
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
           && !selfIdentity.isOwnVolume(v.Name)
+          && !isSecretVolumeRef(v.Name, v.Labels)
           && !DockerController.isRecoveryRepositoryLabel(v.Labels);
       });
       // Removals are independent and Docker handles concurrent volume
@@ -1180,7 +1237,8 @@ class DockerController {
         const usage = volumeUsage.get(v.Name);
         if (!usage || usage.refCount !== 0) return false;
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && !selfIdentity.isOwnVolume(v.Name);
+          && !selfIdentity.isOwnVolume(v.Name)
+          && !isSecretVolumeRef(v.Name, v.Labels);
       });
       for (const vol of prunable) reclaimableBytes += volumeUsage.get(vol.Name)?.size ?? 0;
     } else if (target === 'networks') {
@@ -1345,6 +1403,7 @@ class DockerController {
       }> }>(rawVolumeData)).Volumes || [];
       for (const vol of rawVolumes) {
         if (selfIdentity.isOwnVolume(vol.Name)) continue;
+        if (isSecretVolumeRef(vol.Name, vol.Labels)) continue;
         if (DockerController.isRecoveryRepositoryLabel(vol.Labels)) continue;
         const usage = volumeUsage.get(vol.Name);
         if (!usage || usage.refCount !== 0) continue;
@@ -1803,6 +1862,9 @@ class DockerController {
     if (selfIdentity.isOwnVolume(item.id)) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Sencho self volume' };
     }
+    if (isSecretVolumeRef(item.id)) {
+      return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume holds a delivered secret' };
+    }
     const rawVolumeData = await this.docker.listVolumes();
     const rawVolumes = (this.validateApiData<{ Volumes?: Array<{
       Name: string;
@@ -1811,6 +1873,9 @@ class DockerController {
     const vol = rawVolumes.find((v) => v.Name === item.id);
     if (!vol) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume no longer exists' };
+    }
+    if (isSecretVolumeRef(vol.Name, vol.Labels)) {
+      return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume holds a delivered secret' };
     }
     if (DockerController.isRecoveryRepositoryLabel(vol.Labels)) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume holds recovery points' };
@@ -2192,8 +2257,16 @@ class DockerController {
     if (SelfIdentityService.getInstance().isOwnVolume(name)) {
       throw new Error('Cannot remove a volume that belongs to Sencho');
     }
+    // A secret volume is removed only by the feature that delivered it, never
+    // through the generic volume removal path.
+    if (isSecretVolumeRef(name)) {
+      throw new SecretVolumeProtectedError(secretVolumeAccessMessage(name));
+    }
     const volume = this.docker.getVolume(name);
     const inspected = await volume.inspect() as { Labels?: Record<string, string> | null };
+    if (isSecretVolumeRef(name, inspected.Labels)) {
+      throw new SecretVolumeProtectedError(secretVolumeAccessMessage(name));
+    }
     if (DockerController.isRecoveryRepositoryLabel(inspected.Labels)) {
       throw new Error('Cannot remove a volume that holds recovery points');
     }
@@ -2896,6 +2969,7 @@ class DockerController {
         driver: vol.Driver ?? 'local',
         composeProject: project,
         stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
+        ...(isSecretVolume(vol.Labels) ? { secret: true as const } : {}),
       };
     });
 

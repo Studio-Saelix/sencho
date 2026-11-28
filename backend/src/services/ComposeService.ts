@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import type Docker from 'dockerode';
 import { parse as parseYaml } from 'yaml';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -19,7 +20,7 @@ import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
-import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
+import { parseEffectiveModel, type EffectiveModel, type EffResource } from './preflight/effectiveModel';
 import {
   RecoveryVolumeProtectedError,
   recoveryVolumeNamesIn,
@@ -95,6 +96,21 @@ import {
 import { withTimeout } from '../utils/withTimeout';
 import type { NotificationCategory } from './NotificationService';
 import type { DeployCandidateVerification } from '../helpers/policyGate';
+import {
+  SECRET_VOLUME_LABEL,
+  SecretVolumeProtectedError,
+  isReservedSecretVolumeName,
+  secretVolumeNames,
+} from '../helpers/secretVolume';
+import {
+  evaluateSecretVolumeUse,
+  isSecretVolumeExemptKind,
+  modelReferencesContainers,
+  secretVolumeUnverifiedMessage,
+  secretVolumeUseRefusalMessage,
+  type SecretConsumerContainer,
+  type SecretVolumeNodeFacts,
+} from './preflight/secretVolumeUse';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
 function hasUsableCapturedInvocation(
@@ -217,6 +233,31 @@ function renderErrorLine(stderr: string): string {
   return (lines.find(line => !isWarning(line)) ?? lines[0] ?? '').slice(0, 300);
 }
 
+/** What `renderConfig` answers for one render. */
+type RenderOutcome = {
+  rendered: string | null;
+  stderr: string;
+  code: number | null;
+  timedOut: boolean;
+  withheld?: boolean;
+  refusal?: string;
+};
+
+/**
+ * One `docker compose config` render shared by the guards of one operation.
+ * The first caller spawns it; every later caller reads the same outcome, so
+ * adding a guard to an entry point costs no second render.
+ */
+export type SharedRender = () => Promise<RenderOutcome>;
+
+/** Why a render produced no model, in words safe to show (Compose diagnostics of an overlay are withheld). */
+function renderFailureReason(result: RenderOutcome): string {
+  return result.refusal ? result.refusal
+    : result.timedOut ? 'docker compose config timed out'
+      : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+        : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+}
+
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
@@ -283,6 +324,116 @@ export type GitOpsDeployHandle = {
   failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
 };
 
+/** The project a `down --volumes` acts on, as the guard needs it. */
+interface DownProject {
+  /** The project name Compose runs the down under. */
+  projectName: string;
+  /** The services the rendered project enables. */
+  services: ReadonlySet<string>;
+  /** Whether the down lists one-off `run` containers (`--remove-orphans` does). */
+  removesOneOffs: boolean;
+}
+
+interface SecretMount {
+  name: string;
+  destination: string;
+}
+
+/**
+ * The label Docker puts on a volume it created for a mount that named none.
+ * Removing a container with its volumes deletes only such anonymous volumes;
+ * a volume created by name is kept.
+ */
+const DOCKER_ANONYMOUS_VOLUME_LABEL = 'com.docker.volume.anonymous';
+
+/** Docker names an anonymous volume with a random 64-hex id. */
+const DOCKER_ANONYMOUS_VOLUME_NAME = /^[0-9a-f]{64}$/;
+
+/** Compose's container labels the teardown and hook checks read. */
+const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
+const COMPOSE_CONFIG_HASH_LABEL = 'com.docker.compose.config-hash';
+const COMPOSE_ONEOFF_LABEL = 'com.docker.compose.oneoff';
+const COMPOSE_HOOK_LABEL = 'com.docker.compose.hook';
+const COMPOSE_PRE_START_HOOK = 'pre_start';
+
+/**
+ * True when a secret volume could be one Docker created anonymously, the only
+ * kind removing a container with its volumes deletes.
+ *
+ * The automatic label proves anonymity, but its absence proves nothing: Docker
+ * daemons before the label existed created anonymous volumes with no labels at
+ * all, and an upgrade preserves the stored metadata. Those volumes keep the
+ * 64-hex name Docker generated for them, so a volume without the label stays a
+ * candidate when its name has that shape. A volume created by name is never
+ * removed with a container; the mount provenance check then clears a genuine
+ * named 64-hex volume.
+ */
+function couldBeAnonymousVolume(
+  name: string,
+  labelsByName: ReadonlyMap<string, Record<string, string> | null>,
+): boolean {
+  const labels = labelsByName.get(name);
+  if (labels && Object.prototype.hasOwnProperty.call(labels, DOCKER_ANONYMOUS_VOLUME_LABEL)) return true;
+  return DOCKER_ANONYMOUS_VOLUME_NAME.test(name);
+}
+
+/** True for a retained `pre_start` hook runner, which Compose removes apart from the service containers. */
+function isPreStartHookContainer(labels: Record<string, string> | undefined): boolean {
+  return labels?.[COMPOSE_HOOK_LABEL] === COMPOSE_PRE_START_HOOK;
+}
+
+/**
+ * Whether Compose's `down --volumes` removes an ordinary container of the
+ * project with its volumes. Compose lists those containers by a present
+ * config-hash label and, for a plain down, by `oneoff=False`; a one-off is
+ * listed only when `--remove-orphans` is in effect. Orphans are left alone, or,
+ * with `--remove-orphans`, removed but with their volumes kept.
+ */
+function downRemovesWithVolumes(labels: Record<string, string> | undefined, project: DownProject): boolean {
+  // A hook runner and any container Compose did not create lack the hash and
+  // are invisible to the per-service teardown.
+  if (!labels?.[COMPOSE_CONFIG_HASH_LABEL]) return false;
+  const service = labels[COMPOSE_SERVICE_LABEL];
+  if (!service || !project.services.has(service)) return false;
+  return project.removesOneOffs || labels[COMPOSE_ONEOFF_LABEL] === 'False';
+}
+
+/**
+ * Compose reads `COMPOSE_REMOVE_ORPHANS` as the default of `down
+ * --remove-orphans`, with the same loose boolean parsing as its other flags.
+ * A down Sencho runs must model the value its child will actually get, or the
+ * guard and the command disagree about which one-offs are removed.
+ */
+function envEnablesRemoveOrphans(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.COMPOSE_REMOVE_ORPHANS ?? '').trim().toLowerCase();
+  // strconv.ParseBool plus Compose's own "y".
+  return raw === 'y' || raw === '1' || raw === 't' || raw === 'true';
+}
+
+/** Which retained `pre_start` hook containers an operation removes with their volumes. */
+type HookCleanupScope =
+  | { kind: 'teardown' }
+  | { kind: 'project-up' }
+  | { kind: 'up'; services: ReadonlySet<string> };
+
+/** True when `container`'s own create spec names `mount`'s volume at its path (a `volume` mount or a bind entry). */
+function specNamesMount(container: Docker.ContainerInspectInfo, mount: SecretMount): boolean {
+  const specMounts = container.HostConfig?.Mounts ?? [];
+  const binds = container.HostConfig?.Binds ?? [];
+  return specMounts.some((spec) => spec.Type === 'volume' && spec.Source === mount.name && samePath(spec.Target) === mount.destination)
+    || binds.some((bind) => {
+      const [source, target] = bind.split(':');
+      return source === mount.name && samePath(target) === mount.destination;
+    });
+}
+
+/** A container path as Docker reports it: `/token/` and `//token` are `/token`. */
+function samePath(value: string | undefined): string {
+  if (!value) return '';
+  const normalized = path.posix.normalize(value);
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+}
+
 export class ComposeService {
   private baseDir: string;
   private nodeId: number;
@@ -330,6 +481,7 @@ export class ComposeService {
     stackName: string,
     mutation: EndpointMutation,
     stackDirOverride?: string,
+    render: SharedRender = this.sharedRender(stackName, stackDirOverride),
   ): Promise<DockerEndpointRefusal | null> {
     return evaluateDockerEndpointGuard({
       nodeId: this.nodeId,
@@ -337,16 +489,12 @@ export class ComposeService {
       mutation,
       probes: {
         renderConfig: async () => {
-          const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
+          const result = await render();
           if (result.rendered) return result.rendered;
           // The guard refuses what it cannot see, so say why the render failed. The
           // diagnostics are withheld for an overlay render (they quote secrets);
           // Sencho's own refusal names the file and the reason, so it is safe.
-          const why = result.refusal ? result.refusal
-            : result.timedOut ? 'docker compose config timed out'
-              : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
-                : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
-          throw new Error(why);
+          throw new Error(renderFailureReason(result));
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
         localImage: (imageRef) => this.localImageLookup(imageRef),
@@ -359,10 +507,11 @@ export class ComposeService {
     stackName: string,
     mutation: EndpointMutation,
     stackDirOverride?: string,
+    render?: SharedRender,
   ): Promise<void> {
     let refusal: DockerEndpointRefusal | null;
     try {
-      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride, render);
     } catch (error) {
       // A guard that cannot run is not a pass. Raised as a refusal so callers
       // that tolerate other teardown failures (delete, template rollback) keep
@@ -375,6 +524,282 @@ export class ComposeService {
       });
     }
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /** A memoized render of the stack's authored model, for a caller that runs several checks on one operation. */
+  public createSharedRender(stackName: string): SharedRender {
+    return this.sharedRender(stackName);
+  }
+
+  /**
+   * A memoized render for one operation: the stack's authored model, its
+   * overlay, or the exact global flags of a rebuilt invocation (`composePrefix`).
+   */
+  private sharedRender(stackName: string, stackDirOverride?: string, composePrefix?: string[]): SharedRender {
+    let pending: Promise<RenderOutcome> | null = null;
+    const opts = composePrefix
+      ? { stackDirOverride, composePrefix }
+      : stackDirOverride ? { stackDirOverride } : undefined;
+    return () => (pending ??= this.renderConfig(stackName, opts));
+  }
+
+  /**
+   * The refusal when the model this operation will run reaches a volume that
+   * holds a secret Sencho keeps on this node, else null. See
+   * `preflight/secretVolumeUse.ts` for what counts. The stack Sencho recorded
+   * as the secret's consumer is exempt. A render or Docker read that fails is
+   * a refusal, because what cannot be seen cannot be promised. The labels
+   * dry-run preview calls this too, so the preview answers what the run will.
+   */
+  public async evaluateSecretVolumeUse(
+    stackName: string,
+    render: SharedRender = this.sharedRender(stackName),
+  ): Promise<string | null> {
+    try {
+      // Same scope as the Docker endpoint guard: a remote node's operation runs
+      // on that node, which applies this check itself.
+      if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
+      if (isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName))) return null;
+      const result = await render();
+      if (result.rendered === null) return secretVolumeUnverifiedMessage(stackName, renderFailureReason(result));
+      const parsed: unknown = JSON.parse(result.rendered);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return secretVolumeUnverifiedMessage(stackName, 'the rendered configuration is not a model');
+      }
+      const model = parseEffectiveModel(parsed, stackName);
+      const findings = evaluateSecretVolumeUse(model, await this.secretVolumeNodeFacts(model));
+      return findings.length > 0 ? secretVolumeUseRefusalMessage(stackName, findings) : null;
+    } catch (error) {
+      console.error('[ComposeService] Secret volume check failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return secretVolumeUnverifiedMessage(stackName, getErrorMessage(error, 'check failed'));
+    }
+  }
+
+  private async assertNoSecretVolumeUse(stackName: string, render?: SharedRender): Promise<void> {
+    const refusal = await this.evaluateSecretVolumeUse(stackName, render);
+    if (refusal) throw new SecretVolumeProtectedError(refusal);
+  }
+
+  /**
+   * The refusal when the operation would remove a retained `pre_start` hook
+   * container together with a secret volume it mounts anonymously, else null.
+   *
+   * The bundled Compose keeps a failed hook container for inspection and
+   * removes it later with `RemoveVolumes: true`: `down` sweeps every hook of
+   * the project whatever `--volumes` says, and `up` purges the hooks of a
+   * service that has no running replica to survive the plan, then removes each
+   * runner after a successful hook. A hook inherits its service container's
+   * mounts, so a secret volume the service mounts anonymously reaches the hook
+   * too, and the hook's volume removal deletes it.
+   *
+   * A teardown sweeps every hook in the project, including one whose service
+   * retired or was disabled. An up only checks the enabled services it visits:
+   * a hook of a service outside the model is an orphan, removed without its
+   * volumes. The check is deliberately conservative for up: a retained hook
+   * is refused even when a running replica might survive, because Compose can
+   * still recreate that replica and purge the hook.
+   */
+  public async evaluateHookVolumeCleanup(
+    stackName: string,
+    cleanup: HookCleanupScope,
+    render: SharedRender = this.sharedRender(stackName),
+  ): Promise<string | null> {
+    try {
+      // Same scope as the other node-side guards: a remote node's operation
+      // runs on that node, which applies this check itself.
+      if (NodeRegistry.getInstance().getNode(this.nodeId)?.type === 'remote') return null;
+      let result: Awaited<ReturnType<SharedRender>>;
+      let projectNames: ReadonlySet<string> | null = null;
+      let services: ReadonlySet<string> | null = null;
+      try {
+        result = await render();
+      } catch (error) {
+        if (cleanup.kind !== 'teardown') throw error;
+        if (error instanceof ComposeExpansionRefusal || error instanceof SecretVolumeProtectedError) throw error;
+        // The Compose CLI could not be spawned, so the project the teardown
+        // would act on cannot be resolved. A retained hook of any project on
+        // the node could be one this stack owns, so allow the teardown only
+        // when the node has no hook container at all.
+        let hooks: Docker.ContainerInfo[];
+        try {
+          hooks = await DockerController.getInstance(this.nodeId).getDocker().listContainers({
+            all: true,
+            filters: { label: [`${COMPOSE_HOOK_LABEL}=${COMPOSE_PRE_START_HOOK}`] },
+          });
+        } catch (listError) {
+          return this.hookCleanupUnreadable(stackName, listError);
+        }
+        if ((hooks ?? []).length === 0) return null;
+        return 'Sencho could not spawn Compose to resolve the project of this stack, and a retained pre_start hook container exists on the node, so taking the stack down could delete a secret volume it holds. '
+          + 'Fix the Compose configuration, or remove the retained hook container without deleting its volumes.';
+      }
+      // Sencho's own refusal of the Compose inputs is a refusal of the
+      // operation itself, not a missing model: keep its type and wording so
+      // the route maps it like every other lifecycle caller.
+      if (result.refusal) throw new ComposeExpansionRefusal(result.refusal);
+      if (result.rendered !== null) {
+        const parsed: unknown = JSON.parse(result.rendered);
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const model = parseEffectiveModel(parsed, stackName);
+          projectNames = new Set([model.projectName]);
+          services = new Set(model.services.map((service) => service.name));
+        } else if (cleanup.kind !== 'teardown') {
+          return secretVolumeUnverifiedMessage(stackName, 'the rendered configuration is not a model');
+        }
+      }
+      if (projectNames === null) {
+        if (cleanup.kind !== 'teardown') {
+          // Up already refused an unreadable render in the deploy guard, which
+          // runs first.
+          return null;
+        }
+        // A teardown loads the project with fewer checks than `config` (it
+        // discards service env files and skips environment resolution), so it
+        // can still run under a project name the full render cannot report.
+        // Resolve that name with the same loading rules, or refuse: the hook
+        // sweep cannot be checked against an unknown project.
+        const resolved = await this.downProjectName(stackName);
+        if (resolved === null) {
+          return 'Sencho could not resolve the Compose project of this stack, so it could not check that taking it down does not delete a secret volume, and the operation was not run. '
+            + 'Fix the Compose configuration, then try again.';
+        }
+        projectNames = new Set([resolved]);
+      }
+      if (projectNames.size === 0) return null;
+
+      const docker = DockerController.getInstance(this.nodeId).getDocker();
+      const listed: Docker.ContainerInfo[] = [];
+      try {
+        for (const name of projectNames) {
+          const projectContainers = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${name}`] } });
+          listed.push(...projectContainers);
+        }
+      } catch (error) {
+        return this.hookCleanupUnreadable(stackName, error);
+      }
+      const inScope = (container: Docker.ContainerInfo): boolean => {
+        if (!isPreStartHookContainer(container.Labels)) return false;
+        if (cleanup.kind === 'teardown') return true;
+        const service = container.Labels?.[COMPOSE_SERVICE_LABEL];
+        if (!service || !services?.has(service)) return false;
+        return cleanup.kind === 'project-up' || cleanup.services.has(service);
+      };
+      const hooks = (listed ?? []).filter(
+        (container) => inScope(container) && (container.Mounts ?? []).some((mount) => mount.Type === 'volume'),
+      );
+      // No hook has a volume to delete: the common case costs one container list.
+      if (hooks.length === 0) return null;
+
+      let labelledVolumeNames: Set<string>;
+      const secretVolumeLabels = new Map<string, Record<string, string> | null>();
+      try {
+        const volumes = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+        labelledVolumeNames = new Set();
+        for (const volume of volumes?.Volumes ?? []) {
+          labelledVolumeNames.add(volume.Name);
+          secretVolumeLabels.set(volume.Name, volume.Labels ?? null);
+        }
+      } catch (error) {
+        return this.hookCleanupUnreadable(stackName, error);
+      }
+      const isSecretName = (name: string): boolean => isReservedSecretVolumeName(name) || labelledVolumeNames.has(name);
+      const couldBeAnonymous = (name: string): boolean => couldBeAnonymousVolume(name, secretVolumeLabels);
+      const unreadable = (error: unknown): SecretVolumeProtectedError => (
+        new SecretVolumeProtectedError(this.hookCleanupUnreadable(stackName, error))
+      );
+      for (const hook of hooks) {
+        const mounts: SecretMount[] = (hook.Mounts ?? [])
+          .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string'
+            && isSecretName(mount.Name) && couldBeAnonymous(mount.Name))
+          .map((mount) => ({ name: mount.Name as string, destination: samePath(mount.Destination) }));
+        if (mounts.length === 0) continue;
+        let info: Docker.ContainerInspectInfo;
+        try {
+          info = await docker.getContainer(hook.Id).inspect();
+        } catch (error) {
+          // Gone since the listing: Docker has nothing of it left to remove.
+          if ((error as { statusCode?: number })?.statusCode === 404) continue;
+          return this.hookCleanupUnreadable(stackName, error);
+        }
+        for (const mount of mounts) {
+          if (!(await this.mountIsNamed(docker, info, mount, new Set([hook.Id]), unreadable))) {
+            return 'A retained pre_start hook container of this stack holds a secret Sencho keeps on this node in a volume it mounts without naming it, '
+              + 'which Compose deletes when it cleans up hook containers, so the operation was not run. '
+              + 'Remove the retained hook container without deleting its volumes, or mount the secret volume by name.';
+          }
+        }
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof ComposeExpansionRefusal) throw error;
+      if (error instanceof SecretVolumeProtectedError) return error.message;
+      console.error('[ComposeService] Secret hook cleanup check failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return this.hookCleanupUnreadable(stackName, error);
+    }
+  }
+
+  private hookCleanupUnreadable(stackName: string, error: unknown): string {
+    console.warn('[ComposeService] Could not check hook containers of %s for secret volumes:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    return 'Sencho could not read the hook containers of this stack to check that cleaning them up does not delete a secret volume, so the operation was not run. '
+      + 'Check the Docker connection and try again, or remove the retained hook container without deleting its volumes.';
+  }
+
+  /**
+   * The Compose project name a teardown will run under when the full render
+   * cannot produce a model. Compose's down loads the project with service env
+   * files discarded and environment resolution off, so a service `env_file`
+   * the full render rejects does not stop it. `config --no-env-resolution`
+   * applies the same loading rules and still reports the top-level name and the
+   * `-p` pin. Null when even that load fails; the caller then refuses, because
+   * the hook sweep cannot be checked against an unknown project.
+   */
+  private async downProjectName(stackName: string): Promise<string | null> {
+    try {
+      const args = await this.authoredComposeArgs(stackName, ['config', '--format', 'json', '--no-env-resolution']);
+      const stdout = await this.captureCompose(args.slice(1), path.join(this.baseDir, stackName));
+      const parsed: unknown = JSON.parse(stdout);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parseEffectiveModel(parsed, stackName).projectName;
+    } catch (error) {
+      if (error instanceof ComposeExpansionRefusal) throw error;
+      console.warn(
+        '[ComposeService] Could not resolve the Compose project of %s for the teardown check:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+      return null;
+    }
+  }
+
+  private async assertNoHookVolumeCleanup(
+    stackName: string,
+    cleanup: HookCleanupScope,
+    render: SharedRender,
+  ): Promise<void> {
+    const refusal = await this.evaluateHookVolumeCleanup(stackName, cleanup, render);
+    if (refusal) throw new SecretVolumeProtectedError(refusal);
+  }
+
+  /**
+   * The node facts the secret volume evaluator needs: one label-filtered
+   * volume list, plus the container list only when the model names a
+   * container with `volumes_from` or `pid`.
+   */
+  private async secretVolumeNodeFacts(model: EffectiveModel): Promise<SecretVolumeNodeFacts> {
+    const docker = DockerController.getInstance(this.nodeId).getDocker();
+    const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+    const labelledVolumeNames = new Set(
+      (listed?.Volumes ?? []).map((volume) => volume.Name).filter((name): name is string => typeof name === 'string' && name !== ''),
+    );
+    if (!modelReferencesContainers(model)) return { labelledVolumeNames, consumers: null };
+    const secretNames = new Set([...labelledVolumeNames, ...secretVolumeNames()]);
+    const containers = await docker.listContainers({ all: true });
+    const consumers: SecretConsumerContainer[] = containers
+      .filter((container) => (container.Mounts ?? []).some(
+        (mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && secretNames.has(mount.Name),
+      ))
+      .map((container) => ({ id: container.Id, names: (container.Names ?? []).map((name) => name.replace(/^\//, '')) }));
+    return { labelledVolumeNames, consumers };
   }
 
   /**
@@ -393,11 +818,29 @@ export class ComposeService {
    * The exception is an input Sencho refused to hand to Compose: that throws
    * `ComposeExpansionRefusal` instead, because the same guard refuses the down
    * without volumes too.
+   *
+   * A secret volume is refused too (`SecretVolumeProtectedError`), whether the
+   * stack's declaration shows it (reserved name, authored label) or only the
+   * Docker volume of that name carries the label, and whether it is declared or
+   * a container the down removes with its volumes mounts it anonymously,
+   * directly or through `volumes_from`; a label or container read that fails
+   * refuses. The stack Sencho recorded as the secret's consumer may declare it,
+   * but only as `external` and mounted by name, which Compose never removes.
+   * See `assertNoSecretVolumeRemoval`.
+   *
+   * `down.removesOneOffs` says whether the down lists one-off `run` containers
+   * with its volumes (`--remove-orphans` does).
    */
-  private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
-    let declared: string[] | null = null;
+  private async assertNoRecoveryVolumeRemoval(
+    stackName: string,
+    down: { removesOneOffs: boolean },
+    render: SharedRender = this.sharedRender(stackName),
+  ): Promise<void> {
+    let declaredVolumes: EffResource[] | null = null;
+    let projectName = stackName;
+    let services = new Set<string>();
     try {
-      const result = await this.renderConfig(stackName);
+      const result = await render();
       // Sencho's own refusal says why the volumes cannot be read, which is a
       // different answer from "they could not be checked": name the refused
       // input instead of the generic unverified-volumes wording.
@@ -407,7 +850,10 @@ export class ComposeService {
         // The model parser tolerates anything and returns an empty model, which
         // would read as "declares nothing"; only an object is a model.
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
+          const model = parseEffectiveModel(parsed, stackName);
+          declaredVolumes = Object.values(model.volumes);
+          projectName = model.projectName;
+          services = new Set(model.services.map((service) => service.name));
         } else {
           console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
@@ -421,11 +867,174 @@ export class ComposeService {
       if (error instanceof ComposeExpansionRefusal) throw error;
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     }
-    if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
+    if (declaredVolumes === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
     const self = SelfIdentityService.getInstance();
-    if (recoveryVolumeNamesIn(declared, (name) => self.isRecoveryVolume(name)).length > 0) {
+    if (recoveryVolumeNamesIn(declaredVolumes.map((volume) => volume.name), (name) => self.isRecoveryVolume(name)).length > 0) {
       throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
     }
+    await this.assertNoSecretVolumeRemoval(stackName, { projectName, services, removesOneOffs: down.removesOneOffs }, declaredVolumes);
+  }
+
+  /**
+   * The secret half of the `down --volumes` guard, over both kinds of volume
+   * `down --volumes` removes.
+   *
+   * Declared volumes: a stack that is not the secret's recorded consumer is
+   * refused when it declares a secret volume at all, external or not, exactly
+   * as its deploy is refused. The consumer is refused only when it declares
+   * one that is not `external`, because that is the declaration Compose
+   * removes.
+   *
+   * Anonymous volumes: removing a container with its volumes also removes
+   * every volume it mounted without naming it, whatever the stack's file now
+   * says, so each container the down removes with its volumes is checked for a
+   * secret volume mounted that way. The consumer gets no exemption here: an
+   * anonymous mount is exactly what the removal deletes.
+   *
+   * A volume or container read that fails refuses.
+   */
+  private async assertNoSecretVolumeRemoval(stackName: string, project: DownProject, declaredVolumes: readonly EffResource[]): Promise<void> {
+    let docker: Docker;
+    let labelledVolumeNames: Set<string>;
+    const secretVolumeLabels = new Map<string, Record<string, string> | null>();
+    try {
+      docker = DockerController.getInstance(this.nodeId).getDocker();
+      const listed = await docker.listVolumes({ filters: { label: [SECRET_VOLUME_LABEL] } });
+      labelledVolumeNames = new Set();
+      for (const volume of listed?.Volumes ?? []) {
+        labelledVolumeNames.add(volume.Name);
+        // null when the daemon reports none; the name fallback then applies.
+        secretVolumeLabels.set(volume.Name, volume.Labels ?? null);
+      }
+    } catch (error) {
+      console.warn('[ComposeService] Could not read the volume labels of this node for the secret volume check of %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      throw new SecretVolumeProtectedError(
+        'Sencho could not read the volumes on this node to check that this stack does not reach a secret volume, so its volumes were not removed. '
+        + 'Check the Docker connection and try again, or run the operation without removing volumes.',
+      );
+    }
+    const isSecretName = (name: string): boolean => isReservedSecretVolumeName(name) || labelledVolumeNames.has(name);
+    const secret = declaredVolumes.filter((volume) => isSecretName(volume.name) || volume.hasSecretLabel === true);
+    if (secret.length > 0) {
+      const isConsumer = isSecretVolumeExemptKind(DatabaseService.getInstance().getManagedStackKind(stackName));
+      if (!isConsumer || !secret.every((volume) => volume.external)) {
+        throw new SecretVolumeProtectedError(
+          'This stack declares a volume that holds, or is reserved for, a secret Sencho keeps on this node, so its volumes were not removed. '
+          + 'Run the operation without removing volumes, or rename that volume or remove its io.sencho.secret label first. '
+          + 'The stack that consumes the secret must declare the volume as external.',
+        );
+      }
+    }
+    const couldBeAnonymous = (name: string): boolean => couldBeAnonymousVolume(name, secretVolumeLabels);
+    if (await this.mountsSecretVolumeAnonymously(docker, stackName, project, isSecretName, couldBeAnonymous)) {
+      throw new SecretVolumeProtectedError(
+        'A container of this stack holds a secret Sencho keeps on this node in a volume it mounts without naming it, which removing volumes would delete, so its volumes were not removed. '
+        + 'Run the operation without removing volumes.',
+      );
+    }
+  }
+
+  /**
+   * True when a container the down removes with its volumes mounts a secret
+   * volume anonymously, the mount Docker deletes with the container.
+   *
+   * Which containers: see `downRemovesWithVolumes`. They are looked up under
+   * the project name the render gives, which is the one Compose runs the down
+   * under and can differ from the stack name.
+   *
+   * Which mounts: only a secret volume Docker could have created anonymously
+   * (`couldBeAnonymousVolume`) is checked. A volume created by name is kept
+   * when its container is removed, so its mount cannot lose the secret and its
+   * provenance does not matter. For a possibly-anonymous volume, Docker keeps
+   * a mount whose spec names its volume. A mount counts as named when the
+   * container's own create spec names the volume at that path, or when it came
+   * through `volumes_from` from a container whose same mount is named, since
+   * Docker copies the donor's spec. Anything else is taken as anonymous.
+   *
+   * Throws `SecretVolumeProtectedError` when a container that is still present
+   * cannot be read, or a donor it inherits a possibly-anonymous secret mount
+   * from cannot be read; a holder gone since the listing is skipped.
+   */
+  private async mountsSecretVolumeAnonymously(
+    docker: Docker,
+    stackName: string,
+    project: DownProject,
+    isSecretName: (name: string) => boolean,
+    couldBeAnonymous: (name: string) => boolean,
+  ): Promise<boolean> {
+    const unreadable = (error: unknown): SecretVolumeProtectedError => {
+      console.warn('[ComposeService] Could not read the containers of %s for the secret volume check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return new SecretVolumeProtectedError(
+        'Sencho could not read the containers of this stack to check that removing its volumes does not delete a secret volume, so its volumes were not removed. '
+        + 'Check the Docker connection and try again, or run the operation without removing volumes.',
+      );
+    };
+    let listed: Docker.ContainerInfo[];
+    try {
+      listed = await docker.listContainers({ all: true, filters: { label: [`com.docker.compose.project=${project.projectName}`] } });
+    } catch (error) {
+      throw unreadable(error);
+    }
+    const holders: Array<{ id: string; mounts: SecretMount[] }> = [];
+    for (const container of listed ?? []) {
+      if (!downRemovesWithVolumes(container.Labels, project)) continue;
+      const mounts = (container.Mounts ?? [])
+        .filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string'
+          && isSecretName(mount.Name) && couldBeAnonymous(mount.Name))
+        .map((mount) => ({ name: mount.Name as string, destination: samePath(mount.Destination) }));
+      if (mounts.length > 0) holders.push({ id: container.Id, mounts });
+    }
+    for (const holder of holders) {
+      let info: Docker.ContainerInspectInfo;
+      try {
+        info = await docker.getContainer(holder.id).inspect();
+      } catch (error) {
+        // Gone since the listing: Docker has nothing of it left to remove.
+        if ((error as { statusCode?: number })?.statusCode === 404) continue;
+        throw unreadable(error);
+      }
+      for (const mount of holder.mounts) {
+        if (!(await this.mountIsNamed(docker, info, mount, new Set([holder.id]), unreadable))) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True when `container`'s mount of a possibly-anonymous `mount.name` at
+   * `mount.destination` is named in its own spec, or was inherited through
+   * `volumes_from` from a container whose same mount is named, followed through
+   * chains of donors. A donor that cannot be read, or is gone, throws: the spec
+   * the mount was copied from is then unknown, and unknown is not a pass.
+   */
+  private async mountIsNamed(
+    docker: Docker,
+    container: Docker.ContainerInspectInfo,
+    mount: SecretMount,
+    seen: Set<string>,
+    unreadable: (error: unknown) => SecretVolumeProtectedError,
+  ): Promise<boolean> {
+    if (specNamesMount(container, mount)) return true;
+    for (const entry of container.HostConfig?.VolumesFrom ?? []) {
+      // `container[:mode]`; a container name or id never holds a colon.
+      const ref = entry.split(':')[0];
+      if (!ref || seen.has(ref)) continue;
+      seen.add(ref);
+      let donor: Docker.ContainerInspectInfo;
+      try {
+        donor = await docker.getContainer(ref).inspect();
+      } catch (error) {
+        throw unreadable(error);
+      }
+      // The same donor reached again under its id rather than its name.
+      if (donor.Id && donor.Id !== ref) {
+        if (seen.has(donor.Id)) continue;
+        seen.add(donor.Id);
+      }
+      const provides = (donor.Mounts ?? []).some((own) => own.Type === 'volume' && own.Name === mount.name && samePath(own.Destination) === mount.destination);
+      if (provides && await this.mountIsNamed(docker, donor, mount, seen, unreadable)) return true;
+    }
+    return false;
   }
 
   /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */
@@ -1117,9 +1726,13 @@ export class ComposeService {
   }
 
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
+    const render = this.sharedRender(stackName);
     if (action !== 'start') {
-      await this.assertDockerEndpointSafe(stackName, { kind: action === 'restart' ? 'restart' : 'stop' });
+      await this.assertDockerEndpointSafe(stackName, { kind: action === 'restart' ? 'restart' : 'stop' }, undefined, render);
     }
+    // A scheduled down is still a Compose down: it sweeps retained hook
+    // containers with their volumes even without `--volumes`.
+    if (action === 'down') await this.assertNoHookVolumeCleanup(stackName, { kind: 'teardown' }, render);
     const stackDir = path.join(this.baseDir, stackName);
     // Resolve the arguments first: a stack whose compose cannot be resolved is
     // refused before anything is touched, and must not cost a live gate.
@@ -1139,10 +1752,23 @@ export class ComposeService {
 
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
-    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
-    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' }, undefined, render);
+    // Compose's down command takes `--remove-orphans` from COMPOSE_REMOVE_ORPHANS
+    // when the flag is absent, and a one-off of a declared service is then
+    // removed with its volumes. Resolve the policy once, use it for the guard
+    // and pass the explicit flag, so the two cannot disagree.
+    const removeOrphans = envEnablesRemoveOrphans();
+    if (options?.removeVolumes) {
+      await this.assertNoRecoveryVolumeRemoval(stackName, { removesOneOffs: removeOrphans }, render);
+    }
+    // Compose sweeps retained hook containers with their volumes whatever
+    // `--volumes` says.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'teardown' }, render);
     const stackDir = path.join(this.baseDir, stackName);
-    const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
+    const args = ['down'];
+    if (options?.removeVolumes) args.push('--volumes');
+    if (removeOrphans) args.push('--remove-orphans');
     const composeArgs = await this.authoredComposeArgs(stackName, args);
     await this.supersedeGatesForContainerOp(stackName, 'the stack was taken down during the observation');
     await this.execute('docker', composeArgs, stackDir, ws);
@@ -1310,6 +1936,7 @@ export class ComposeService {
     stackName: string,
     overlayDir?: string,
     composeArgsPrefix?: string[],
+    render?: SharedRender,
   ): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
@@ -1326,7 +1953,7 @@ export class ComposeService {
     const hostComposeDir = resolveHostBindPath(composeDir, mounts);
     if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
 
-    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix);
+    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix, render);
     if (!analysis) return;
 
     const unsafeBind = analysis.model.services
@@ -1391,9 +2018,13 @@ export class ComposeService {
     stackName: string,
     overlayDir?: string,
     composeArgsPrefix?: string[],
+    render?: SharedRender,
   ): Promise<{ model: EffectiveModel; bases: string[]; deviceSources: string[] } | null> {
     let rendered: Awaited<ReturnType<ComposeService['renderConfig']>>;
-    if (composeArgsPrefix) {
+    if (render) {
+      // The caller's render of this exact file set, shared with its other checks.
+      rendered = await render();
+    } else if (composeArgsPrefix) {
       // A rebuilt invocation is the project this command runs, so the render
       // reuses its exact global flags instead of deriving a second one.
       rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir, composePrefix: composeArgsPrefix });
@@ -1702,11 +2333,17 @@ export class ComposeService {
     // Before the guard: a render that fails on a missing required variable
     // should say so, not that the guard could not read the model.
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
+    const render = this.sharedRender(stackName, ctx?.overlayDir);
     await this.assertDockerEndpointSafe(
       stackName,
       { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
       ctx?.overlayDir,
+      render,
     );
+    await this.assertNoSecretVolumeUse(stackName, render);
+    // Compose's reconciliation purges retained pre_start hook containers with
+    // their volumes for a service with no replica left to survive the plan.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'project-up' }, render);
     const stackDir = this.resolveStackDir(stackName, ctx);
     // The overlay is the project this deploy will actually run, so the guard
     // reads it rather than the live stack.
@@ -2216,18 +2853,22 @@ export class ComposeService {
       invocation ?? null,
       stackDir,
     );
-    // The recovery is about to run this exact invocation, so the Pilot host-path
-    // guard reads the same one: the captured file set, the env selection, the
-    // recovery layer, and the decrypt overlay, all as assembled. Ordinary
-    // deployment already refuses a mismapped overlay; a rollback restoring a
-    // relative mount has the same consequence, so it refuses on the same terms.
+    // The recovery is about to run this exact invocation, so both checks below
+    // read the same one, from one render: the captured file set, the env
+    // selection, the recovery layer, and the decrypt overlay, all as assembled.
     // `buildComposeArgsWithRecoveryOverride` appends the action last, so the
     // global-flag prefix is this argv without those tokens.
-    await this.assertSafePilotBindMapping(
-      stackName,
-      overlay?.overlayDir,
-      args.slice(0, args.length - upAction.length),
-    );
+    const composeArgsPrefix = args.slice(0, args.length - upAction.length);
+    const render = this.sharedRender(stackName, overlay?.overlayDir, composeArgsPrefix);
+    // A captured generation that reached a secret volume is refused even when
+    // the current files no longer do.
+    await this.assertNoSecretVolumeUse(stackName, render);
+    // A recovery up runs the same hook purge as any other up.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'project-up' }, render);
+    // Ordinary deployment already refuses a mismapped overlay; a rollback
+    // restoring a relative mount has the same consequence, so the Pilot
+    // host-path guard refuses on the same terms.
+    await this.assertSafePilotBindMapping(stackName, overlay?.overlayDir, composeArgsPrefix, render);
     await this.withRegistryAuth(async (env) => {
       // The child inherits COMPOSE_ENV_FILES from this process whether or not
       // the invocation names that file, so check it at the last moment before
@@ -2779,7 +3420,12 @@ export class ComposeService {
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
+    // Compose's reconciliation purges retained pre_start hook containers with
+    // their volumes for a service with no replica left to survive the plan.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'project-up' }, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
@@ -3121,7 +3767,12 @@ export class ComposeService {
   ): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
+    // The up names one service with --no-deps --force-recreate, so Compose
+    // visits only that service and purges its retained hook containers.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'up', services: new Set([serviceName]) }, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -3156,7 +3807,12 @@ export class ComposeService {
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName }, undefined, render);
+    await this.assertNoSecretVolumeUse(stackName, render);
+    // The up names one service with --no-deps --force-recreate, so Compose
+    // visits only that service and purges its retained hook containers.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'up', services: new Set([serviceName]) }, render);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -3170,8 +3826,14 @@ export class ComposeService {
 
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
     // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
-    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
-    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
+    const render = this.sharedRender(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' }, undefined, render);
+    // `--remove-orphans` lists one-off `run` containers too: a one-off of a declared
+    // service is removed with its volumes, an orphan without them.
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName, { removesOneOffs: true }, render);
+    // Compose sweeps retained hook containers with their volumes whatever
+    // `--volumes` says.
+    await this.assertNoHookVolumeCleanup(stackName, { kind: 'teardown' }, render);
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes

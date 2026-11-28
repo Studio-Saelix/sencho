@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
+import { isSecretVolumeProtectedError, SECRET_VOLUME_PROTECTED_CODE } from '../helpers/secretVolume';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
@@ -236,7 +237,9 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       const refusal = deployError instanceof MissingExternalNetworksError ? deployError : null;
       const parsed = refusal === null ? ErrorParser.parse(rawError) : null;
 
-      const shouldRollback = refusal !== null || (parsed?.rule ? parsed.rule.canSilentlyRollback : true);
+      // A secret volume refusal also lands before Compose runs, so it always rolls back too.
+      const shouldRollback = refusal !== null || isSecretVolumeProtectedError(deployError)
+        || (parsed?.rule ? parsed.rule.canSilentlyRollback : true);
       let rolledBack = false;
 
       if (shouldRollback) {
@@ -249,9 +252,10 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
             await compose.downStack(stackName, { removeVolumes: true });
           } catch (volumeErr) {
             // A volume removal the node refuses (the stack declares the recovery
-            // repository, or its volumes could not be read) must not strand the
-            // rollback: take the stack down without removing volumes.
-            if (!isRecoveryVolumeProtectedError(volumeErr)) throw volumeErr;
+            // repository or a secret volume, or its volumes could not be read)
+            // must not strand the rollback: take the stack down without removing
+            // volumes.
+            if (!isRecoveryVolumeProtectedError(volumeErr) && !isSecretVolumeProtectedError(volumeErr)) throw volumeErr;
             console.error('[Templates] Rollback of %s keeps its volumes: %s', sanitizeForLog(stackName), sanitizeForLog(volumeErr.message));
             await compose.downStack(stackName);
           }
@@ -283,6 +287,11 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       }
 
       invalidateNodeCaches(req.nodeId);
+      if (isSecretVolumeProtectedError(deployError)) {
+        // Refused before Compose ran: answer like every other secret volume refusal.
+        res.status(423).json({ error: deployError.message, code: SECRET_VOLUME_PROTECTED_CODE, rolledBack });
+        return;
+      }
       res.status(500).json({
         error: refusal?.message ?? parsed?.message ?? rawError,
         rolledBack,
