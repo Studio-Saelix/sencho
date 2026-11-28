@@ -472,9 +472,12 @@ export function listComposeServiceNames(content: string): string[] {
 /**
  * Name the first declaration a merge key could hide from the inventory, walking
  * only the parts of the document this parser enumerates. Unused anchors and
- * harmless merges do not match. The walk is iterative and the visited set is
- * keyed by role, because the same anchor can be reached as a service, a build,
- * an env_file entry and so on, and each role protects different keys.
+ * harmless merges do not match. Every `<<` key counts here, including a quoted
+ * or string-tagged one: the inventory fails closed when such a key could hide a
+ * declaration, while the service-name projection keeps the literal forms
+ * distinct. The walk is iterative and the visited set is keyed by role, because
+ * the same anchor can be reached as a service, a build, an env_file entry and
+ * so on, and each role protects different keys.
  */
 function findMergeHiddenDeclaration(node: unknown, rootRole: MergeWalkRole): string | null {
     const seen = new WeakMap<object, Set<MergeWalkRole>>();

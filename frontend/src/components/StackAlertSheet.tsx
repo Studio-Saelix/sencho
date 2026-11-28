@@ -371,8 +371,9 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             : []),
     ];
 
-    // A lookup in progress, a failed lookup, or a requested service this stack
-    // does not list is not an all-services choice until the operator says so.
+    // A lookup in progress, a failed lookup, a node whose lookup has not run
+    // yet, or a requested service this stack does not list is not an
+    // all-services choice until the operator says so.
     const needsExplicitAllServices = canScopeService
         && service === ''
         && !targetAllServices

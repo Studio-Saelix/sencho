@@ -3335,10 +3335,12 @@ paths:
         keys are expanded to the service names they contribute; an explicitly
         string-tagged `<<` is a literal key, and an explicit merge tag is
         refused. An alias expansion the expansion guard refuses, a reuse past
-        the shared alias budget, an explicit merge tag, or a document the guard
-        cannot measure answers `409 compose_inputs_refused`; a file over the
-        1 MiB parse limit answers `413`. The serving node produces the answer,
-        so an older node may answer with its installed version's behavior.
+        the shared alias budget, an explicit merge tag, a merge key whose value
+        is not a mapping, a merge-key scan over the listing budget, or a
+        document the guard cannot measure answers `409 compose_inputs_refused`;
+        a file over the 1 MiB parse limit answers `413`. The serving node
+        produces the answer, so an older node may return its installed
+        version's error text instead of this envelope.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"

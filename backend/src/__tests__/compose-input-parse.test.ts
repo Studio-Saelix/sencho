@@ -1177,6 +1177,15 @@ describe('listComposeServiceNames', () => {
         ].join('\n'))).toEqual(['1e999']);
     });
 
+    it('treats a quoted << as a literal key, not a merge', () => {
+        expect(listComposeServiceNames([
+            '"<<": literal root key',
+            'services:',
+            '  web:',
+            '    image: nginx',
+        ].join('\n'))).toEqual(['web']);
+    });
+
     it('treats an explicitly string-tagged << as a literal key', () => {
         expect(listComposeServiceNames([
             'x-ext:',

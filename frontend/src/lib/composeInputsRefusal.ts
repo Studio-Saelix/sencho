@@ -8,14 +8,15 @@ export const COMPOSE_INPUTS_REFUSED_CODE = 'compose_inputs_refused';
  * `{ error, code: 'compose_inputs_refused' }` (directly, through a proxied
  * node, and through a Pilot tunnel); the message names the file and the reason.
  * The service list also answers its own 1 MiB byte-cap check before parsing,
- * with a filename-free 413 `{ error }`. The container list reaches the same cap
- * through the Compose guard, so it answers the guard's filename-naming 409
- * instead. Both are the same kind of actionable reason, so both readers show
- * the operator the text instead of a generic failure, and neither text carries
- * a value from the file. An older serving node that does not implement these
- * envelopes answers its previous generic error, which this reader returns null
- * for. Returns null for any other failure, so callers keep their generic
- * wording for those.
+ * with a filename-free 413 `{ error }`; a 413 is shown when it carries a string
+ * error, with no code required. The container list reaches the same cap through
+ * the Compose guard, so it answers the guard's filename-naming 409 instead.
+ * Both are the same kind of actionable reason, so both readers show the
+ * operator the text instead of a generic failure, and neither text carries a
+ * value from the file. An older serving node may answer from its installed
+ * version: a 409 with this code still carries text this reader returns, while a
+ * generic 500 or a 409 without the code returns null and callers keep their
+ * generic wording. Returns null for any other failure.
  */
 export async function readComposeInputsRefusal(res: Response): Promise<string | null> {
   if (res.status !== 409 && res.status !== 413) return null;
