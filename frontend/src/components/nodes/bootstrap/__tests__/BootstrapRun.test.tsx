@@ -1912,6 +1912,34 @@ describe('release confirmation binding', () => {
     expect(confirm).toHaveTextContent('a.example.com');
     expect(confirm).toHaveTextContent(/node record is no longer in Fleet/);
     expect(screen.getByTestId('bootstrap-run-answer')).toHaveTextContent('Stopped partway');
+
+    // Confirming posts the run the click checked, not another one.
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Release server' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(releaseBootstrapOperation).toHaveBeenCalledWith(stopped.id);
+  });
+
+  it('does not hand an open read of another run the shown run when a poll overtook it', async () => {
+    vi.useFakeTimers();
+    const shown = { ...held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11), agentStarted: true };
+    const other = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    const answers: Array<(detail: BootstrapOperationDetail) => void> = [];
+    vi.mocked(fetchBootstrapOperation).mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(shown));
+    let read: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { read = result.current.openOperation(other.id); });
+
+    // The shown run's settle poll answers before the open read of the other run.
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(answers).toHaveLength(2);
+    await act(async () => { answers[1](shown); });
+
+    let answered: BootstrapOperationDetail | null = shown;
+    await act(async () => { answers[0](other); answered = await read; });
+    expect(answered).toBeNull();
+    expect(result.current.operation?.id).toBe(shown.id);
   });
 
   it('hands an overtaken open read the newest answer for its run instead of dropping it', async () => {
