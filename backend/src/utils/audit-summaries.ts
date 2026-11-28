@@ -44,6 +44,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /system/networks': 'Created network',
   'POST /system/console-token': 'Generated console token',
   'POST /system/reapply-compose': 'Triggered compose reapply',
+  'POST /system/image-pin-refresh': 'Re-read the Compose image pin',
 
   // Node management
   'POST /nodes': 'Added node',

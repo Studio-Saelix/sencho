@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import path from 'path';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { disableCapability, enableCapability } from './CapabilityRegistry';
@@ -15,6 +16,7 @@ import {
 import { resolveDockerEndpointProvider, type DockerEndpointContainer } from './DockerEndpointProvider';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
   ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
   ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS,
@@ -30,11 +32,17 @@ import {
 } from '../helpers/endpointProviderReplace';
 import {
   buildTargetImageRef,
+  crossesAbsoluteSymlink,
   isRepinBlocked,
+  isSameOrChildPath,
+  isShadowedByDeeperMount,
   isValidImageRef,
+  mapHostPathToContainerPath,
   patchComposeServiceImage,
+  resolveMountDestinations,
   resolveServiceImageFromContents,
   type ImagePinKind,
+  type PathMount,
   type ResolvedComposeImage,
 } from '../helpers/selfUpdateCompose';
 
@@ -55,13 +63,30 @@ const UPDATE_ERROR_FILE = '/app/data/.sencho-update-error';
 
 // Rewritten compose file the main process stages under /app/data for the helper
 // to copy onto the host compose file. Uses the same /app/data handoff as the
-// error file because the main process cannot reach the compose working dir.
+// error file because the main process cannot reliably write to the compose working dir.
 const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
 
-// Cap how long a cached pin classification is served to status/meta callers.
-// Update DECISIONS always read fresh (fresh: true), so this only bounds how
-// stale a displayed pin kind can be after a live compose edit.
+// How long a cached pin classification is served before a routine caller
+// re-reads it. Only config files Sencho can read directly through its own bind
+// mounts are re-read (no container). When a file needs the helper container, the
+// cached classification is served until a complete fresh read replaces it (an
+// update, a Compose reapply, an image channel switch, opening the image channel
+// settings, the Fleet Recheck, or a restart), so routine monitoring never starts
+// a container once a pin is fully read. Update DECISIONS always read fresh
+// (fresh: true).
 const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// A read that could not read every config file caches what it did read, marked
+// partial, so routine callers keep a classification. Only then does a routine
+// caller start the full read again, after a delay that doubles with each
+// consecutive incomplete read from the first value up to the ceiling. A
+// transient failure at startup recovers within minutes, and a file that can
+// never be read settles at one helper read a day.
+const PIN_INCOMPLETE_RETRY_BASE_MS = 5 * 60 * 1000;
+const PIN_INCOMPLETE_RETRY_MAX_MS = 24 * 60 * 60 * 1000;
+
+/** Largest compose file Sencho reads when classifying its own image pin. */
+const COMPOSE_READ_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Ceiling for pulling the Sencho image before an endpoint replacement stages. */
 export const SELF_UPDATE_PULL_TIMEOUT_MS = 5 * 60_000;
@@ -73,9 +98,21 @@ const UPDATE_BLOCKED_REASON =
 const UPDATE_READ_FAILED_REASON =
   'Could not read the Sencho compose file to determine how its image is pinned. Confirm the update helper can reach the compose directory, then try again.';
 
-interface HostMount {
-  source: string;
-  destination: string;
+type HostMount = PathMount;
+
+/** Outcome of reading one config file through Sencho's own bind mounts. */
+type DirectRead =
+  | { kind: 'read'; content: string }
+  /** No usable mount exposes it: not mounted, a single-file mount, a path leaving the mount, or a file that is not plain or is oversized. */
+  | { kind: 'uncovered' }
+  /** A mount exposes it but this read failed (permissions, a file mid-rename). */
+  | { kind: 'failed'; reason: string };
+
+/** Result of reading every config file; `info` is null when none of the files it read sets the service image. */
+interface ComposeRead {
+  info: ResolvedComposeImage | null;
+  /** True when a config file could not be read, so `info` classifies only the files that were. */
+  partial: boolean;
 }
 
 /** Narrow projection of the Dockerode mount entry we actually consume. */
@@ -126,15 +163,19 @@ export function shQuote(value: string): string {
 
 /**
  * Build the argv for a one-shot helper that reads a single compose config file
- * from the host. The main process cannot open the compose working dir, so it
- * mounts it read-only into a throwaway container and cats the file out. Pure and
- * exported for unit testing. The path is a discrete argv element handed to
- * execFile (no shell), so a path with shell metacharacters stays inert.
+ * from the host. It is used only when Sencho cannot read the file directly (not
+ * mounted, a single-file mount, a path that leaves the mount, a file that is not
+ * plain or is oversized, or a failed direct read), so the helper mounts the
+ * working dir read-only into a throwaway container and cats the file out. The
+ * label names its purpose in `docker events`. Pure and exported for unit
+ * testing. The path is a discrete argv element handed to execFile (no shell), so
+ * a path with shell metacharacters stays inert.
  */
 export function buildComposeReadArgs(workingDir: string, imageName: string, configFilePath: string): string[] {
   return [
     'run', '--rm',
     '--user', 'root',
+    '--label', 'io.sencho.helper=compose-read',
     '--entrypoint', 'cat',
     '-v', `${workingDir}:${workingDir}:ro`,
     '-w', workingDir,
@@ -195,6 +236,8 @@ interface ComposeContext {
   imageName: string;
   dataDirHost: string | null;
   hostBindMounts: HostMount[];
+  /** Destination of every mount of Sencho's own container (volumes and tmpfs too), to spot a mount that shadows a bind-mounted path. */
+  mountDestinations: string[];
   /** Compose project label of Sencho's own container. */
   project: string | null;
   /** Image ID of the running container, so a helper runs exactly this build. */
@@ -419,7 +462,29 @@ class SelfUpdateService {
   /** Stashed when the helper exits before any onceHelperExit listener is registered. */
   private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
-  private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
+  /** A complete read, or a partial one until a complete read replaces it. */
+  private pinCache: {
+    info: ResolvedComposeImage | null;
+    /** When the read behind `info` started; a read that started earlier never replaces it. */
+    at: number;
+    /** When the files were last read by any read; a failing routine re-read also stamps it, so it is retried once per TTL. */
+    checkedAt: number;
+    /** True when at least one config file cannot be read directly, so only the helper can refresh it. */
+    needsHelper: boolean;
+    /** True when a config file could not be read at all: `info` comes from the files that were. Routine callers retry it on a backoff. */
+    partial: boolean;
+  } | null = null;
+  /** A failing routine re-read has been logged, until one succeeds. */
+  private routineReadWarned = false;
+  /** The newest read that may start the helper, so routine callers can wait for it. */
+  private pinInflight: Promise<ComposeRead | null> | null = null;
+  /** The one read queued behind `pinInflight` for fresh callers that arrived while it ran. */
+  private freshQueued: Promise<ComposeRead | null> | null = null;
+  private lastFullReadAt = 0;
+  /** Consecutive full reads that could not read every config file. */
+  private incompleteReads = 0;
+  /** When the read that last set `incompleteReads` started, so a read that finishes late does not rewind the count. */
+  private incompleteReadsAt = 0;
   /** Bounded reason the last detection refused, null while available. */
   private unavailableCode: SelfUpdateUnavailableCode = 'detecting';
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -559,6 +624,8 @@ class SelfUpdateService {
 
     this.composeContext = {
       workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts,
+      // A tmpfs mount is listed under HostConfig.Tmpfs, not under Mounts.
+      mountDestinations: [...rawMounts.map(m => m.Destination), ...Object.keys(info.HostConfig?.Tmpfs ?? {})].filter(Boolean),
       project: labels['com.docker.compose.project'] || null,
       runningImageId: typeof info.Image === 'string' && info.Image ? info.Image : null,
     };
@@ -568,6 +635,12 @@ class SelfUpdateService {
 
   /** Record a detection outcome and decide whether to keep retrying. */
   private applyDetection(code: SelfUpdateUnavailableCode | null): void {
+    // A new detection may describe a different Compose project: drop what the last one read.
+    this.pinCache = null;
+    this.routineReadWarned = false;
+    this.lastFullReadAt = 0;
+    this.incompleteReads = 0;
+    this.incompleteReadsAt = 0;
     if (code === null) {
       this.canSelfUpdate = true;
       this.unavailableCode = 'detecting';
@@ -704,10 +777,17 @@ class SelfUpdateService {
   }
 
   /**
-   * Classify how this instance's compose image is pinned. Serves a short-lived
-   * cache to frequent status/meta callers; pass `{ fresh: true }` for update
-   * decisions so a live compose edit is always reflected. Returns null when
-   * self-update is unavailable or the compose file could not be read.
+   * Classify how this instance's compose image is pinned. Frequent status/meta
+   * callers are served from a cache and start a container only after a first read
+   * was attempted and while the cached classification is missing or partial (a
+   * config file could not be read), on a backoff of 5 minutes up to a day;
+   * `cacheOnly` never reads. Pass `{ fresh: true }` for update decisions so a live
+   * compose edit is always reflected. Concurrent fresh callers share one read.
+   * A fresh read that could not read every config file returns null, never the
+   * classification of the files it did read: a file it missed can override the
+   * image, so an update decision must not act on it (the cache keeps that partial
+   * classification for routine callers). Returns null when self-update is
+   * unavailable, or no read has classified the pin yet.
    */
   async getPinInfo(opts?: { fresh?: boolean; cacheOnly?: boolean }): Promise<PinInfo | null> {
     const resolved = await this.resolveComposeImage(opts?.fresh ?? false, opts?.cacheOnly ?? false);
@@ -732,13 +812,18 @@ class SelfUpdateService {
    * Preflight the route layer runs before responding, so a blocked update fails
    * fast with a 409 instead of returning 202 and stalling the reconnect overlay.
    * A missing target version is the legacy pull-current path and makes no repin
-   * decision. A digest/unknown pin (or an unreadable compose file) is blocked.
+   * decision, but the route chose the hardened or community path from a fresh read
+   * of the files, so it is refused when that read missed a file. A digest/unknown
+   * pin (or a compose file that cannot be read in full) is blocked.
    */
   async canSelfUpdateTarget(targetVersion?: string): Promise<SelfUpdatePreflight> {
     if (!this.canSelfUpdate) {
       return { ok: false, reason: 'Self-update is unavailable on this instance.' };
     }
-    if (!targetVersion) return { ok: true };
+    if (!targetVersion) {
+      const read = await this.startCoalescedFullRead();
+      return read?.partial ? { ok: false, reason: UPDATE_READ_FAILED_REASON } : { ok: true };
+    }
     const info = await this.getPinInfo({ fresh: true });
     if (!info) return { ok: false, reason: UPDATE_READ_FAILED_REASON };
     if (isRepinBlocked(info.pinKind)) {
@@ -747,36 +832,233 @@ class SelfUpdateService {
     return { ok: true };
   }
 
-  /** Resolve the compose-declared service image fresh from the host, or from a
-   *  short-lived cache. Reads each config file via a throwaway cat container. */
+  /**
+   * Resolve the compose-declared service image. A fresh read always reads the
+   * current files (directly when a mount exposes them, otherwise through the
+   * helper) and refreshes the cache; it returns null when any file could not be
+   * read, and callers that arrive while a read runs share the one read queued
+   * after it. A routine read serves the cache: once it is
+   * older than the TTL it is re-read directly, and only when every file can be
+   * read directly. A routine read starts the helper only while the cache is
+   * missing or partial, after a first read was attempted and no more often than
+   * `incompleteReadRetryMs` allows; with a partial classification in hand it
+   * answers from it and reads in the background. Returns null when nothing is
+   * classified.
+   */
   private async resolveComposeImage(fresh: boolean, cacheOnly = false): Promise<ResolvedComposeImage | null> {
     if (!this.composeContext) return null;
-    const now = Date.now();
-    if (!fresh && this.pinCache && now - this.pinCache.at < PIN_CACHE_TTL_MS) {
-      return this.pinCache.info;
+    if (fresh) {
+      const read = await this.startCoalescedFullRead();
+      return read && !read.partial ? read.info : null;
     }
-    if (cacheOnly) return null;
-    const { workingDir, configFiles, serviceName, imageName } = this.composeContext;
-    const env = this.buildEnv();
-    const debug = isDebugEnabled();
+    const cache = this.pinCache;
+    if (cache && !cache.partial) {
+      const expired = Date.now() - cache.checkedAt >= PIN_CACHE_TTL_MS;
+      if (cacheOnly || !expired || cache.needsHelper) return cache.info;
+      const read = await this.readComposeImage(false);
+      return read ? read.info : cache.info;
+    }
+    if (cacheOnly) return cache?.info ?? null;
+    // A partial cache that classified something answers at once; the retry runs
+    // in the background so a status request or monitor tick never waits on a
+    // helper container. With nothing classified there is no answer to give yet,
+    // so the caller waits for the read.
+    const background = cache?.info != null;
+    if (this.pinInflight) {
+      if (background) return cache.info;
+      await this.pinInflight;
+      return this.pinCache?.info ?? null;
+    }
+    const sinceLastRead = Date.now() - this.lastFullReadAt;
+    if (this.lastFullReadAt === 0 || sinceLastRead < this.incompleteReadRetryMs()) return cache?.info ?? null;
+    const read = this.startFullRead();
+    if (background) {
+      read.catch(error => console.warn('[SelfUpdate] Background Compose image pin read failed:', sanitizeForLog((error as Error).message)));
+      return cache.info;
+    }
+    await read;
+    return this.pinCache?.info ?? null;
+  }
+
+  /** Delay before a routine caller starts the full read again after consecutive incomplete reads. */
+  private incompleteReadRetryMs(): number {
+    return Math.min(PIN_INCOMPLETE_RETRY_BASE_MS * 2 ** Math.max(0, this.incompleteReads - 1), PIN_INCOMPLETE_RETRY_MAX_MS);
+  }
+
+  /** A read that may start the helper, tracked so routine callers wait for it
+   *  instead of starting their own. */
+  private startFullRead(): Promise<ComposeRead | null> {
+    const read = this.readComposeImage(true).finally(() => {
+      if (this.pinInflight === read) this.pinInflight = null;
+    });
+    this.pinInflight = read;
+    return read;
+  }
+
+  /**
+   * A full read for a fresh caller. While one runs, every fresh caller that
+   * arrives shares a single read queued behind it, which starts after they have
+   * all joined and so sees any edit made before them; callers that arrive once that
+   * read has begun queue the next one. Starting one helper per caller would pile
+   * containers onto the Docker host.
+   */
+  private startCoalescedFullRead(): Promise<ComposeRead | null> {
+    if (this.freshQueued) return this.freshQueued;
+    const running = this.pinInflight;
+    if (!running) return this.startFullRead();
+    const queued = running.catch(() => undefined).then(() => {
+      this.freshQueued = null;
+      return this.startFullRead();
+    });
+    this.freshQueued = queued;
+    return queued;
+  }
+
+  /**
+   * Read every config file and classify the image. A routine read (no helper)
+   * returns null, keeping the cache, when a file cannot be read directly, and
+   * records the attempt in `checkedAt` so it is not repeated on every tick. A read
+   * that got every file is cached. A read that missed a file caches what it did
+   * read as partial, but only when nothing better is cached: it never replaces a
+   * complete entry, and never replaces a partial entry that classified an image
+   * with one that classified none. A complete read replaces a partial entry
+   * whenever it started; no other read replaces an entry that a read started
+   * later wrote. The result's `partial` is true when a file could not be read:
+   * fresh callers treat that as no answer.
+   */
+  private async readComposeImage(allowHelper: boolean): Promise<ComposeRead | null> {
+    const ctx = this.composeContext;
+    if (!ctx) return { info: null, partial: false };
+    const startedAt = Date.now();
+    if (allowHelper) this.lastFullReadAt = startedAt;
     const files: { filePath: string; content: string }[] = [];
-    for (const raw of configFiles.split(',')) {
+    const unread: string[] = [];
+    let needsHelper = false;
+    for (const raw of ctx.configFiles.split(',')) {
       const filePath = raw.trim();
       if (!filePath) continue;
-      try {
-        const { stdout } = await execFileAsync('docker', buildComposeReadArgs(workingDir, imageName, filePath), {
-          env,
-          timeout: 30_000,
-          maxBuffer: 10 * 1024 * 1024,
-        });
-        files.push({ filePath, content: stdout });
-      } catch (error) {
-        if (debug) console.debug('[SelfUpdate:debug] Could not read compose file', filePath, (error as Error).message);
+      const direct = await this.readConfigFileDirect(filePath, ctx.hostBindMounts, ctx.mountDestinations);
+      if (direct.kind === 'uncovered') needsHelper = true;
+      let content = direct.kind === 'read' ? direct.content : null;
+      if (content === null && allowHelper) content = await this.readConfigFileViaHelper(filePath, ctx);
+      if (content !== null) {
+        files.push({ filePath, content });
+      } else if (allowHelper) {
+        unread.push(filePath);
+      } else {
+        this.noteFailedRoutineRead(startedAt, filePath, direct.kind === 'failed' ? direct.reason : 'not readable directly');
+        return null;
       }
     }
-    const info = resolveServiceImageFromContents(files, serviceName);
-    this.pinCache = { info, at: now };
-    return info;
+    const info = resolveServiceImageFromContents(files, ctx.serviceName);
+    const partial = unread.length > 0;
+    const cache = this.pinCache;
+    const newest = startedAt >= this.incompleteReadsAt;
+    if (newest) this.incompleteReadsAt = startedAt;
+    if (partial) {
+      if (newest) this.incompleteReads += 1;
+      console.warn(`[SelfUpdate] Could not read Compose config file(s) ${sanitizeForLog(unread.join(', '))}; the files that were read set the cached pin only when no better one is cached. While the cached pin is partial, routine checks read the files again with a growing delay.`);
+    } else if (newest || cache?.partial) {
+      // A complete read ends the retries even when a partial read that started later finished first.
+      this.incompleteReads = 0;
+    }
+    // A complete read replaces a partial entry whenever it started; otherwise a read replaces only an entry an earlier read wrote.
+    const replaces = !cache
+      || (cache.partial && !partial)
+      || (cache.at <= startedAt && (!partial || (cache.partial && (info !== null || cache.info === null))));
+    if (replaces) {
+      this.pinCache = { info, at: startedAt, checkedAt: startedAt, needsHelper, partial };
+      if (!partial) this.routineReadWarned = false;
+    }
+    return { info, partial };
+  }
+
+  /** A routine read could not read a file directly: keep the cache, retry after the TTL, log once. */
+  private noteFailedRoutineRead(startedAt: number, filePath: string, reason: string): void {
+    if (this.pinCache) this.pinCache.checkedAt = Math.max(this.pinCache.checkedAt, startedAt);
+    if (this.routineReadWarned) return;
+    this.routineReadWarned = true;
+    console.warn(`[SelfUpdate] Could not re-read ${sanitizeForLog(filePath)} directly (${sanitizeForLog(reason)}); keeping the last known image pin until it can be read.`);
+  }
+
+  /** Read a config file through one of Sencho's own bind mounts. A single-file
+   *  mount is uncovered: it keeps showing the old file after an editor replaces
+   *  it, so only a mounted folder is trusted. So is a path another mount covers,
+   *  directly, through a symlink, or by being mounted over the folder's own root;
+   *  and so is a path that passes an absolute symlink (or one that leaves the
+   *  mount) when the folder is mounted at a different path than on the host.
+   *  Other mounts are located from the live mount list (the runtime resolves a
+   *  symlink in a destination, `/apps/current/sencho` is mounted at
+   *  `/apps/v2/sencho`, while Docker records it as written), with the recorded
+   *  destinations resolved instead where that list cannot be read. */
+  private async readConfigFileDirect(
+    filePath: string,
+    mounts: ReadonlyArray<HostMount>,
+    mountDestinations: ReadonlyArray<string>,
+  ): Promise<DirectRead> {
+    const mapped = mapHostPathToContainerPath(filePath, mounts, mountDestinations);
+    if (!mapped) return { kind: 'uncovered' };
+    try {
+      const [real, root, view] = await Promise.all([
+        fs.promises.realpath(mapped.containerPath),
+        fs.promises.realpath(mapped.mountDestination),
+        resolveMountDestinations(mountDestinations),
+      ]);
+      if (!isSameOrChildPath(real, root)) return { kind: 'uncovered' };
+      // A symlink inside the mount can lead into another mount's folder, which
+      // holds a file the host path does not name; so can a nested mount whose
+      // recorded destination runs through a symlink, and one mounted over the
+      // mount's own root, on it or on a parent path, after it.
+      if (isShadowedByDeeperMount(real, root, view.destinations) || view.hides(root)) return { kind: 'uncovered' };
+      const sameTree = path.posix.normalize(filePath) === mapped.containerPath;
+      if (!sameTree && await crossesAbsoluteSymlink(mapped.mountDestination, mapped.containerPath)) return { kind: 'uncovered' };
+      if (!(await fs.promises.stat(root)).isDirectory()) return { kind: 'uncovered' };
+      const content = await this.readPlainFile(real);
+      return content === null ? { kind: 'uncovered' } : { kind: 'read', content };
+    } catch (error) {
+      if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Direct compose read failed', filePath, (error as Error).message);
+      return { kind: 'failed', reason: (error as NodeJS.ErrnoException).code ?? (error as Error).message };
+    }
+  }
+
+  /**
+   * Read a plain file within the size limit, or null when the open file is not a
+   * regular file or is over the limit. The file is opened first and checked
+   * through the open handle, so the file that passed the check is the file that is
+   * read. The open itself throws when the path cannot be opened (a symlink swapped
+   * in after the path was resolved fails it with ELOOP; a missing file or a
+   * permission error fail it too), which the caller reports as a failed read. A
+   * FIFO opens without waiting for a writer.
+   */
+  private async readPlainFile(file: string): Promise<string | null> {
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    const handle = await fs.promises.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > COMPOSE_READ_MAX_BYTES) return null;
+      const content = await handle.readFile('utf8');
+      return content.length > COMPOSE_READ_MAX_BYTES ? null : content;
+    } finally {
+      // A failed close of a read-only handle must not discard what was read.
+      await handle.close().catch(error => {
+        if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Closing the compose file failed', (error as Error).message);
+      });
+    }
+  }
+
+  /** Read a config file from the host through a throwaway cat container. */
+  private async readConfigFileViaHelper(filePath: string, ctx: ComposeContext): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync('docker', buildComposeReadArgs(ctx.workingDir, ctx.imageName, filePath), {
+        env: this.buildEnv(),
+        timeout: 30_000,
+        maxBuffer: COMPOSE_READ_MAX_BYTES,
+      });
+      return stdout;
+    } catch (error) {
+      if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Could not read compose file', filePath, (error as Error).message);
+      return null;
+    }
   }
 
   private buildEnv(): NodeJS.ProcessEnv {

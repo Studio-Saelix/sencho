@@ -24,7 +24,7 @@ import {
   type SelfUpdateUnavailableCode,
 } from '../helpers/selfUpdateEligibility';
 import { MonitorService } from '../services/MonitorService';
-import { getSenchoVersion, isValidVersion, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
+import { getSenchoVersion, isValidVersion, IMAGE_PIN_REFRESH_CAPABILITY, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
 import { checkPermission, requirePermission } from '../middleware/permissions';
@@ -1714,8 +1714,9 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
 // ignores the extra body key and behaves as before.
 function postSystemEndpoint(
   target: ProxyTarget,
-  endpoint: '/api/system/update' | '/api/system/reapply-compose',
+  endpoint: '/api/system/update' | '/api/system/reapply-compose' | '/api/system/image-pin-refresh',
   body: Record<string, unknown> = {},
+  timeoutMs = 10000,
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
@@ -1723,7 +1724,7 @@ function postSystemEndpoint(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(timeoutMs),
   }, target.trustedLoopback);
 }
 
@@ -1732,6 +1733,18 @@ function postSystemUpdate(target: ProxyTarget, targetVersion: string | undefined
     ...(targetVersion ? { targetVersion } : {}),
     ...(replaceEndpointProvider ? { replaceEndpointProvider: true } : {}),
   });
+}
+
+// The node answers after it has re-read its Compose files. Each file only its
+// helper container can read takes up to 30 seconds, and the files are read one
+// after another, so this bound covers one such file and a node that needs the
+// helper for several can take longer. The hub then logs the timeout and moves on
+// while the node finishes and caches the pin, and a Fleet status fetched right
+// after the Recheck can still show the old pin until the next one.
+const IMAGE_PIN_REFRESH_TIMEOUT_MS = 45_000;
+
+function postSystemImagePinRefresh(target: ProxyTarget) {
+  return postSystemEndpoint(target, '/api/system/image-pin-refresh', {}, IMAGE_PIN_REFRESH_TIMEOUT_MS);
 }
 
 function postSystemReapplyCompose(target: ProxyTarget, endpointProvider: EndpointProviderChoice) {
@@ -2374,6 +2387,50 @@ fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: R
   }
 });
 
+/**
+ * Re-read this node's own Compose image pin as part of a Recheck, so an install
+ * whose Compose file only the helper container can read still picks up a live
+ * edit. Bounded by the same cooldown as the version refresh; a failed read is
+ * logged and never fails the Recheck.
+ */
+async function refreshLocalImagePin(): Promise<void> {
+  try {
+    await SelfUpdateService.getInstance().getPinInfo({ fresh: true });
+  } catch (error) {
+    console.warn('[Fleet] Could not refresh the Compose image pin during recheck:', errorMessageForLog(error));
+  }
+}
+
+/**
+ * Ask every remote node to re-read its own Compose image pin as part of a
+ * Recheck. A remote's `updateBlocked` is the pin it last read, and a pin that only
+ * the helper container can read is not re-read on a timer, so this is how an edit
+ * to it shows up in Fleet without a restart. Only nodes that advertise the
+ * capability are asked (an older node is left to refresh by itself), in parallel,
+ * through the same proxy or Pilot target as an update. A node whose request fails
+ * or is refused is logged and skipped; an offline node, one without the
+ * capability, or one with no target is skipped without a log. The Recheck never
+ * fails on any of them.
+ */
+async function refreshRemoteImagePins(): Promise<void> {
+  const registry = NodeRegistry.getInstance();
+  const remotes = DatabaseService.getInstance().getNodes().filter(node => node.type === 'remote');
+  await Promise.allSettled(remotes.map(async node => {
+    const target = registry.getProxyTarget(node.id);
+    if (!target) return;
+    try {
+      const meta = await registry.fetchMetaForNode(node.id);
+      if (!meta.online || !meta.capabilities.includes(IMAGE_PIN_REFRESH_CAPABILITY)) return;
+      const response = await postSystemImagePinRefresh(target);
+      if (!response.ok) {
+        console.warn(`[Fleet] Node "${sanitizeForLog(node.name)}" (id ${node.id}) did not refresh its Compose image pin during recheck (status ${response.status}).`);
+      }
+    } catch (error) {
+      console.warn(`[Fleet] Could not refresh the Compose image pin on node "${sanitizeForLog(node.name)}" (id ${node.id}) during recheck:`, errorMessageForLog(error));
+    }
+  }));
+}
+
 fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   // Optionally pre-fetch a fresh latest version so the next GET compares against
@@ -2385,6 +2442,7 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
     if (now - lastForcedRecheckAt >= FORCED_RECHECK_COOLDOWN_MS) {
       lastForcedRecheckAt = now;
       await getLatestVersion(true);
+      await Promise.all([refreshLocalImagePin(), refreshRemoteImagePins()]);
       rechecked = true;
     }
   }
