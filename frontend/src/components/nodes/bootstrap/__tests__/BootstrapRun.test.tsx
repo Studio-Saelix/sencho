@@ -1878,6 +1878,68 @@ describe('release confirmation binding', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
+  it('opens the Release confirmation from the newest answer when a settle poll overtook the click', async () => {
+    vi.useFakeTimers();
+    const stopped = { ...held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11), agentStarted: true };
+    // The settle poll answers with the same releasable run and a node that is gone; the click's
+    // older answer must not drop the click, and the confirmation must use the poll's newer copy.
+    const afterPoll = { ...stopped, nodeExists: false };
+    let answerRelease: (detail: BootstrapOperationDetail) => void = () => undefined;
+    let reads = 0;
+    vi.mocked(fetchBootstrapOperation).mockImplementation(() => {
+      reads += 1;
+      // View, the Release refresh (kept out), then the settle poll.
+      if (reads === 2) return new Promise((resolve) => { answerRelease = resolve; });
+      return Promise.resolve(reads >= 3 ? afterPoll : stopped);
+    });
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(within(screen.getByTestId(`bootstrap-run-${stopped.id}`)).getByRole('button', { name: 'View' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(within(screen.getByTestId('bootstrap-run-answer')).getByRole('button', { name: 'Release server' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(reads).toBe(2);
+
+    // The settle poll starts after the click's read and answers first with the newer state.
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(reads).toBe(3);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    await act(async () => { answerRelease(stopped); });
+
+    // The click still opens the confirmation, from the poll's newer answer.
+    const confirm = screen.getByRole('alertdialog');
+    expect(confirm).toHaveTextContent('a.example.com');
+    expect(confirm).toHaveTextContent(/node record is no longer in Fleet/);
+    expect(screen.getByTestId('bootstrap-run-answer')).toHaveTextContent('Stopped partway');
+  });
+
+  it('hands an overtaken open read the newest answer for its run instead of dropping it', async () => {
+    vi.useFakeTimers();
+    const stopped = { ...held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11), agentStarted: true };
+    const afterPoll = { ...stopped, nodeExists: false };
+    const answers: Array<(detail: BootstrapOperationDetail) => void> = [];
+    vi.mocked(fetchBootstrapOperation).mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(stopped));
+    let read: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { read = result.current.openOperation(stopped.id); });
+    expect(result.current.busy).toBe('open');
+
+    // The settle poll starts after the click's read and answers first with the newer state.
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(answers).toHaveLength(2);
+    await act(async () => { answers[1](afterPoll); });
+    expect(result.current.operation?.nodeExists).toBe(false);
+
+    let answered: BootstrapOperationDetail | null = null;
+    await act(async () => { answers[0](stopped); answered = await read; });
+    expect(answered).toMatchObject({ id: stopped.id, nodeExists: false });
+    expect(result.current.operation?.nodeExists).toBe(false);
+    expect(result.current.busy).toBeNull();
+  });
+
   it('drops a late open read that a newer open overtook, so View cannot land on another run', async () => {
     const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
     const b = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);

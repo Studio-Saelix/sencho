@@ -31,7 +31,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
  * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
  * a loaded later page's row that fails is retried like a failed read of the list. A readiness read of the shown run, or of the list, that fails is retried until a read that began after it answers; an older answer that arrives late is shown but does not end the retries. Nothing polls while the dialog is closed.
- * A read that starts when a run is opened, viewed, followed, or checked before Release is ordered with the polls: an answer overtaken by a newer read, a close, another run, or an action is dropped, so it cannot put an older run or an older state back on screen.
+ * A read that starts when a run is opened, viewed, followed, or checked before Release is ordered with the polls: an answer overtaken by a newer read, a close, another run, or an action is not put on screen, so it cannot put an older run or an older state back. A read overtaken by a newer answer for the same run hands that newest answer back instead of nothing, so a Release click can still act on it.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -297,7 +297,15 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     const signals = readinessSignals.current;
     try {
       const detail = await client.get(id);
-      if (request !== openRequestSeq.current || epoch !== viewEpoch.current || seq < detailAppliedSeq.current) return null;
+      if (request !== openRequestSeq.current || epoch !== viewEpoch.current) return null;
+      if (seq < detailAppliedSeq.current) {
+        // A read of this run that started after this one already answered, so this answer is
+        // obsolete. The newer answer is what the operator asked for and is already on screen,
+        // so it is handed back instead of dropping the request: a Release click whose refresh
+        // a settle poll overtook must still open the confirmation, from the newest state.
+        const newest = operationRef.current;
+        return newest !== null && newest.id === id ? newest : null;
+      }
       detailAppliedSeq.current = seq;
       setBusy(null);
       show(detail);
