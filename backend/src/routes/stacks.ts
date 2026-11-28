@@ -136,6 +136,8 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 
 /** The YAML library's alias-count refusal, distinct from its unresolved-alias ReferenceError. */
 function isYamlAliasBudgetError(error: unknown): boolean {
+  // The library gives no error code, so this matches its message. Any other
+  // ReferenceError (an unresolved alias) is left to the generic failure path.
   return error instanceof ReferenceError && error.message.includes('Excessive alias count');
 }
 
@@ -1755,7 +1757,7 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     } catch (error) {
       if (!isYamlAliasBudgetError(error)) throw error;
       res.status(409).json({
-        error: `Compose file "${filename}" reuses YAML aliases more than ${MAX_COMPOSE_ALIAS_COUNT.toLocaleString('en-US')} times, so Sencho refused to parse it. Remove some alias references or split the file, then try again.`,
+        error: `Compose file "${filename}" expands YAML aliases beyond the ${MAX_COMPOSE_ALIAS_COUNT.toLocaleString('en-US')}-reference budget, so Sencho refused to parse it. Remove some alias reuse or split the file, then try again.`,
         code: COMPOSE_INPUTS_REFUSED_CODE,
       });
       return;

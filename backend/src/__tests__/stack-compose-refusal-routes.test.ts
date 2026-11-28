@@ -384,7 +384,8 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('compose_inputs_refused');
     expect(res.body.error).toContain('Compose file "compose.yaml"');
-    expect(res.body.error).toContain('reuses YAML aliases');
+    expect(res.body.error).toContain('beyond the 10,000-reference budget');
+    expect(res.body.error).not.toContain(stackDir('refused'));
   });
 });
 
