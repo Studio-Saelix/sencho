@@ -15,6 +15,13 @@ describe('readComposeInputsRefusal', () => {
     expect(await readComposeInputsRefusal(json({ error: 'busy', code: 'other' }, 409))).toBeNull();
   });
 
+  it('returns the size reason for a 413', async () => {
+    expect(await readComposeInputsRefusal(json({ error: 'Compose file too large to parse' }, 413)))
+      .toBe('Compose file too large to parse');
+    expect(await readComposeInputsRefusal(json({}, 413))).toBeNull();
+    expect(await readComposeInputsRefusal(json({ error: '  ' }, 413))).toBeNull();
+  });
+
   it('returns null for any other status even when the body carries the code', async () => {
     const body = { error: 'x', code: COMPOSE_INPUTS_REFUSED_CODE };
     expect(await readComposeInputsRefusal(json(body, 500))).toBeNull();

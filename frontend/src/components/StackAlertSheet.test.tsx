@@ -3,7 +3,7 @@
  * capability gating, and active-node reset.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const { nodeState } = vi.hoisted(() => ({
@@ -183,6 +183,213 @@ describe('StackAlertSheet Alerts tab', () => {
     expect(screen.queryByText(/Not in compose/i)).not.toBeInTheDocument();
   });
 
+  it('shows a refusal for a new stack, drops the old names, and requires an explicit all-services choice', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url === '/stacks/web/services') return jsonRes(['api', 'database']);
+      if (url === '/stacks/broken/services') {
+        return jsonRes(
+          {
+            error: 'Compose file "compose.yaml" expands YAML aliases beyond the 10,000-reference budget, so Sencho refused to parse it.',
+            code: 'compose_inputs_refused',
+          },
+          false,
+          409,
+        );
+      }
+      if (url.startsWith('/alerts') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/alerts' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(<StackAlertSheet open onOpenChange={() => {}} stackName="web" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'api' }));
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" expands YAML aliases');
+    expect(screen.queryByRole('button', { name: 'api' })).not.toBeInTheDocument();
+    expect(screen.queryByText('All services')).not.toBeInTheDocument();
+    const addRule = screen.getByRole('button', { name: 'Add Rule' });
+    expect(addRule).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addRule).toBeEnabled();
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    await userEvent.click(addRule);
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/alerts' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      const body = JSON.parse(String((post![1] as RequestInit).body));
+      expect(body.stack_name).toBe('broken');
+      expect(body.service_name).toBeNull();
+    });
+  });
+
+  it('blocks Add Rule while the service lookup is pending', async () => {
+    let resolveServices: ((res: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => { resolveServices = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) return pending;
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+
+    const addRule = await screen.findByRole('button', { name: 'Add Rule' });
+    expect(addRule).toBeDisabled();
+
+    await act(async () => {
+      resolveServices!(jsonRes(['api', 'database']));
+      await pending;
+    });
+    await waitFor(() => expect(addRule).toBeEnabled());
+  });
+
+  it('requires an explicit all-services choice after a generic service failure', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) return jsonRes(null, false, 500);
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the Compose services for this stack.');
+    const addRule = screen.getByRole('button', { name: 'Add Rule' });
+    expect(addRule).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addRule).toBeEnabled();
+  });
+
+  it('shows the size reason from a 413 and requires an explicit all-services choice', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) return jsonRes({ error: 'Compose file too large to parse' }, false, 413);
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file too large to parse');
+    const addRule = screen.getByRole('button', { name: 'Add Rule' });
+    expect(addRule).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addRule).toBeEnabled();
+  });
+
+  it('clears the explicit all-services confirmation after a rule is added', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) return jsonRes({ error: 'Compose file too large to parse' }, false, 413);
+      if (url.startsWith('/alerts') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/alerts' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      return jsonRes(null, false);
+    });
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+    await screen.findByRole('alert');
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await userEvent.click(targetAll);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Rule' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Alert rule added.'));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Add Rule' })).toBeDisabled();
+  });
+
+  it('ignores a late service list for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/broken/services') return jsonRes(['api']);
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(<StackAlertSheet open onOpenChange={() => {}} stackName="web" />);
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url) === '/stacks/web/services')).toBe(true);
+    });
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    expect(await screen.findByRole('button', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonRes(['web', 'db']));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('button', { name: 'db' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'api' })).toBeInTheDocument();
+  });
+
+  it('ignores a late refusal for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/broken/services') return jsonRes(['api']);
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(<StackAlertSheet open onOpenChange={() => {}} stackName="web" />);
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url) === '/stacks/web/services')).toBe(true);
+    });
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    expect(await screen.findByRole('button', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonRes(
+        { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+        false,
+        409,
+      ));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'api' })).toBeInTheDocument();
+  });
+
   it('hides service selector when capability is missing and posts null', async () => {
     nodeState.activeNodeMeta = { version: '0.90.0', capabilities: [] };
     mockHappyPath();
@@ -249,6 +456,130 @@ describe('StackAlertSheet Alerts tab', () => {
     await waitFor(() => expect(screen.getByText(/Not in compose/i)).toBeInTheDocument());
   });
 
+  it('saves all services when the confirmation replaces a picked service', async () => {
+    mockHappyPath(['api', 'database']);
+    const user = userEvent.setup();
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialService="on" />,
+    );
+
+    await screen.findByText(/Service "on" is not in this stack's compose file/);
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    expect(targetAll).not.toBeChecked();
+
+    await user.click(targetAll);
+    expect(targetAll).toBeChecked();
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('All services');
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    await user.click(screen.getByRole('button', { name: 'Add Rule' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/alerts' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBeNull();
+    });
+  });
+
+  it('saves the picked service after the confirmation, and requires a fresh confirmation when it is cleared', async () => {
+    mockHappyPath(['api', 'database']);
+    const user = userEvent.setup();
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialService="on" />,
+    );
+
+    await screen.findByText(/Service "on" is not in this stack's compose file/);
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await user.click(targetAll);
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'All services' }));
+    expect(targetAll).not.toBeChecked();
+    const addRule = screen.getByRole('button', { name: 'Add Rule' });
+    expect(addRule).toBeDisabled();
+
+    await user.click(targetAll);
+    expect(addRule).toBeEnabled();
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    await user.click(addRule);
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/alerts' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBeNull();
+    });
+  });
+
+  it('saves a picked service when it follows the all-services confirmation', async () => {
+    mockHappyPath(['api', 'database']);
+    const user = userEvent.setup();
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialService="on" />,
+    );
+
+    await screen.findByText(/Service "on" is not in this stack's compose file/);
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await user.click(targetAll);
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+    expect(targetAll).not.toBeChecked();
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    await user.click(screen.getByRole('button', { name: 'Add Rule' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/alerts' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBe('api');
+    });
+  });
+
+  it('writes an alert to the node whose services were listed', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) {
+        return jsonRes((init as { nodeId?: number } | undefined)?.nodeId === 2 ? ['worker'] : ['api']);
+      }
+      if (url.startsWith('/alerts') && (!init || !init.method || init.method === 'GET')) return jsonRes([]);
+      if (url === '/alerts' && init?.method === 'POST') return jsonRes({ id: 99 }, true, 201);
+      return jsonRes(null, false);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    nodeState.activeNode = { id: 2, type: 'remote', name: 'Remote' };
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'worker' }));
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    await user.click(screen.getByRole('button', { name: 'Add Rule' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/alerts' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect((post![1] as { nodeId?: number }).nodeId).toBe(2);
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBe('worker');
+    });
+  });
+
   it('prefills the Service combobox from initialService when listed', async () => {
     mockHappyPath(['api', 'database']);
     render(
@@ -264,6 +595,28 @@ describe('StackAlertSheet Alerts tab', () => {
       expect(screen.getByText('Add Rule')).toBeInTheDocument();
       expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
     });
+  });
+
+  it('does not silently target all services when the requested service is absent', async () => {
+    mockHappyPath(['api']);
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialService="on"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Service "on" is not in this stack's compose file/)).toBeInTheDocument();
+    });
+    const addRule = screen.getByRole('button', { name: 'Add Rule' });
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    expect(addRule).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addRule).toBeEnabled();
   });
 
   it('ignores Alerts initialService when service-scoped capability is absent', async () => {
@@ -307,6 +660,424 @@ describe('StackAlertSheet Alerts tab', () => {
       expect(screen.getByText('Add Policy')).toBeInTheDocument();
       expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
     });
+  });
+
+  it('shows an auto-heal refusal for a new stack and requires an explicit all-services choice', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/stacks/web/services') return jsonRes(['api', 'database']);
+      if (url === '/stacks/broken/services') {
+        return jsonRes(
+          {
+            error: 'Compose file "compose.yaml" expands YAML aliases beyond the 10,000-reference budget, so Sencho refused to parse it.',
+            code: 'compose_inputs_refused',
+          },
+          false,
+          409,
+        );
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="web" initialTab="auto-heal" />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'api' }));
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" initialTab="auto-heal" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" expands YAML aliases');
+    expect(screen.queryByRole('button', { name: 'api' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addPolicy).toBeEnabled();
+    await userEvent.click(addPolicy);
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/auto-heal/policies' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      const body = JSON.parse(String((post![1] as RequestInit).body));
+      expect(body.stack_name).toBe('broken');
+      expect(body.service_name).toBeNull();
+    });
+  });
+
+  it('does not silently target all services in auto-heal when the requested service is absent', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) return jsonRes(['api']);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialTab="auto-heal"
+        initialService="on"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Service "on" is not in this stack's compose file/)).toBeInTheDocument();
+    });
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addPolicy).toBeEnabled();
+  });
+
+  it('requires an explicit all-services choice after a generic auto-heal service failure', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) return jsonRes(null, false, 500);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the Compose services for this stack.');
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addPolicy).toBeEnabled();
+  });
+
+  it('blocks Add Policy while the auto-heal service lookup is pending', async () => {
+    let resolveServices: ((res: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => { resolveServices = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) return pending;
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+
+    const addPolicy = await screen.findByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await act(async () => {
+      resolveServices!(jsonRes(['api', 'database']));
+      await pending;
+    });
+    await waitFor(() => expect(addPolicy).toBeEnabled());
+  });
+
+  it('shows the size reason from a 413 in auto-heal and requires an explicit all-services choice', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) return jsonRes({ error: 'Compose file too large to parse' }, false, 413);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file too large to parse');
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addPolicy).toBeEnabled();
+  });
+
+  it('clears the explicit all-services confirmation after a policy is added', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) return jsonRes(null, false, 500);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+    await screen.findByRole('alert');
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await userEvent.click(targetAll);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Policy' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Policy added.'));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Add Policy' })).toBeDisabled();
+  });
+
+  it('reloads auto-heal services for a new active node and writes the new scope to it', async () => {
+    const serviceCalls: Array<number | undefined> = [];
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) {
+        const nodeId = (init as { nodeId?: number } | undefined)?.nodeId;
+        serviceCalls.push(nodeId);
+        return jsonRes(nodeId === 2 ? ['worker'] : ['api', 'database']);
+      }
+      return jsonRes(null, false);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+    await waitFor(() => expect(serviceCalls).toEqual([1]));
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+
+    nodeState.activeNode = { id: 2, type: 'remote', name: 'Remote' };
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />);
+
+    await waitFor(() => expect(serviceCalls).toEqual([1, 2]));
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('All services'));
+    expect(screen.getAllByRole('combobox')[0]).not.toHaveTextContent('api');
+
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'worker' }));
+    await user.click(screen.getByRole('button', { name: 'Add Policy' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/auto-heal/policies' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect((post![1] as { nodeId?: number }).nodeId).toBe(2);
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBe('worker');
+    });
+  });
+
+  it('drops a late auto-heal service list from the previous node', async () => {
+    let resolveOld: ((res: Response) => void) | undefined;
+    const oldPending = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) {
+        return (init as { nodeId?: number } | undefined)?.nodeId === 2 ? jsonRes(['worker']) : oldPending;
+      }
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/services'))).toBe(true);
+    });
+
+    nodeState.activeNode = { id: 2, type: 'remote', name: 'Remote' };
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    expect(await screen.findByRole('button', { name: 'worker' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOld!(jsonRes(['stale']));
+      await oldPending;
+    });
+
+    expect(screen.queryByRole('button', { name: 'stale' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'worker' })).toBeInTheDocument();
+  });
+
+  it('shows a fresh refusal after a node change and targets the new node', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) {
+        if ((init as { nodeId?: number } | undefined)?.nodeId === 2) {
+          return jsonRes(
+            { error: 'Compose file "compose.yaml" expands YAML aliases beyond the 10,000-reference budget, so Sencho refused to parse it.', code: 'compose_inputs_refused' },
+            false,
+            409,
+          );
+        }
+        return jsonRes(['api']);
+      }
+      return jsonRes(null, false);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+
+    nodeState.activeNode = { id: 2, type: 'remote', name: 'Remote' };
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('beyond the 10,000-reference budget');
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await user.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(addPolicy).toBeEnabled();
+    await user.click(addPolicy);
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/auto-heal/policies' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect((post![1] as { nodeId?: number }).nodeId).toBe(2);
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBeNull();
+    });
+  });
+
+  it('saves all services when the confirmation replaces a picked auto-heal service', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) return jsonRes(['api', 'database']);
+      return jsonRes(null, false);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" initialService="on" />,
+    );
+    await screen.findByText(/Service "on" is not in this stack's compose file/);
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    expect(targetAll).not.toBeChecked();
+
+    await user.click(targetAll);
+    expect(targetAll).toBeChecked();
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('All services');
+    await user.click(screen.getByRole('button', { name: 'Add Policy' }));
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/auto-heal/policies' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBeNull();
+    });
+  });
+
+  it('saves a picked auto-heal service after the confirmation and requires a fresh confirmation when cleared', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) return jsonRes(['api', 'database']);
+      return jsonRes(null, false);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" initialService="on" />,
+    );
+    await screen.findByText(/Service "on" is not in this stack's compose file/);
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await user.click(targetAll);
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'api' }));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+
+    await user.click(screen.getAllByRole('combobox')[0]);
+    await user.click(await screen.findByRole('button', { name: 'All services' }));
+    expect(targetAll).not.toBeChecked();
+    const addPolicy = screen.getByRole('button', { name: 'Add Policy' });
+    expect(addPolicy).toBeDisabled();
+
+    await user.click(targetAll);
+    expect(addPolicy).toBeEnabled();
+    await user.click(addPolicy);
+
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, init]) => String(url) === '/auto-heal/policies' && (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(post).toBeDefined();
+      expect(JSON.parse(String((post![1] as RequestInit).body)).service_name).toBeNull();
+    });
+  });
+
+  it('ignores a late auto-heal service list for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/broken/services') return jsonRes(['api']);
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="web" initialTab="auto-heal" />,
+    );
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url) === '/stacks/web/services')).toBe(true);
+    });
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" initialTab="auto-heal" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    expect(await screen.findByRole('button', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonRes(['web', 'db']));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('button', { name: 'db' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'api' })).toBeInTheDocument();
   });
 });
 

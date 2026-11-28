@@ -15,9 +15,20 @@ import path from 'path';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
-import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
+import { ComposeExpansionRefusal, MAX_COMPOSE_INPUT_BYTES } from '../helpers/composeExpansionGuard';
 
 const REFUSAL = 'Compose file "bomb.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
+
+/** A small file whose nested anchors expand past the guard's node budget. */
+const ALIAS_BOMB = (() => {
+  const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+  for (let level = 1; level <= 12; level += 1) {
+    const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
+    lines.push(`x${level}: &a${level} [${refs}]`);
+  }
+  lines.push('services:', '  web:', '    image: nginx:alpine');
+  return `${lines.join('\n')}\n`;
+})();
 
 const mocks = {
   runDown: vi.fn(),
@@ -334,23 +345,295 @@ describe('refused stack: the Fleet container list', () => {
   });
 });
 
-describe('refused stack: the real guard, the real down, and Delete together', () => {
-  const BOMB = (() => {
-    const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
-    for (let level = 1; level <= 12; level += 1) {
-      const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
-      lines.push(`x${level}: &a${level} [${refs}]`);
-    }
-    lines.push('services:', '  web:', '    image: nginx:alpine');
-    return `${lines.join('\n')}\n`;
-  })();
+describe('refused stack: GET /services names the refusal', () => {
+  function writeCompose(content: string) {
+    fs.mkdirSync(stackDir('refused'), { recursive: true });
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), content);
+  }
 
+  it('answers 409 with the guard text for an over-cap file, not the YAML library 500', async () => {
+    writeCompose(ALIAS_BOMB);
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('Compose file "compose.yaml"');
+    expect(res.body.error).toContain('nested YAML aliases');
+    expect(res.body.error).not.toContain(stackDir('refused'));
+  });
+
+  it('lists services when one anchor is reused more often than the YAML library default', async () => {
+    const services = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`);
+    writeCompose(['x-image: &image nginx:alpine', 'services:', ...services].join('\n'));
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(150);
+    expect(res.body).toContain('svc0');
+    expect(res.body).toContain('svc149');
+  });
+
+  it('answers 409 with a reason when one document reuses aliases past the shared budget', async () => {
+    const refs = Array.from({ length: 10_001 }, () => '*label').join(', ');
+    writeCompose(`x-label: &label app=web\nservices:\n  web:\n    labels: [${refs}]\n`);
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('Compose file "compose.yaml"');
+    expect(res.body.error).toContain('beyond the 10,000-reference budget');
+    expect(res.body.error).not.toContain(stackDir('refused'));
+  });
+
+  it('keeps literal YAML 1.1 service names under ordinary alias reuse', async () => {
+    // A 1.1 directive would turn `on` into a boolean key and drop it from the
+    // list; the core schema keeps both names literal.
+    const reuse = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`).join('\n');
+    writeCompose(
+      `%YAML 1.1\n---\nx-image: &image nginx:alpine\nservices:\n  on:\n    image: *image\n  "true":\n    image: *image\n${reuse}\n`,
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    const expected = ['on', 'true', ...Array.from({ length: 150 }, (_, i) => `svc${i}`)];
+    expect([...res.body].sort()).toEqual([...expected].sort());
+    expect(res.body).not.toContain('<<');
+  });
+
+  it('keeps numeric-looking names in Compose spelling under ordinary alias reuse', async () => {
+    const reuse = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`).join('\n');
+    writeCompose(
+      [
+        'x-image: &image nginx:alpine',
+        'services:',
+        '  1e999:',
+        '    image: *image',
+        '  Infinity:',
+        '    image: *image',
+        '  0x10:',
+        '    image: *image',
+        reuse,
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    const expected = [
+      '1e999', 'Infinity', '0x10',
+      ...Array.from({ length: 150 }, (_, i) => `svc${i}`),
+    ];
+    expect(res.body).toEqual(expected);
+  });
+
+  it('keeps numeric-looking names a merged services map contributes', async () => {
+    writeCompose(
+      [
+        'x-services: &svcs',
+        '  1e999:',
+        '    image: nginx:alpine',
+        'services:',
+        '  <<: *svcs',
+        '  Infinity:',
+        '    image: nginx:alpine',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['1e999', 'Infinity']);
+  });
+
+  it('keeps numeric-looking names a merged document root contributes', async () => {
+    writeCompose(
+      [
+        'x-root: &root',
+        '  services:',
+        '    1e999:',
+        '      image: nginx:alpine',
+        '<<: *root',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['1e999']);
+  });
+
+  it.each([
+    {
+      where: 'an unrelated extension field',
+      lines: ['x-ext:', '  !!str <<: a literal extension key', 'services:', '  web:', '    image: nginx:alpine', ''],
+    },
+    {
+      where: 'a service label',
+      lines: ['services:', '  web:', '    image: nginx:alpine', '    labels:', '      !!str <<: a literal label key', ''],
+    },
+  ])('lists services when a literal string-tagged << key appears in $where', async ({ lines }) => {
+    writeCompose(lines.join('\n'));
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
+  it('lists services when a merge only contributes service attributes', async () => {
+    writeCompose(
+      [
+        'x-base: &base',
+        '  image: nginx:alpine',
+        '  restart: unless-stopped',
+        'services:',
+        '  web:',
+        '    <<: *base',
+        '  db:',
+        '    image: postgres:16',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect([...res.body].sort()).toEqual(['db', 'web']);
+  });
+
+  it('lists the names a merged services map contributes', async () => {
+    writeCompose(
+      [
+        'x-services: &svcs',
+        '  web:',
+        '    image: nginx:alpine',
+        'services:',
+        '  <<: *svcs',
+        '  db:',
+        '    image: postgres:16',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect([...res.body].sort()).toEqual(['db', 'web']);
+    expect(res.body).not.toContain('<<');
+  });
+
+  it.each([
+    {
+      where: 'a service definition',
+      lines: ['x-base: &base', '  image: nginx:alpine', 'services:', '  web:', '    !!merge <<: *base', ''],
+    },
+    {
+      where: 'the services map',
+      lines: ['x-svcs: &svcs', '  web:', '    image: nginx:alpine', 'services:', '  !!merge <<: *svcs', ''],
+    },
+    {
+      where: 'the document root',
+      lines: ['x-root: &root', '  services:', '    web:', '      image: nginx:alpine', '!!merge <<: *root', ''],
+    },
+  ])('answers 409 for an explicit merge tag on $where', async ({ lines }) => {
+    writeCompose(lines.join('\n'));
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('explicit YAML merge tag');
+  });
+
+  it('lists the names a merged document root contributes', async () => {
+    writeCompose(
+      [
+        'x-root: &root',
+        '  services:',
+        '    web:',
+        '      image: nginx:alpine',
+        '<<: *root',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+});
+
+describe('refused stack: GET /services size boundary is encoding-independent', () => {
+  const head = 'services:\n  web:\n    image: nginx\n    labels:\n      pad: "';
+  const tail = '"\n';
+  const baseBytes = Buffer.byteLength(head + tail, 'utf8');
+
+  function writeComposeOfBytes(bytes: number, encoding: 'ascii' | 'multibyte') {
+    const remaining = bytes - baseBytes;
+    const unit = encoding === 'multibyte' ? 'é' : 'a';
+    const unitBytes = Buffer.byteLength(unit, 'utf8');
+    const count = Math.floor(remaining / unitBytes);
+    const extra = remaining - count * unitBytes;
+    const content = `${head}${unit.repeat(count)}${'a'.repeat(extra)}${tail}`;
+    expect(Buffer.byteLength(content, 'utf8')).toBe(bytes);
+    fs.mkdirSync(stackDir('refused'), { recursive: true });
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), content);
+  }
+
+  it('accepts an ASCII compose file exactly at the byte limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES, 'ascii');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
+  it('answers 413 for an ASCII compose file one byte over the limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES + 1, 'ascii');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'Compose file too large to parse' });
+  });
+
+  it('accepts a multibyte compose file exactly at the byte limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES, 'multibyte');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
+  it('answers 413 for a multibyte file over the byte limit instead of a size-worded 409', async () => {
+    // 1,048,577 UTF-8 bytes are only about 524,319 UTF-16 code units, which the
+    // old code-unit check let through to the expansion guard's 409.
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES + 1, 'multibyte');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'Compose file too large to parse' });
+  });
+});
+
+describe('refused stack: the real guard, the real down, and Delete together', () => {
   beforeEach(() => {
     // The refusal below comes from the real guard reading a real file; only the
     // Docker endpoint guard and the spawn are out of the picture.
     vi.mocked(ComposeService.prototype.downStack).mockRestore();
     vi.spyOn(ComposeService.prototype as unknown as { assertDockerEndpointSafe: () => Promise<void> }, 'assertDockerEndpointSafe').mockResolvedValue(undefined);
-    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), BOMB);
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), ALIAS_BOMB);
   });
 
   it('keeps the files of a bombed stack whose containers are still bound, and says why', async () => {
@@ -370,5 +653,60 @@ describe('refused stack: the real guard, the real down, and Delete together', ()
 
     expect(res.status).toBe(200);
     expect(fs.existsSync(stackDir('refused'))).toBe(false);
+  });
+});
+
+describe('refused stack: a remote node service refusal passes through the proxy', () => {
+  let remoteServer: import('http').Server;
+  let remoteNodeId: number;
+
+  beforeAll(async () => {
+    const http = await import('http');
+    remoteServer = http.createServer((req, res) => {
+      if (req.url?.startsWith('/api/meta')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ version: '0.99.0', capabilities: ['cross-node-rbac'] }));
+        return;
+      }
+      if (req.url === '/api/stacks/refused/services') {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Compose file "compose.yaml" is too complex to list.',
+          code: 'compose_inputs_refused',
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('[]');
+    });
+    await new Promise<void>((resolve) => remoteServer.listen(0, '127.0.0.1', resolve));
+    const port = (remoteServer.address() as import('net').AddressInfo).port;
+    const { DatabaseService } = await import('../services/DatabaseService');
+    remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'refusal-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: `http://127.0.0.1:${port}`,
+      api_token: 'refusal-token',
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => remoteServer.close(() => resolve()));
+  });
+
+  it('forwards the 409 body and code unchanged', async () => {
+    const res = await request(app)
+      .get('/api/stacks/refused/services')
+      .set('Cookie', authCookie)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Compose file "compose.yaml" is too complex to list.',
+      code: 'compose_inputs_refused',
+    });
   });
 });

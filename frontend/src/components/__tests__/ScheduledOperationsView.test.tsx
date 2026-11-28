@@ -6,7 +6,7 @@
  * hub-local endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -153,6 +153,363 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
+  });
+
+  it('shows a refusal on a prefilled stack without a node through apiFetch', async () => {
+    mockedFetch.mockImplementation(async (url: string) => {
+      if (url === '/scheduled-tasks') return jsonResponse([]);
+      if (url === '/nodes') return jsonResponse(nodesFixture);
+      if (url === '/stacks') return jsonResponse(['broken']);
+      if (url === '/stacks/broken/services') {
+        return jsonResponse(
+          { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+          { ok: false, status: 409 },
+        );
+      }
+      return jsonResponse({});
+    });
+
+    render(<ScheduledOperationsView prefill={{ stackName: 'broken', nodeId: null }} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" is too complex to list.');
+    expect(mockedFetchForNode).not.toHaveBeenCalledWith('/stacks/broken/services', expect.anything());
+  });
+
+  it('requires an explicit all-services choice after a generic service failure', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(null, { ok: false, status: 500 });
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the Compose services for this stack.');
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+  });
+
+  it('shows the 413 size reason and requires an explicit all-services choice', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') {
+        return jsonResponse({ error: 'Compose file too large to parse' }, { ok: false, status: 413 });
+      }
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file too large to parse');
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+  });
+
+  it('blocks Create while the selected stack service lookup is still pending', async () => {
+    let resolveServices: ((res: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => { resolveServices = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return pending;
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await act(async () => {
+      resolveServices!(jsonResponse(['web', 'db']));
+      await pending;
+    });
+    await waitFor(() => expect(create).toBeEnabled());
+  });
+
+  it('ignores a late service list for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'other']);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/other/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    // Switch to another stack before the first lookup answers.
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'other' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonResponse(['web', 'db']));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('checkbox', { name: 'db' })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+  });
+
+  it('does not silently drop a saved service that the stack no longer lists', async () => {
+    tasksFixture = [makeTask({
+      id: 42, name: 'restart-web', target_type: 'stack', target_id: 'web', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['web']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (web) is not in this stack');
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(update).toBeEnabled();
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'api' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeChecked();
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/42' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['api']);
+    });
+  });
+
+  it('lets a one-service stack switch from all services back to the service', async () => {
+    tasksFixture = [makeTask({
+      id: 52, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['cache']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'mariadb' }));
+    expect(screen.getByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeChecked();
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/52' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
+    });
+  });
+
+  it('lets all services replace a picked service when the saved scope is missing', async () => {
+    tasksFixture = [makeTask({
+      id: 53, name: 'edit-c', target_type: 'stack', target_id: 'web', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['cache']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+
+    const api = await screen.findByRole('checkbox', { name: 'api' });
+    await userEvent.click(api);
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(api).not.toBeChecked();
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/53' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toBeNull();
+    });
+  });
+
+  it('revalidates a saved service when a second task opens on the same stack', async () => {
+    tasksFixture = [
+      makeTask({
+        id: 50, name: 'edit-a', target_type: 'stack', target_id: 'web', node_id: 1,
+        action: 'restart', target_services: JSON.stringify(['api']),
+      }),
+      makeTask({
+        id: 51, name: 'edit-b', target_type: 'stack', target_id: 'web', node_id: 1,
+        action: 'restart', target_services: JSON.stringify(['cache']),
+      }),
+    ];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+
+    const rowA = screen.getByText('edit-a').closest('tr');
+    await userEvent.click(within(rowA!).getByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    const rowB = screen.getByText('edit-b').closest('tr');
+    await userEvent.click(within(rowB!).getByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+    expect(screen.getByRole('button', { name: 'Update' })).toBeDisabled();
+  });
+
+  it('keeps a saved service when the stack lists only that service', async () => {
+    tasksFixture = [makeTask({
+      id: 43, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['mariadb']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/43' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
+    });
+  });
+
+  it('restores the only listed service after clearing it in the edit form', async () => {
+    tasksFixture = [makeTask({
+      id: 54, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['mariadb']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const mariadb = await screen.findByRole('checkbox', { name: 'mariadb' });
+    expect(mariadb).toBeChecked();
+    await userEvent.click(mariadb);
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'mariadb' }));
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/54' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
+    });
+  });
+
+  it('ignores a late refusal for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'other']);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/other/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'other' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonResponse(
+        { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+        { ok: false, status: 409 },
+      ));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'api' })).toBeInTheDocument();
   });
 
   it('clears the stale stack when the user changes the node', async () => {
@@ -382,6 +739,64 @@ describe('ScheduledOperationsView', () => {
 
     const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
     expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
+  });
+
+  it('shows the refusal, clears stale services, and requires an explicit all-services choice', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'broken']);
+      if (url === '/stacks/web/services') return jsonResponse(['web', 'db']);
+      if (url === '/stacks/broken/services') {
+        return jsonResponse(
+          {
+            error: 'Compose file "compose.yaml" expands YAML aliases beyond the 10,000-reference budget, so Sencho refused to parse it.',
+            code: 'compose_inputs_refused',
+          },
+          { ok: false, status: 409 },
+        );
+      }
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-broken');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
+    expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
+    await userEvent.click(within(servicesBlock!).getByRole('checkbox', { name: 'db' }));
+
+    // A refusal for a different stack must drop the previous stack's names and
+    // the service selected on it.
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'broken' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" expands YAML aliases');
+    expect(screen.queryByRole('checkbox', { name: 'db' })).not.toBeInTheDocument();
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+    await userEvent.click(create);
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        target_type: 'stack',
+        target_id: 'broken',
+        node_id: 2,
+        target_services: null,
+      });
+    });
   });
 
   it('renders the five registry category lanes in the timeline view', async () => {

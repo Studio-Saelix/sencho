@@ -51,6 +51,8 @@ You can add as many policies to a stack as you need. Each policy is evaluated in
 | **Max restarts / hr** | The most times this policy will restart a given container in a rolling one-hour window. Once the cap is reached, further restarts are skipped until the window clears. |
 | **Auto-disable after (failures)** | If the restart call itself fails this many times in a row, the policy disables itself so it stops looping on a broken setup. The counter resets after any successful restart. |
 
+The **Service** picker lists the Compose services on the active node. If that lookup is refused or fails, the form shows the reason and requires **Target all services in this stack** as an explicit confirmation; **Add Policy** stays disabled until you choose a listed service or confirm all services. Opening the form from a container whose service is not in the file shows the name as missing and asks you to choose a listed service or confirm all services. Choosing a service clears the all-services confirmation, and confirming all services clears a picked service, so the saved policy always matches the visible choice. Switching to another node reloads the list and clears a choice made on the previous node, so the policy is saved on the node whose services you saw.
+
 ## Stack vs service scope
 
 - **All services** applies the policy to every container in the stack that reports `unhealthy`. Containers are matched by the `com.docker.compose.service` label.
