@@ -304,7 +304,7 @@ describe('ScheduledOperationsView', () => {
     expect(update).toBeEnabled();
     await userEvent.click(await screen.findByRole('checkbox', { name: 'api' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.queryByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeChecked();
     expect(update).toBeEnabled();
     await userEvent.click(update);
 
@@ -314,6 +314,40 @@ describe('ScheduledOperationsView', () => {
       );
       expect(putCall).toBeTruthy();
       expect(JSON.parse(putCall![1].body).target_services).toEqual(['api']);
+    });
+  });
+
+  it('lets a one-service stack switch from all services back to the service', async () => {
+    tasksFixture = [makeTask({
+      id: 52, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['cache']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'mariadb' }));
+    expect(screen.getByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeChecked();
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/52' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
     });
   });
 

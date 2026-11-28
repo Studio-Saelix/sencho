@@ -143,14 +143,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [labelPreview, setLabelPreview] = useState<
     { kind: 'idle' } | { kind: 'loading' } | { kind: 'unavailable' } | { kind: 'ready'; data: LabelMatchPreview }
   >({ kind: 'idle' });
+  const [formSession, setFormSession] = useState(0);
   const [availableServices, setAvailableServices] = useState<string[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
   const [servicesError, setServicesError] = useState<string | null>(null);
   const [servicesNotice, setServicesNotice] = useState<string | null>(null);
   const [targetAllServices, setTargetAllServices] = useState(false);
   const [saving, setSaving] = useState(false);
-  // The selection at the moment a target's service lookup starts. The lookup
-  // effect does not depend on the checkboxes, so it reads the latest value here.
+  // The latest service selection, read when a target's lookup response
+  // arrives. The lookup effect does not depend on the checkboxes.
   const currentTargetServicesRef = useRef<string[]>([]);
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null);
   const [runsPage, setRunsPage] = useState(1);
@@ -307,7 +308,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     };
     fetchServices();
     return () => { cancelled = true; };
-  }, [dialogOpen, editingTask?.id, formAction, formTargetId, formNodeId]);
+  }, [dialogOpen, formSession, editingTask?.id, formAction, formTargetId, formNodeId]);
 
   useEffect(() => {
     if (!dialogOpen || formAction !== 'update-by-label') return;
@@ -385,6 +386,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
 
   const openCreate = (prefillData?: { stackName: string; nodeId: string }) => {
     const nodeId = prefillData?.nodeId ?? (filterNodeId != null ? String(filterNodeId) : '');
+    setFormSession((session) => session + 1);
     setEditingTask(null);
     setFormName('');
     setFormAction(DEFAULT_SCHEDULED_ACTION_ID);
@@ -412,6 +414,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   };
 
   const openEdit = (task: ScheduledTask) => {
+    setFormSession((session) => session + 1);
     setEditingTask(task);
     setFormName(task.name);
     setFormAction(resolveTaskAction(task)?.id ?? task.action);
@@ -1164,9 +1167,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     </label>
                   </div>
                 )}
-                {currentAction.supportsServiceSelection && formTargetId && showServicesNotice && (
+                {currentAction.supportsServiceSelection && formTargetId && servicesNotice && (
                   <div className="space-y-2">
-                    <p role="alert" className="text-xs text-warning">{servicesNotice}</p>
+                    {showServicesNotice && (
+                      <p role="alert" className="text-xs text-warning">{servicesNotice}</p>
+                    )}
                     <label className="flex items-center gap-2 text-sm cursor-pointer">
                       <Checkbox
                         checked={targetAllServices}
@@ -1178,7 +1183,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 )}
                 {currentAction.supportsServiceSelection && formTargetId && !servicesError && (
                   availableServices.length > 1
-                  || (availableServices.length === 1 && (formTargetServices.length > 0 || showServicesNotice))
+                  || (availableServices.length === 1 && (formTargetServices.length > 0 || !!servicesNotice))
                 ) && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
