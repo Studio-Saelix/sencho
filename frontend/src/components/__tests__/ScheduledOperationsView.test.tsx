@@ -351,6 +351,40 @@ describe('ScheduledOperationsView', () => {
     });
   });
 
+  it('lets all services replace a picked service when the saved scope is missing', async () => {
+    tasksFixture = [makeTask({
+      id: 53, name: 'edit-c', target_type: 'stack', target_id: 'web', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['cache']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+
+    const api = await screen.findByRole('checkbox', { name: 'api' });
+    await userEvent.click(api);
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(api).not.toBeChecked();
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/53' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toBeNull();
+    });
+  });
+
   it('revalidates a saved service when a second task opens on the same stack', async () => {
     tasksFixture = [
       makeTask({

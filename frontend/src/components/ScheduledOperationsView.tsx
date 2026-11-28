@@ -1161,7 +1161,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     <label className="flex items-center gap-2 text-sm cursor-pointer">
                       <Checkbox
                         checked={targetAllServices}
-                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                        onCheckedChange={(checked) => {
+                          setTargetAllServices(checked === true);
+                          if (checked) setFormTargetServices([]);
+                        }}
                       />
                       <span>Target all services in this stack</span>
                     </label>
@@ -1175,7 +1178,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     <label className="flex items-center gap-2 text-sm cursor-pointer">
                       <Checkbox
                         checked={targetAllServices}
-                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                        onCheckedChange={(checked) => {
+                          setTargetAllServices(checked === true);
+                          if (checked) setFormTargetServices([]);
+                        }}
                       />
                       <span>Target all services in this stack</span>
                     </label>
