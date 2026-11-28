@@ -313,7 +313,9 @@ function FitViewOnGraphChange({ signature, nodeIds }: { signature: string; nodeI
     const nodesInitialized = useNodesInitialized();
     // Reading the store's node set (rather than a ref) makes the effect run
     // again after React Flow applies the new `nodes` prop, which happens in a
-    // passive effect after this component's own.
+    // passive effect after this component's own. React Flow 13 replaced the
+    // monolithic `useStore` with per-slice stores, so the node list is read
+    // through `useNodesStore`; `useStore` no longer exists.
     const storeNodeIds = useNodesStore((state) => state.nodes.map((node) => node.id).sort().join('\u0000'));
     const lastFitted = useRef<string | null>(null);
     useEffect(() => {
