@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
 import { ConfirmModal } from '@/components/ui/modal';
@@ -33,6 +33,14 @@ const GATE_WORD: Record<ReadinessGateStatus, string> = {
 
 function time(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+/** The confirmation names the node record only as far as the hub reported it. */
+function fleetMembershipClause(operation: BootstrapOperationDetail): string {
+  if (operation.nodeId === null) return '';
+  if (operation.nodeExists === true) return ', and the node record stays in Fleet';
+  if (operation.nodeExists === false) return ', and the node record is no longer in Fleet';
+  return ', and the hub did not report whether the node record is still in Fleet';
 }
 
 function Fact({ label, value }: { label: string; value: string }) {
@@ -116,17 +124,42 @@ export function BootstrapRunStep({
   onCancel,
   onRetry,
   onRelease,
+  onRefresh,
   onVerify,
 }: {
   operation: BootstrapOperationDetail;
   busy: 'open' | 'cancel' | 'release' | 'verify' | null;
   onCancel: () => void;
   onRetry: () => void;
-  onRelease: () => Promise<void>;
+  /** Release the run the confirmation was checked for; the id is the one it previewed. */
+  onRelease: (id: string) => Promise<void>;
+  /** Read this run again before the Release confirmation, so a node deleted meanwhile is named correctly. */
+  onRefresh: (id: string) => Promise<BootstrapOperationDetail | null>;
   onVerify: () => void;
 }) {
-  const [confirmRelease, setConfirmRelease] = useState(false);
+  // The checked run the confirmation belongs to. The POST is sent to this id, and the
+  // host and target name come from this answer, not from whatever the dialog shows by
+  // then. Fleet membership follows the newest answer for the same run, so a node deleted
+  // while the confirmation is open is named correctly.
+  const [releaseTarget, setReleaseTarget] = useState<BootstrapOperationDetail | null>(null);
   const { actions } = operation;
+  // The confirmation is only open for the run it checked, while the hub still offers
+  // Release for it. The effect below also drops the checked answer, so a later answer
+  // that offers Release again cannot reopen an old confirmation by itself.
+  const releaseOpen = releaseTarget !== null && releaseTarget.id === operation.id && actions.release;
+  // The confirmation closes when the view moves to another run, or the hub stops
+  // offering Release for this one, instead of acting on a run the operator did not confirm.
+  useEffect(() => {
+    if (releaseTarget !== null && (releaseTarget.id !== operation.id || !actions.release)) {
+      setReleaseTarget(null);
+    }
+  }, [releaseTarget, operation.id, actions.release]);
+  const openRelease = async () => {
+    const target = operation.id;
+    const fresh = await onRefresh(target);
+    if (fresh === null || fresh.id !== target || !fresh.actions.release) return;
+    setReleaseTarget(fresh);
+  };
   const verbs = (actions.cancel || actions.retry || actions.release || actions.verify) ? (
     <div className="flex flex-wrap items-center gap-2">
       {actions.verify && (
@@ -150,7 +183,7 @@ export function BootstrapRunStep({
         </BusyButton>
       )}
       {actions.release && (
-        <Button size="sm" variant="ghost" onClick={() => setConfirmRelease(true)} disabled={busy !== null}>
+        <Button size="sm" variant="ghost" onClick={() => { void openRelease(); }} disabled={busy !== null}>
           Release server
         </Button>
       )}
@@ -166,22 +199,24 @@ export function BootstrapRunStep({
         data-testid="bootstrap-run-status"
       />
       <ConfirmModal
-        open={confirmRelease}
-        onOpenChange={setConfirmRelease}
-        kicker={`BOOTSTRAP · ${operation.targetName}`}
+        open={releaseOpen}
+        onOpenChange={(next) => { if (!next) setReleaseTarget(null); }}
+        kicker={`BOOTSTRAP · ${releaseTarget?.targetName ?? operation.targetName}`}
         title="Release this server?"
-        hint={`CHANGES nothing on ${operation.host}`}
+        hint={`CHANGES nothing on ${releaseTarget?.host ?? operation.host}`}
         confirmLabel="Release server"
         busyConfirmLabel="Releasing"
         confirming={busy === 'release'}
         onConfirm={async () => {
-          await onRelease();
-          setConfirmRelease(false);
+          if (releaseTarget === null) return;
+          const target = releaseTarget.id;
+          await onRelease(target);
+          setReleaseTarget(null);
         }}
       >
         <p className="text-sm text-muted-foreground">
-          Another bootstrap can then run on {operation.host}. Steps this run already made stay on the server
-          {operation.nodeId !== null ? ', and the node record stays in Fleet' : ''}. Nothing is removed.
+          Another bootstrap can then run on {releaseTarget?.host ?? operation.host}. Steps this run already made stay on the server
+          {fleetMembershipClause(operation)}. Nothing is removed.
         </p>
       </ConfirmModal>
     </>

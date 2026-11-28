@@ -198,6 +198,13 @@ export interface BootstrapOperation {
   stage: string | null;
   step: string | null;
   nodeId: number | null;
+  /**
+   * True when this run registered a node and that node is still in Fleet; false when
+   * the hub reports no node record for it (it registered none, or that node was
+   * deleted); null when the hub did not report membership (a hub that predates the
+   * field). Absence is unknown, never a deletion.
+   */
+  nodeExists: boolean | null;
   changesMade: boolean;
   /** The Pilot container was started, so the Pilot can still connect after the run stopped. */
   agentStarted: boolean;

@@ -208,7 +208,7 @@ A retry reuses the node the run registered, by its identity rather than its name
 
 ### Release server
 
-**Release server** ends the run's hold on the server without touching the server. Steps already run stay there, and a node the run registered stays in Fleet; delete it from Fleet if you do not want it, and the released run then leaves **Bootstrap runs**. Another bootstrap can then run on that server.
+**Release server** ends the run's hold on the server without touching the server. Steps already run stay there, and a node the run registered stays in Fleet while it exists; the confirmation says whether it is still there. Delete it from Fleet if you do not want it, and the released run then leaves **Bootstrap runs**. Another bootstrap can then run on that server.
 
 ### When Sencho restarts
 

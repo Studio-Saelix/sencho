@@ -1085,12 +1085,31 @@ describe('bootstrap operations: enrollment and retry', () => {
     expect(released.active).toBe(false);
     expect(h.host.commands.length).toBe(before);
     expect(db.getNode(released.nodeId as number)).toBeDefined();
+    expect(released.nodeExists).toBe(true);
     expect(released.events.at(-1)?.message).toMatch(/node record stays/);
     // The target is free again.
     const next = approve(h);
     expect(() => h.service.start(next.request, context())).not.toThrow();
     await h.service.settled();
     db.deleteNode(released.nodeId as number);
+  });
+
+  it('releases a run whose node was already deleted without claiming the record stays', async () => {
+    const h = harness({ connectOnStart: false, enrollWaitMs: 20 });
+    const { request } = approve(h);
+    const op = h.service.start(request, context());
+    await h.service.settled();
+    const nodeId = h.service.get(op.id).nodeId as number;
+    db.deleteNode(nodeId);
+
+    const stopped = h.service.get(op.id);
+    expect(stopped).toMatchObject({ state: 'partial', active: true, nodeId, nodeExists: false });
+
+    const released = h.service.release(op.id, AUDIT);
+    expect(released).toMatchObject({ active: false, nodeId, nodeExists: false });
+    const message = released.events.at(-1)?.message ?? '';
+    expect(message).not.toMatch(/stays in Fleet/);
+    expect(message).toMatch(/node record is no longer in Fleet/);
   });
 });
 

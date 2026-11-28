@@ -23,6 +23,7 @@ function operation(index: number, overrides: Partial<BootstrapOperation> = {}): 
     stage: null,
     step: null,
     nodeId: null,
+    nodeExists: false,
     changesMade: true,
     agentStarted: true,
     active: true,
