@@ -8,7 +8,9 @@ import {
   FALLBACK_CAPABILITIES,
   checkBootstrapHostKey,
   fetchBootstrapCapabilities,
+  fetchBootstrapOperation,
   listBootstrapOperations,
+  releaseBootstrapOperation,
   runBootstrapPreflight,
 } from '../bootstrapApi';
 
@@ -119,10 +121,36 @@ describe('bootstrapApi', () => {
       .mockResolvedValueOnce(jsonResponse({ operations: [{ id: 'a' }], nextCursor: 'c+/=' }))
       .mockResolvedValueOnce(jsonResponse({ operations: [{ id: 'b' }] }));
     const first = await listBootstrapOperations();
-    expect(first).toEqual({ operations: [{ id: 'a' }], nextCursor: 'c+/=' });
+    expect(first).toEqual({ operations: [{ id: 'a', nodeExists: null }], nextCursor: 'c+/=' });
     const second = await listBootstrapOperations(undefined, first.nextCursor);
-    expect(second).toEqual({ operations: [{ id: 'b' }], nextCursor: null });
+    expect(second).toEqual({ operations: [{ id: 'b', nodeExists: null }], nextCursor: null });
     expect(vi.mocked(apiFetch).mock.calls[0][0]).toBe('/nodes/bootstrap/operations');
     expect(vi.mocked(apiFetch).mock.calls[1][0]).toBe('/nodes/bootstrap/operations?cursor=c%2B%2F%3D');
+  });
+
+  it('reads a missing nodeExists as unknown on the detail, list, and mutation responses', async () => {
+    // A hub older than the field sends no nodeExists at all.
+    const legacy = { id: 'op-1', nodeId: 4 };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(legacy))
+      .mockResolvedValueOnce(jsonResponse({ operations: [legacy], nextCursor: null }))
+      .mockResolvedValueOnce(jsonResponse(legacy));
+    await expect(fetchBootstrapOperation('op-1')).resolves.toMatchObject({ nodeExists: null });
+    const page = await listBootstrapOperations();
+    expect(page.operations[0].nodeExists).toBeNull();
+    await expect(releaseBootstrapOperation('op-1')).resolves.toMatchObject({ nodeExists: null });
+  });
+
+  it('keeps an explicit nodeExists answer on the detail, list, and mutation responses', async () => {
+    const present = { id: 'op-1', nodeId: 4, nodeExists: true };
+    const deleted = { id: 'op-2', nodeId: 5, nodeExists: false };
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(present))
+      .mockResolvedValueOnce(jsonResponse({ operations: [present, deleted], nextCursor: null }))
+      .mockResolvedValueOnce(jsonResponse(deleted));
+    await expect(fetchBootstrapOperation('op-1')).resolves.toMatchObject({ nodeExists: true });
+    const page = await listBootstrapOperations();
+    expect(page.operations.map((entry) => entry.nodeExists)).toEqual([true, false]);
+    await expect(releaseBootstrapOperation('op-2')).resolves.toMatchObject({ nodeExists: false });
   });
 });

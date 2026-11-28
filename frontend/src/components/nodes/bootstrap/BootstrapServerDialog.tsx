@@ -253,7 +253,7 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
             onCancel={() => { void run.cancel(); }}
             onRetry={() => wizard.startRetry(shownOperation)}
             onRelease={run.release}
-            onRefresh={() => run.openOperation(shownOperation.id)}
+            onRefresh={(id) => run.openOperation(id)}
             onVerify={() => { void run.verify(); }}
           />
         )}

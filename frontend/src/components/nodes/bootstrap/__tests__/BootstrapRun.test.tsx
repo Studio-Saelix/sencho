@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { BOOTSTRAP_SCOPE } from '../scope';
 import { BootstrapServerDialog } from '../BootstrapServerDialog';
 import {
@@ -566,7 +567,7 @@ describe('progress polling', () => {
     const { result } = renderHook(() => useBootstrapOperation({ open: true }));
     act(() => result.current.show(stopped));
     await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
-    await act(async () => { await result.current.release(); });
+    await act(async () => { await result.current.release(stopped.id); });
     await act(async () => { answer({ ...stopped }); });
     expect(result.current.operation).toMatchObject({ active: false, actions: { release: false } });
   });
@@ -1769,5 +1770,283 @@ describe('held runs arrive a page at a time', () => {
     expect(result.current.operations).toHaveLength(20);
     expect(result.current.operations.map((entry) => entry.id)).not.toContain('held-0');
     expect(result.current.hasMoreOperations).toBe(true);
+  });
+});
+
+describe('release confirmation binding', () => {
+  const held = (id: string, targetName: string, host: string, nodeId: number) => operation({
+    id,
+    targetName,
+    host,
+    nodeId,
+    nodeExists: true,
+    state: 'partial',
+    error: { code: 'STEP_FAILED', message: '"Install the missing Docker packages" failed (exit 100).' },
+    finishedAt: Date.now(),
+    agentStarted: false,
+    actions: { cancel: false, retry: true, release: true, verify: false },
+  });
+
+  it('cannot submit a delayed Release read from an earlier session to a later confirmation', async () => {
+    const A = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    const B = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    let answerA: (detail: BootstrapOperationDetail) => void = () => undefined;
+    let aReads = 0;
+    vi.mocked(fetchBootstrapOperation).mockImplementation((id: string) => {
+      if (id === A.id) {
+        aReads += 1;
+        // The second read is the Release refresh; it stays out across the close and the next run.
+        if (aReads === 2) return new Promise((resolve) => { answerA = resolve; });
+        return Promise.resolve(A);
+      }
+      return Promise.resolve(B);
+    });
+    vi.mocked(listBootstrapOperations)
+      .mockResolvedValueOnce({ operations: [A], nextCursor: null })
+      .mockResolvedValueOnce({ operations: [A, B], nextCursor: null });
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>Open bootstrap</button>
+          <BootstrapServerDialog open={open} onOpenChange={setOpen} />
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(within(await screen.findByTestId(`bootstrap-run-${A.id}`)).getByRole('button', { name: 'View' }));
+    await user.click(within(await screen.findByTestId('bootstrap-run-answer')).getByRole('button', { name: 'Release server' }));
+    expect(aReads).toBe(2);
+
+    // The read is still out when the operator closes the dialog, reopens it, and checks run B.
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Open bootstrap' }));
+    await user.click(within(await screen.findByTestId(`bootstrap-run-${B.id}`)).getByRole('button', { name: 'View' }));
+    await user.click(within(await screen.findByTestId('bootstrap-run-answer')).getByRole('button', { name: 'Release server' }));
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveTextContent('b.example.com');
+
+    // A's answer lands last. It cannot replace B's confirmation or its target.
+    await act(async () => { answerA(A); });
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('b.example.com');
+    expect(screen.getByRole('alertdialog')).not.toHaveTextContent('a.example.com');
+
+    vi.mocked(releaseBootstrapOperation).mockResolvedValueOnce({ ...B, active: false, actions: { cancel: false, retry: false, release: false, verify: false } });
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Release server' }));
+    await waitFor(() => expect(releaseBootstrapOperation).toHaveBeenCalledWith(B.id));
+    expect(releaseBootstrapOperation).not.toHaveBeenCalledWith(A.id);
+  });
+
+  it('drops an older Release read that a newer settle read of the same run overtook', async () => {
+    vi.useFakeTimers();
+    const stopped = { ...held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11), agentStarted: true };
+    const enrolled = {
+      ...stopped,
+      state: 'enrolled' as const,
+      active: false,
+      error: null,
+      actions: { cancel: false, retry: false, release: false, verify: false },
+    };
+    let answerRelease: (detail: BootstrapOperationDetail) => void = () => undefined;
+    let reads = 0;
+    vi.mocked(fetchBootstrapOperation).mockImplementation(() => {
+      reads += 1;
+      // View, the Release refresh (kept out), then the settle poll.
+      if (reads === 2) return new Promise((resolve) => { answerRelease = resolve; });
+      return Promise.resolve(reads >= 3 ? enrolled : stopped);
+    });
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(within(screen.getByTestId(`bootstrap-run-${stopped.id}`)).getByRole('button', { name: 'View' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(within(screen.getByTestId('bootstrap-run-answer')).getByRole('button', { name: 'Release server' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(reads).toBe(2);
+
+    // The settle poll answers first and the run is enrolled; the older Release read must not undo that.
+    await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_POLL_MS); });
+    expect(reads).toBe(3);
+    expect(screen.getByTestId('bootstrap-run-answer')).toHaveTextContent('Enrolled');
+    expect(screen.queryByRole('button', { name: 'Release server' })).not.toBeInTheDocument();
+    await act(async () => { answerRelease(stopped); });
+    expect(screen.getByTestId('bootstrap-run-answer')).toHaveTextContent('Enrolled');
+    expect(screen.queryByRole('button', { name: 'Release server' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('drops a late open read that a newer open overtook, so View cannot land on another run', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    const b = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    const answers = new Map<string, (detail: BootstrapOperationDetail) => void>();
+    vi.mocked(fetchBootstrapOperation).mockImplementation((id: string) => new Promise((resolve) => { answers.set(id, resolve); }));
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
+    const { result, rerender } = renderHook(({ open }) => useBootstrapOperation({ open }), { initialProps: { open: true } });
+    let readA: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { readA = result.current.openOperation(a.id); });
+    rerender({ open: false });
+    rerender({ open: true });
+    let readB: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { readB = result.current.openOperation(b.id); });
+    let resultA: BootstrapOperationDetail | null = null;
+    let resultB: BootstrapOperationDetail | null = null;
+    await act(async () => { answers.get(b.id)?.(b); resultB = await readB; });
+    expect(resultB).toMatchObject({ id: b.id });
+    expect(result.current.operation?.id).toBe(b.id);
+    await act(async () => { answers.get(a.id)?.(a); resultA = await readA; });
+    expect(resultA).toBeNull();
+    expect(result.current.operation?.id).toBe(b.id);
+  });
+
+  it('drops an open read when the dialog closes, before any other run is opened', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    let answerA: (detail: BootstrapOperationDetail) => void = () => undefined;
+    vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answerA = resolve; }));
+    const { result, rerender } = renderHook(({ open }) => useBootstrapOperation({ open }), { initialProps: { open: true } });
+    let readA: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { readA = result.current.openOperation(a.id); });
+    expect(result.current.busy).toBe('open');
+    rerender({ open: false });
+    let resultA: BootstrapOperationDetail | null = a;
+    await act(async () => { answerA(a); resultA = await readA; });
+    expect(resultA).toBeNull();
+    expect(result.current.operation).toBeNull();
+    expect(result.current.busy).toBeNull();
+  });
+
+  it('does not show an older open while a newer one is still out, and leaves the busy state with the newer one', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    const b = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    const answers = new Map<string, (detail: BootstrapOperationDetail) => void>();
+    vi.mocked(fetchBootstrapOperation).mockImplementation((id: string) => new Promise((resolve) => { answers.set(id, resolve); }));
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    let readA: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    let readB: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { readA = result.current.openOperation(a.id); });
+    act(() => { readB = result.current.openOperation(b.id); });
+    let resultA: BootstrapOperationDetail | null = null;
+    await act(async () => { answers.get(a.id)?.(a); resultA = await readA; });
+    expect(resultA).toBeNull();
+    expect(result.current.operation).toBeNull();
+    // A's answer did not clear the busy state the newer read owns.
+    expect(result.current.busy).toBe('open');
+    let resultB: BootstrapOperationDetail | null = null;
+    await act(async () => { answers.get(b.id)?.(b); resultB = await readB; });
+    expect(resultB).toMatchObject({ id: b.id });
+    expect(result.current.operation?.id).toBe(b.id);
+    expect(result.current.busy).toBeNull();
+  });
+
+  it('keeps a view opened during an action, and leaves the busy state with that view', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    const b = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    let answerCancel: (detail: BootstrapOperationDetail) => void = () => undefined;
+    let answerB: (detail: BootstrapOperationDetail) => void = () => undefined;
+    vi.mocked(cancelBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answerCancel = resolve; }));
+    vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answerB = resolve; }));
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [], nextCursor: null });
+    const { result, rerender } = renderHook(({ open }) => useBootstrapOperation({ open }), { initialProps: { open: true } });
+    act(() => result.current.show(a));
+    let cancel: Promise<void> = Promise.resolve();
+    act(() => { cancel = result.current.cancel(); });
+    expect(result.current.busy).toBe('cancel');
+    rerender({ open: false });
+    act(() => result.current.show(null));
+    rerender({ open: true });
+    let readB: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { readB = result.current.openOperation(b.id); });
+    expect(result.current.busy).toBe('open');
+    // The cancel answer for A lands while B is still being read.
+    await act(async () => { answerCancel(a); await cancel; });
+    expect(result.current.operation).toBeNull();
+    expect(result.current.busy).toBe('open');
+    let resultB: BootstrapOperationDetail | null = null;
+    await act(async () => { answerB(b); resultB = await readB; });
+    expect(resultB).toMatchObject({ id: b.id });
+    expect(result.current.operation?.id).toBe(b.id);
+  });
+
+  it('keeps an action busy state when an older open read answers', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    let answerOpen: (detail: BootstrapOperationDetail) => void = () => undefined;
+    vi.mocked(fetchBootstrapOperation).mockImplementationOnce(() => new Promise((resolve) => { answerOpen = resolve; }));
+    vi.mocked(cancelBootstrapOperation).mockImplementationOnce(() => new Promise(() => undefined));
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(a));
+    let read: Promise<BootstrapOperationDetail | null> = Promise.resolve(null);
+    act(() => { read = result.current.openOperation(a.id); });
+    act(() => { void result.current.cancel(); });
+    expect(result.current.busy).toBe('cancel');
+    await act(async () => { answerOpen(a); await read; });
+    expect(result.current.busy).toBe('cancel');
+  });
+
+  it('does not release a run other than the one on screen', async () => {
+    const a = held('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'server-a', 'a.example.com', 11);
+    const b = held('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'server-b', 'b.example.com', 12);
+    const { result } = renderHook(() => useBootstrapOperation({ open: true }));
+    act(() => result.current.show(a));
+    await act(async () => { await result.current.release(b.id); });
+    expect(releaseBootstrapOperation).not.toHaveBeenCalled();
+    expect(result.current.operation?.id).toBe(a.id);
+  });
+
+  it('closes the confirmation when the run is replaced or stops offering Release', async () => {
+    const op = held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11);
+    const onRelease = vi.fn();
+    const step = (shown: BootstrapOperationDetail) => (
+      <BootstrapRunStep operation={shown} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={onRelease} onRefresh={async () => shown} onVerify={vi.fn()} />
+    );
+    const user = userEvent.setup();
+    const { rerender } = render(step(op));
+    await user.click(screen.getByRole('button', { name: 'Release server' }));
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('a.example.com');
+
+    rerender(step({ ...op, actions: { ...op.actions, release: false } }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+
+    // A later answer that offers Release again does not reopen the old confirmation.
+    rerender(step(op));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+
+    // A fresh click checks the run again and opens a new confirmation.
+    await user.click(screen.getByRole('button', { name: 'Release server' }));
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('a.example.com');
+    rerender(step({ ...op, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', targetName: 'server-b', host: 'b.example.com' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(onRelease).not.toHaveBeenCalled();
+  });
+
+  it('updates the Fleet sentence when the node leaves Fleet while the confirmation is open', async () => {
+    const op = held('11111111-1111-4111-8111-111111111111', 'server-a', 'a.example.com', 11);
+    const step = (shown: BootstrapOperationDetail) => (
+      <BootstrapRunStep operation={shown} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={async () => shown} onVerify={vi.fn()} />
+    );
+    const user = userEvent.setup();
+    const { rerender } = render(step(op));
+    await user.click(screen.getByRole('button', { name: 'Release server' }));
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent(/node record stays in Fleet/);
+    rerender(step({ ...op, nodeExists: false }));
+    expect(screen.getByRole('alertdialog')).toHaveTextContent(/node record is no longer in Fleet/);
+  });
+
+  it('does not call unknown Fleet membership a deletion, and still offers Release', async () => {
+    const unknown = { ...STOPPED, nodeId: 4, nodeExists: null };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [unknown], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue(unknown);
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    await user.click(within(await screen.findByTestId(`bootstrap-run-${unknown.id}`)).getByRole('button', { name: 'View' }));
+    await user.click(within(await screen.findByTestId('bootstrap-run-answer')).getByRole('button', { name: 'Release server' }));
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveTextContent(/hub did not report whether the node record is still in Fleet/);
+    expect(confirm).not.toHaveTextContent(/stays in Fleet/);
+    expect(confirm).not.toHaveTextContent(/no longer in Fleet/);
+    await user.click(within(confirm).getByRole('button', { name: 'Release server' }));
+    await waitFor(() => expect(releaseBootstrapOperation).toHaveBeenCalledWith(unknown.id));
   });
 });

@@ -141,6 +141,22 @@ export type ExecuteInput = Omit<PreflightInput, 'operationId' | 'replacePinnedFi
   planDigest: string;
 };
 
+/**
+ * A hub older than this field sends no `nodeExists`. A missing answer is unknown,
+ * never a deletion, so every operation response path normalizes it to null.
+ */
+function nodeEvidence(value: unknown): boolean | null {
+  return value === true ? true : value === false ? false : null;
+}
+
+function readOperation(operation: BootstrapOperation): BootstrapOperation {
+  return { ...operation, nodeExists: nodeEvidence(operation.nodeExists) };
+}
+
+function readDetail(detail: BootstrapOperationDetail): BootstrapOperationDetail {
+  return { ...detail, nodeExists: nodeEvidence(detail.nodeExists) };
+}
+
 async function sendOperation(path: string, body: unknown, signal?: AbortSignal): Promise<BootstrapOperationDetail> {
   const res = await apiFetch(path, {
     method: 'POST',
@@ -149,7 +165,7 @@ async function sendOperation(path: string, body: unknown, signal?: AbortSignal):
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw await toError(res);
-  return await res.json() as BootstrapOperationDetail;
+  return readDetail(await res.json() as BootstrapOperationDetail);
 }
 
 export function startBootstrapOperation(input: ExecuteInput): Promise<BootstrapOperationDetail> {
@@ -176,7 +192,7 @@ export function verifyBootstrapOperation(id: string): Promise<BootstrapOperation
 export async function fetchBootstrapOperation(id: string, signal?: AbortSignal): Promise<BootstrapOperationDetail> {
   const res = await apiFetch(`/nodes/bootstrap/operations/${encodeURIComponent(id)}`, { localOnly: true, signal });
   if (!res.ok) throw await toError(res);
-  return await res.json() as BootstrapOperationDetail;
+  return readDetail(await res.json() as BootstrapOperationDetail);
 }
 
 /** One page of runs: those that still hold a server, and with the first page the latest finished ones. */
@@ -191,5 +207,5 @@ export async function listBootstrapOperations(signal?: AbortSignal, cursor?: str
   const res = await apiFetch(`/nodes/bootstrap/operations${query}`, { localOnly: true, signal });
   if (!res.ok) throw await toError(res);
   const body = await res.json() as { operations?: BootstrapOperation[]; nextCursor?: string | null };
-  return { operations: body.operations ?? [], nextCursor: body.nextCursor ?? null };
+  return { operations: (body.operations ?? []).map(readOperation), nextCursor: body.nextCursor ?? null };
 }

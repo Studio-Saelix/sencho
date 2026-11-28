@@ -31,6 +31,7 @@ import type { BootstrapOperation, BootstrapOperationDetail } from './types';
  * down are lost), so a node that stopped being ready is not still called ready. A change announced while a read was out (the first read of the list or of an opened run, a later page,
  * a poll, or the answer to Verify) is followed by a read of its own, since what that read answered may predate it. A read of
  * a loaded later page's row that fails is retried like a failed read of the list. A readiness read of the shown run, or of the list, that fails is retried until a read that began after it answers; an older answer that arrives late is shown but does not end the retries. Nothing polls while the dialog is closed.
+ * A read that starts when a run is opened, viewed, followed, or checked before Release is ordered with the polls: an answer overtaken by a newer read, a close, another run, or an action is dropped, so it cannot put an older run or an older state back on screen.
  */
 
 export const OPERATION_POLL_MS = 2_000;
@@ -85,6 +86,11 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   // before then is older than that answer and is dropped, so it cannot put the
   // previous state (a stopped run's Retry and Release) back on screen.
   const viewEpoch = useRef(0);
+  // The newest request to show one run (opening it, View or Follow, or the read before
+  // Release). A reply is shown only while it is still the newest request and no close,
+  // run replacement, or action came after it, so a delayed answer cannot put an older
+  // run back on screen or open its confirmation.
+  const openRequestSeq = useRef(0);
   // Reads of the shown run's detail overlap (a poll and a readiness read). Each takes a number when it starts, and an
   // answer older than one already applied is dropped, so a slow earlier read cannot bring back a verdict a later one replaced.
   const detailReadSeq = useRef(0);
@@ -110,12 +116,14 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   const readNowRef = useRef<(() => Promise<void>) | null>(null);
 
   const show = useCallback((detail: BootstrapOperationDetail | null) => {
+    openRequestSeq.current += 1;
     viewEpoch.current += 1;
     shownRef.current = detail?.id ?? null;
     operationRef.current = detail;
     setOperation(detail);
     setPollFailures(0);
     setReadinessReadFailed(false);
+    setBusy(null);
   }, []);
 
   /** Put an answer for the shown run on screen. Every write of the shown run goes through here, so the ref cannot drift from the state. */
@@ -174,6 +182,13 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     void refreshList(controller.signal);
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Closing the dialog ends its session: a read that started before it cannot show a
+  // run in the next one.
+  useEffect(() => {
+    if (open) return;
+    viewEpoch.current += 1;
   }, [open]);
 
   /** Read the next page of held runs and add it below the ones shown. */
@@ -273,10 +288,18 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
   }, []);
 
   const openOperation = useCallback(async (id: string): Promise<BootstrapOperationDetail | null> => {
+    // This read joins the ordered detail reads: a poll that started after it and answered
+    // first makes its answer obsolete, and so does a newer open, a close, or an action.
+    const request = ++openRequestSeq.current;
+    const seq = ++detailReadSeq.current;
+    const epoch = viewEpoch.current;
     setBusy('open');
     const signals = readinessSignals.current;
     try {
       const detail = await client.get(id);
+      if (request !== openRequestSeq.current || epoch !== viewEpoch.current || seq < detailAppliedSeq.current) return null;
+      detailAppliedSeq.current = seq;
+      setBusy(null);
       show(detail);
       // A readiness change arrived while this read was out: the run may predate it.
       if (readinessSignals.current !== signals && detail.state === 'enrolled') void readNowRef.current?.();
@@ -285,7 +308,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       toast.error(error instanceof Error ? error.message : 'The bootstrap could not be loaded.');
       return null;
     } finally {
-      setBusy(null);
+      // A request a newer one replaced does not own the busy state.
+      if (openRequestSeq.current === request) setBusy(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show]);
@@ -439,25 +463,35 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     setPollStopped(false);
   }
 
-  const act = useCallback(async (kind: 'cancel' | 'release' | 'verify') => {
-    if (!operationId) return;
+  const act = useCallback(async (kind: 'cancel' | 'release' | 'verify', targetId?: string) => {
+    const id = targetId ?? operationId;
+    if (!id) return;
+    // A confirmation that checked one run never acts on a run the view has since replaced.
+    if (targetId !== undefined && shownRef.current !== targetId) return;
+    // This action owns the busy state until its answer, unless a newer request replaces it.
+    const request = ++openRequestSeq.current;
     setBusy(kind);
-    viewEpoch.current += 1;
     const signals = readinessSignals.current;
     try {
       const verify = client.verify ?? verifyBootstrapOperation;
       const detail = kind === 'cancel'
-        ? await client.cancel(operationId)
-        : kind === 'release' ? await client.release(operationId) : await verify(operationId);
-      viewEpoch.current += 1;
-      if (kind === 'verify' && readinessSignals.current !== signals) {
-        // The hub announced a readiness change while the check ran. That may be the check's own announcement (it announces
-        // when it starts and when it records) or a later change such as a dropped tunnel, and this answer cannot say which, so
-        // it is not put on screen (a Ready from before a disconnect must not come back). The shown run is read instead, which
-        // is the newest the hub has; if that read fails, the shown run is read again every few seconds until a read that began after it answers.
-        void readNowRef.current?.();
-      } else if (shownRef.current === detail.id) {
-        apply(detail);
+        ? await client.cancel(id)
+        : kind === 'release' ? await client.release(id) : await verify(id);
+      // Only an answer for the run still on screen replaces its state. It is newer than
+      // any read that started before it, so those reads can no longer apply. An answer for
+      // a run the view has left is not applied; that run is read again when the operator
+      // views it, and its list row refreshes after a successful action.
+      if (shownRef.current === detail.id) {
+        viewEpoch.current += 1;
+        if (kind === 'verify' && readinessSignals.current !== signals) {
+          // The hub announced a readiness change while the check ran. That may be the check's own announcement (it announces
+          // when it starts and when it records) or a later change such as a dropped tunnel, and this answer cannot say which, so
+          // it is not put on screen (a Ready from before a disconnect must not come back). The shown run is read instead, which
+          // is the newest the hub has; if that read fails, the shown run is read again every few seconds until a read that began after it answers.
+          void readNowRef.current?.();
+        } else {
+          apply(detail);
+        }
       }
       if (kind === 'release') toast.success('Server released. Nothing on it was changed.');
       void refreshList();
@@ -465,7 +499,8 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
       const verb = kind === 'cancel' ? 'cancelled' : kind === 'release' ? 'released' : 'checked for readiness';
       toast.error(error instanceof Error ? error.message : `The bootstrap could not be ${verb}.`);
     } finally {
-      setBusy(null);
+      // A request a newer one replaced does not own the busy state.
+      if (openRequestSeq.current === request) setBusy(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationId, refreshList]);
@@ -486,7 +521,7 @@ export function useBootstrapOperation({ open, api }: UseBootstrapOperationOption
     openOperation,
     refreshList,
     cancel: () => act('cancel'),
-    release: () => act('release'),
+    release: (id: string) => act('release', id),
     verify: () => act('verify'),
   };
 }
