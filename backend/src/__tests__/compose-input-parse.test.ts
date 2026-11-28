@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDynamicPath, parseDeclaredInputs } from '../helpers/composeInputParse';
+import { isDynamicPath, listComposeServiceNames, parseDeclaredInputs } from '../helpers/composeInputParse';
 import type { DeclaredInput, DynamicInput } from '../types/gitProjectManifest';
 
 /** In-memory repo fixture: maps repo paths to contents. */
@@ -1104,5 +1104,19 @@ describe('parseDeclaredInputs reportUnenumerable mode', () => {
         }, true);
         expect(result.parseErrors).toEqual([]);
         expect(result.dynamic.map((d) => d.sourcePath)).toEqual(['${DIR}/more.yaml']);
+    });
+});
+
+describe('listComposeServiceNames', () => {
+    it('returns no names for a missing, null, scalar, or sequence services value', () => {
+        expect(listComposeServiceNames('')).toEqual([]);
+        expect(listComposeServiceNames('services: null\n')).toEqual([]);
+        expect(listComposeServiceNames('services: "abc"\n')).toEqual([]);
+        expect(listComposeServiceNames('services: [web]\n')).toEqual([]);
+    });
+
+    it('keeps literal YAML 1.1 service names', () => {
+        expect(listComposeServiceNames('%YAML 1.1\n---\nservices:\n  on:\n    image: nginx\n  "true":\n    image: nginx\n'))
+            .toEqual(['on', 'true']);
     });
 });

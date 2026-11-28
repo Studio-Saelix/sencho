@@ -446,17 +446,21 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.body).not.toContain('<<');
   });
 
-  it('answers 409 for an explicit merge tag instead of guessing the names it expands to', async () => {
-    writeCompose(
-      [
-        'x-base: &base',
-        '  image: nginx:alpine',
-        'services:',
-        '  web:',
-        '    !!merge <<: *base',
-        '',
-      ].join('\n'),
-    );
+  it.each([
+    {
+      where: 'a service definition',
+      lines: ['x-base: &base', '  image: nginx:alpine', 'services:', '  web:', '    !!merge <<: *base', ''],
+    },
+    {
+      where: 'the services map',
+      lines: ['x-svcs: &svcs', '  web:', '    image: nginx:alpine', 'services:', '  !!merge <<: *svcs', ''],
+    },
+    {
+      where: 'the document root',
+      lines: ['x-root: &root', '  services:', '    web:', '      image: nginx:alpine', '!!merge <<: *root', ''],
+    },
+  ])('answers 409 for an explicit merge tag on $where', async ({ lines }) => {
+    writeCompose(lines.join('\n'));
 
     const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
 
@@ -528,9 +532,9 @@ describe('refused stack: GET /services size boundary is encoding-independent', (
     expect(res.body).toEqual(['web']);
   });
 
-  it('answers 413 for a multibyte file over the byte limit instead of an alias-worded 409', async () => {
+  it('answers 413 for a multibyte file over the byte limit instead of a size-worded 409', async () => {
     // 1,048,577 UTF-8 bytes are only about 524,319 UTF-16 code units, which the
-    // old code-unit check let through to the expansion guard.
+    // old code-unit check let through to the expansion guard's 409.
     writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES + 1, 'multibyte');
 
     const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
@@ -566,5 +570,60 @@ describe('refused stack: the real guard, the real down, and Delete together', ()
 
     expect(res.status).toBe(200);
     expect(fs.existsSync(stackDir('refused'))).toBe(false);
+  });
+});
+
+describe('refused stack: a remote node service refusal passes through the proxy', () => {
+  let remoteServer: import('http').Server;
+  let remoteNodeId: number;
+
+  beforeAll(async () => {
+    const http = await import('http');
+    remoteServer = http.createServer((req, res) => {
+      if (req.url?.startsWith('/api/meta')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ version: '0.99.0', capabilities: ['cross-node-rbac'] }));
+        return;
+      }
+      if (req.url === '/api/stacks/refused/services') {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Compose file "compose.yaml" is too complex to list.',
+          code: 'compose_inputs_refused',
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('[]');
+    });
+    await new Promise<void>((resolve) => remoteServer.listen(0, '127.0.0.1', resolve));
+    const port = (remoteServer.address() as import('net').AddressInfo).port;
+    const { DatabaseService } = await import('../services/DatabaseService');
+    remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'refusal-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: `http://127.0.0.1:${port}`,
+      api_token: 'refusal-token',
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => remoteServer.close(() => resolve()));
+  });
+
+  it('forwards the 409 body and code unchanged', async () => {
+    const res = await request(app)
+      .get('/api/stacks/refused/services')
+      .set('Cookie', authCookie)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Compose file "compose.yaml" is too complex to list.',
+      code: 'compose_inputs_refused',
+    });
   });
 });

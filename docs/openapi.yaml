@@ -3329,13 +3329,13 @@ paths:
       summary: List stack services
       description: |
         Returns the service names defined in the stack's primary compose file.
-        Names are read with the same YAML core schema Docker Compose uses, so a
-        `%YAML 1.1` directive does not turn a name such as `on` into a boolean,
-        and ordinary YAML merge keys are expanded the way Compose expands them.
-        An alias expansion the expansion guard refuses, a reuse past the shared
-        alias budget, or an explicit merge tag answers `409
-        compose_inputs_refused`; a file over the 1 MiB parse limit answers
-        `413`.
+        Names are read with the YAML core schema, so a `%YAML 1.1` directive
+        does not turn a name such as `on` into a boolean. Ordinary YAML merge
+        keys are expanded to the service names they contribute; an explicit
+        merge tag is refused. An alias expansion the expansion guard refuses, a
+        reuse past the shared alias budget, an explicit merge tag, or a document
+        the guard cannot measure answers `409 compose_inputs_refused`; a file
+        over the 1 MiB parse limit answers `413`.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"

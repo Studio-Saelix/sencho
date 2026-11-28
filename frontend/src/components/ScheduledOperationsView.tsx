@@ -144,6 +144,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     { kind: 'idle' } | { kind: 'loading' } | { kind: 'unavailable' } | { kind: 'ready'; data: LabelMatchPreview }
   >({ kind: 'idle' });
   const [availableServices, setAvailableServices] = useState<string[]>([]);
+  const [servicesLoading, setServicesLoading] = useState(false);
   const [servicesError, setServicesError] = useState<string | null>(null);
   const [targetAllServices, setTargetAllServices] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -241,14 +242,17 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     const actionDef = getActionById(formAction);
     if (!actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
+      setServicesLoading(false);
       setServicesError(null);
       setTargetAllServices(false);
       return;
     }
     let cancelled = false;
     // Drop the previous target's names before the lookup starts, so a refusal
-    // for this target can never leave another stack's services selectable.
+    // for this target can never leave another stack's services selectable and a
+    // save during the lookup cannot quietly become an all-services target.
     setAvailableServices([]);
+    setServicesLoading(true);
     setServicesError(null);
     setTargetAllServices(false);
     const fetchServices = async () => {
@@ -263,18 +267,21 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
         if (!res.ok) {
           const refusal = await readComposeInputsRefusal(res);
           if (cancelled) return;
+          setServicesLoading(false);
           setFormTargetServices([]);
           setServicesError(refusal ?? 'Could not load the Compose services for this stack.');
           return;
         }
         const services = (await res.json()) as string[];
         if (cancelled) return;
+        setServicesLoading(false);
         setAvailableServices(services);
         if (services.length <= 1) {
           setFormTargetServices([]);
         }
       } catch {
         if (!cancelled) {
+          setServicesLoading(false);
           setFormTargetServices([]);
           setServicesError('Could not load the Compose services for this stack.');
         }
@@ -653,6 +660,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       !formSelectorValue.trim()
       || (formLabelScope === 'node' && !formNodeId)
     ))
+    || servicesLoading
     || (!!servicesError && !targetAllServices)
     || !canSaveWithCurrentTarget;
 
@@ -1083,6 +1091,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     onValueChange={(val) => {
                       setFormTargetId(val);
                       setFormTargetServices([]);
+                      setAvailableServices([]);
+                      setServicesLoading(val !== '');
                       setServicesError(null);
                       setTargetAllServices(false);
                     }}

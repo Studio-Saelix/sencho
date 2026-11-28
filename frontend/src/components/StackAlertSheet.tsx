@@ -362,12 +362,14 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             : []),
     ];
 
-    // A failed lookup, or a requested service this stack does not list, is not
-    // an all-services choice until the operator says so.
+    // A lookup in progress, a failed lookup, or a requested service this stack
+    // does not list is not an all-services choice until the operator says so.
     const needsExplicitAllServices = canScopeService
         && service === ''
         && !targetAllServices
-        && (servicesState.status === 'error' || missingInitialService !== null);
+        && (servicesState.status === 'loading'
+            || servicesState.status === 'error'
+            || missingInitialService !== null);
 
     const renderTargetLabel = (alert: StackAlert) => {
         if (!alert.service_name) {
@@ -663,6 +665,7 @@ function AutoHealTab({
     const [saving, setSaving] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [serviceOptions, setServiceOptions] = useState<{ value: string; label: string }[]>([]);
+    const [servicesLoading, setServicesLoading] = useState(false);
     const [servicesError, setServicesError] = useState<string | null>(null);
     const [targetAllServices, setTargetAllServices] = useState(false);
     const [missingInitialService, setMissingInitialService] = useState<string | null>(null);
@@ -679,6 +682,7 @@ function AutoHealTab({
         setLoading(true);
         setService('');
         setServiceOptions([]);
+        setServicesLoading(true);
         setServicesError(null);
         setTargetAllServices(false);
         setMissingInitialService(null);
@@ -695,11 +699,13 @@ function AutoHealTab({
                 if (!res.ok) {
                     const refusal = await readComposeInputsRefusal(res);
                     if (cancelled) return;
+                    setServicesLoading(false);
                     setServicesError(refusal ?? 'Could not load the Compose services for this stack.');
                     return;
                 }
                 const names = await res.json() as string[];
                 if (cancelled) return;
+                setServicesLoading(false);
                 setServiceOptions(names.map(n => ({ value: n, label: n })));
                 setService(preselectListedService(initialService, names));
                 setMissingInitialService(
@@ -707,7 +713,10 @@ function AutoHealTab({
                 );
             } catch (e) {
                 console.error('[StackAlertSheet] Failed to fetch stack services', e);
-                if (!cancelled) setServicesError('Could not load the Compose services for this stack.');
+                if (!cancelled) {
+                    setServicesLoading(false);
+                    setServicesError('Could not load the Compose services for this stack.');
+                }
             }
         })();
 
@@ -800,11 +809,11 @@ function AutoHealTab({
         ...serviceOptions,
     ];
 
-    // A failed lookup, or a requested service this stack does not list, is not
-    // an all-services choice until the operator says so.
+    // A lookup in progress, a failed lookup, or a requested service this stack
+    // does not list is not an all-services choice until the operator says so.
     const needsExplicitAllServices = service === ''
         && !targetAllServices
-        && (servicesError !== null || missingInitialService !== null);
+        && (servicesLoading || servicesError !== null || missingInitialService !== null);
 
     return (
         <>
@@ -862,6 +871,7 @@ function AutoHealTab({
                                 placeholder="All services"
                                 searchPlaceholder="Search services..."
                                 emptyText="No services found."
+                                disabled={servicesLoading}
                             />
                             {missingInitialService && (
                                 <>

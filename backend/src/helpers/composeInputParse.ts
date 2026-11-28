@@ -66,12 +66,14 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 // document-wide reference quota and does not disable hostility checks).
 export const MAX_COMPOSE_ALIAS_COUNT = 10_000;
 
-// Compose expands YAML merge keys (`<<`), but this parser does not: doing so
-// through the yaml option copies an anchor once per merge reference, which the
-// alias budget and the source-size cap do not bound. A merge that would hide a
-// declaration the inventory must enumerate therefore fails the file closed
-// instead of writing a generation that silently omits it. Harmless merges
-// (restart, logging, image and similar) stay accepted.
+// Compose expands YAML merge keys (`<<`), but the inventory parser does not:
+// doing so through the yaml option copies an anchor once per merge reference,
+// which the alias budget and the source-size cap do not bound, and a merge that
+// hides a declaration the inventory must enumerate would write a generation
+// that silently omits it. The inventory therefore inspects merges and fails
+// such a file closed. The service-name projection may expand merges only after
+// the expansion guard has bounded the source. Harmless merges (restart,
+// logging, image and similar) stay accepted.
 type MergeWalkRole = 'root' | 'service' | 'build' | 'include' | 'resource' | 'extends' | 'env-file' | 'volume';
 
 const MERGE_HIDDEN_DECLARATION_KEYS: Record<MergeWalkRole, ReadonlySet<string>> = {
@@ -289,6 +291,9 @@ export interface ParseComposeYamlOptions {
  * its `<<` keys are inspected exactly like a 1.2 document's. Explicitly tagged
  * merges are still refused because yaml expands them under any schema, before
  * materialisation.
+ *
+ * Merges stay unexpanded by default so the inventory can inspect them; see
+ * `ParseComposeYamlOptions.expandMerges` for the guarded name-projection path.
  */
 export function parseComposeYaml(content: string, options: ParseComposeYamlOptions = {}): unknown {
     const expandMerges = options.expandMerges === true;
@@ -309,11 +314,12 @@ export function parseComposeYaml(content: string, options: ParseComposeYamlOptio
  *
  * Names stay literal: the document is read with the core schema, so a
  * `%YAML 1.1` directive cannot turn the service `on` into the boolean `true`.
- * Merge keys are expanded the way Compose expands them, so a `<<` on the
- * `services` map contributes its service names and a merge inside one service
- * definition only contributes attributes. The caller must have bounded the
- * source with the expansion guard first: merge expansion copies an anchor once
- * per reference, and the guard is what caps that copy count.
+ * Merge keys are expanded, so a `<<` on the `services` map contributes its
+ * service names and a merge inside one service definition only contributes
+ * attributes. The caller must have bounded the source with the expansion guard
+ * first: merge expansion copies an anchor once per reference, and the guard is
+ * what caps that copy count. Throws `ComposeServiceListRefusal` for an explicit
+ * merge tag, which the parser does not expand.
  */
 export function listComposeServiceNames(content: string): string[] {
     let parsed: unknown;

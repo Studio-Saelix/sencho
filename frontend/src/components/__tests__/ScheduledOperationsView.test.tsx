@@ -6,7 +6,7 @@
  * hub-local endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -173,6 +173,87 @@ describe('ScheduledOperationsView', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" is too complex to list.');
     expect(mockedFetchForNode).not.toHaveBeenCalledWith('/stacks/broken/services', expect.anything());
+  });
+
+  it('requires an explicit all-services choice after a generic service failure', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(null, { ok: false, status: 500 });
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the Compose services for this stack.');
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+  });
+
+  it('blocks Create while the selected stack service lookup is still pending', async () => {
+    let resolveServices: ((res: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => { resolveServices = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return pending;
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await act(async () => {
+      resolveServices!(jsonResponse(['web', 'db']));
+      await pending;
+    });
+    await waitFor(() => expect(create).toBeEnabled());
+  });
+
+  it('ignores a late service list for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'other']);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/other/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    // Switch to another stack before the first lookup answers.
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'other' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonResponse(['web', 'db']));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('checkbox', { name: 'db' })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'api' })).toBeInTheDocument();
   });
 
   it('clears the stale stack when the user changes the node', async () => {
@@ -431,8 +512,10 @@ describe('ScheduledOperationsView', () => {
 
     const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
     expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
+    await userEvent.click(within(servicesBlock!).getByRole('checkbox', { name: 'db' }));
 
-    // A refusal for a different stack must drop the previous stack's names.
+    // A refusal for a different stack must drop the previous stack's names and
+    // the service selected on it.
     await userEvent.click(screen.getAllByRole('combobox')[2]);
     await userEvent.click(await screen.findByRole('button', { name: 'broken' }));
 

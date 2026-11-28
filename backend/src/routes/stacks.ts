@@ -1739,7 +1739,7 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     // One byte-based bound for every encoding: an ASCII and a multibyte file of
     // the same on-disk size must get the same answer. The expansion guard
     // applies this same cap, so checking it here makes the size refusal a 413
-    // before any parse work instead of an alias-worded 409.
+    // before any parse work instead of the guard's size-worded 409.
     if (Buffer.byteLength(content, 'utf8') > MAX_COMPOSE_INPUT_BYTES) {
       console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_INPUT_BYTES} bytes; refusing to parse services`);
       res.status(413).json({ error: 'Compose file too large to parse' });
@@ -1751,8 +1751,9 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     assertComposeSourceWithinExpansionLimits(content, filename);
     let services: string[];
     try {
-      // The same core-schema projection the Compose inventory uses, so literal
-      // names such as `on` stay service names instead of becoming booleans.
+      // The same core-schema parser the Compose inventory uses, with bounded
+      // merge expansion for a name projection, so literal names such as `on`
+      // stay service names and merge keys contribute the names Compose lists.
       services = listComposeServiceNames(content);
     } catch (error) {
       if (error instanceof ComposeServiceListRefusal) {
