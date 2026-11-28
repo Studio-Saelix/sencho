@@ -29,6 +29,7 @@ vi.mock('../services/automaticStackUpdate', () => ({ applyAutomaticStackUpdate: 
 vi.mock('../services/hubPostUpdateVerification', () => ({ skippedVerification: () => ({ status: 'skipped', source: 'skipped', completedAt: null, detail: null }) }));
 import { checkedAutoUpdateRouter } from '../routes/checkedAutoUpdate';
 import { hashImageUpdateFacts } from '../services/imageUpdateFacts';
+import { DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 const facts = { model: { renderable: true as const }, services: [], images: [{ ref: 'nginx:1', localDigests: ['sha256:abc'], platform: { os: 'linux', architecture: 'amd64' }, emptyReason: 'none' as const }] };
 const body = { contractVersion: 1, stack: 'web', digestUpdateImages: ['nginx:1'], observationToken: 'token' };
@@ -83,6 +84,15 @@ describe('checked automatic update route', () => {
     const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ applied: false, result: 'rejected', endpointRefusal: 'Service "socket-proxy" carries the Docker connection.' });
+  });
+  it('answers a data restore refusal with the fence, not as a failed update', async () => {
+    const refusal = new DataRestoreFenceError('/srv/web/data', 'browse', 'directory');
+    mocks.apply.mockRejectedValue(refusal);
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ applied: false, result: 'rejected', code: 'data_restore', error: refusal.message });
+    expect(mocks.consume).not.toHaveBeenCalled();
+    expect(mocks.invalidate).not.toHaveBeenCalled();
   });
   it('reports the evidence the update was allowed on, and nothing on a clean pass', async () => {
     const clean = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);

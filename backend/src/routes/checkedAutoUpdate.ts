@@ -10,6 +10,7 @@ import { ImageUpdateObservationService, ImageUpdateObservationError } from '../s
 import { hashImageUpdateFacts, IMAGE_UPDATE_FACTS_IMAGE_LIMIT } from '../services/imageUpdateFacts';
 import { applyAutomaticStackUpdate, type AutomaticUpdateTrigger } from '../services/automaticStackUpdate';
 import { skippedVerification } from '../services/hubPostUpdateVerification';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 interface CheckedUpdateRequest {
   contractVersion: 1;
@@ -92,6 +93,13 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
   } catch (error) {
     if (error instanceof ImageUpdateObservationError) {
       res.status(error.status).json({ ...envelope, result: error.code === 'IMAGE_UPDATE_OBSERVATION_STALE' ? 'stale_observation' : 'rejected', code: error.code });
+      return;
+    }
+    if (isDataRestoreFenceError(error)) {
+      // A restore is overwriting what the update reads: a refusal with its
+      // reason, not an update that ran and failed. The hub reports the stack
+      // as failed with that reason.
+      res.status(409).json({ ...envelope, result: 'rejected', code: DATA_RESTORE_FENCE_CODE, error: error.message });
       return;
     }
     if (error instanceof ImageUpdateFactsError) {

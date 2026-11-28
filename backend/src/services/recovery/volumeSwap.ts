@@ -2,6 +2,8 @@ import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { RecoveryError } from './redaction';
 import { RECOVERY_WORK_DIR_PREFIX } from './restoreIntents';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
+import type { ProvenHostRoot } from './hostRoots';
+import { isFsTargetKey } from './fsTargets';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import { helperFailureNote } from './restic/resticOutput';
 
@@ -95,8 +97,12 @@ export interface SwapRunResult {
   ok: boolean;
   /** The status the helper reported, when it reported one. */
   report: SwapReport | null;
-  /** Why the helper did not answer, when it did not. */
-  errorClass: 'interrupted' | 'node_error' | 'capability_unavailable' | null;
+  /**
+   * Why the helper did not answer, when it did not. `identity_unknown` is a
+   * guard refusal: the host directory the daemon bound is not the proven one,
+   * and the swap did not run.
+   */
+  errorClass: 'interrupted' | 'node_error' | 'capability_unavailable' | 'identity_unknown' | null;
 }
 
 /**
@@ -108,10 +114,18 @@ export async function runSwapStep(input: {
   runner: RecoveryHelperRunner;
   operationId: string;
   volumeName: string;
+  /** A host directory target, proven: the swap binds it through the guard instead of the volume. */
+  hostRoot?: ProvenHostRoot;
   intentId: string;
   action: SwapAction;
   signal?: AbortSignal;
 }): Promise<SwapRunResult> {
+  // An `fs:` target is a host directory and is only ever reached through its
+  // proven root; a proven root is only ever an `fs:` target. A mismatched pair
+  // is refused here rather than handed to Docker as a volume name.
+  if (isFsTargetKey(input.volumeName) !== (input.hostRoot !== undefined)) {
+    return { ok: false, report: null, errorClass: 'identity_unknown' };
+  }
   const lines: string[] = [];
   let result;
   try {
@@ -127,7 +141,7 @@ export async function runSwapStep(input: {
         '--id',
         input.intentId,
       ],
-      mounts: { target: input.volumeName },
+      mounts: { target: input.hostRoot ?? input.volumeName },
       signal: input.signal,
       onStdoutLine: (line) => {
         if (lines.length === 0) lines.push(line);
@@ -142,6 +156,7 @@ export async function runSwapStep(input: {
     console.warn('[Recovery] Swap helper could not run:', errorMessageForLog(err));
     return { ok: false, report: null, errorClass: 'node_error' };
   }
+  if (result.guardRefused) return { ok: false, report: null, errorClass: 'identity_unknown' };
   const report = parseSwapReport(lines[0] ?? '');
   if (result.aborted) return { ok: false, report, errorClass: 'interrupted' };
   if (result.killed) {

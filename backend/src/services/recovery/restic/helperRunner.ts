@@ -4,7 +4,8 @@ import { StringDecoder } from 'string_decoder';
 import { errorMessageForLog, sanitizeForLog } from '../../../utils/safeLog';
 import type { ContentChunkSink, RecoveryErrorClass } from '../types';
 import { RecoveryError } from '../redaction';
-import { RECOVERY_HELPER_RESTIC_PATH } from './helperImage';
+import { RECOVERY_HELPER_PROBE_PATH, RECOVERY_HELPER_RESTIC_PATH } from './helperImage';
+import { ProvenHostRoot, UnprovenHostPath, type HelperMountSource } from '../hostRoots';
 
 /**
  * How a recovery helper runs, and nothing else.
@@ -234,12 +235,31 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
   },
 });
 
-/** Volumes a run needs. Names only: a helper never sees a host path or a bind. */
+/**
+ * What a run mounts. A volume is named; a host directory arrives only as a
+ * branded record (see `hostRoots.ts`), and only in the slots
+ * `HOST_ROOT_SOURCE_PROFILES` and `HOST_ROOT_TARGET_PROFILES` allow.
+ */
 export interface HelperMountSpec {
   repository?: string;
-  source?: string;
-  target?: string;
+  source?: HelperMountSource;
+  target?: string | ProvenHostRoot;
+  /**
+   * Bind a proven source recursively, so mounts below it are visible. Only the
+   * `probe` profile accepts it: the nested-mount listing reads them, and every
+   * other read of a host directory is non-recursive so a mount below it is never
+   * captured as if it were the root's own data.
+   */
+  recursiveSource?: boolean;
 }
+
+/** Profiles whose source slot may hold a proven host root. */
+export const HOST_ROOT_SOURCE_PROFILES: ReadonlySet<HelperProfile> = new Set<HelperProfile>(['probe', 'backup']);
+/** Profiles whose target slot may hold a proven host root. `restore` serves only new volumes. */
+export const HOST_ROOT_TARGET_PROFILES: ReadonlySet<HelperProfile> = new Set<HelperProfile>(['materialize', 'swap']);
+
+/** The exit code of a guard that refused the mounted root (`guardRefusedExit` in the probe). */
+export const HELPER_GUARD_REFUSED_EXIT = 86;
 
 export interface HelperRunSpec {
   profile: HelperProfile;
@@ -274,6 +294,12 @@ export interface HelperRunResult {
   stderrTail: string;
   aborted: boolean;
   killed: boolean;
+  /**
+   * True when the run mounted a proven host root and the guard refused it: the
+   * directory the daemon bound is not the one Sencho proved, and the real
+   * command never started.
+   */
+  guardRefused: boolean;
 }
 
 /** Longest stdout line a listener receives before the rest of that line is dropped. */
@@ -309,13 +335,29 @@ export interface HelperContainerInput {
   labels: Readonly<Record<string, string>>;
 }
 
-export interface HelperMount {
+export interface HelperVolumeMount {
   Type: 'volume';
   Source: string;
   Target: string;
   ReadOnly: boolean;
   VolumeOptions: { NoCopy: true };
 }
+
+/**
+ * A host directory, always through `Mounts` (never `Binds`), so a missing source
+ * is an error instead of a directory the daemon creates. Private propagation
+ * keeps a mount made inside the helper from reaching the host, and the bind is
+ * non-recursive except for the nested-mount listing.
+ */
+export interface HelperBindMount {
+  Type: 'bind';
+  Source: string;
+  Target: string;
+  ReadOnly: boolean;
+  BindOptions: { Propagation: 'rprivate'; NonRecursive: boolean };
+}
+
+export type HelperMount = HelperVolumeMount | HelperBindMount;
 
 /**
  * The container spec for one run. Pure, so a test can assert every field of
@@ -327,6 +369,7 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
 } {
   const { spec } = input;
   const mounts: HelperMount[] = [];
+  if (input.mounts.recursiveSource && input.profile !== 'probe') throw new RecoveryError('invalid_request');
   if (spec.needsRepository) {
     if (!input.mounts.repository) throw new RecoveryError('invalid_request');
     mounts.push({
@@ -337,23 +380,62 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
       VolumeOptions: { NoCopy: true },
     });
   }
+  /** The proven root this run mounts, which the guard checks before the command runs. */
+  let guarded: { root: ProvenHostRoot; target: string } | null = null;
   if (spec.source) {
-    mounts.push({
-      Type: 'volume',
-      Source: requireVolume(input.mounts.source),
-      Target: HELPER_SOURCE_MOUNT,
-      ReadOnly: true,
-      VolumeOptions: { NoCopy: true },
-    });
+    const source = input.mounts.source;
+    if (source instanceof ProvenHostRoot || source instanceof UnprovenHostPath) {
+      if (!HOST_ROOT_SOURCE_PROFILES.has(input.profile)) throw new RecoveryError('invalid_request');
+      // Only the proof probe reads a path that is not proven yet.
+      if (source instanceof UnprovenHostPath && input.profile !== 'probe') throw new RecoveryError('invalid_request');
+      mounts.push({
+        Type: 'bind',
+        Source: source.hostPath,
+        Target: HELPER_SOURCE_MOUNT,
+        ReadOnly: true,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: input.mounts.recursiveSource !== true },
+      });
+      if (source instanceof ProvenHostRoot) guarded = { root: source, target: HELPER_SOURCE_MOUNT };
+    } else {
+      if (input.mounts.recursiveSource) throw new RecoveryError('invalid_request');
+      mounts.push({
+        Type: 'volume',
+        Source: requireVolume(source),
+        Target: HELPER_SOURCE_MOUNT,
+        ReadOnly: true,
+        VolumeOptions: { NoCopy: true },
+      });
+    }
+  } else if (input.mounts.source !== undefined && typeof input.mounts.source !== 'string') {
+    // A host path offered to a profile with no source slot is a caller bug, never ignored.
+    throw new RecoveryError('invalid_request');
   }
   if (spec.target) {
-    mounts.push({
-      Type: 'volume',
-      Source: requireVolume(input.mounts.target),
-      Target: HELPER_RESTORE_MOUNT,
-      ReadOnly: false,
-      VolumeOptions: { NoCopy: true },
-    });
+    const target = input.mounts.target;
+    if (target instanceof ProvenHostRoot) {
+      if (!HOST_ROOT_TARGET_PROFILES.has(input.profile)) throw new RecoveryError('invalid_request');
+      mounts.push({
+        Type: 'bind',
+        Source: target.hostPath,
+        Target: HELPER_RESTORE_MOUNT,
+        ReadOnly: false,
+        BindOptions: { Propagation: 'rprivate', NonRecursive: true },
+      });
+      guarded = { root: target, target: HELPER_RESTORE_MOUNT };
+    } else {
+      mounts.push({
+        Type: 'volume',
+        Source: requireVolume(target),
+        Target: HELPER_RESTORE_MOUNT,
+        ReadOnly: false,
+        VolumeOptions: { NoCopy: true },
+      });
+    }
+  } else if (input.mounts.target !== undefined && typeof input.mounts.target !== 'string') {
+    throw new RecoveryError('invalid_request');
+  }
+  if (input.mounts.recursiveSource && !(input.mounts.source instanceof ProvenHostRoot)) {
+    throw new RecoveryError('invalid_request');
   }
 
   const hostConfig: Record<string, unknown> = {
@@ -379,7 +461,16 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
   // never depends on which entrypoint the image happens to carry. The helper image
   // ships restic as its entrypoint, and the probe is a second binary in the same
   // image; naming both here keeps one image serving both without a shell.
-  const [entrypoint, ...entrypointArgs] = input.cmd;
+  // A run that mounts a proven host root starts through the probe's guard, which
+  // stats the mounted root and execs the command only when it is the proven
+  // directory. Applied here, not by callers, so no host-root run can skip it.
+  const argv = guarded
+    ? [
+      RECOVERY_HELPER_PROBE_PATH, 'guard', '--root', guarded.target, '--expect', guarded.root.identity(), '--',
+      ...input.cmd,
+    ]
+    : [...input.cmd];
+  const [entrypoint, ...entrypointArgs] = argv;
 
   const config: Record<string, unknown> = {
     Image: input.imageRef,
@@ -402,8 +493,8 @@ export function buildHelperContainerConfig(input: HelperContainerInput): {
   return { config, hostConfig };
 }
 
-function requireVolume(name: string | undefined): string {
-  if (!name) throw new RecoveryError('invalid_request');
+function requireVolume(name: HelperMountSource | undefined): string {
+  if (typeof name !== 'string' || !name) throw new RecoveryError('invalid_request');
   return name;
 }
 
@@ -661,11 +752,17 @@ export class RecoveryHelperRunner {
       }
     }
 
+    const mountsHostRoot = request.mounts.source instanceof ProvenHostRoot || request.mounts.target instanceof ProvenHostRoot;
+    const guardRefused = mountsHostRoot && exitCode === HELPER_GUARD_REFUSED_EXIT;
+    if (guardRefused) {
+      console.warn('[Recovery] The guard refused the host root of operation %s: it is not the directory Sencho proved', request.operationId);
+    }
     return {
       exitCode,
       stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
       aborted: aborted || request.signal?.aborted === true,
       killed,
+      guardRefused,
     };
   }
 

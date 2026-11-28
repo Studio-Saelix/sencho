@@ -23,6 +23,7 @@ import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../h
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 function tryAcquireRegistryDeliveryLock(
   req: Request,
@@ -148,7 +149,12 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
       console.log(`[Templates] Cleaned up orphaned stack directory: ${stackName}`);
       await fsService.deleteStack(stackName);
-    } catch {
+    } catch (err) {
+      // A fence refusal from the compose check or the orphan deletion means a
+      // data restore holds the directory: it is not an orphan to replace.
+      if (isDataRestoreFenceError(err)) {
+        return res.status(409).json({ error: err.message, code: DATA_RESTORE_FENCE_CODE, rolledBack: false });
+      }
       // Directory does not exist; proceed with deploy
     }
 
@@ -166,19 +172,51 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       envVarCount: envVars ? Object.keys(envVars).length : 0,
     });
 
-    await fsService.createStack(stackName);
-
-    const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
-    if (deliveryPrepId) {
-      await materializePreparedSourceToStack(deliveryPrepId, req.nodeId, stackName);
-    } else {
-      const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
-      await fsService.saveStackContent(stackName, composeYaml);
-
-      if (envVars && Object.keys(envVars).length > 0) {
-        const envString = templateService.generateEnvString(envVars);
-        await fsService.saveEnvContent(stackName, envString);
+    /**
+     * Remove the stack this request created after a data restore's fence
+     * refused it before any runtime was started, and answer the refusal as a
+     * refusal: `409` with `code: "data_restore"`, and `rolledBack` saying
+     * whether the files this request wrote are gone (the removal is file work
+     * the same fence can refuse, and then the files stay).
+     */
+    const answerFenceRefusal = async (refusal: Error): Promise<void> => {
+      let rolledBack = true;
+      try {
+        await fsService.deleteStack(stackName);
+      } catch (cleanupErr) {
+        rolledBack = false;
+        console.warn('[Templates] The files of %s stay after a data restore refused the deploy: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(cleanupErr, 'cleanup failed')));
       }
+      invalidateNodeCaches(req.nodeId);
+      if (!res.headersSent) {
+        res.status(409).json({ error: refusal.message, code: DATA_RESTORE_FENCE_CODE, rolledBack });
+      }
+    };
+
+    try {
+      await fsService.createStack(stackName);
+
+      const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+      if (deliveryPrepId) {
+        await materializePreparedSourceToStack(deliveryPrepId, req.nodeId, stackName);
+      } else {
+        const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
+        await fsService.saveStackContent(stackName, composeYaml);
+
+        if (envVars && Object.keys(envVars).length > 0) {
+          const envString = templateService.generateEnvString(envVars);
+          await fsService.saveEnvContent(stackName, envString);
+        }
+      }
+    } catch (saveErr) {
+      // A save a data restore's fence refused started nothing: the files this
+      // request wrote are removed where the fence allows, and the answer is
+      // the fence's, not a generic failure.
+      if (isDataRestoreFenceError(saveErr)) {
+        await answerFenceRefusal(saveErr);
+        return;
+      }
+      throw saveErr;
     }
 
     try {
@@ -208,6 +246,13 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         );
       }
     } catch (deployError: unknown) {
+      // deployStack throws a fence refusal as itself only before Compose was
+      // handed the up (a later one comes wrapped in its rollback), so no
+      // runtime was started: there is nothing to take down, and the files go.
+      if (isDataRestoreFenceError(deployError)) {
+        await answerFenceRefusal(deployError);
+        return;
+      }
       const rawError = getErrorMessage(deployError, String(deployError));
       console.error(`[Templates] Deploy failed: ${stackName} -`, rawError);
       if (deployError instanceof PulledCandidateBlockedError) {
@@ -238,6 +283,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
       const shouldRollback = refusal !== null || (parsed?.rule ? parsed.rule.canSilentlyRollback : true);
       let rolledBack = false;
+      let downFenceRefusal: string | null = null;
 
       if (shouldRollback) {
         let dockerDownCompleted = true;
@@ -263,7 +309,10 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
             console.warn('[Templates] Rollback of %s skips Docker down: %s', sanitizeForLog(stackName), sanitizeForLog(downErr.message));
           } else {
             dockerDownCompleted = false;
-            dockerDownRefused = isDockerEndpointProtectedError(downErr);
+            // The endpoint guard, or a data restore's fence on a file the down
+            // names: nothing was taken down, so the files stay.
+            dockerDownRefused = isDockerEndpointProtectedError(downErr) || isDataRestoreFenceError(downErr);
+            if (isDataRestoreFenceError(downErr)) downFenceRefusal = downErr.message;
             console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
           }
         }
@@ -287,9 +336,16 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         error: refusal?.message ?? parsed?.message ?? rawError,
         rolledBack,
         ruleId: refusal?.code ?? parsed?.rule?.id ?? 'UNKNOWN',
+        // The deploy failed for its own reason; the teardown after it was
+        // refused by a data restore, so its containers and files stay.
+        ...(downFenceRefusal ? { rollbackRefusal: { code: DATA_RESTORE_FENCE_CODE, error: downFenceRefusal } } : {}),
       });
     }
   } catch (error: unknown) {
+    if (isDataRestoreFenceError(error)) {
+      if (!res.headersSent) res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, rolledBack: false });
+      return;
+    }
     const message = getErrorMessage(error, 'Failed to deploy template');
     console.error('[Templates] Deploy error:', message);
     res.status(500).json({ error: message });

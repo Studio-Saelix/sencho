@@ -24,12 +24,22 @@ import { RecoveryPointStore } from './recoveryPoints';
 import { RecoveryRepositoryStore } from './repositories';
 import { classifyRecoveryError, RecoveryError } from './redaction';
 import { getRecoveryAuthorityId } from './recoveryDb';
-import { RestoreIntentStore, reconcileRestoreIntentsAtStartup } from './restoreIntents';
-import { StorageIdentityStore } from './storageIdentity';
+import { RestoreIntentStore, isRecoveryWorkDirName, reconcileRestoreIntentsAtStartup } from './restoreIntents';
+import { StorageIdentityStore, canonicalizeLocator, deriveStorageKey } from './storageIdentity';
 import SelfIdentityService from '../SelfIdentityService';
+import {
+  assertNoOverlappingFsWork,
+  describeFsIneligible,
+  fsTargetKey,
+  listStackFsRootCandidates,
+  locateStoredFsRoot,
+  proveHostRoot,
+  readFsRootEnvironment,
+  resolveFsRootDependents,
+} from './fsRoots';
+import { hostRootEngineDeps, requiresNodeWideCheck, storageAdapterFor } from './storageAdapters';
 import { StackOpLockService } from '../StackOpLockService';
 import {
-  describeStoredLocator,
   describeVolumeLocator,
   knownStacksFor,
   observeVolumeInUse,
@@ -77,6 +87,7 @@ import type {
   ReadablePoint,
   RecoveryErrorClass,
   RecoveryOperation,
+  RecoveryPoint,
   RecoveryProgress,
   RepositoryDescriptor,
   StorageDependent,
@@ -128,6 +139,13 @@ interface RunningWork {
 
 /** How stale the cached health may be before a read refreshes it in the background. */
 const HEALTH_TTL_MS = 60_000;
+/**
+ * At most this many recorded spellings sharing a directory's token are proven
+ * for an alias merge, each one helper probe. Several current identities with one
+ * token are rare (a directory moved, a second Sencho mount); this bounds the
+ * probes a capture can start.
+ */
+const MAX_ALIAS_IDENTITIES = 4;
 /** How long boot waits for a missing helper image to download before it carries on without it. */
 const BOOT_HELPER_PULL_TIMEOUT_MS = 60_000;
 
@@ -703,6 +721,211 @@ export class RecoveryEngineService {
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }
 
+  /**
+   * Create a root point of a host directory a stack declares: one of its bind
+   * sources, or its own source directory.
+   *
+   * The caller names a stack and the root id `StackFileRootsService` minted, never
+   * a path. The roots are derived again here with a fresh render and the id is
+   * matched against them, so a forged or stale id widens nothing. Order: access
+   * against every dependent, then eligibility, then the identity proof, and only
+   * then a row.
+   */
+  async admitCreateFsPoint(input: {
+    stackName: string;
+    rootId: string;
+    actor: string;
+    idempotencyKey: string;
+    requestDigest: string;
+    transport: RecoveryOperation['transport'];
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
+    /** Whether the caller may protect the named stack, so it may be told the id names nothing. */
+    authorizeStack: (stackName: string) => boolean;
+  }): Promise<AdmissionResult> {
+    this.requireReady();
+    // A retry after a lost answer returns the work already admitted, before the
+    // derivation below runs again against a root that work may be reading.
+    const replay = this.operations.findReplay({
+      idempotencyKey: input.idempotencyKey,
+      kind: 'create_point',
+      actor: input.actor,
+      transport: input.transport,
+      requestDigest: input.requestDigest,
+    });
+    if (replay) return { operation: replay, replayed: true };
+    const repository = this.requireActiveRepository();
+    const docker = this.docker();
+    const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, docker);
+    const knownStackNames = await knownStacksFor(this.nodeId);
+    if (!knownStackNames.includes(input.stackName)) {
+      this.requireNodeWideAccess(input.authorize);
+      throw new RecoveryError('invalid_request', { detail: 'No stack on this node has that name.' });
+    }
+
+    const environment = await readFsRootEnvironment(this.nodeId, docker);
+    const listed = await listStackFsRootCandidates({
+      nodeId: this.nodeId,
+      stackName: input.stackName,
+      fresh: true,
+      environment,
+    });
+    const candidate = listed.candidates.find((root) => root.rootId === input.rootId);
+    if (!candidate) {
+      if (!input.authorizeStack(input.stackName)) throw new RecoveryError('permission_denied');
+      throw new RecoveryError('invalid_request', {
+        detail: 'This stack declares no directory with that root id. List its storage again.',
+      });
+    }
+
+    const hostPath = candidate.hostPath;
+    const naturalKey = hostPath
+      ? deriveStorageKey(getRecoveryAuthorityId(), ownerNodeKey, 'bind_root', canonicalizeLocator('bind_root', hostPath))
+      : null;
+    const resolution = await resolveFsRootDependents({
+      nodeId: this.nodeId,
+      storageKey: naturalKey,
+      knownStackNames,
+      root: { senchoPath: candidate.senchoPath, hostPath: hostPath ?? candidate.senchoPath, aliases: candidate.aliases },
+      render: true,
+      docker,
+      environment,
+    });
+    // A directory whose host path is unknown has no record yet; it is checked
+    // against the stacks that declare it now, under a key no row can carry.
+    const keyForCheck = requiresNodeWideCheck(resolution) ? null : (naturalKey ?? `unmapped:${candidate.senchoPath}`);
+    if (!input.authorize({ storageKey: keyForCheck, dependents: resolution.dependents })) {
+      throw new RecoveryError('permission_denied');
+    }
+    if (candidate.status === 'mapping_unreadable') {
+      throw new RecoveryError('identity_unknown', {
+        reason: 'path_mapping_unproven',
+        detail: 'Sencho could not read its own container mounts, so it cannot tell which host path holds this directory. Try again shortly.',
+      });
+    }
+    // Docker not saying where its data root is is a question to ask again, so it
+    // answers as an unproven mapping rather than as a directory never offered.
+    if (candidate.status === 'ineligible' && candidate.ineligibleReason === 'docker_root_unknown') {
+      throw new RecoveryError('identity_unknown', {
+        reason: 'path_mapping_unproven',
+        detail: describeFsIneligible(candidate.ineligibleReason) ?? undefined,
+      });
+    }
+    if (candidate.status === 'ineligible') {
+      throw new RecoveryError('invalid_request', { detail: describeFsIneligible(candidate.ineligibleReason) ?? undefined });
+    }
+    if (hostPath === null) throw new RecoveryError('identity_unknown');
+
+    const proven = await proveHostRoot({
+      runner: this.helperRunner(),
+      operationId: randomUUID(),
+      senchoPath: candidate.senchoPath,
+      hostPath,
+      aliases: candidate.aliases,
+    });
+
+    // Two host spellings of one directory are one identity: a current identity
+    // with this token under another locator is the one this point belongs to,
+    // and its recorded dependents join the access check.
+    const store = StorageIdentityStore.getInstance();
+    const tokenMatches = store.listCurrentByGenerationToken(ownerNodeKey, 'bind_root', proven.generationToken, MAX_ALIAS_IDENTITIES);
+    // An equal token is a candidate, not proof: a moved directory keeps its
+    // token, and a clone can share inode and birth time with its origin. Each
+    // recorded spelling is proven now, oldest first, and must be this very
+    // directory; one that cannot be proven (a mount since removed) is passed
+    // over, so a directory recorded under it can still join a later spelling.
+    // This spelling's own current identity with the same token is the directory
+    // already; it is looked up by its key, so the cap on the list never hides it.
+    const own = naturalKey ? store.getCurrent(naturalKey) : null;
+    let alias: StorageIdentity | null = null;
+    if (own?.generationToken !== proven.generationToken) {
+      for (const match of tokenMatches) {
+        if (await this.isSameDirectory(match.locator, proven.root.identity())) {
+          alias = match;
+          break;
+        }
+      }
+    }
+    const locator = alias ? alias.locator : hostPath;
+    if (alias && alias.locator !== hostPath) {
+      if (!input.authorize({ storageKey: keyForCheck === null ? null : alias.storageKey, dependents: resolution.dependents })) {
+        throw new RecoveryError('permission_denied');
+      }
+    }
+
+    const observed = store.observe({
+      ownerNodeKey,
+      kind: 'bind_root',
+      locator,
+      generationToken: proven.generationToken,
+      dependents: resolution.dependents,
+    });
+    this.requireRepositoryStillActive(repository.id);
+
+    const started = this.operations.admit(
+      {
+        idempotencyKey: input.idempotencyKey,
+        kind: 'create_point',
+        storageId: observed.id,
+        actor: input.actor,
+        transport: input.transport,
+        requestDigest: input.requestDigest,
+      },
+      [
+        { scope: 'storage', resourceKey: observed.storageKey },
+        { scope: 'repository', resourceKey: repository.id },
+      ],
+      (operation) => {
+        // The same rule a volume has: an overwrite that has not settled owns the
+        // directory. A directory inside or around one being captured or
+        // overwritten is refused too, because its storage lock is another key.
+        if (RestoreFenceStore.getInstance().liveIntentForVolume(fsTargetKey(observed.storageKey))) {
+          throw new RecoveryError('lock_held', {
+            detail: 'A restore of this directory has not finished or still holds its fence. Resolve the restore, then capture again.',
+          });
+        }
+        assertNoOverlappingFsWork(observed.locator, observed.storageKey);
+        if (hostPath !== observed.locator) assertNoOverlappingFsWork(hostPath, observed.storageKey);
+        return this.points.begin({
+          kind: 'root',
+          storageId: observed.id,
+          expectedGenerationToken: proven.generationToken,
+          repositoryId: repository.id,
+          trigger: 'manual',
+          actor: input.actor,
+          sourceOperationId: operation.id,
+          sourceNodeKey: ownerNodeKey,
+          engineId: RESTIC_ENGINE_ID,
+        });
+      },
+    );
+    if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
+
+    const operationId = started.operation.id;
+    const point = started.setup;
+    this.schedule(operationId, () => this.runCreatePoint(operationId, point.id, observed.id, repository));
+    return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /** Whether a recorded host path is, proven now, the directory with this identity. */
+  private async isSameDirectory(locator: string, identity: string): Promise<boolean> {
+    try {
+      const location = await locateStoredFsRoot(locator);
+      const proven = await proveHostRoot({
+        runner: this.helperRunner(),
+        operationId: randomUUID(),
+        senchoPath: location.senchoPath,
+        hostPath: location.hostPath,
+        followSenchoPath: true,
+      });
+      return proven.root.identity() === identity;
+    } catch (err) {
+      // A recorded spelling that cannot be proven is not this directory; the
+      // capture records its own identity under its own path instead.
+      console.warn('[Recovery] A recorded spelling of this directory could not be proven:', errorMessageForLog(err));
+      return false;
+    }
+  }
+
   /** Verify a point. The check itself is repository-wide evidence. */
   async admitVerify(input: {
     nodeId: number;
@@ -765,6 +988,11 @@ export class RecoveryEngineService {
      * caller who may not restore this point.
      */
     assertTargetAvailable?: () => Promise<void>;
+    /**
+     * One path of the point, absolute within it (`/data/db.sqlite`), to restore
+     * alone at its own place in the new volume. Omitted restores the whole point.
+     */
+    path?: string;
   }): Promise<AdmissionResult> {
     this.requireReady();
     const point = this.points.get(input.pointId);
@@ -794,6 +1022,10 @@ export class RecoveryEngineService {
       if (!input.authorizeCrossStack(stackName)) throw new RecoveryError('permission_denied');
     }
     await input.assertTargetAvailable?.();
+    // A path restore names a path that must be in the point: the read half
+    // answers from the snapshot itself, before any row or volume exists, so a
+    // missing path is refused instead of restoring an empty volume.
+    const pathScope = input.path === undefined ? undefined : await this.requirePathInPoint(point, repository, input.path);
 
     // The check at the top ran before the awaits; a replace may have finished since.
     this.requireRepositoryNotReplaced(repository.id);
@@ -818,6 +1050,7 @@ export class RecoveryEngineService {
         targetVolume: input.targetVolumeName,
         actor: input.actor,
         processEpoch: this.processEpoch,
+        pathScope,
       }),
     );
     if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
@@ -826,6 +1059,54 @@ export class RecoveryEngineService {
     const intent = started.setup;
     this.schedule(operationId, () => this.runRestore(operationId, intent.id, point.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /**
+   * The point-relative form of `pointPath` when the point holds it, after one
+   * record-only read of the snapshot. The root itself is not a path restore.
+   */
+  private async requirePathInPoint(
+    point: ReadablePoint | RecoveryPoint,
+    repository: RepositoryDescriptor,
+    pointPath: string,
+  ): Promise<string> {
+    if (pointPath === '/' || !point.snapshotId) {
+      throw new RecoveryError('invalid_request', {
+        detail: pointPath === '/' ? 'Restore the whole point on the restore route.' : undefined,
+      });
+    }
+    // A restore work directory a point carries is never restored on its own: it
+    // holds the data an earlier overwrite replaced, not the root's own content.
+    if (isRecoveryWorkDirName(pointPath.split('/')[1] ?? '')) {
+      throw new RecoveryError('invalid_request', { reason: 'unsupported_entry_type' });
+    }
+    const release = acquirePointReadSlot(repository.id);
+    if (!release) {
+      throw new RecoveryError('capability_unavailable', {
+        reason: 'read_capacity',
+        detail: 'This node is already reading as many saved points as it allows. Try again shortly.',
+      });
+    }
+    try {
+      const operationId = `read-${randomUUID()}`;
+      const controller = new AbortController();
+      const engine = this.buildEngine(repository, operationId, controller.signal) as BackupEngine & Partial<PointContentReader>;
+      if (typeof engine.readDirectory !== 'function') {
+        throw new RecoveryError('capability_unavailable', {
+          detail: 'The recovery engine on this node cannot read saved point contents.',
+        });
+      }
+      const read = await engine.readDirectory(
+        { snapshotId: point.snapshotId, repositoryId: repository.id, path: pointPath },
+        { offset: 0, pageSize: 0 },
+        { operationId, signal: controller.signal },
+      );
+      if (!read.ok) throw new RecoveryError(read.errorClass);
+      if (!read.evidence.found) throw new RecoveryError('invalid_request', { reason: 'path_not_found' });
+    } finally {
+      release();
+    }
+    return pointPath.replace(/^\/+/, '');
   }
 
   /**
@@ -859,7 +1140,9 @@ export class RecoveryEngineService {
   async admitOverwrite(input: {
     pointId: string;
     confirmationToken: string;
-    confirmVolumeName: string;
+    /** The volume name typed back; a host directory takes `confirmHostPath` instead. */
+    confirmVolumeName?: string;
+    confirmHostPath?: string;
     actor: string;
     idempotencyKey: string;
     requestDigest: string;
@@ -888,6 +1171,7 @@ export class RecoveryEngineService {
       pointId: input.pointId,
       confirmationToken: input.confirmationToken,
       confirmVolumeName: input.confirmVolumeName,
+      confirmHostPath: input.confirmHostPath,
     });
     this.requireRepositoryStillActive(repository.id);
 
@@ -932,17 +1216,23 @@ export class RecoveryEngineService {
         ],
         // One implementation of the admission rows: the intent, the source hold
         // and the exact fence set, written inside the operation's transaction.
-        (operation) => recordOverwriteIntent(deps, {
-          intentId,
-          operationId: operation.id,
-          pointId: admitted.point.id,
-          targetVolume: admitted.storage.locator,
-          actor: input.actor,
-          processEpoch: this.processEpoch,
-          expectedGenerationToken: admitted.liveGenerationToken,
-          fenceMembers: admitted.fenceMembers,
-          dependentStacks: admitted.stacks,
-        }),
+        (operation) => {
+          // A host directory inside or around one another operation holds is
+          // refused here, inside the admission, where no other admission can race it.
+          if (admitted.targetPaths) assertNoOverlappingFsWork(admitted.targetPaths.hostPath, admitted.storageKey);
+          return recordOverwriteIntent(deps, {
+            intentId,
+            operationId: operation.id,
+            pointId: admitted.point.id,
+            targetVolume: admitted.targetVolume,
+            targetPaths: admitted.targetPaths,
+            actor: input.actor,
+            processEpoch: this.processEpoch,
+            expectedGenerationToken: admitted.liveGenerationToken,
+            fenceMembers: admitted.fenceMembers,
+            dependentStacks: admitted.stacks,
+          });
+        },
       );
     } catch (err) {
       releaseStacks();
@@ -1151,7 +1441,13 @@ export class RecoveryEngineService {
   /** What a content read is decided on, from the dependents resolved now with a render. */
   private async pointContentReadTarget(storage: StorageIdentity | null): Promise<PointContentReadTarget> {
     if (!storage) return { kind: 'detached' };
-    return pointContentReadTargetFor(storage.storageKey, await this.resolveStorageDependents(storage));
+    const resolution = await this.resolveStorageDependents(storage);
+    // A container no stack owns depends on the directory: the read is held to
+    // the node-wide rule an unrenderable model gets.
+    return pointContentReadTargetFor(
+      storage.storageKey,
+      resolution.unownedContainer ? { ...resolution, kind: 'unrenderable', stackName: '' } : resolution,
+    );
   }
 
   /** The deps every overwrite entry point needs, so the three cannot drift. */
@@ -1233,7 +1529,7 @@ export class RecoveryEngineService {
    * the node-wide decision applies, the same one a storage no stack declares gets.
    */
   private async requireStorageAccess(
-    storage: { storageKey: string; locator: string } | null,
+    storage: StorageIdentity | null,
     authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean,
   ): Promise<void> {
     if (!storage) {
@@ -1241,34 +1537,25 @@ export class RecoveryEngineService {
       return;
     }
     const resolution = await this.resolveStorageDependents(storage);
-    // An unrenderable model makes the full dependent set unknown; the check then
+    // An unrenderable model makes the full dependent set unknown, and so does a
+    // container no stack owns that depends on a host directory; the check then
     // runs without a stack, which the caller does for a null storage key.
-    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
+    const storageKeyForCheck = requiresNodeWideCheck(resolution) ? null : storage.storageKey;
     if (!authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
       throw new RecoveryError('permission_denied');
     }
   }
 
-  /** Every stack that depends on a stored volume, resolved now with a Compose render. */
-  private async resolveStorageDependents(storage: { locator: string }): Promise<DependentResolution> {
-    const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
-    const knownStackNames = await knownStacksFor(this.nodeId);
-    // The volume may be gone by now (that is when a point is needed), so the
-    // stored locator is described, not required.
-    const described = await describeStoredLocator({
-      docker: this.docker(),
-      ownerNodeKey,
-      locator: storage.locator,
-    });
-    return resolveVolumeDependents({
+  /** Every stack that depends on a stored storage, resolved now with a Compose render. */
+  private async resolveStorageDependents(storage: StorageIdentity): Promise<DependentResolution> {
+    const docker = this.docker();
+    const adapter = storageAdapterFor(storage.kind, {
       nodeId: this.nodeId,
-      ownerNodeKey,
-      knownStackNames,
-      volumeName: storage.locator,
-      volumeLabels: described.labels,
-      render: true,
-      docker: this.docker(),
+      docker,
+      ownerNodeKey: await ownerNodeKeyFor(this.nodeId, docker),
+      knownStackNames: await knownStacksFor(this.nodeId),
     });
+    return adapter.dependents(storage, { render: true });
   }
 
   private requireNodeWideAccess(
@@ -1559,7 +1846,7 @@ export class RecoveryEngineService {
           repositoryId: repository.id,
           snapshotId: point.snapshotId,
           target: { mode: 'new_volume', volumeName: targetVolume },
-          pathScope: null,
+          pathScope: intentRecord.pathScope,
           phase: 'staging',
           actor: intentRecord.actor,
           createdAt: intentRecord.createdAt,
@@ -1882,6 +2169,7 @@ export class RecoveryEngineService {
         });
       },
       observeInUse: (volumeName) => observeVolumeInUse(docker, volumeName),
+      hostRoots: hostRootEngineDeps({ docker, runner: () => this.helperRunner() }),
       repositoryFor: (repositoryId) => {
         const descriptor = this.repositories.get(repositoryId);
         return descriptor ? { id: descriptor.id, locator: descriptor.locator } : null;

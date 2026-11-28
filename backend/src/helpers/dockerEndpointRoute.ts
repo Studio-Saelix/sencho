@@ -1,10 +1,12 @@
 import type { Request, Response } from 'express';
 import { ComposeService } from '../services/ComposeService';
+import { FileSystemService } from '../services/FileSystemService';
 import {
   DOCKER_ENDPOINT_PROTECTED_CODE,
   isDockerEndpointProtectedError,
   type EndpointMutation,
 } from './dockerEndpointGuard';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from './dataRestoreFenceError';
 
 /**
  * Route-level front of the Docker endpoint guard: when `mutation` would stop or
@@ -18,13 +20,24 @@ export async function refuseIfDockerEndpoint(
   res: Response,
   stackName: string,
   mutation: EndpointMutation,
+  fence: { pinsComposeFiles?: boolean } = {},
 ): Promise<boolean> {
   try {
     const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, mutation);
     if (!refusal) return false;
+    // A compose file a data restore is swapping does not render: the fence
+    // answers, for the files the caller's command opens (`fence`).
+    if (refusal?.renderFailed) await FileSystemService.getInstance(req.nodeId).refuseIfComposeFenced(stackName, fence);
     res.status(409).json({ error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: refusal.reason, service: refusal.service });
     return true;
   } catch (error) {
+    // A compose file a data restore is swapping: the answer is the fence's. It
+    // is a pre-check, so nothing has moved, and a hub restoring through this
+    // node (a rollout rollback) is told so.
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE, failureClass: 'pre_mutation' });
+      return true;
+    }
     console.error('[DockerEndpointGuard] Check failed; refusing the request:', error);
     res.status(500).json({ error: 'Could not verify that this operation keeps the Docker connection safe.' });
     return true;

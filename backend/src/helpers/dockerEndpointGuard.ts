@@ -12,6 +12,7 @@ import { normalizeComposeVersion } from './composeVersionSkew';
 import { getErrorMessage } from '../utils/errors';
 import { SENCHO_INFRASTRUCTURE_LABEL as INFRASTRUCTURE_LABEL } from './senchoLabels';
 import type { DockerEndpointRefusal } from './dockerEndpointError';
+import { isDataRestoreFenceError } from './dataRestoreFenceError';
 
 /*
  * Guard for lifecycle operations that would stop or recreate the container
@@ -931,6 +932,9 @@ async function readRendered(probes: EndpointGuardProbes): Promise<RenderResult> 
     console.warn('[DockerEndpointGuard] Compose config could not be rendered; %s is not read from the file', INFRASTRUCTURE_LABEL);
     return { state: 'failed', detail: 'Compose returned no configuration', services: new Map() };
   } catch (error) {
+    // A data restore's fence refused the render before Compose ran: the fence
+    // answers for the operation, not the guard's "could not render".
+    if (isDataRestoreFenceError(error)) throw error;
     const detail = getErrorMessage(error, 'render failed');
     console.warn('[DockerEndpointGuard] Could not read %s from the Compose config:', INFRASTRUCTURE_LABEL, detail);
     return { state: 'failed', detail, services: new Map() };
@@ -941,6 +945,7 @@ function renderFailureRefusal(stackName: string, detail: string): DockerEndpoint
   return {
     reason: 'unresolved',
     service: null,
+    renderFailed: true,
     message: `Sencho could not render the Compose configuration of "${stackName}" (${detail}), so it cannot tell whether this operation would stop or recreate the container that carries its Docker connection. `
       + 'Fix the configuration (rendering it must also take under 20 seconds and produce no more than 5 MiB of output), then retry.',
   };

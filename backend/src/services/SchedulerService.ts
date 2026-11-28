@@ -1467,10 +1467,18 @@ export class SchedulerService {
                 const policy = await resolveUpdatePolicy(nodeId, {
                     stack: stackName, target: { scope: 'stack' }, trigger: 'scheduled',
                 });
+                // A compose file a data restore is swapping does not render:
+                // the fence answers before the skip is recorded.
+                if (policy.evaluation === 'unrenderable') {
+                    await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
+                }
                 if (policy.decision !== 'allow') {
                     recordUpdatePolicyDecision(nodeId, policy, 'system:scheduler');
                     return { kind: 'update_policy_skipped', policy };
                 }
+                // A compose file a data restore is overwriting refuses the run
+                // before the gate, so the refusal writes no gate evidence.
+                await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
                 const schedulerGate = await this.enforceSchedulerPolicyGate(
                     stackName,
                     nodeId,

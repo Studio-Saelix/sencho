@@ -47,6 +47,8 @@ interface CheckedResult {
   healthGateId: string | null;
   /** Why the target's Docker endpoint guard refused the update, on a `rejected` result. */
   endpointRefusal?: string;
+  /** Why the target refused the update while a data restore overwrites what it reads, on a `rejected` result. */
+  dataRestoreRefusal?: string;
   /** The target's decision, on an `update_policy_skipped` result. Re-validated, never trusted raw. */
   updatePolicy?: RemoteUpdatePolicy;
 }
@@ -63,6 +65,9 @@ function checkedResult(value: unknown, stack: string): CheckedResult | null {
   const endpointRefusal = body.result === 'rejected' && typeof body.endpointRefusal === 'string'
     ? body.endpointRefusal.replace(/\s+/g, ' ').trim().slice(0, ENDPOINT_REFUSAL_MAX_LENGTH)
     : '';
+  const dataRestoreRefusal = body.result === 'rejected' && body.code === 'data_restore' && typeof body.error === 'string'
+    ? body.error.replace(/\s+/g, ' ').trim().slice(0, ENDPOINT_REFUSAL_MAX_LENGTH)
+    : '';
   // The target's decision is rebuilt field by field. A skip that cannot be read
   // is an unconfirmed outcome, so the whole envelope is refused.
   const updatePolicy = body.updatePolicy === undefined ? undefined : readRemoteUpdatePolicy(body.updatePolicy);
@@ -72,6 +77,7 @@ function checkedResult(value: unknown, stack: string): CheckedResult | null {
   return {
     contractVersion: 1, stack, applied: body.applied, result: body.result as CheckedResult['result'], healthGateId: body.healthGateId,
     ...(endpointRefusal ? { endpointRefusal } : {}),
+    ...(dataRestoreRefusal ? { dataRestoreRefusal } : {}),
     ...(updatePolicy ? { updatePolicy } : {}),
   };
 }
@@ -200,6 +206,7 @@ export class AutoUpdateRemoteCoordinator {
       }
       // A refusal fails the run for this stack, with the target's reason, so it is not mistaken for a skipped update.
       if (result.endpointRefusal) return `Stack "${stack}" failed: ${result.endpointRefusal}`;
+      if (result.dataRestoreRefusal) return `Stack "${stack}" failed: ${result.dataRestoreRefusal}`;
       // A declared policy is an outcome, not a failure, and the target's own
       // reason is relayed so a local and a remote run read the same.
       if (result.result === 'update_policy_skipped') {

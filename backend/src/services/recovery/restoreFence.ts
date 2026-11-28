@@ -1,9 +1,12 @@
 import type Docker from 'dockerode';
+import { AsyncLocalStorage } from 'async_hooks';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { DataRestoreFenceError, type FenceSubject } from '../../helpers/dataRestoreFenceError';
 import { recoveryDb } from './recoveryDb';
+import { parseFsTargetPaths, type FsTargetPaths } from './fsTargets';
 import { RecoveryError } from './redaction';
 import type { RestoreFenceState } from './restoreIntents';
+import type { OwnMounts } from './fsRoots';
 
 /**
  * The durable restore fence.
@@ -21,10 +24,12 @@ import type { RestoreFenceState } from './restoreIntents';
  *
  * Every Sencho path that can start a workload consults this module: a Compose
  * lifecycle through `StackOpLockService`, a single container start or restart
- * through `DockerController`, and the Files & Volumes browser. The fence matches
- * containers by what they mount, never by comparing a Compose project label to a
- * stack name: the two can differ (a `name:` key, or case), and an old container
- * from an earlier project would be missed.
+ * through `DockerController`, and the Files & Volumes browser. The stack file
+ * routes register each operation on a host directory here as well, so a fence
+ * on a directory waits for (or cuts off) the file work already running on it.
+ * The fence matches containers by what they mount, never by comparing a Compose
+ * project label to a stack name: the two can differ (a `name:` key, or case),
+ * and an old container from an earlier project would be missed.
  *
  * A store this build cannot read (schema `newer`, or a failed migration) makes
  * the checks fail open with one log line. The Docker-level restart policy fence
@@ -96,10 +101,13 @@ const LIVE_FENCE_STATE = "('held','release_failed')";
 
 /** One log line for an unreadable store, not one per request. */
 let warnedUnreadable = false;
+/** Fenced restores whose directory paths could not be read, each logged once. */
+const warnedUnreadableFsTargets = new Set<string>();
 
-/** Test seam: allow the warning again. */
+/** Test seam: allow the warnings again. */
 export function resetRestoreFenceWarningForTests(): void {
   warnedUnreadable = false;
+  warnedUnreadableFsTargets.clear();
 }
 
 function warnStoreUnreadable(err: unknown): void {
@@ -109,6 +117,21 @@ function warnStoreUnreadable(err: unknown): void {
     '[Recovery] The restore fence store cannot be read, so Sencho cannot tell which volumes are fenced: %s',
     errorMessageForLog(err),
   );
+}
+
+/** The restore intent whose own work is running in this async context, if any. */
+const fenceOwnerScope = new AsyncLocalStorage<string>();
+
+/**
+ * Run `work` as the restore `intentId` itself: inside it, that restore's own
+ * directory fence is not listed (`liveFencedFsTargets`), so the reads the
+ * restore makes of the stacks that depend on its directory (the dependent
+ * re-check renders each one's Compose model, before the swap starts) are not
+ * refused by the fence the same restore holds. Every other restore's fence
+ * still applies, and nothing outside `work` is affected.
+ */
+export function runAsFenceOwner<T>(intentId: string, work: () => Promise<T>): Promise<T> {
+  return fenceOwnerScope.run(intentId, work);
 }
 
 export class RestoreFenceStore {
@@ -203,6 +226,37 @@ export class RestoreFenceStore {
   }
 
   /**
+   * The host directories a live overwrite holds, with where each lives. Empty in
+   * the common case, so the callers that check it pay one query.
+   */
+  liveFencedFsTargets(): FsTargetPaths[] {
+    const owner = fenceOwnerScope.getStore() ?? null;
+    try {
+      const rows = recoveryDb().prepare(`
+        SELECT id, target_paths_json AS paths FROM recovery_restore_intents
+        WHERE target_mode = 'staged_overwrite'
+          AND target_volume LIKE 'fs:%'
+          AND fence_state IN ${LIVE_FENCE_STATE}
+      `).all() as Array<{ id: string; paths: string | null }>;
+      return rows.filter((row) => row.id !== owner).map((row) => {
+        const paths = parseFsTargetPaths(row.paths);
+        if (paths) return paths;
+        // A fenced directory whose record cannot be read is still fenced. It
+        // stands for every host path, so nothing that binds one starts and no
+        // file route touches one until the restore is resolved.
+        if (!warnedUnreadableFsTargets.has(row.id)) {
+          warnedUnreadableFsTargets.add(row.id);
+          console.warn('[Recovery] The paths of fenced restore %s cannot be read; refusing every host directory until it is resolved', sanitizeForLog(row.id));
+        }
+        return { senchoPath: '/', hostPath: '/', aliases: [] };
+      });
+    } catch (err) {
+      warnStoreUnreadable(err);
+      return [];
+    }
+  }
+
+  /**
    * Whether a stack has a container under a live fence. Both the stack directory
    * name and its Compose project name are matched, because callers key by either.
    */
@@ -281,7 +335,7 @@ interface InspectableContainer {
     Name?: string;
     State?: { Running?: boolean };
     HostConfig?: { RestartPolicy?: RestartPolicy };
-    Mounts?: Array<{ Type?: string; Name?: string }>;
+    Mounts?: Array<{ Type?: string; Name?: string; Source?: string; RW?: boolean }>;
   }>;
   update(options: { RestartPolicy: RestartPolicy }): Promise<unknown>;
   stop(options?: { t?: number }): Promise<unknown>;
@@ -428,10 +482,18 @@ export function startUnderFence<T>(
   volumeNames: readonly string[],
   start: () => Promise<T>,
   subject: FenceSubject = 'container',
+  /**
+   * A refusal to evaluate in the same synchronous step as the registration. The
+   * directory match is asynchronous, so it runs before; this re-reads the
+   * fenced directories here and refuses one that appeared after the match.
+   */
+  recheck?: () => DataRestoreFenceError | null,
 ): Promise<T> {
   const fenced = RestoreFenceStore.getInstance().liveFencedVolumeNames();
   const hit = volumeNames.find((name) => fenced.includes(name));
   if (hit) return Promise.reject(new DataRestoreFenceError(hit, subject));
+  const late = recheck?.() ?? null;
+  if (late) return Promise.reject(late);
   let run: Promise<T>;
   try {
     run = start();
@@ -479,6 +541,18 @@ export async function waitForStartsInFlight(timeoutMs = startDrainTimeoutMs): Pr
 }
 
 /**
+ * Wait for the work a fence just recorded must not run under: every container
+ * start in flight, and, for a host directory, every stack file operation on it
+ * (see `waitForFsWorkOn`). Null when all of it has finished; otherwise which kind
+ * did not, and the fence is refused.
+ */
+export async function waitForWorkBeforeFence(fsTarget: FsTargetPaths | null): Promise<'start' | 'file_operation' | null> {
+  if (!await waitForStartsInFlight()) return 'start';
+  if (fsTarget && !await waitForFsWorkOn(fsTarget)) return 'file_operation';
+  return null;
+}
+
+/**
  * Start or restart one container unless a volume it mounts is fenced. Called
  * from `DockerController`, through which every single-container start and
  * restart of the Sencho process passes. The mounts are read only while a fence is live, so
@@ -491,7 +565,7 @@ export async function startContainerUnderFence<T>(
   start: () => Promise<T>,
 ): Promise<T> {
   if (RestoreFenceStore.getInstance().liveFencedVolumeNames().length === 0) return startUnderFence([], start);
-  let mounts: Array<{ Type?: string; Name?: string }>;
+  let mounts: Array<{ Type?: string; Name?: string; Source?: string; RW?: boolean }>;
   try {
     const inspected = await (docker.getContainer(containerId) as unknown as InspectableContainer).inspect();
     mounts = inspected.Mounts ?? [];
@@ -502,7 +576,241 @@ export async function startContainerUnderFence<T>(
   const names = mounts
     .filter((m) => m.Type === 'volume' && m.Name !== undefined)
     .map((m) => m.Name as string);
-  return startUnderFence(names, start);
+  // A host directory under a fence is matched by the dependency rule: a bind of
+  // it, of a path inside it, or of an ancestor that can write it. A read-only
+  // ancestor (a monitoring agent) still starts.
+  const fsTargets = RestoreFenceStore.getInstance().liveFencedFsTargets();
+  const bindsHostPath = mounts.some((m) => m.Type === 'bind');
+  const checked = new Set<string>();
+  if (fsTargets.length > 0 && bindsHostPath) {
+    const { matchContainerToRoot, readOwnMounts } = await import('./fsRoots');
+    // `null` means Sencho is not in a container, so its paths are the host's.
+    // Mounts that cannot be read are not that: without them a symlinked or
+    // second spelling of the fenced directory cannot be recognised, so a start
+    // that binds any host path is refused until they can be read again.
+    const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+    if (ownMounts === 'unreadable') {
+      return Promise.reject(new DataRestoreFenceError(fsTargets[0].hostPath, 'unproven', 'directory'));
+    }
+    for (const target of fsTargets) {
+      const match = await matchContainerToRoot({ Mounts: mounts }, target, ownMounts);
+      if (match.depends) {
+        return Promise.reject(new DataRestoreFenceError(target.hostPath, 'container', 'directory'));
+      }
+      // A bind whose relationship to the fenced directory could not be read
+      // could be another spelling of it: refused like an unreadable mount table.
+      if (match.unproven) {
+        return Promise.reject(new DataRestoreFenceError(target.hostPath, 'unproven', 'directory'));
+      }
+      checked.add(target.hostPath);
+    }
+  }
+  // A directory fenced after the match above was never compared with this
+  // container. It is refused at registration, which is synchronous with the
+  // fence write, so a fence is either matched or seen here; the caller retries.
+  const recheck = (): DataRestoreFenceError | null => {
+    if (!bindsHostPath) return null;
+    const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets().find((target) => !checked.has(target.hostPath));
+    return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'recheck', 'directory') : null;
+  };
+  return startUnderFence(names, start, 'container', recheck);
+}
+
+// --- Stack file work under a directory fence --------------------------------
+
+/** How a fenced directory is told apart from another in a `checked` set. */
+function fsTargetMatchKey(target: FsTargetPaths): string {
+  return `${target.senchoPath}\0${target.hostPath}`;
+}
+
+/** The fenced directories a file operation was compared with and found clear of, and its refusal if it was not. */
+export interface FsWorkMatch {
+  refusal: DataRestoreFenceError | null;
+  checked: ReadonlySet<string>;
+}
+
+/** The paths one piece of file work is known by: one, or every spelling a link on the way gives it. */
+function spellingsOf(senchoPaths: string | readonly string[]): readonly string[] {
+  return typeof senchoPaths === 'string' ? [senchoPaths] : senchoPaths;
+}
+
+/**
+ * How one piece of file work, known by each of `spellings`, sits relative to a
+ * fenced directory: `overlap` when any spelling overlaps it, else `unknown`
+ * when any spelling cannot be placed, else `unrelated`.
+ */
+async function relateSpellingsToFencedDirectory(
+  spellings: readonly string[],
+  target: FsTargetPaths,
+  ownMounts: OwnMounts | 'unreadable',
+): Promise<'overlap' | 'unrelated' | 'unknown'> {
+  const { relateToFencedDirectory } = await import('./fsRoots');
+  let unknown = false;
+  for (const spelling of spellings) {
+    const relation = await relateToFencedDirectory(spelling, target, ownMounts);
+    if (relation === 'overlap') return 'overlap';
+    if (relation === 'unknown') unknown = true;
+  }
+  return unknown ? 'unknown' : 'unrelated';
+}
+
+/**
+ * Compare a file or directory a stack file operation reads or writes, in
+ * Sencho's namespace, with every directory a live overwrite holds, by each
+ * spelling either has (see `relateToFencedDirectory`). A file reached through
+ * links is passed with every spelling the links give it (`linkSpellings`): a
+ * link whose target a restore has just moved aside resolves to nothing, so its
+ * own path alone would look unrelated to the directory it points into. An
+ * overlap by any spelling is refused, and so is a relationship that cannot be
+ * proven. One query when nothing is fenced.
+ */
+export async function matchFsWorkToFences(senchoPaths: string | readonly string[]): Promise<FsWorkMatch> {
+  const targets = RestoreFenceStore.getInstance().liveFencedFsTargets();
+  const checked = new Set<string>();
+  if (targets.length === 0) return { refusal: null, checked };
+  const { readOwnMounts } = await import('./fsRoots');
+  const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+  const spellings = spellingsOf(senchoPaths);
+  for (const target of targets) {
+    const relation = await relateSpellingsToFencedDirectory(spellings, target, ownMounts);
+    if (relation === 'overlap') return { refusal: new DataRestoreFenceError(target.hostPath, 'browse', 'directory'), checked };
+    if (relation === 'unknown') return { refusal: new DataRestoreFenceError(target.hostPath, 'unproven', 'directory'), checked };
+    checked.add(fsTargetMatchKey(target));
+  }
+  return { refusal: null, checked };
+}
+
+/** A stack file operation admitted against the directory fences, held until it has finished. */
+export interface FsWorkLease {
+  /**
+   * The refusal for a directory fenced since this work was admitted that it has
+   * not been proven clear of, or null. Synchronous: work that does more than one
+   * step (the items of a bulk operation, an upload after its body arrived) asks
+   * before each one, so a fence waiting for it does not wait for the rest.
+   */
+  recheck(): DataRestoreFenceError | null;
+  /**
+   * How to cut this work off instead of waiting for it, or null when it must be
+   * waited for. A read, or an upload still receiving its body, writes nothing
+   * the restore replaces, so a fence ends it at once rather than letting a slow
+   * client hold the restore off; a write already under way is waited for.
+   */
+  setAbort(abort: (() => void) | null): void;
+  /** The work has finished. Idempotent. */
+  release(): void;
+}
+
+interface FsWorkEntry {
+  /** Every spelling the work was matched by, so a fence's drain compares the same ones. */
+  senchoPaths: readonly string[];
+  startedAt: number;
+  /** Fenced directories this work is proven clear of; a fence's drain adds to it. */
+  checked: Set<string>;
+  abort: (() => void) | null;
+  done: Promise<void>;
+}
+
+/** Stack file operations admitted and not finished. */
+const fsWorkInFlight = new Set<FsWorkEntry>();
+
+function uncheckedFsFence(checked: ReadonlySet<string>): DataRestoreFenceError | null {
+  const unchecked = RestoreFenceStore.getInstance().liveFencedFsTargets()
+    .find((target) => !checked.has(fsTargetMatchKey(target)));
+  return unchecked ? new DataRestoreFenceError(unchecked.hostPath, 'files_recheck', 'directory') : null;
+}
+
+/**
+ * Admit a stack file operation that `matchFsWorkToFences` cleared, or refuse it.
+ *
+ * The check and the registration are one synchronous step, as for a container
+ * start, and the fence write that closes the other side is synchronous too: the
+ * work either sees a directory fenced after its match and is refused, or is
+ * registered before the fence exists and is waited for by `waitForFsWorkOn`.
+ */
+export function admitFsWork(
+  senchoPaths: string | readonly string[],
+  checked: ReadonlySet<string>,
+  abort: (() => void) | null = null,
+): FsWorkLease | DataRestoreFenceError {
+  const late = uncheckedFsFence(checked);
+  if (late) return late;
+  let settle: () => void = () => undefined;
+  const entry: FsWorkEntry = {
+    senchoPaths: spellingsOf(senchoPaths),
+    startedAt: performance.now(),
+    checked: new Set(checked),
+    abort,
+    done: new Promise<void>((resolve) => { settle = resolve; }),
+  };
+  fsWorkInFlight.add(entry);
+  return {
+    recheck: () => (fsWorkInFlight.has(entry) ? uncheckedFsFence(entry.checked) : null),
+    setAbort: (next) => { entry.abort = next; },
+    release: () => {
+      if (!fsWorkInFlight.delete(entry)) return;
+      settle();
+    },
+  };
+}
+
+/** Test seam: how many stack file operations are admitted and unfinished. */
+export function fsWorkInFlightCountForTests(): number {
+  return fsWorkInFlight.size;
+}
+
+/**
+ * Wait until every stack file operation that overlaps `target`, or whose
+ * relationship to it cannot be proven, has finished. One that can be cut off
+ * (a read, an upload still receiving its body) is cut off instead, and one
+ * whose cut-off fails is waited for. Called after the fence on
+ * `target` is recorded, so no operation can be admitted on it from then on and
+ * the set looked at here is complete. An operation proven clear of it is marked
+ * so, and its rechecks pass. False means one was still running when the cap ran
+ * out, or has been running long enough to count as hung: the fence is refused
+ * rather than taken under work that may still write.
+ */
+export async function waitForFsWorkOn(target: FsTargetPaths, timeoutMs = startDrainTimeoutMs): Promise<boolean> {
+  const entries = [...fsWorkInFlight];
+  if (entries.length === 0) return true;
+  const { readOwnMounts } = await import('./fsRoots');
+  const ownMounts = await readOwnMounts().catch(() => 'unreadable' as const);
+  const key = fsTargetMatchKey(target);
+  const pending: FsWorkEntry[] = [];
+  for (const entry of entries) {
+    if (!fsWorkInFlight.has(entry)) continue;
+    if (await relateSpellingsToFencedDirectory(entry.senchoPaths, target, ownMounts) === 'unrelated') entry.checked.add(key);
+    else pending.push(entry);
+  }
+  // Work that writes nothing yet is cut off, not waited for: a client that reads
+  // slowly, or sends an upload slowly, cannot hold the restore off that way.
+  // One whose cut-off failed is waited for like a write.
+  const cutOff = new Set<FsWorkEntry>();
+  for (const entry of pending) {
+    const abort = entry.abort;
+    if (!abort || !fsWorkInFlight.has(entry)) continue;
+    try {
+      abort();
+      cutOff.add(entry);
+    } catch (err) {
+      console.warn('[Recovery] Could not cut off a file operation on the directory:', errorMessageForLog(err));
+    }
+  }
+  const live = pending.filter((entry) => fsWorkInFlight.has(entry) && !cutOff.has(entry));
+  if (live.length === 0) return true;
+  const now = performance.now();
+  if (live.some((entry) => now - entry.startedAt >= hungStartAfterMs)) {
+    console.warn('[Recovery] A file operation on the directory has been running for over %d seconds; refusing the fence.', Math.round(hungStartAfterMs / 1000));
+    return false;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const capped = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.all(live.map((entry) => entry.done)).then(() => true), capped]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**

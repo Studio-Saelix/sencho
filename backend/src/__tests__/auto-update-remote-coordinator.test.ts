@@ -181,6 +181,27 @@ describe('remote automatic update coordinator', () => {
     expect(mocks.recheck).not.toHaveBeenCalled();
   });
 
+  it('reports a data restore refusal from the target as a failed stack with its reason', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'rejected', applied: false, healthGateId: null,
+      code: 'data_restore', error: 'This location overlaps the directory "/srv/web/data",\nwhich a data restore is overwriting.',
+    }), { status: 409 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({
+      handled: true,
+      result: 'Stack "web" failed: This location overlaps the directory "/srv/web/data", which a data restore is overwriting.',
+    });
+    expect(mocks.recheck).not.toHaveBeenCalled();
+  });
+
+  it('ignores a data restore text on a result that is not a rejection', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'policy_blocked', applied: false, healthGateId: null, code: 'data_restore', error: 'spoofed',
+    }), { status: 200 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web": policy_blocked; skipped auto-update.' });
+  });
+
   it('ignores a refusal text on a result that is not a rejection', async () => {
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
       contractVersion: 1, stack: 'web', result: 'policy_blocked', applied: false, healthGateId: null, endpointRefusal: 'spoofed',

@@ -191,6 +191,32 @@ export class StorageIdentityStore {
     return row ? toIdentity(row) : null;
   }
 
+  /**
+   * The current identity of this engine and kind whose generation token is
+   * `token`, under any locator. A host directory reached by two host spellings
+   * (a host symlink, a second mount of the Sencho container) has one token, so
+   * the second spelling resolves to the identity the first one created: one
+   * lock, one set of points, one dependent set.
+   */
+  listCurrentByGenerationToken(ownerNodeKey: string, kind: StorageKind, token: string, limit: number): StorageIdentity[] {
+    const rows = recoveryDb().prepare(`
+      SELECT * FROM recovery_storage_identities
+      WHERE authority_id = ? AND owner_node_key = ? AND kind = ? AND generation_token = ? AND state = 'current'
+      ORDER BY first_seen_at LIMIT ?
+    `).all(getRecoveryAuthorityId(), ownerNodeKey, kind, token, limit) as IdentityRow[];
+    return rows.map(toIdentity);
+  }
+
+  /** Every current identity of a kind on this engine, for a node-wide listing. */
+  listCurrent(ownerNodeKey: string, kind: StorageKind): StorageIdentity[] {
+    const rows = recoveryDb().prepare(`
+      SELECT * FROM recovery_storage_identities
+      WHERE authority_id = ? AND owner_node_key = ? AND kind = ? AND state = 'current'
+      ORDER BY locator
+    `).all(getRecoveryAuthorityId(), ownerNodeKey, kind) as IdentityRow[];
+    return rows.map(toIdentity);
+  }
+
   /** Every generation of a key, oldest first. */
   listGenerations(storageKey: string): StorageIdentity[] {
     const rows = recoveryDb().prepare(

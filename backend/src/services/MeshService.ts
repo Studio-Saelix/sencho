@@ -1995,24 +1995,43 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     // --- Override file management ---
 
+    /**
+     * Whether the stack's Compose commands carry a Mesh override layer, so they
+     * name their compose files with `-f` instead of letting Compose discover
+     * them: a Mesh row, or on a Pilot node the override central pushed. Reads
+     * only; `ensureStackOverride` is what writes the layer.
+     */
+    public async stackOverrideApplies(nodeId: number, stackName: string): Promise<boolean> {
+        if (!isValidStackName(stackName)) return false;
+        if (DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName)) return true;
+        return (await this.pilotStackOverride(nodeId, stackName)) !== null;
+    }
+
+    /**
+     * Pilot nodes intentionally have no mesh_stacks rows (opt-in state lives on
+     * central per the C-3 design). Use file-presence as the fallback: if central
+     * pushed an override via applyLocalOverride, return that path so
+     * ComposeService picks it up on the next deploy.
+     */
+    private async pilotStackOverride(nodeId: number, stackName: string): Promise<string | null> {
+        if (process.env.SENCHO_MODE !== 'pilot') return null;
+        const dir = this.overrideDirFor(nodeId);
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
+        if (!isPathWithinBase(file, dir)) return null;
+        try {
+            await fs.access(file);
+            return file;
+        } catch {
+            return null;
+        }
+    }
+
     public async ensureStackOverride(nodeId: number, stackName: string): Promise<string | null> {
         if (!isValidStackName(stackName)) return null;
         const db = DatabaseService.getInstance();
         const dir = this.overrideDirFor(nodeId);
         if (!db.isMeshStackEnabled(nodeId, stackName)) {
-            // Pilot nodes intentionally have no mesh_stacks rows (opt-in state
-            // lives on central per the C-3 design). Use file-presence as the
-            // fallback: if central pushed an override via applyLocalOverride, return
-            // that path so ComposeService picks it up on the next deploy.
-            if (process.env.SENCHO_MODE !== 'pilot') return null;
-            const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
-            if (!isPathWithinBase(file, dir)) return null;
-            try {
-                await fs.access(file);
-                return file;
-            } catch {
-                return null;
-            }
+            return this.pilotStackOverride(nodeId, stackName);
         }
         if (!this.senchoIp) return null;
 

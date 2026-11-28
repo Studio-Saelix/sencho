@@ -53,6 +53,7 @@ import { validateStackPatternForRedos } from '../helpers/stackPattern';
 
 export { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { getErrorMessage } from '../utils/errors';
+import { DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import {
   prepareOutboundRegistryDeliveryBody,
   registryDeliveryRefusal,
@@ -3434,6 +3435,20 @@ async function applySnapshotStackFiles(
 // the remote node), so this only performs the deploy itself. A remote node's
 // gate decision rides back on its deploy response; it is returned so the hub's
 // own response can report it, as the local arm does from its central gate.
+/**
+ * A remote node that refused the redeploy with a data restore's fence: the
+ * files were already restored, so the answer says so, with the node's reason
+ * and the fence's code. Null for any other error.
+ */
+function fenceRefusedRedeploy(error: unknown): Error | null {
+  const remote = error as { code?: unknown; httpStatus?: unknown; remoteError?: unknown } | null;
+  if (remote?.code !== DATA_RESTORE_FENCE_CODE || remote.httpStatus !== 409 || typeof remote.remoteError !== 'string') return null;
+  return Object.assign(
+    new Error(`The snapshot files were restored, but the stack was not redeployed. ${remote.remoteError}`),
+    { code: DATA_RESTORE_FENCE_CODE, httpStatus: 409, cause: error },
+  );
+}
+
 async function redeploySnapshotStack(
   node: Node,
   stackName: string,
@@ -3742,7 +3757,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
         node,
         stackName,
         node.type === 'local' ? pulledDeployCandidateVerification(req, res, stackName, node.id) : undefined,
-      );
+      ).catch((redeployError: unknown) => { throw fenceRefusedRedeploy(redeployError) ?? redeployError; });
       if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
 
@@ -3791,7 +3806,7 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
-  /** Machine-readable refusal code (registry delivery or Docker endpoint guard), when the redeploy failed on one. */
+  /** Machine-readable refusal code (registry delivery, Docker endpoint guard, or a data restore's fence), when the redeploy failed on one. */
   code?: string;
   /** Set when the redeploy proceeded on evidence that was not a clean pass. */
   policyEvidence?: AllowedPolicyEvidence;
@@ -3938,13 +3953,13 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
                 { code: DOCKER_ENDPOINT_PROTECTED_CODE, httpStatus: 409, cause: redeployError },
               );
             }
-            throw redeployError;
+            throw fenceRefusedRedeploy(redeployError) ?? redeployError;
           }
           redeployed = true;
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError, ...(policyEvidence ? { policyEvidence } : {}) });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code ?? (dockerEndpointRefusalOf(e) ? DOCKER_ENDPOINT_PROTECTED_CODE : undefined) });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code ?? (dockerEndpointRefusalOf(e) ? DOCKER_ENDPOINT_PROTECTED_CODE : ((e as { code?: unknown })?.code === DATA_RESTORE_FENCE_CODE ? DATA_RESTORE_FENCE_CODE : undefined)) });
       }
     }
 

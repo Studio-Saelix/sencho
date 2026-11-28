@@ -3,7 +3,7 @@ import { getRegisteredEngines, registerBackupEngine } from '../capability';
 import { RecoveryEngineService } from '../operationRunner';
 import DockerController from '../../../services/DockerController';
 import { inspectHelperImage, resolveHelperImageRef, type HelperImageRef } from './helperImage';
-import { RESTIC_ENGINE_ID, ResticEngine } from './ResticEngine';
+import { RESTIC_ENGINE_ID, RESTIC_STORAGE_KINDS, ResticEngine } from './ResticEngine';
 import { RECOVERY_CONTRACT_VERSION } from '../types';
 import type {
   BackupEngine,
@@ -31,7 +31,7 @@ import type {
 class RegisteredResticEngine implements BackupEngine {
   readonly engineId = RESTIC_ENGINE_ID;
   readonly contractVersion = RECOVERY_CONTRACT_VERSION;
-  readonly storageKinds: readonly StorageKind[] = ['named_volume'];
+  readonly storageKinds: readonly StorageKind[] = RESTIC_STORAGE_KINDS;
 
   constructor(
     private readonly docker: Docker,

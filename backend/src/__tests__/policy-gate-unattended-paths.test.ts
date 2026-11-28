@@ -56,6 +56,7 @@ vi.mock('../services/NotificationService', () => ({
 // is covered by its dedicated suites.
 vi.mock('../services/updatePolicy', () => import('./__helpers__/allowingUpdatePolicy').then(m => m.allowingUpdatePolicyModule()));
 vi.mock('../services/FleetSyncService', () => ({ FleetSyncService: { getSelfIdentity: () => 'self-node' } }));
+vi.mock('../services/FileSystemService', () => ({ FileSystemService: { getInstance: () => ({ refuseIfComposeFenced: async () => undefined }) } }));
 
 import { describePolicyBlock } from '../helpers/policyGate';
 import { SchedulerService } from '../services/SchedulerService';

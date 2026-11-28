@@ -175,6 +175,37 @@ describe('DriftPanel', () => {
     expect(toast.error).toHaveBeenCalled();
   });
 
+  it('says a data restore is under way when the drift read is refused by one', async () => {
+    const reason = 'This location overlaps the directory "/srv/web/data", which a data restore is overwriting.';
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/gitops/applications')) return jsonRes({ application: undefined });
+      return jsonRes({ error: reason, code: 'data_restore' }, false, 409);
+    });
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-retry-btn');
+    expect(toast.error).toHaveBeenCalledWith(reason);
+  });
+
+  it('keeps the generic message for a failed drift read that is not a restore refusal', async () => {
+    mockFailedDriftRead();
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-retry-btn');
+    expect(toast.error).toHaveBeenCalledWith('Failed to load the drift report.');
+  });
+
+  it('says a data restore is under way when a re-check is refused by one', async () => {
+    const reason = 'This location overlaps the directory "/srv/web/data", which a data restore is overwriting.';
+    vi.mocked(apiFetch).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (String(path).startsWith('/gitops/applications')) return jsonRes({ application: undefined });
+      if (init?.method === 'POST') return jsonRes({ error: reason, code: 'data_restore' }, false, 409);
+      return jsonRes(report({ status: 'in-sync' }));
+    });
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    fireEvent.click(screen.getByTestId('drift-recheck-btn'));
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalledWith(reason));
+  });
+
   it('shows the retry state when the request throws', async () => {
     vi.mocked(apiFetch).mockRejectedValue(new Error('network'));
     render(<DriftPanel stackName="web" />);

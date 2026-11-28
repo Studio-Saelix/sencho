@@ -62,6 +62,7 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 
 export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
 export { parseServicesJsonStrict } from './recoveryServicesJson';
@@ -1126,6 +1127,86 @@ export class StackUpdateRecoveryService {
     // nothing; the underlying error this used to collapse into a bare `false`
     // cannot happen before the row exists.
     if (!row) return { rolledBack: false, failureClass: 'pre_mutation' };
+    // The restore's up names the root file and its override itself (or a
+    // captured file set, asked at that up's own argv). One a data restore is
+    // overwriting refuses here, before any file moves and before a GitOps
+    // recovery is opened, so a refused restore leaves the generation and the
+    // live files as they were. The transaction's whole file set is then
+    // registered with the fences until this returns, so a fence recorded
+    // after this ask on one of those files waits for the transaction to end
+    // instead of landing between a write and its revert. The recovery up is
+    // admitted on its own at its spawn, so such a fence refuses that up; the
+    // restored files are then put back under the same registration, and the
+    // refusal is answered as pre_mutation when they are.
+    let lease: Awaited<ReturnType<FileSystemService['admitStackFileWork']>>;
+    try {
+      await FileSystemService.getInstance(row.node_id)
+        .refuseIfComposeFenced(row.stack_name, { pinsComposeFiles: true });
+      lease = await this.admitGenerationFileWork(row);
+    } catch (error) {
+      if (isDataRestoreFenceError(error)) Object.assign(error, { failureClass: 'pre_mutation' });
+      throw error;
+    }
+    try {
+      return await this.compensateUnderFileLease(generationId, row, composeUp, policyOptions);
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * Register a generation's file transaction with the directory fences before
+   * its first write (`FileSystemService.admitStackFileWork`): the files the
+   * generation holds or may delete, the ones its own captured invocation
+   * opens (which can name a shared layer the live selection does not), and
+   * the live ones. A generation whose content cannot be read is asked by its
+   * live files only; its restore refuses on that content anyway.
+   */
+  private async admitGenerationFileWork(row: StackUpdateRecoveryGenerationRow) {
+    const relativePaths: string[] = [];
+    const prefixes: string[][] = [];
+    if (expectsGenerationContent(row) && row.content_path && looksLikeGenerationUuid(row.content_path)) {
+      try {
+        const manifest = await RollbackGenerationStore.readVerifiedGeneration(row.node_id, row.stack_name, row.content_path);
+        relativePaths.push(...manifest.managedRelativePaths, ...manifest.entries.map((entry) => entry.relativePath));
+        if (manifest.invocation?.composeArgsPrefix) {
+          prefixes.push(manifest.invocation.composeArgsPrefix.filter((arg) => arg !== 'compose'));
+        }
+        if (manifest.invocation?.composeLayers) {
+          relativePaths.push(...manifest.invocation.composeLayers);
+        }
+      } catch {
+        // Unreadable content: GENERATION_CONTENT_MISSING from the restore itself.
+      }
+    }
+    // The restore also writes or deletes the live managed paths (a file the
+    // stack gained after capture), so those are asked too.
+    try {
+      const { resolveRollbackInventory } = await import('./rollbackInventory');
+      const inventory = await resolveRollbackInventory(row.node_id, row.stack_name);
+      relativePaths.push(
+        ...inventory.entries.map((entry) => entry.relativePath),
+        ...inventory.ownedUncapturedRelativePaths,
+      );
+    } catch {
+      // A live inventory that cannot be read refuses the restore itself; the
+      // managed files and the live selection are still asked here.
+    }
+    return FileSystemService.getInstance(row.node_id).admitStackFileWork(
+      row.stack_name,
+      relativePaths,
+      prefixes,
+      // A row without generation content restores the single backup slot.
+      { backupSlot: !expectsGenerationContent(row) },
+    );
+  }
+
+  private async compensateUnderFileLease(
+    generationId: string,
+    row: StackUpdateRecoveryGenerationRow,
+    composeUp: CompensationComposeUp,
+    policyOptions?: PolicyEnforcementOptions,
+  ): Promise<CompensationOutcome> {
     // Finish any leftover restore transaction for this generation before a new
     // restore can overwrite pre-restore/ with an already-restored tree.
     if (row.content_path) {
@@ -1328,11 +1409,13 @@ export class StackUpdateRecoveryService {
           );
         }
       }
-      // The Docker endpoint guard refused the restore's compose up before it ran,
-      // and the files are back where they were: nothing moved, and the recovery
-      // point is still intact for a restore from the host, so it is neither
+      // The Docker endpoint guard, or a data restore's fence on a compose file
+      // the recovery up names, refused that up before Compose ran, and the
+      // files are back where they were: no container changed, and the
+      // recovery point is still intact for a later restore, so it is neither
       // marked recovery_required nor flattened into a failed restore.
-      const refusedBeforeAnyMovement = isDockerEndpointProtectedError(error) && !revertFailed && filesRevertedClean;
+      const refusedBeforeAnyMovement = (isDockerEndpointProtectedError(error) || isDataRestoreFenceError(error))
+        && !revertFailed && filesRevertedClean;
       if (refusedBeforeAnyMovement) failureClass = 'pre_mutation';
       gitopsRecovery?.failed(failureClass);
       if (typeof error === 'object' && error !== null) {
@@ -1386,14 +1469,32 @@ export class StackUpdateRecoveryService {
   }
 
   /**
-   * Restore generation project files + Git manifesto/DB without compose-up.
-   * Used when legacy Git materialize fails mid-write and must reinstate the
-   * pre-apply capture before abandoning the recovery candidate.
+   * Restore generation project files + Git manifesto/DB without compose-up,
+   * for a legacy Git materialize that fails mid-write and must reinstate the
+   * pre-apply capture before abandoning the recovery candidate. Nothing in
+   * the current code calls it; its file set is registered with the directory
+   * fences like a rollback's, so a caller added later inherits that.
    */
   public async revertToGenerationContent(generationId: string): Promise<boolean> {
     const row = this.get(generationId);
     if (!row || !expectsGenerationContent(row) || !row.content_path) return false;
     await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
+    // The files-only revert writes the same set a rollback does, so it is
+    // registered with the directory fences the same way, through its own
+    // revert of a failed write.
+    const lease = await this.admitGenerationFileWork(row);
+    try {
+      return await this.revertToGenerationContentUnderLease(generationId, row);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async revertToGenerationContentUnderLease(
+    generationId: string,
+    row: StackUpdateRecoveryGenerationRow,
+  ): Promise<boolean> {
+    if (!row.content_path) return false;
 
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
 

@@ -27,6 +27,7 @@ import {
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
@@ -1701,6 +1702,9 @@ export class BlueprintService {
                     // surfaces.
                     if (recoveryId !== null) {
                         try {
+                            // A data restore overwriting a compose file the
+                            // restore's up names refuses it before any file
+                            // moves (compensateWithCandidate asks).
                             const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
                             const recovered = await StackUpdateRecoveryService.getInstance().compensateWithCandidate(
                                 recoveryId,
@@ -1714,11 +1718,21 @@ export class BlueprintService {
                                 );
                             }
                         } catch (compError) {
-                            console.error(
-                                '[BlueprintService] Recovery compensation failed for "%s": %s',
-                                sanitizeForLog(stackName),
-                                sanitizeForLog(BlueprintService.formatError(compError)),
-                            );
+                            // A data restore's fence refusing the restore is
+                            // a refusal, not a failed compensation.
+                            if (isDataRestoreFenceError(compError)) {
+                                console.warn(
+                                    '[BlueprintService] Recovery compensation for "%s" was refused by a data restore: %s',
+                                    sanitizeForLog(stackName),
+                                    sanitizeForLog(BlueprintService.formatError(compError)),
+                                );
+                            } else {
+                                console.error(
+                                    '[BlueprintService] Recovery compensation failed for "%s": %s',
+                                    sanitizeForLog(stackName),
+                                    sanitizeForLog(BlueprintService.formatError(compError)),
+                                );
+                            }
                         }
                     }
                     if (createdStack) {

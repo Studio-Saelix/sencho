@@ -28,6 +28,8 @@ vi.mock('../services/FileSystemService', () => ({
       getBaseDir: () => '/tmp/compose',
       readComposeFile: vi.fn().mockResolvedValue(''),
       hasComposeFile: vi.fn().mockResolvedValue(true),
+      refuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
+      admitStackFileWork: vi.fn().mockResolvedValue({ recheck: () => null, release: () => undefined }),
     }),
   },
 }));

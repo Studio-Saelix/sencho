@@ -14,7 +14,8 @@ import {
   fenceIdentityFor,
   releaseRestoreFence,
   RestoreFenceStore,
-  waitForStartsInFlight,
+  runAsFenceOwner,
+  waitForWorkBeforeFence,
   type FenceMember,
   type FenceMemberInput,
   type RestartPolicy,
@@ -32,6 +33,25 @@ import {
   resolveVolumeDependents,
 } from './volumeSources';
 import { runSwapStep, swapIncomingDir, swapWorkDir, type SwapRunResult, type SwapStatus } from './volumeSwap';
+import {
+  describeFsIneligible,
+  findDeclaredFsRoot,
+  fsTargetKey,
+  isFsTargetKey,
+  locateStoredFsRoot,
+  matchContainerToRoot,
+  nestedLeftoverWorkDirs,
+  nestedMountExclusions,
+  probeProvenRoot,
+  proveHostRoot,
+  readFsRootEnvironment,
+  readOwnMounts,
+  resolveFsRootDependents,
+  type FsRootLocation,
+  type FsTargetPaths,
+} from './fsRoots';
+import type { ProvenHostRoot } from './hostRoots';
+import SelfIdentityService from '../SelfIdentityService';
 import type { RecoveryHelperRunner } from './restic/helperRunner';
 import type { RecoveryOperationStore } from './operations';
 import type { RecoveryPointStore } from './recoveryPoints';
@@ -43,6 +63,7 @@ import type {
   RecoveryErrorClass,
   RecoveryPoint,
   RecoveryProgress,
+  RecoveryRefusalReason,
   RepositoryDescriptor,
   StorageIdentity,
 } from './types';
@@ -73,18 +94,22 @@ import type {
  * the set is not, and the preview says so.
  */
 
-const SWAP_WARNINGS: readonly string[] = [
-  'The containers that use this volume stop while the restore runs. They start again afterwards if they were running before.',
-  'The restored data is crash consistent, not application consistent. A database may need to recover, replay or check its files on the next start.',
-  'Your Compose files and environment files are not changed. Only the contents of the volume change.',
-  'The recovery repository is on this host, in a Docker volume. Losing this host loses both the data and the points that protect it.',
-  'Restoring to a new volume is the safer option: it never touches the running data. Use this overwrite only when the data has to stay on this volume.',
-  'The swap is a series of renames, not one atomic step. Sencho stops the workloads and journals every step so a crash can be recovered, but the volume is briefly in an intermediate state.',
-  'A container started outside Sencho after the fence is not stopped by it. The swap re-checks just before it starts and refuses if one is running.',
-];
+/** The preview's warnings, worded for the target: a volume or a directory. */
+function swapWarnings(noun: 'volume' | 'directory'): string[] {
+  return [
+    `The containers that use this ${noun} stop while the restore runs. They start again afterwards if they were running before.`,
+    'The restored data is crash consistent, not application consistent. A database may need to recover, replay or check its files on the next start.',
+    `Your Compose files and environment files are not changed. Only the contents of the ${noun} change.`,
+    'The recovery repository is on this host, in a Docker volume. Losing this host loses both the data and the points that protect it.',
+    `Restoring to a new volume is the safer option: it never touches the running data. Use this overwrite only when the data has to stay in this ${noun}.`,
+    `The swap is a series of renames, not one atomic step. Sencho stops the workloads and journals every step so a crash can be recovered, but the ${noun} is briefly in an intermediate state.`,
+    'A container started outside Sencho after the fence is not stopped by it. The swap re-checks just before it starts and refuses if one is running.',
+  ];
+}
 
-const WORK_DIRS_UNCHECKED_WARNING =
-  'Sencho could not check this volume for a work directory left by an earlier restore. If one is there, the swap refuses it after the containers have stopped, and the restore rolls back and starts them again.';
+function workDirsUncheckedWarning(noun: 'volume' | 'directory'): string {
+  return `Sencho could not check this ${noun} for a work directory left by an earlier restore. If one is there, the swap refuses it after the containers have stopped, and the restore rolls back and starts them again.`;
+}
 
 /**
  * The target no longer holds the generation the point was captured from. The
@@ -117,6 +142,19 @@ export interface OverwriteContainerFact {
   restartPolicy: RestartPolicy;
 }
 
+/** What the preview names as the target: a volume by name, or a directory by its host path. */
+export type OverwritePreviewTarget = {
+  storageKey: string;
+  generation: number;
+  generationToken: string;
+  eligible: boolean;
+  ineligibleReason: string | null;
+} & (
+  | { kind: 'named_volume'; volumeName: string; hostPath: null }
+  /** The host path is what the confirmation types back. */
+  | { kind: 'bind_root'; volumeName: null; hostPath: string }
+);
+
 export interface OverwritePreview {
   point: {
     id: string;
@@ -128,15 +166,15 @@ export interface OverwritePreview {
     isCurrentGeneration: boolean;
   };
   node: { id: number; name: string; transport: string };
-  target: {
-    volumeName: string;
-    storageKey: string;
-    generation: number;
-    generationToken: string;
-    eligible: boolean;
-    ineligibleReason: string | null;
+  target: OverwritePreviewTarget;
+  dependents: {
+    stacks: string[];
+    containers: OverwriteContainerFact[];
+    /** Containers that read the directory through a read-only ancestor: shown, never stopped. */
+    observers: string[];
   };
-  dependents: { stacks: string[]; containers: OverwriteContainerFact[] };
+  /** Mount points below a host directory. Any one of them refuses the overwrite. */
+  nestedMounts: string[];
   inUse: boolean;
   swap: { method: 'fenced_rename'; atomic: false; supported: boolean; reason: string | null };
   space: { requiredBytes: number; freeBytes: number | null; sufficient: boolean | null };
@@ -177,9 +215,20 @@ interface TargetObservation {
   storage: StorageIdentity;
   point: FulfilledPoint;
   repository: RepositoryDescriptor;
+  /** The value the intent records: the volume name, or a host directory's `fs:` key. */
   volumeName: string;
+  /** What the confirmation must type back: the volume name or the host path. */
+  confirmTarget: string;
+  /** A host directory's paths in both namespaces; null for a volume. */
+  targetPaths: FsTargetPaths | null;
+  observers: string[];
+  nestedMounts: string[];
   eligible: boolean;
   ineligibleReason: string | null;
+  /** The refusal token an admission answers with when the target is not eligible. */
+  refusalReason?: RecoveryRefusalReason;
+  /** A host directory's token from the proof this observation ran; null for a volume. */
+  liveGenerationToken: string | null;
   generationToken: string;
   isCurrentGeneration: boolean;
   /** True when the live volume is a different generation from the point's. */
@@ -200,12 +249,23 @@ const MAX_REPORTED_WORK_DIRS = 8;
  * names come from the volume, so anything that is not plain printable text is
  * replaced rather than echoed.
  */
-function describeWorkDirs(names: readonly string[]): string {
+function describeWorkDirs(names: readonly string[], noun: 'volume' | 'directory' = 'volume'): string {
   const shown = names.map((name) => (/^[\x20-\x7e]{1,255}$/.test(name) ? name : `${RECOVERY_WORK_DIR_PREFIX}…`));
   const label = shown.length === 1
     ? `a work directory (${shown[0]})`
     : `work directories (${shown.join(', ')}${names.length >= MAX_REPORTED_WORK_DIRS ? ', and possibly more' : ''})`;
-  return `A restore that did not finish left ${label} in this volume, and it may hold the data that restore replaced. A point of this volume does not include it, so copy out anything you need, remove it from the volume, then preview again. Until then another overwrite of this volume would stop the containers and fail.`;
+  return `A restore that did not finish left ${label} in this ${noun}, and it may hold the data that restore replaced. A point of this ${noun} does not include it, so copy out anything you need, remove it from the ${noun}, then preview again. Until then another overwrite of this ${noun} would stop the containers and fail.`;
+}
+
+/**
+ * Work directories an overwrite of a directory inside this one left behind,
+ * shown in a sentence. The swap would not refuse them: it would move them with
+ * the rest of the data and remove them, which is why the overwrite is refused.
+ */
+function describeNestedWorkDirs(paths: readonly string[]): string {
+  const shown = paths.map((entry) => (/^[\x20-\x7e]{1,4096}$/.test(entry) ? entry : `…/${RECOVERY_WORK_DIR_PREFIX}…`));
+  const label = shown.length === 1 ? `a work directory (${shown[0]})` : `work directories (${shown.join(', ')})`;
+  return `A restore of a directory inside this one did not finish and left ${label}, and it may hold the data that restore replaced. A point of this directory does not include it, and overwriting this directory would remove it, so copy out anything you need, remove it, then preview again.`;
 }
 
 function requirePoint(deps: OverwriteDeps, pointId: string): TargetObservation["point"] {
@@ -281,19 +341,91 @@ async function startedAtFor(deps: OverwriteDeps, containerId: string): Promise<s
   }
 }
 
-/** Every container that mounts the volume, with the facts the preview shows. */
-async function listMountingContainers(deps: OverwriteDeps, volumeName: string): Promise<OverwriteContainerFact[]> {
+/** What an overwrite writes: a volume by name, or a host directory where it lives. */
+type OverwriteTarget =
+  | { kind: 'named_volume'; volumeName: string }
+  | { kind: 'bind_root'; location: FsRootLocation };
+
+/** The overwrite target an intent recorded. */
+function targetOfIntent(intent: Pick<RestoreIntentRecord, 'targetVolume' | 'targetPaths'>): OverwriteTarget {
+  if (!isFsTargetKey(intent.targetVolume)) return { kind: 'named_volume', volumeName: intent.targetVolume ?? '' };
+  if (!intent.targetPaths) throw new RecoveryError('identity_unknown');
+  return { kind: 'bind_root', location: intent.targetPaths };
+}
+
+/**
+ * The proven host directory an intent writes, or undefined for a volume. Every
+ * helper step re-proves it, and the guard checks the same identity inside the
+ * step's own container. Throws `identity_unknown` when it cannot be proven now.
+ */
+async function intentHostRoot(
+  deps: OverwriteDeps,
+  intent: Pick<RestoreIntentRecord, 'targetVolume' | 'targetPaths' | 'expectedGenerationToken'>,
+  operationId: string,
+): Promise<ProvenHostRoot | undefined> {
+  if (!isFsTargetKey(intent.targetVolume)) return undefined;
+  const paths = intent.targetPaths;
+  if (!paths || !intent.expectedGenerationToken) throw new RecoveryError('identity_unknown');
+  const proven = await proveHostRoot({
+    runner: deps.runner(),
+    operationId,
+    senchoPath: paths.senchoPath,
+    hostPath: paths.hostPath,
+    followSenchoPath: true,
+  });
+  // The proof only says both namespaces see the same directory at the path now.
+  // It must be the directory the operator confirmed: a directory recreated or
+  // swapped in (or an empty mount point, after a reboot that has not mounted the
+  // real filesystem yet) is never written, and the step settles unknown. The
+  // swap renames entries inside the root, so the root's own identity holds
+  // across the whole overwrite.
+  if (proven.generationToken !== intent.expectedGenerationToken) {
+    console.warn('[Recovery] The directory of a restore is not the one it was admitted for; refusing to touch it');
+    throw new RecoveryError('identity_unknown');
+  }
+  return proven.root;
+}
+
+/**
+ * Every container that mounts the target, with the facts the preview shows. For
+ * a host directory, a container depends on it by the rule in `dependsOnRoot`;
+ * a read-only ancestor is not fenced, and Sencho's own container never is. A
+ * container whose binds cannot be proven clear of the directory throws
+ * `identity_unknown`: at the preview and the admission that refuses the
+ * overwrite, and on a later check it settles the restore as a rollback.
+ */
+async function listMountingContainers(deps: OverwriteDeps, target: OverwriteTarget | string): Promise<OverwriteContainerFact[]> {
+  const resolved: OverwriteTarget = typeof target === 'string' ? { kind: 'named_volume', volumeName: target } : target;
   const listed = await deps.docker.listContainers({ all: true }) as Array<{
     Id: string;
     Names?: string[];
     State?: string;
     Labels?: Record<string, string>;
-    Mounts?: Array<{ Type?: string; Name?: string }>;
+    Mounts?: Array<{ Type?: string; Name?: string; Source?: string; RW?: boolean }>;
   }>;
   const projectToStack = await projectToStackMap(deps.knownStackNames);
+  const ownMounts = resolved.kind === 'bind_root' ? await readOwnMounts() : null;
   const facts: OverwriteContainerFact[] = [];
   for (const container of listed) {
-    if (!(container.Mounts ?? []).some((m) => m.Type === 'volume' && m.Name === volumeName)) continue;
+    if (resolved.kind === 'named_volume') {
+      if (!(container.Mounts ?? []).some((m) => m.Type === 'volume' && m.Name === resolved.volumeName)) continue;
+    } else {
+      if (SelfIdentityService.getInstance().isOwnContainer(container.Id)) continue;
+      const match = await matchContainerToRoot(container, resolved.location, ownMounts);
+      // A container whose binds cannot be proven clear of the directory could be
+      // writing it under another spelling: the overwrite cannot say which
+      // workloads to stop, so it is refused rather than run beside one.
+      if (match.unproven) {
+        // The container is named in the log only: this runs before the caller is
+        // authorized against its stack, so the answer carries no name.
+        console.warn(
+          '[Recovery] Cannot prove that container %s stays clear of the directory; refusing the overwrite.',
+          sanitizeForLog(containerName(container) || container.Id),
+        );
+        throw new RecoveryError('identity_unknown');
+      }
+      if (!match.depends) continue;
+    }
     const inspect = await inspectContainer(deps, container.Id);
     if (!inspect) continue;
     const identity = fenceIdentityFor(container, projectToStack, deps.knownStackNames);
@@ -345,6 +477,7 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
   const point = requirePoint(deps, pointId);
   const storage = requireStorage(deps, point);
   const repository = requireRepository(deps, point);
+  if (storage.kind === 'bind_root') return observeFsTarget(deps, point, storage, repository);
   const source = await inspectVolumeSource(deps.docker, storage.locator);
   const resolution = await resolveVolumeDependents({
     nodeId: deps.nodeId,
@@ -467,8 +600,210 @@ async function observeTarget(deps: OverwriteDeps, pointId: string): Promise<Targ
     point,
     repository,
     volumeName: storage.locator,
+    confirmTarget: storage.locator,
+    targetPaths: null,
+    observers: [],
+    nestedMounts: [],
+    liveGenerationToken: null,
     eligible,
     ineligibleReason,
+    generationToken: storage.generationToken,
+    isCurrentGeneration,
+    generationChanged,
+    containers,
+    stacks: [...stacks].sort(),
+    freeBytes,
+    workDirsChecked,
+  };
+}
+
+const FS_NOT_DECLARED_REASON =
+  'No stack on this node declares this directory as a bind it may write, so Sencho will not write it. Restore the point into a new volume instead.';
+const FS_STACK_SOURCE_REASON =
+  'This is a stack\'s own source directory. Its Compose files belong to configuration recovery, so a point of it restores into a new volume, never over it.';
+const FS_NESTED_MOUNT_REASON =
+  'A mount sits below this directory, and an overwrite would write across it. Unmount it, or restore the point into a new volume.';
+const FS_GENERATION_CHANGED_REASON =
+  'This directory was removed and made again after this point was captured, so the point does not describe the data in it now. Take a new point of it, then preview again.';
+const FS_UNPROVEN_REASON =
+  'Sencho could not prove that the host path the Docker daemon uses is this directory, so it will not write it.';
+
+/**
+ * The facts of an overwrite of a host directory. The directory must be one a
+ * stack declares now as a bind it may write, its host path must be proven, and
+ * no mount may sit below it. Authorization runs first, against every stack and
+ * container that depends on it, before any helper probes it.
+ */
+async function observeFsTarget(
+  deps: OverwriteDeps,
+  point: FulfilledPoint,
+  storage: StorageIdentity,
+  repository: RepositoryDescriptor,
+): Promise<TargetObservation> {
+  const environment = await readFsRootEnvironment(deps.nodeId, deps.docker);
+  let located: FsRootLocation | null = null;
+  try {
+    located = await locateStoredFsRoot(storage.locator);
+  } catch (err) {
+    console.warn('[Recovery] Could not place %s in Sencho\'s namespace:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+  }
+  const declared = located
+    ? await findDeclaredFsRoot({
+      nodeId: deps.nodeId,
+      knownStackNames: deps.knownStackNames,
+      environment,
+      senchoPath: located.senchoPath,
+    })
+    : { candidates: [], unrenderable: null, unplaced: false };
+  const aliases = [...new Set(declared.candidates.flatMap((candidate) => candidate.aliases))].sort();
+  const location: FsRootLocation | null = located ? { ...located, aliases } : null;
+  const resolution = location
+    ? await resolveFsRootDependents({
+      nodeId: deps.nodeId,
+      storageKey: storage.storageKey,
+      knownStackNames: deps.knownStackNames,
+      root: location,
+      // Every stack was just rendered to find the declarations; their roots
+      // are in the cache from that pass.
+      render: false,
+      docker: deps.docker,
+      environment,
+    })
+    : null;
+  const containers = location ? await listMountingContainers(deps, { kind: 'bind_root', location }) : [];
+  const stacks = new Set<string>();
+  for (const dependent of resolution?.dependents ?? StorageIdentityStore.getInstance().listDependents(storage.storageKey)) {
+    stacks.add(dependent.stackName);
+  }
+  for (const container of containers) if (container.stack) stacks.add(container.stack);
+  const unknownSet = location === null
+    || declared.unrenderable !== null
+    || resolution?.kind === 'unrenderable'
+    || resolution?.unownedContainer === true;
+  if (unknownSet && !deps.authorizeGlobal()) throw new RecoveryError('permission_denied');
+  for (const stackName of stacks) {
+    if (!deps.authorizeStack(stackName)) throw new RecoveryError('permission_denied');
+  }
+  if (containers.some((container) => container.stack === null) && !deps.authorizeGlobal()) {
+    throw new RecoveryError('permission_denied');
+  }
+  if (stacks.size === 0 && containers.length === 0 && !deps.authorizeGlobal()) {
+    throw new RecoveryError('permission_denied');
+  }
+
+  let endpointRefusal: { unresolved: boolean } | null = null;
+  for (const container of containers) {
+    endpointRefusal = await dockerEndpointRefusal(deps, container.id);
+    if (endpointRefusal) break;
+  }
+
+  let refusalReason: RecoveryRefusalReason | undefined;
+  let ineligibleReason: string | null = null;
+  const refuse = (reason: RecoveryRefusalReason, sentence: string): void => {
+    if (refusalReason === undefined) {
+      refusalReason = reason;
+      ineligibleReason = sentence;
+    }
+  };
+  if (declared.candidates.some((candidate) => candidate.role === 'stack_source')) {
+    refuse('unsupported_target', FS_STACK_SOURCE_REASON);
+  }
+  const writable = declared.candidates.some((candidate) => candidate.role === 'bind'
+    && candidate.writable && candidate.ineligibleReason === null && candidate.hostPath === storage.locator);
+  const writableAnySpelling = declared.candidates.some((candidate) => candidate.role === 'bind'
+    && candidate.writable && candidate.ineligibleReason === null);
+  // Docker not saying where its data root is withholds every directory, but that
+  // is a question to ask again, not a stack that stopped declaring this one.
+  const dockerRootUnknown = declared.candidates.some((candidate) => candidate.role === 'bind'
+    && candidate.writable && candidate.ineligibleReason === 'docker_root_unknown');
+  if (!writable && !writableAnySpelling) {
+    if (dockerRootUnknown) refuse('path_mapping_unproven', describeFsIneligible('docker_root_unknown') ?? FS_UNPROVEN_REASON);
+    // A declaration whose identity could not be read may be this directory under
+    // another spelling: the answer is unknown, the same refusal a container that
+    // cannot be placed gets, never "no stack declares it".
+    else if (declared.unplaced && refusalReason === undefined) throw new RecoveryError('identity_unknown');
+    else refuse('root_not_authorized', FS_NOT_DECLARED_REASON);
+  }
+
+  let liveGenerationToken: string | null = null;
+  let freeBytes: number | null = null;
+  let workDirsChecked = false;
+  let leftoverWorkDirs: string[] = [];
+  let nestedLeftovers: string[] = [];
+  let nestedMounts: string[] = [];
+  if (refusalReason === undefined && location) {
+    try {
+      const proven = await proveHostRoot({
+        runner: deps.runner(),
+        operationId: `overwrite-preview-${point.id}`,
+        senchoPath: location.senchoPath,
+        hostPath: location.hostPath,
+        aliases: location.aliases,
+        followSenchoPath: true,
+      });
+      liveGenerationToken = proven.generationToken;
+      const nested = await nestedMountExclusions({
+        runner: deps.runner(),
+        operationId: `overwrite-preview-${point.id}`,
+        root: proven.root,
+      });
+      nestedMounts = nested.map((exclusion) => exclusion.path);
+      if (nestedMounts.length > 0) refuse('nested_mount', FS_NESTED_MOUNT_REASON);
+      const probed = await probeProvenRoot({
+        runner: deps.runner(),
+        operationId: `overwrite-preview-${point.id}`,
+        root: proven.root,
+      });
+      freeBytes = probed.free ?? proven.report.free;
+      if (probed.workDirs !== null) {
+        workDirsChecked = true;
+        const live = deps.fence.liveIntentForVolume(fsTargetKey(storage.storageKey));
+        leftoverWorkDirs = probed.workDirs
+          .filter((name) => isRecoveryWorkDirName(name))
+          .filter((name) => name !== (live ? swapWorkDir(live) : null));
+      }
+      // A directory inside this one that was overwritten keeps its own work
+      // directory, below the top level the probe lists.
+      nestedLeftovers = await nestedLeftoverWorkDirs(location);
+    } catch (err) {
+      console.warn('[Recovery] Could not prove the directory %s for an overwrite:', sanitizeForLog(storage.locator), errorMessageForLog(err));
+      refuse('path_mapping_unproven', FS_UNPROVEN_REASON);
+    }
+  } else if (!location) {
+    refuse('path_mapping_unproven', FS_UNPROVEN_REASON);
+  }
+
+  const isCurrentGeneration = liveGenerationToken !== null && liveGenerationToken === storage.generationToken;
+  const generationChanged = liveGenerationToken !== null && !isCurrentGeneration;
+  if (generationChanged) refuse('generation_changed', FS_GENERATION_CHANGED_REASON);
+  // These two refuse the target for what it is, as they do for a volume, with
+  // no refusal token: neither is a state the operator's confirmation moved.
+  let plainRefusal: string | null = null;
+  if (endpointRefusal) {
+    plainRefusal = endpointRefusal.unresolved
+      ? 'Sencho cannot prove this directory is not one it runs on, because it could not identify its own container. Check the Docker endpoint permissions, then try again.'
+      : 'This directory is mounted by the container that runs the Docker endpoint, so overwriting it would take Sencho offline with it.';
+  } else if (leftoverWorkDirs.length > 0) {
+    plainRefusal = describeWorkDirs(leftoverWorkDirs, 'directory');
+  } else if (nestedLeftovers.length > 0) {
+    plainRefusal = describeNestedWorkDirs(nestedLeftovers);
+  }
+  if (plainRefusal !== null && ineligibleReason === null) ineligibleReason = plainRefusal;
+  const eligible = refusalReason === undefined && plainRefusal === null && liveGenerationToken !== null;
+
+  return {
+    storage,
+    point,
+    repository,
+    volumeName: fsTargetKey(storage.storageKey),
+    confirmTarget: storage.locator,
+    targetPaths: location ? { senchoPath: location.senchoPath, hostPath: location.hostPath, aliases: [...location.aliases] } : null,
+    observers: resolution?.observers ?? [],
+    nestedMounts,
+    liveGenerationToken,
+    eligible,
+    ineligibleReason: eligible ? null : (ineligibleReason ?? FS_UNPROVEN_REASON),
+    refusalReason: eligible ? undefined : refusalReason,
     generationToken: storage.generationToken,
     isCurrentGeneration,
     generationChanged,
@@ -496,6 +831,13 @@ export function confirmationTokenFor(input: {
     running: boolean;
     restartPolicy: RestartPolicy;
   }>;
+  /**
+   * A host directory also binds the dependent stacks, its host path, its
+   * declared aliases and the mounts below it, so a stack that starts or stops
+   * declaring it, or a mount that appears, moves the token. Omitted for a volume,
+   * whose token is unchanged.
+   */
+  hostDirectory?: { stacks: readonly string[]; hostPath: string; aliases: readonly string[]; nestedMounts: readonly string[] };
 }): string {
   // Running state and restart policy are part of what the operator saw: a
   // container that stops or changes policy after the preview would otherwise
@@ -513,7 +855,34 @@ export function confirmationTokenFor(input: {
       container.restartPolicy?.MaximumRetryCount ?? 0,
     ].join(':')).sort(),
   ];
+  if (input.hostDirectory) {
+    canonical.push(JSON.stringify({
+      stacks: [...input.hostDirectory.stacks].sort(),
+      hostPath: input.hostDirectory.hostPath,
+      aliases: [...input.hostDirectory.aliases].sort(),
+      nestedMounts: [...input.hostDirectory.nestedMounts].sort(),
+    }));
+  }
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/** The confirmation token for an observation, the same in the preview and the admission. */
+function tokenForObservation(observed: TargetObservation, generationToken: string): string {
+  return confirmationTokenFor({
+    pointId: observed.point.id,
+    storageKey: observed.storage.storageKey,
+    generationToken,
+    repositoryId: observed.repository.id,
+    containers: observed.containers,
+    hostDirectory: observed.targetPaths
+      ? {
+        stacks: observed.stacks,
+        hostPath: observed.targetPaths.hostPath,
+        aliases: observed.targetPaths.aliases,
+        nestedMounts: observed.nestedMounts,
+      }
+      : undefined,
+  });
 }
 
 /** The staging volume name for an intent, derived before the row exists. */
@@ -540,14 +909,17 @@ export async function previewOverwrite(deps: OverwriteDeps, pointId: string): Pr
     },
     node: { id: deps.hubNode?.id ?? deps.nodeId, name: deps.hubNode?.name ?? deps.nodeName, transport: deps.transport },
     target: {
-      volumeName: observed.volumeName,
       storageKey: observed.storage.storageKey,
       generation: observed.storage.generation,
       generationToken: observed.generationToken,
       eligible: observed.eligible,
       ineligibleReason: observed.ineligibleReason,
+      ...(observed.storage.kind === 'bind_root'
+        ? { kind: 'bind_root' as const, volumeName: null, hostPath: observed.confirmTarget }
+        : { kind: 'named_volume' as const, volumeName: observed.volumeName, hostPath: null }),
     },
-    dependents: { stacks: observed.stacks, containers: observed.containers },
+    dependents: { stacks: observed.stacks, containers: observed.containers, observers: observed.observers },
+    nestedMounts: observed.nestedMounts,
     inUse: observed.containers.some((container) => container.running),
     swap: {
       method: 'fenced_rename',
@@ -557,19 +929,16 @@ export async function previewOverwrite(deps: OverwriteDeps, pointId: string): Pr
     },
     space: { requiredBytes, freeBytes: observed.freeBytes, sufficient },
     preRestorePoint: { required: true, consistency: 'crash_consistent_stopped' },
-    warnings: observed.workDirsChecked ? [...SWAP_WARNINGS] : [...SWAP_WARNINGS, WORK_DIRS_UNCHECKED_WARNING],
+    warnings: observed.workDirsChecked
+      ? swapWarnings(observed.storage.kind === 'bind_root' ? 'directory' : 'volume')
+      : [
+        ...swapWarnings(observed.storage.kind === 'bind_root' ? 'directory' : 'volume'),
+        workDirsUncheckedWarning(observed.storage.kind === 'bind_root' ? 'directory' : 'volume'),
+      ],
     confirmation: {
       // No token for a target admission would refuse: an ineligible volume has no
       // state an overwrite could be admitted against.
-      token: observed.eligible
-        ? confirmationTokenFor({
-          pointId: observed.point.id,
-          storageKey: observed.storage.storageKey,
-          generationToken: observed.generationToken,
-          repositoryId: observed.repository.id,
-          containers: observed.containers,
-        })
-        : null,
+      token: observed.eligible ? tokenForObservation(observed, observed.generationToken) : null,
     },
   };
 }
@@ -584,6 +953,10 @@ export interface AdmittedOverwrite {
   stacks: string[];
   storageKey: string;
   liveGenerationToken: string;
+  /** What the intent records as its target: the volume name, or the directory's `fs:` key. */
+  targetVolume: string;
+  /** A host directory's paths, recorded with the intent; null for a volume. */
+  targetPaths: FsTargetPaths | null;
 }
 
 /**
@@ -595,7 +968,9 @@ export interface AdmittedOverwrite {
 export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   pointId: string;
   confirmationToken: string;
-  confirmVolumeName: string;
+  /** The volume name typed back; for a host directory, `confirmHostPath` instead. */
+  confirmVolumeName?: string;
+  confirmHostPath?: string;
 }): Promise<AdmittedOverwrite> {
   if (!deps.points.get(input.pointId) && !deps.authorizeGlobal()) throw new RecoveryError('permission_denied');
   const observed = await observeTarget(deps, input.pointId);
@@ -603,16 +978,38 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
     // A recreated volume is a moved precondition, not a malformed request: the
     // caller's token was valid for the point, and the repair is a new point.
     if (observed.generationChanged) {
+      // Another refusal may have been found first; the sentence follows the reason.
       throw new RecoveryError('precondition_failed', {
         reason: 'generation_changed',
-        detail: GENERATION_CHANGED_REASON,
+        detail: observed.storage.kind === 'bind_root'
+          ? FS_GENERATION_CHANGED_REASON
+          : (observed.ineligibleReason ?? GENERATION_CHANGED_REASON),
       });
     }
-    throw new RecoveryError('invalid_request', { detail: observed.ineligibleReason ?? undefined });
+    // For a host directory, a mount that appeared below it, a stack that stopped
+    // declaring it, and a host path that no longer proves are all a state that
+    // moved since the preview, so they answer as one. A stack source directory
+    // never becomes overwritable: that is a request the route never accepts.
+    if (observed.storage.kind === 'bind_root' && observed.refusalReason !== undefined
+      && observed.refusalReason !== 'unsupported_target') {
+      throw new RecoveryError('precondition_failed', {
+        reason: observed.refusalReason,
+        detail: observed.ineligibleReason ?? undefined,
+      });
+    }
+    throw new RecoveryError('invalid_request', {
+      reason: observed.refusalReason,
+      detail: observed.ineligibleReason ?? undefined,
+    });
   }
-  if (input.confirmVolumeName !== observed.volumeName) throw new RecoveryError('invalid_request');
+  // The typed confirmation is compared with the derived value only: the
+  // volume's name, or the directory's host path. It never selects the target.
+  const typed = observed.storage.kind === 'bind_root' ? input.confirmHostPath : input.confirmVolumeName;
+  if (typed !== observed.confirmTarget) throw new RecoveryError('invalid_request', { reason: 'confirmation_mismatch' });
 
-  const liveGenerationToken = await probeGenerationToken({
+  // A host directory was proven by the observation this admission just ran;
+  // a volume reads its token again, as it always has.
+  const liveGenerationToken = observed.liveGenerationToken ?? await probeGenerationToken({
     runner: deps.runner(),
     operationId: `overwrite-admission-${observed.point.id}`,
     volumeName: observed.volumeName,
@@ -621,16 +1018,10 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   if (liveGenerationToken !== observed.generationToken) {
     throw new RecoveryError('precondition_failed', {
       reason: 'generation_changed',
-      detail: GENERATION_CHANGED_REASON,
+      detail: observed.storage.kind === 'bind_root' ? FS_GENERATION_CHANGED_REASON : GENERATION_CHANGED_REASON,
     });
   }
-  const expected = confirmationTokenFor({
-    pointId: observed.point.id,
-    storageKey: observed.storage.storageKey,
-    generationToken: observed.generationToken,
-    repositoryId: observed.repository.id,
-    containers: observed.containers,
-  });
+  const expected = tokenForObservation(observed, observed.generationToken);
   if (expected !== input.confirmationToken) {
     throw new RecoveryError('precondition_failed', {
       reason: 'confirmation_mismatch',
@@ -638,7 +1029,7 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
       // be a token from another preview, or the containers or the repository may
       // have changed since this one was issued (a recreated volume was refused
       // above, as `generation_changed`).
-      detail: 'The confirmation token does not match this volume as it is now: it came from another preview, or something changed since the preview. Ask for a new preview and confirm again.',
+      detail: `The confirmation token does not match this ${observed.storage.kind === 'bind_root' ? 'directory' : 'volume'} as it is now: it came from another preview, or something changed since the preview. Ask for a new preview and confirm again.`,
     });
   }
 
@@ -647,7 +1038,7 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
   }
   if (deps.fence.liveIntentForVolume(observed.volumeName)) {
     throw new RecoveryError('lock_held', {
-      detail: 'Another restore of this volume has not finished. Wait for it, or resolve it, then preview again.',
+      detail: `Another restore of this ${observed.storage.kind === 'bind_root' ? 'directory' : 'volume'} has not finished. Wait for it, or resolve it, then preview again.`,
     });
   }
 
@@ -666,6 +1057,8 @@ export async function prepareOverwriteAdmission(deps: OverwriteDeps, input: {
     })),
     storageKey: observed.storage.storageKey,
     liveGenerationToken,
+    targetVolume: observed.volumeName,
+    targetPaths: observed.targetPaths,
   };
 }
 
@@ -687,6 +1080,8 @@ export function recordOverwriteIntent(
     fenceMembers: readonly FenceMemberInput[];
     /** Every stack whose model declares the volume, with or without containers. */
     dependentStacks?: readonly string[];
+    /** A host directory's paths; required when `targetVolume` is an `fs:` key. */
+    targetPaths?: FsTargetPaths | null;
   },
 ): RestoreIntentRecord {
   const intent = deps.intents.recordOverwrite({
@@ -699,6 +1094,7 @@ export function recordOverwriteIntent(
     stagingVolume: stagingVolumeFor(input.intentId),
     expectedGenerationToken: input.expectedGenerationToken,
     dependentStacks: input.dependentStacks ? [...input.dependentStacks] : undefined,
+    targetPaths: input.targetPaths ?? undefined,
   });
   deps.points.addHold({ pointId: input.pointId, holderKind: 'restore_intent', holderRef: intent.id });
   deps.fence.recordMembers(intent.id, input.fenceMembers);
@@ -965,29 +1361,44 @@ function keepForCleanup(deps: OverwriteDeps, intentId: string, now = Date.now())
  */
 async function fenceWorkloads(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
   const deps = ctx.deps;
-  const dependency = await recheckDependents(ctx, state, { requireStopped: false });
-  if (dependency !== 'ok') {
-    await settleRollback(ctx, state, dependency === 'changed' ? 'dependents_changed' : 'identity_unknown');
-    return false;
-  }
+  // A container whose bind became unreadable since admission throws here; it
+  // settles the restore like any other refusal instead of leaving the intent
+  // open, which would hold the directory until a restart reconciled it.
+  if (!await recheckDependentsOrSettle(ctx, state, { requireStopped: false }, 'Re-checking the dependents before the fence')) return false;
   deps.intents.advance(state.intent.id, 'fenced');
   // From here the workloads are being stopped, so the fence is live: every
   // Sencho path that could start or browse one is refused from this record.
   deps.fence.setFenceState(state.intent.id, 'held');
   // A start that passed its check before the fence was recorded is still on its
-  // way; the observation below has to see its result, so it is waited for first.
-  const drained = await waitForStartsInFlight();
+  // way, and so may be a stack file operation on the directory: the observation
+  // below has to see the start's result, and the pre-restore point and the swap
+  // must not run under the file work, so both are waited for first.
+  const unfinished = await waitForWorkBeforeFence(
+    isFsTargetKey(state.intent.targetVolume) ? state.intent.targetPaths : null,
+  );
   // Nothing has been stopped or re-pinned yet, so an abort from here puts the
   // fence back to `none`: a release would otherwise restore the admission-time
   // policies and start members an operator stopped since, or fail on a member
   // that no longer exists and leave the volume fenced for good.
-  if (!drained) {
-    console.warn('[Recovery] A container start is still unanswered; refusing the fence on %s.', sanitizeForLog(state.intent.id));
+  if (unfinished !== null) {
+    console.warn(
+      '[Recovery] A %s is still unanswered; refusing the fence on %s.',
+      unfinished === 'start' ? 'container start' : 'file operation on the directory',
+      sanitizeForLog(state.intent.id),
+    );
     deps.fence.setFenceState(state.intent.id, 'none');
     await settleRollback(ctx, state, 'fence_unavailable');
     return false;
   }
-  const current = await listMountingContainers(deps, state.intent.targetVolume ?? '');
+  let current: OverwriteContainerFact[];
+  try {
+    current = await listMountingContainers(deps, targetOfIntent(state.intent));
+  } catch (err) {
+    logEngineThrow(state, 'Listing the containers that use the target', err);
+    deps.fence.setFenceState(state.intent.id, 'none');
+    await settleRollback(ctx, state, classifyRecoveryError(err));
+    return false;
+  }
   const recorded = new Set(state.members.map((member) => member.containerId));
   if (current.length !== state.members.length || current.some((container) => !recorded.has(container.id))) {
     deps.fence.setFenceState(state.intent.id, 'none');
@@ -1164,7 +1575,7 @@ function settleFailedPoint(deps: OverwriteDeps, pointId: string, errorClass: Rec
  */
 async function containersStillFenced(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
   try {
-    const current = await listMountingContainers(ctx.deps, state.intent.targetVolume ?? '');
+    const current = await listMountingContainers(ctx.deps, targetOfIntent(state.intent));
     const recorded = new Set(state.members.map((member) => member.containerId));
     if (current.length !== state.members.length) return false;
     for (const container of current) {
@@ -1193,6 +1604,7 @@ async function materializePoint(ctx: OverwriteRunContext, state: PipelineState):
   }
   let result;
   try {
+    const hostRoot = await intentHostRoot(deps, state.intent, ctx.operationId);
     result = await ctx.engine.restore(
       {
         id: state.intent.id,
@@ -1201,6 +1613,7 @@ async function materializePoint(ctx: OverwriteRunContext, state: PipelineState):
         repositoryId: ctx.repository.id,
         snapshotId: point.snapshotId,
         target: {
+          hostRoot,
           mode: 'staged_overwrite',
           storageId: state.storage.id,
           expectedGenerationToken: state.intent.expectedGenerationToken ?? state.storage.generationToken,
@@ -1239,16 +1652,28 @@ async function materializePoint(ctx: OverwriteRunContext, state: PipelineState):
 async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): Promise<boolean> {
   const deps = ctx.deps;
   const volumeName = state.intent.targetVolume ?? '';
+  let hostRoot: ProvenHostRoot | undefined;
+  try {
+    hostRoot = await intentHostRoot(deps, state.intent, ctx.operationId);
+  } catch (err) {
+    logEngineThrow(state, 'Proving the directory before the swap', err);
+    await settleRollback(ctx, state, 'identity_unknown');
+    return false;
+  }
   const prepared = await runSwapStep({
     runner: deps.runner(),
     operationId: ctx.operationId,
     volumeName,
+    hostRoot,
     intentId: state.intent.id,
     action: 'prepare',
     signal: ctx.context.signal,
   });
   if (!prepared.ok || prepared.report?.status !== 'planned') {
-    await settleRollback(ctx, state, prepared.errorClass === 'interrupted' ? 'interrupted' : 'node_error');
+    const failure = prepared.errorClass === 'interrupted' || prepared.errorClass === 'identity_unknown'
+      ? prepared.errorClass
+      : 'node_error';
+    await settleRollback(ctx, state, failure);
     return false;
   }
   deps.intents.advance(state.intent.id, 'swapping');
@@ -1261,11 +1686,12 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
     runner: deps.runner(),
     operationId: ctx.operationId,
     volumeName,
+    hostRoot,
     intentId: state.intent.id,
     action: 'commit',
     signal: ctx.context.signal,
   });
-  let finalStatus = await readSwapStatus(ctx, volumeName, state.intent.id, committed.report?.status ?? null);
+  let finalStatus = await readSwapStatus(ctx, volumeName, state.intent.id, committed.report?.status ?? null, hostRoot);
   if (finalStatus === 'metadata_pending') {
     // Every entry moved but the journal never recorded the commit, so the root
     // metadata is not proven. One more commit finishes it; it is idempotent.
@@ -1273,11 +1699,12 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
       runner: deps.runner(),
       operationId: ctx.operationId,
       volumeName,
+      hostRoot,
       intentId: state.intent.id,
       action: 'commit',
       signal: ctx.context.signal,
     });
-    finalStatus = await readSwapStatus(ctx, volumeName, state.intent.id, null);
+    finalStatus = await readSwapStatus(ctx, volumeName, state.intent.id, null, hostRoot);
   }
   if (finalStatus !== 'swapped') {
     if (finalStatus === 'inconsistent') {
@@ -1296,6 +1723,7 @@ async function swapAndCleanup(ctx: OverwriteRunContext, state: PipelineState): P
     runner: deps.runner(),
     operationId: ctx.operationId,
     volumeName,
+    hostRoot,
     intentId: state.intent.id,
     action: 'cleanup',
     signal: ctx.context.signal,
@@ -1321,11 +1749,13 @@ async function readSwapStatus(
   volumeName: string,
   intentId: string,
   fallback: SwapStatus | null,
+  hostRoot?: ProvenHostRoot,
 ): Promise<SwapStatus> {
   const status = await runSwapStep({
     runner: ctx.deps.runner(),
     operationId: ctx.operationId,
     volumeName,
+    hostRoot,
     intentId,
     action: 'status',
   });
@@ -1427,10 +1857,20 @@ export async function rollbackIntent(deps: OverwriteDeps, intentId: string): Pro
     || intent.phase === 'swapping'
     || intent.phase === 'swapped';
   if (swapMayHaveRun) {
+    let hostRoot: ProvenHostRoot | undefined;
+    try {
+      hostRoot = await intentHostRoot(deps, intent, `overwrite-rollback-${intentId}`);
+    } catch (err) {
+      // A directory that cannot be proven is never written: the rollback waits.
+      console.warn('[Recovery] Could not prove the directory of restore %s for a rollback:', sanitizeForLog(intentId), errorMessageForLog(err));
+      deps.intents.advance(intentId, 'completion_unknown', { outcomeClass: 'identity_unknown' });
+      return 'unknown';
+    }
     const swap = await runClosingSwapStep({
       runner: deps.runner(),
       operationId: `overwrite-rollback-${intentId}`,
       volumeName: intent.targetVolume,
+      hostRoot,
       intentId,
       action: 'rollback',
     });
@@ -1511,18 +1951,32 @@ async function recheckDependents(
 ): Promise<'ok' | 'changed' | 'unknown'> {
   const deps = ctx.deps;
   const volumeName = state.intent.targetVolume ?? '';
-  const source = await inspectVolumeSource(deps.docker, volumeName);
-  const resolution = await resolveVolumeDependents({
-    nodeId: deps.nodeId,
-    ownerNodeKey: deps.ownerNodeKey,
-    knownStackNames: deps.knownStackNames,
-    volumeName,
-    volumeLabels: source?.labels ?? {},
-    render: true,
-    docker: deps.docker,
-  });
+  const target = targetOfIntent(state.intent);
+  const source = target.kind === 'named_volume' ? await inspectVolumeSource(deps.docker, volumeName) : null;
+  const resolution = target.kind === 'named_volume'
+    ? await resolveVolumeDependents({
+      nodeId: deps.nodeId,
+      ownerNodeKey: deps.ownerNodeKey,
+      knownStackNames: deps.knownStackNames,
+      volumeName,
+      volumeLabels: source?.labels ?? {},
+      render: true,
+      docker: deps.docker,
+    })
+    : await resolveFsRootDependents({
+      nodeId: deps.nodeId,
+      storageKey: state.storage.storageKey,
+      knownStackNames: deps.knownStackNames,
+      root: target.location,
+      render: true,
+      docker: deps.docker,
+      environment: await readFsRootEnvironment(deps.nodeId, deps.docker),
+    });
   if (resolution.kind === 'unrenderable') return 'changed';
-  const current = await listMountingContainers(deps, volumeName);
+  // A container no stack owns that started depending on the directory is a
+  // dependent nobody authorized.
+  if (resolution.unownedContainer) return 'changed';
+  const current = await listMountingContainers(deps, target);
   const recorded = new Set(state.members.map((member) => member.containerId));
   if (current.length !== state.members.length) return 'changed';
   if (current.some((container) => !recorded.has(container.id))) return 'changed';
@@ -1540,24 +1994,33 @@ async function recheckDependents(
     if (!recordedStacks.has(dependent.stackName)) return 'changed';
   }
   try {
-    const live = await probeGenerationToken({
-      runner: deps.runner(),
-      operationId: ctx.operationId,
-      volumeName,
-      createdAt: source?.createdAt ?? null,
-    });
+    const live = target.kind === 'named_volume'
+      ? await probeGenerationToken({
+        runner: deps.runner(),
+        operationId: ctx.operationId,
+        volumeName,
+        createdAt: source?.createdAt ?? null,
+      })
+      : (await proveHostRoot({
+        runner: deps.runner(),
+        operationId: ctx.operationId,
+        senchoPath: target.location.senchoPath,
+        hostPath: target.location.hostPath,
+        followSenchoPath: true,
+      })).generationToken;
     if (live !== state.intent.expectedGenerationToken) return 'unknown';
   } catch {
+    // A token that cannot be read proves nothing; the caller settles unknown.
     return 'unknown';
   }
   return 'ok';
 }
 
 /**
- * The post-fence call sites share one rule: a recheck that cannot answer must
- * not escape the pipeline with the workloads stopped and the fence held, because
- * only reconciliation would release them. A throw, a changed set and an unknown
- * generation all settle the restore the same way an ordinary refusal does.
+ * Every recheck shares one rule: a recheck that cannot answer must not escape
+ * the pipeline, because only reconciliation would then settle the intent (and,
+ * after the fence, release the stopped workloads). A throw, a changed set and an
+ * unknown generation all settle the restore the same way an ordinary refusal does.
  */
 async function recheckDependentsOrSettle(
   ctx: OverwriteRunContext,
@@ -1567,7 +2030,10 @@ async function recheckDependentsOrSettle(
 ): Promise<boolean> {
   let dependency: 'ok' | 'changed' | 'unknown';
   try {
-    dependency = await recheckDependents(ctx, state, options);
+    // The re-check renders the dependent stacks while this restore's fence is
+    // held and before its swap: run as the fence's owner, so its own fence
+    // does not refuse those renders (another restore's still does).
+    dependency = await runAsFenceOwner(ctx.intentId, () => recheckDependents(ctx, state, options));
   } catch (err) {
     logEngineThrow(state, step, err);
     await settleRollback(ctx, state, classifyRecoveryError(err));
@@ -1662,6 +2128,21 @@ export async function reconcileOverwriteIntent(
     return 'unknown';
   }
 
+  /**
+   * A host directory is proven again before any step touches it. A proof that
+   * cannot run (Sencho's mounts unreadable, no helper) or that answers a
+   * different directory both leave the fence held and the intent unknown, and a
+   * `retry` proves it again.
+   */
+  const proveTarget = async (): Promise<{ ok: true; hostRoot: ProvenHostRoot | undefined } | { ok: false }> => {
+    try {
+      return { ok: true, hostRoot: await intentHostRoot(deps, intent, `overwrite-reconcile-${intent.id}`) };
+    } catch (err) {
+      console.warn('[Recovery] Could not prove the directory of restore %s:', sanitizeForLog(intent.id), errorMessageForLog(err));
+      return { ok: false };
+    }
+  };
+
   if (PRE_FENCE_PHASES.includes(intent.phase)) {
     // Nothing in the live volume has moved. Remove the staging volume if it is
     // ours and unused, and leave the workloads exactly as they were. A fence that
@@ -1680,6 +2161,12 @@ export async function reconcileOverwriteIntent(
 
   if (FENCED_PHASES.includes(intent.phase)) {
     // Nothing was renamed yet.
+    const proven = await proveTarget();
+    if (!proven.ok) {
+      markUnknown(deps, intent, 'identity_unknown', now);
+      return 'unknown';
+    }
+    const hostRoot = proven.hostRoot;
     if (workloadsMayRunNow(deps, intent)) {
       // A rollback that released its fence and did not settle (its staging volume was
       // still in use, or the process died): the workloads may be running, so the
@@ -1690,6 +2177,7 @@ export async function reconcileOverwriteIntent(
         runner: deps.runner(),
         operationId: `overwrite-reconcile-${intent.id}`,
         volumeName,
+        hostRoot,
         intentId: intent.id,
         action: 'status',
       });
@@ -1707,6 +2195,7 @@ export async function reconcileOverwriteIntent(
         runner: deps.runner(),
         operationId: `overwrite-reconcile-${intent.id}`,
         volumeName,
+        hostRoot,
         intentId: intent.id,
         action: 'rollback',
       });
@@ -1725,10 +2214,19 @@ export async function reconcileOverwriteIntent(
   }
 
   // swapping, swapped: the journal decides.
+  const provenForSwap = await proveTarget();
+  if (!provenForSwap.ok) {
+    // A `swapped` intent keeps its phase: the journal's commit marker was read,
+    // and a directory that cannot be proven now does not undo that.
+    if (intent.phase !== 'swapped') markUnknown(deps, intent, 'identity_unknown', now);
+    return 'unknown';
+  }
+  const hostRoot = provenForSwap.hostRoot;
   const status = await runSwapStep({
     runner: deps.runner(),
     operationId: `overwrite-reconcile-${intent.id}`,
     volumeName,
+    hostRoot,
     intentId: intent.id,
     action: 'status',
   });
@@ -1768,6 +2266,7 @@ export async function reconcileOverwriteIntent(
         runner: deps.runner(),
         operationId: `overwrite-reconcile-${intent.id}`,
         volumeName,
+        hostRoot,
         intentId: intent.id,
         action: 'commit',
       });
@@ -1780,6 +2279,7 @@ export async function reconcileOverwriteIntent(
       runner: deps.runner(),
       operationId: `overwrite-reconcile-${intent.id}`,
       volumeName,
+      hostRoot,
       intentId: intent.id,
       action: 'cleanup',
     });
@@ -1810,6 +2310,7 @@ export async function reconcileOverwriteIntent(
     runner: deps.runner(),
     operationId: `overwrite-reconcile-${intent.id}`,
     volumeName,
+    hostRoot,
     intentId: intent.id,
     action: 'rollback',
   });
@@ -1983,11 +2484,21 @@ export async function resolveOverwriteIntent(
 
   // Acceptance changes who runs the workloads, not what the data is. Only the
   // journal can prove the swap committed; anything else stays unknown.
-  const status = intent.targetVolume
+  let hostRoot: ProvenHostRoot | undefined;
+  let proven = true;
+  try {
+    hostRoot = await intentHostRoot(deps, intent, `overwrite-resolve-${intent.id}`);
+  } catch (err) {
+    // An unproven directory is not read: its journal stays unknown.
+    console.warn('[Recovery] Could not prove the directory of restore %s:', sanitizeForLog(intent.id), errorMessageForLog(err));
+    proven = false;
+  }
+  const status = intent.targetVolume && proven
     ? (await runSwapStep({
         runner: deps.runner(),
         operationId: `overwrite-resolve-${intent.id}`,
         volumeName: intent.targetVolume,
+        hostRoot,
         intentId: intent.id,
         action: 'status',
       })).report?.status ?? null
@@ -2004,6 +2515,7 @@ export async function resolveOverwriteIntent(
       runner: deps.runner(),
       operationId: `overwrite-resolve-${intent.id}`,
       volumeName: intent.targetVolume,
+      hostRoot,
       intentId: intent.id,
       action: 'cleanup',
     });

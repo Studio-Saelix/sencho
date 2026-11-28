@@ -123,7 +123,12 @@ function toPoint(row: PointRow): RecoveryPoint {
 export function canonicalizePathScope(raw: string): string {
   if (typeof raw !== 'string' || raw.length === 0 || raw.includes('\0')) throw new RecoveryError('invalid_request');
   if (path.posix.isAbsolute(raw) || raw.split('/').includes('..')) throw new RecoveryError('invalid_request');
-  const normalized = path.posix.normalize(raw).replace(/\/+$/, '');
+  // Trailing slashes are cut with a scan, not a `/\/+$/` replace: that regex
+  // backtracks over every run of slashes in a caller-supplied path.
+  let normalized = path.posix.normalize(raw);
+  let end = normalized.length;
+  while (end > 0 && normalized[end - 1] === '/') end -= 1;
+  normalized = normalized.slice(0, end);
   if (normalized === '' || normalized === '.') throw new RecoveryError('invalid_request');
   return normalized;
 }
@@ -153,7 +158,7 @@ export type PointFinalization =
   | { status: 'completion_unknown' };
 
 const EXCLUSION_REASONS: ReadonlySet<ExclusionReason> = new Set<ExclusionReason>([
-  'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type',
+  'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type', 'nested_mount',
 ]);
 
 const CONSISTENCY_CLASSES: ReadonlySet<ConsistencyClass> = new Set<ConsistencyClass>([

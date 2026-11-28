@@ -28,6 +28,7 @@ import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
+import { renderStackModel } from './recovery/volumeSources';
 
 export interface RootMount {
   service: string;
@@ -51,6 +52,48 @@ interface BindGroup {
    */
   dangerousSource: boolean;
   mounts: RootMount[];
+  /**
+   * Every source string the rendered model declares for this canonical
+   * directory, exactly as Compose hands it to the Docker daemon. Two spellings of
+   * one directory (a symlink, a trailing slash) are two entries.
+   */
+  declaredSources: Set<string>;
+}
+
+/**
+ * A directory a stack's recovery points may cover: its own source directory, or
+ * one bind source group. Unlike `StackFileRoot` it keeps every bind group,
+ * including the ones the explorer suppresses, because recovery must report a
+ * refused directory with its reason rather than leave it out.
+ */
+export interface FsRootDeclaration {
+  /** `stack-source`, or the same `bind:<hash>` id the explorer mints. */
+  rootId: string;
+  role: 'stack_source' | 'bind';
+  /** The directory as Sencho sees it, canonical when it could be resolved. */
+  senchoPath: string;
+  /** Declared source strings that resolve to this directory (bind role; a bind of the stack directory joins the stack source). */
+  declaredSources: string[];
+  mounts: RootMount[];
+  label: string;
+  accessible: boolean;
+  isDirectory: boolean;
+  dangerous: boolean;
+  managedSourceOverlap: boolean;
+  /** Every declaration is read-only. */
+  readonly: boolean;
+}
+
+/** One stack's recovery roots, with how its model was read. */
+export interface FsRootListing {
+  /**
+   * `rendered`: the model was read and every bind group is listed. `absent`: the
+   * stack has no Compose file, so it declares nothing. `unrenderable`: Compose
+   * could not produce the model, so the binds are unknown and only the stack
+   * source root is listed; a caller must not read that as "declares nothing".
+   */
+  outcome: 'rendered' | 'absent' | 'unrenderable';
+  roots: FsRootDeclaration[];
 }
 
 export interface StackFileRoot {
@@ -133,6 +176,13 @@ interface CacheEntry {
 // Module-level cache: getInstance(nodeId) returns a fresh service each call (like
 // FileSystemService), so the cache must outlive the instance. Keyed by node+stack.
 const rootsCache = new Map<string, CacheEntry>();
+
+/**
+ * The recovery view of the same roots, cached on the same terms. An
+ * `unrenderable` outcome is never cached: the next caller renders again rather
+ * than reading a failure as a stack that declares nothing.
+ */
+const fsRootsCache = new Map<string, { listing: FsRootListing; expiresAt: number }>();
 
 /**
  * Sencho's writable data directory (sencho.db, encryption.key, backups). Mirrors
@@ -333,6 +383,7 @@ export class StackFileRootsService {
   /** Drop the cached allowlist for a stack so a changed mount stops being addressable immediately. */
   static invalidate(nodeId: number, stackName: string): void {
     rootsCache.delete(`${nodeId}:${stackName}`);
+    fsRootsCache.delete(`${nodeId}:${stackName}`);
   }
 
   /**
@@ -344,6 +395,9 @@ export class StackFileRootsService {
     const prefix = `${nodeId}:`;
     for (const key of rootsCache.keys()) {
       if (key.startsWith(prefix)) rootsCache.delete(key);
+    }
+    for (const key of fsRootsCache.keys()) {
+      if (key.startsWith(prefix)) fsRootsCache.delete(key);
     }
   }
 
@@ -434,41 +488,57 @@ export class StackFileRootsService {
     return root;
   }
 
+  /**
+   * Group a model's bind declarations by the canonical directory each resolves
+   * to, probing each declared source once.
+   */
+  private async groupBinds(model: EffectiveModel, stackDir: string): Promise<Map<string, BindGroup>> {
+    const probeByRaw = new Map<string, { canonical: string; accessible: boolean; isDir: boolean }>();
+    const bindByCanonical = new Map<string, BindGroup>();
+    for (const svc of model.services) {
+      for (const m of svc.storageMounts ?? []) {
+        if (m.type !== 'bind' || !m.source) continue;
+        const mount: RootMount = { service: svc.name, containerPath: m.target, readOnly: m.readOnly };
+        const rawAbs = path.isAbsolute(m.source) ? m.source : path.resolve(stackDir, m.source);
+        let probe = probeByRaw.get(rawAbs);
+        if (!probe) {
+          probe = await probeBindRootAccess(rawAbs);
+          probeByRaw.set(rawAbs, probe);
+        }
+        let group = bindByCanonical.get(probe.canonical);
+        if (!group) {
+          group = {
+            canonical: probe.canonical,
+            accessible: probe.accessible,
+            isDir: probe.isDir,
+            dockerSock: false,
+            dangerousSource: false,
+            mounts: [],
+            declaredSources: new Set<string>(),
+          };
+          bindByCanonical.set(probe.canonical, group);
+        }
+        group.mounts.push(mount);
+        group.declaredSources.add(rawAbs);
+        if (isDangerousHostPath(rawAbs)) group.dangerousSource = true;
+        if (isDockerSocketMount({ source: m.source, target: m.target })) group.dockerSock = true;
+      }
+    }
+    return bindByCanonical;
+  }
+
   private async discoverVolumeRoots(
     model: EffectiveModel,
     baseDir: string,
     stackDir: string,
   ): Promise<StackFileRoot[]> {
-    const probeByRaw = new Map<string, { canonical: string; accessible: boolean; isDir: boolean }>();
-    const bindByCanonical = new Map<string, BindGroup>();
+    const bindByCanonical = await this.groupBinds(model, stackDir);
     const volByName = new Map<string, { name: string; mounts: RootMount[] }>();
 
     for (const svc of model.services) {
       for (const m of svc.storageMounts ?? []) {
         const mount: RootMount = { service: svc.name, containerPath: m.target, readOnly: m.readOnly };
-        if (m.type === 'bind' && m.source) {
-          const rawAbs = path.isAbsolute(m.source) ? m.source : path.resolve(stackDir, m.source);
-          let probe = probeByRaw.get(rawAbs);
-          if (!probe) {
-            probe = await probeBindRootAccess(rawAbs);
-            probeByRaw.set(rawAbs, probe);
-          }
-          let group = bindByCanonical.get(probe.canonical);
-          if (!group) {
-            group = {
-              canonical: probe.canonical,
-              accessible: probe.accessible,
-              isDir: probe.isDir,
-              dockerSock: false,
-              dangerousSource: false,
-              mounts: [],
-            };
-            bindByCanonical.set(probe.canonical, group);
-          }
-          group.mounts.push(mount);
-          if (isDangerousHostPath(rawAbs)) group.dangerousSource = true;
-          if (isDockerSocketMount({ source: m.source, target: m.target })) group.dockerSock = true;
-        } else if (m.type === 'named' && m.source) {
+        if (m.type === 'named' && m.source) {
           const resolvedName = model.volumes[m.source]?.name ?? m.source;
           let group = volByName.get(resolvedName);
           if (!group) {
@@ -477,7 +547,7 @@ export class StackFileRootsService {
           }
           group.mounts.push(mount);
         }
-        // anonymous / tmpfs mounts have no stable browse target and are skipped.
+        // binds are grouped above; anonymous / tmpfs mounts have no stable browse target and are skipped.
       }
     }
 
@@ -491,6 +561,86 @@ export class StackFileRootsService {
       roots.push(await this.buildVolumeRoot(group));
     }
     return roots;
+  }
+
+  /**
+   * The cached recovery roots of a stack, or null when none are cached. Never
+   * renders, so a node-wide read can use what other requests already paid for
+   * and fall back to the node-wide check for the rest.
+   */
+  peekFsRoots(stackName: string): FsRootListing | null {
+    const cached = fsRootsCache.get(this.cacheKey(stackName));
+    return cached && cached.expiresAt > Date.now() ? cached.listing : null;
+  }
+
+  /**
+   * The directories a stack's recovery points may cover: the stack source and
+   * every bind group, each with the explorer's own verdicts. Never a client
+   * path: the caller matches a server-minted `rootId` against this list.
+   *
+   * `fresh` bypasses the cache, for a caller about to change data.
+   */
+  async listFsRoots(stackName: string, opts: { fresh?: boolean } = {}): Promise<FsRootListing> {
+    if (!isValidStackName(stackName)) {
+      throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
+    }
+    const key = this.cacheKey(stackName);
+    if (!opts.fresh) {
+      const cached = fsRootsCache.get(key);
+      if (cached && cached.expiresAt > Date.now()) return cached.listing;
+    }
+    const baseDir = FileSystemService.getInstance(this.nodeId).getBaseDir();
+    const stackDir = path.join(baseDir, stackName);
+    const canonicalStackDir = await probeBindRootAccess(stackDir);
+    const source: FsRootDeclaration = {
+      rootId: STACK_SOURCE_ROOT_ID,
+      role: 'stack_source',
+      senchoPath: canonicalStackDir.canonical,
+      declaredSources: [],
+      mounts: [],
+      label: 'Stack source',
+      accessible: canonicalStackDir.accessible,
+      isDirectory: canonicalStackDir.isDir,
+      dangerous: false,
+      managedSourceOverlap: false,
+      readonly: false,
+    };
+    const model = await renderStackModel(this.nodeId, stackName);
+    if (model === 'unrenderable') return { outcome: 'unrenderable', roots: [source] };
+    if (model === null) {
+      const listing: FsRootListing = { outcome: 'absent', roots: [source] };
+      fsRootsCache.set(key, { listing, expiresAt: Date.now() + ROOTS_CACHE_TTL_MS });
+      return listing;
+    }
+    const managedRoots = await resolveManagedRoots(baseDir);
+    const roots: FsRootDeclaration[] = [source];
+    for (const group of (await this.groupBinds(model, stackDir)).values()) {
+      // A bind of the stack directory itself is the stack source root, declared
+      // a second time: its declarations are aliases of that root.
+      if (group.canonical === stackDir || group.canonical === canonicalStackDir.canonical) {
+        source.declaredSources.push(...group.declaredSources);
+        source.mounts.push(...group.mounts);
+        continue;
+      }
+      const verdict = this.buildBindRoot(group, managedRoots, stackDir);
+      roots.push({
+        rootId: verdict?.id ?? `bind:${shortHash(group.canonical)}`,
+        role: 'bind',
+        senchoPath: group.canonical,
+        declaredSources: [...group.declaredSources].sort(),
+        mounts: group.mounts,
+        label: verdict?.label ?? group.canonical,
+        accessible: group.accessible,
+        isDirectory: group.isDir,
+        dangerous: verdict?.dangerous ?? true,
+        managedSourceOverlap: verdict?.managedSourceOverlap ?? false,
+        readonly: group.mounts.every((m) => m.readOnly),
+      });
+    }
+    source.declaredSources.sort();
+    const listing: FsRootListing = { outcome: 'rendered', roots };
+    fsRootsCache.set(key, { listing, expiresAt: Date.now() + ROOTS_CACHE_TTL_MS });
+    return listing;
   }
 
   private buildBindRoot(

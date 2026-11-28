@@ -2197,3 +2197,101 @@ export async function assertComposeInputsWithinExpansionLimits(opts: {
 
   await assertInputClosure({ cwd, rootEnv, projectDir, files: inputFiles });
 }
+
+/**
+ * The candidates of an ordered Compose discovery list in `dir`, up to and
+ * including the first one present, as absolute paths. Compose takes the first
+ * name `stat` finds (a link is followed, so one that dangles is passed over), and
+ * so does `getOverrideFilename`. A candidate passed over is still in the list:
+ * one that dangles into, or is missing from, a directory a data restore is
+ * overwriting may only be mid-swap, so its fence check refuses. A later sibling
+ * the winner shadows is not in it, so a held file the command never selects
+ * does not refuse.
+ */
+export async function orderedComposeCandidates(dir: string, names: readonly string[]): Promise<string[]> {
+  const { promises: fsPromises } = await import('fs');
+  const out: string[] = [];
+  for (const name of names) {
+    const candidate = path.resolve(dir, name);
+    out.push(candidate);
+    try {
+      await fsPromises.stat(candidate);
+      return out;
+    } catch {
+      // Not there, or a link that dangles: Compose tries the next name.
+    }
+  }
+  return out;
+}
+
+/**
+ * The files a Compose run opens before it follows any `include:` or
+ * `extends:` (which the directory fence does not ask; see the operator guide),
+ * as absolute paths: its env sources (`--env-file`, else COMPOSE_ENV_FILES,
+ * else the selection directory's `.env`), its compose files (the `-f` values;
+ * else the COMPOSE_FILE entries the environment or those env files set; else
+ * the discovered root file and implicit override, each candidate up to the
+ * first one present, see `orderedComposeCandidates`), and the selected project
+ * directory's own `.env` when that is another directory. The same selection
+ * `assertComposeInputsWithinExpansionLimits` makes, without measuring or
+ * refusing: a missing file is listed, because the fence asks the path whatever
+ * is there. When the env sources cannot be read, every root and override name
+ * is listed (the safe superset), since the COMPOSE_FILE they might set is
+ * unknown.
+ */
+export async function composeSelectedInputPaths(opts: {
+  cwd: string;
+  invocation: readonly string[];
+  env?: ComposeEnvLookup;
+}): Promise<string[]> {
+  const cwd = path.resolve(opts.cwd);
+  const invocation = opts.invocation;
+  const processEnv: ComposeEnvLookup = opts.env ?? ((name) => process.env[name]);
+  const paths: string[] = [];
+
+  const explicitFiles = composeFileArgsFromInvocation(invocation)
+    .filter((file) => file !== '-' && !isRemoteComposeRef(file))
+    .map((file) => path.resolve(cwd, file));
+  const envFileArgs = flagValues(invocation, '--env-file', '--env-file');
+  const projectDirectoryArg = lastFlagValue(invocation, '--project-directory');
+  const configuredProjectDir = projectDirectoryArg !== undefined ? path.resolve(cwd, projectDirectoryArg) : null;
+  const selectionBase = configuredProjectDir ?? (explicitFiles.length > 0 ? path.dirname(explicitFiles[0]) : cwd);
+
+  const listedEnvFiles = (processEnv('COMPOSE_ENV_FILES') ?? '').split(',').filter((entry) => entry.length > 0);
+  if (envFileArgs.length > 0) paths.push(...envFileArgs.map((file) => path.resolve(cwd, file)));
+  else if (listedEnvFiles.length > 0) paths.push(...listedEnvFiles.map((file) => path.resolve(cwd, file)));
+  else paths.push(path.resolve(selectionBase, '.env'));
+
+  let inputFiles: string[];
+  if (explicitFiles.length > 0) {
+    inputFiles = explicitFiles;
+  } else {
+    let composeFile: string | undefined;
+    let separator = DEFAULT_PATH_SEPARATOR;
+    let sourcesRead = true;
+    try {
+      const selection = await loadSelectionEnv(cwd, selectionBase, envFileArgs, processEnv);
+      const lookup = selection ? lookupEnv(selection.context) : processEnv;
+      composeFile = lookup('COMPOSE_FILE');
+      separator = lookup('COMPOSE_PATH_SEPARATOR') || DEFAULT_PATH_SEPARATOR;
+    } catch {
+      sourcesRead = false;
+    }
+    if (composeFile !== undefined) {
+      inputFiles = composeFile.split(separator)
+        .filter((entry) => entry.length > 0 && entry !== '-' && !isRemoteComposeRef(entry))
+        .map((entry) => path.resolve(cwd, entry));
+    } else if (!sourcesRead) {
+      inputFiles = [...DISCOVERED_COMPOSE_NAMES, ...DISCOVERED_OVERRIDE_NAMES].map((name) => path.resolve(selectionBase, name));
+    } else {
+      inputFiles = [
+        ...await orderedComposeCandidates(selectionBase, DISCOVERED_COMPOSE_NAMES),
+        ...await orderedComposeCandidates(selectionBase, DISCOVERED_OVERRIDE_NAMES),
+      ];
+    }
+  }
+  paths.push(...inputFiles);
+  const projectDir = configuredProjectDir ?? (inputFiles.length > 0 ? path.dirname(inputFiles[0]) : selectionBase);
+  if (projectDir !== selectionBase) paths.push(path.resolve(projectDir, '.env'));
+  return [...new Set(paths)];
+}

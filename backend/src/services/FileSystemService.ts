@@ -49,6 +49,8 @@ function getBackupBaseDir(): string {
 }
 
 import { isDebugEnabled } from '../utils/debug';
+import { isDataRestoreFenceError, DataRestoreFenceError } from '../helpers/dataRestoreFenceError';
+import { linkSpellings } from '../helpers/linkSpellings';
 
 /**
  * Identity of a file as it was published: the inode and mtime a staged file
@@ -113,6 +115,14 @@ const declarationSets = new Map<string, DeclarationSetState>();
 // Advances whenever any bracket opens or closes. Process-wide on purpose: a
 // false "changed" only makes a reader keep claims it could have released.
 let declarationSetClock = 0;
+
+/**
+ * The stacks the last listing of each compose root found, so a stack whose
+ * compose file a data restore has moved aside mid-swap stays listed. One entry
+ * per compose root; in memory, so after a restart only the restore's own record
+ * of the stacks depending on the directory keeps one listed.
+ */
+const listedStacks = new Map<string, Set<string>>();
 
 export interface DeclarationSetPublication {
   /** The layers are whole again: the operation finished or its writes were undone. */
@@ -251,6 +261,76 @@ function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' 
 }
 
 /**
+ * Read a resolved compose file and its mtime through one descriptor, opened
+ * non-blocking before asking it what it is. O_NONBLOCK has no effect on a
+ * regular file, but a FIFO that replaced the resolved file in the check/open
+ * gap gives this call a descriptor to inspect instead of sleeping until a
+ * writer appears. The read is registered under the directory fences, so a
+ * sleeping one would also hold a fence's drain until its wait ran out and the
+ * restore aborted. The descriptor's own type is authoritative, so only
+ * a regular compose file is ever returned.
+ */
+async function readRegularComposeFile(filePath: string): Promise<{ content: string; mtimeMs: number }> {
+  const { fh, stat } = await openRegularFile(filePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
+  try {
+    return { content: await fh.readFile('utf-8'), mtimeMs: stat.mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
+
+type OpenedFile = { fh: import('fs/promises').FileHandle; stat: import('fs').Stats };
+
+/**
+ * Open `filePath` with `flags` plus O_NONBLOCK and refuse it with `refuse`
+ * unless the descriptor is a regular file. O_NONBLOCK has no effect on a
+ * regular file, but a FIFO swapped in for one opens at once (or, for writing
+ * with no reader, fails with ENXIO) instead of sleeping until the other end
+ * appears, which under the directory fences would hold a fence's drain until
+ * its wait ran out. A directory opened for writing keeps its EISDIR; one
+ * opened for reading is handed to `refuse` with its stat. On success the
+ * caller owns the handle and closes it; on any refusal or error this function
+ * has already closed it.
+ */
+async function openRegularFile(
+  filePath: string,
+  flags: number,
+  refuse: (file: string, stat?: import('fs').Stats) => Error,
+): Promise<OpenedFile> {
+  let fh: import('fs/promises').FileHandle;
+  try {
+    fh = await fsPromises.open(filePath, flags | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENXIO') throw refuse(path.basename(filePath));
+    throw err;
+  }
+  try {
+    const stat = await fh.stat();
+    if (!stat.isFile()) throw refuse(path.basename(filePath), stat);
+    return { fh, stat };
+  } catch (err) {
+    await fh.close().catch(() => undefined);
+    throw err;
+  }
+}
+
+/**
+ * Write an env file through openRegularFile, creating or truncating it as
+ * fsPromises.writeFile does, so a FIFO in its place is refused instead of
+ * holding the write (and any fence registration) open.
+ */
+async function writeRegularEnvFile(filePath: string, content: string, encoding: BufferEncoding): Promise<void> {
+  const { fh } = await openRegularFile(
+    filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC, nonRegularEnvTargetError,
+  );
+  try {
+    await fh.writeFile(content, encoding);
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
  * Refuse an env file that is not a regular file. Compose loads these for
  * interpolation on every run, and opening a FIFO in blocking mode has no writer
  * to end the wait. The code lets the caller name the invalid input instead of
@@ -260,6 +340,18 @@ function nonRegularEnvFileError(file: string): Error & { code: 'NOT_A_FILE' } {
   return Object.assign(new Error(`Env file ${file} is not a regular file`), {
     code: 'NOT_A_FILE' as const,
   });
+}
+
+/**
+ * nonRegularEnvFileError for the editor and Secrets sinks, except that a
+ * directory keeps the EISDIR a plain read or write of it gives, which the env
+ * routes answer as a path that is a directory.
+ */
+function nonRegularEnvTargetError(file: string, stat?: import('fs').Stats): Error {
+  if (stat?.isDirectory()) {
+    return Object.assign(new Error(`EISDIR: illegal operation on a directory, ${file}`), { code: 'EISDIR' });
+  }
+  return nonRegularEnvFileError(file);
 }
 
 // Explorer-only protection: includes the blueprint ownership marker without
@@ -442,6 +534,14 @@ export class FileSystemService {
     return path.join(getBackupBaseDir(), String(this.nodeId), stackName);
   }
 
+  /**
+   * True when the stack directory has a compose file, false when it has none.
+   * Throws the fence's `DataRestoreFenceError` instead of answering false when
+   * a missing compose file sits in a directory a data restore is overwriting
+   * (the stack's own, or one a link to it points into), or cannot be checked
+   * against a held fence: it may only be mid-swap, so the stack is not known
+   * to be gone.
+   */
   async hasComposeFile(dir: string): Promise<boolean> {
     // Canonical inline js/path-injection barrier at the fs sink below: CodeQL
     // credits neither the wrapped isPathWithinBase helper nor a check in a
@@ -461,7 +561,65 @@ export class FileSystemService {
         // continue
       }
     }
+    const refusal = await this.composeFenceRefusal(resolvedDir);
+    if (refusal) throw refusal;
     return false;
+  }
+
+  /**
+   * The fence's refusal when any root compose file of `stackDir` (or each of
+   * `files`, resolved against it, when given), or a path a link on the way to
+   * it names, sits in a directory a data restore is overwriting; null
+   * otherwise. A check that fails while a fence is held (`files` throwing
+   * included) proves nothing either way, so it is logged and answered as the
+   * fence's `unproven` refusal: a compose file Sencho could not check is not
+   * gone. That refusal names the first held fence, which need not be the one
+   * the stack touches, since the failed check could not say which.
+   * Asked after a step on the compose file failed, and up front by
+   * refuseIfComposeFenced; no filesystem work, and one store lookup, when
+   * nothing is fenced (`files` is not called then).
+   */
+  private async composeFenceRefusal(
+    stackDir: string,
+    files: () => readonly string[] | Promise<readonly string[]> = () => COMPOSE_ROOT_FILENAMES,
+  ): Promise<DataRestoreFenceError | null> {
+    const { RestoreFenceStore } = await import('./recovery/restoreFence');
+    const fenced = RestoreFenceStore.getInstance().liveFencedFsTargets();
+    if (fenced.length === 0) return null;
+    try {
+      const { refuseIfFencedSource } = await import('../helpers/envFileResolution');
+      for (const file of await files()) {
+        await refuseIfFencedSource(path.resolve(stackDir, file));
+      }
+    } catch (err) {
+      if (isDataRestoreFenceError(err)) return err;
+      console.warn(
+        '[FileSystemService] Could not check the compose files of %s against a data restore; answering as unproven: %s',
+        sanitizeForLog(stackDir),
+        sanitizeForLog((err as Error)?.message ?? String(err)),
+      );
+      return new DataRestoreFenceError(fenced[0].hostPath, 'unproven', 'directory');
+    }
+    return null;
+  }
+
+  /**
+   * Run `step`, which resolves or checks a stack's compose file before its
+   * read or write is admitted, or is that admitted read itself. When it fails
+   * for any reason while a root compose file of the stack sits in, or links
+   * into, a directory a data restore is overwriting, the fence's refusal is
+   * thrown instead: a link that dangles there mid-swap is not a link out of
+   * the stack, and a file missing there is not gone. A check that could not
+   * run while a fence is held is answered as the fence's `unproven` refusal.
+   * Otherwise the step's own error is kept.
+   */
+  private async composeStepUnderFences<T>(stackName: string, step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (err) {
+      if (isDataRestoreFenceError(err)) throw err;
+      throw (await this.composeFenceRefusal(this.resolveStackDir(stackName))) ?? err;
+    }
   }
 
   /**
@@ -649,12 +807,42 @@ export class FileSystemService {
       if (!item.name || typeof item.name !== 'string') continue;
 
       const stackDir = path.join(this.baseDir, item.name);
-      if (await this.hasComposeFile(stackDir)) {
-        stackNames.push(item.name);
+      try {
+        if (await this.hasComposeFile(stackDir)) stackNames.push(item.name);
+      } catch (err) {
+        if (!isDataRestoreFenceError(err)) throw err;
+        // A stack whose compose file is mid-swap under a data restore is still
+        // a stack: dropping it would read as deleted to every consumer (the
+        // sidebar, the scan reconcile that purges a missing stack's rows). A
+        // fenced directory that never was one (a bind at the top of the
+        // compose root) is not listed; see wasStack.
+        if (await this.wasStack(item.name, stackDir)) stackNames.push(item.name);
       }
     }
 
+    listedStacks.set(path.resolve(this.baseDir), new Set(stackNames));
     return stackNames;
+  }
+
+  /**
+   * Whether a fenced directory whose compose file cannot be found was a stack:
+   * a compose filename is still there as a link (one that dangles into the
+   * fenced directory mid-swap), the restore's fence names the stack (by stack
+   * or Compose project name, as a stopped container's or a recorded
+   * dependent), or this process listed it before. The last is in memory, so
+   * after a restart only the first two keep a stack listed.
+   */
+  private async wasStack(name: string, stackDir: string): Promise<boolean> {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
+      try {
+        if ((await fsPromises.lstat(path.join(stackDir, file))).isSymbolicLink()) return true;
+      } catch {
+        // Not there: try the next name.
+      }
+    }
+    if (listedStacks.get(path.resolve(this.baseDir))?.has(name)) return true;
+    const { RestoreFenceStore } = await import('./recovery/restoreFence');
+    return RestoreFenceStore.getInstance().isStackFenced(name);
   }
 
   async getStacks(): Promise<string[]> {
@@ -681,11 +869,56 @@ export class FileSystemService {
     return this.listStacksRaw();
   }
 
+  /**
+   * Run `work`, which reads or writes `target` (a file or directory under the
+   * compose root), as file work the directory fences of a data restore know
+   * about: refused with a `DataRestoreFenceError` when `target` is equal to,
+   * inside, or around a directory a restore is overwriting (by any spelling,
+   * a link included), or cannot be proven clear of one; otherwise registered
+   * until `work` settles, so a fence recorded meanwhile waits for it before it
+   * captures or swaps anything. Used by the single-file sinks the Compose and
+   * env editors and the local Secrets read and write go through
+   * (getStackContent, getStackContentWithMtime, saveStackContent, saveStackContentIfUnchanged
+   * and the conflict read it answers with, writeFileIfUnchanged,
+   * createFileExclusive, readFile, writeFile, saveEnvContent) and by
+   * deleteStack; the Files routes have their own admission. When nothing is
+   * fenced it costs one spelling walk (a readlink per path component, from the
+   * filesystem root, and per component of every link target it follows) and
+   * one fence query.
+   *
+   * `target` is matched and registered by every spelling a link on the way to
+   * it gives it, not by its own path alone: a link whose target a restore moved
+   * aside after the caller's checks resolves to nothing, and by its own path
+   * would look unrelated to the directory it points into, so a write would
+   * recreate the file inside that directory or replace the link itself. The
+   * spellings are worked out even when nothing is fenced, because a fence
+   * recorded while the work runs compares them in its drain.
+   */
+  private async underDirectoryFences<T>(target: string, work: () => Promise<T>): Promise<T> {
+    const { matchFsWorkToFences, admitFsWork } = await import('./recovery/restoreFence');
+    const spellings = await linkSpellings(target);
+    const match = await matchFsWorkToFences(spellings);
+    const admitted = match.refusal ?? admitFsWork(spellings, match.checked);
+    if (isDataRestoreFenceError(admitted)) throw admitted;
+    try {
+      return await work();
+    } finally {
+      admitted.release();
+    }
+  }
+
+  /**
+   * The stack's compose file as text. The read itself is file work under the
+   * directory fences, as in getStackContentWithMtime: refused while the file
+   * sits in, or links into, a directory a data restore is overwriting, and
+   * otherwise registered so a fence waits for it. A read that fails is asked
+   * about the fence again, so a file gone mid-swap answers with the fence.
+   */
   async getStackContent(stackName: string): Promise<string> {
     try {
-      const filePath = await this.getComposeFilePath(stackName);
-      return await fsPromises.readFile(filePath, 'utf-8');
+      return await this.readStackContentUnderFences(stackName);
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       const code = error && typeof error === 'object' && 'code' in error
         ? (error as { code?: unknown }).code
         : undefined;
@@ -695,6 +928,135 @@ export class FileSystemService {
     }
   }
 
+  /** getStackContent's read, with its failures as they are: no log, no rewording. */
+  private async readStackContentUnderFences(stackName: string): Promise<string> {
+    const filePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
+    return this.composeStepUnderFences(
+      stackName,
+      () => this.underDirectoryFences(filePath, async () => (await readRegularComposeFile(filePath)).content),
+    );
+  }
+
+  /**
+   * Throw the fence's refusal when a compose file the stack's next Compose
+   * command opens sits in, or links into, a directory a data restore is
+   * overwriting: asked up front by an update, a deploy, an image pull, a
+   * rollback, and a recovery generation's restore, which would otherwise
+   * write gate evidence, start Compose, restore files, or spend a checked
+   * observation before their own read is refused. Any other read failure is not
+   * this check's to answer: it is neither logged nor thrown here, and the
+   * caller reports it from its own read. A fence recorded after this check is
+   * still answered by that later read, by the assembled argv
+   * (`refuseIfComposeArgvFenced` in helpers/composeArgvFence), and by each
+   * Compose process's own admission at its spawn (`prepareComposeAdmission`).
+   *
+   * The files asked are the ones that command opens (`composeFilesForCommand`).
+   * A root file clear of the fence does not make the project clear when
+   * another of those files links into, or is missing from, a directory a
+   * restore is overwriting, and a root file an applied Git deployment leaves
+   * out is not a refusal. A check of those files that cannot run while a fence is held is
+   * answered as the fence's `unproven` refusal, as for the root file. Files an
+   * `include:` or `extends:` pulls in are not asked.
+   *
+   * `pinsComposeFiles` is set by a caller whose command names the discovered
+   * files with `-f` whatever the stack's Mesh state: a recovery up, which
+   * layers the recovery override last, and a digest-pinned deploy up.
+   */
+  async refuseIfComposeFenced(stackName: string, options: { pinsComposeFiles?: boolean } = {}): Promise<void> {
+    let stackDir: string;
+    try {
+      stackDir = this.resolveStackDir(stackName);
+    } catch {
+      // An invalid name has no compose files to ask about; the caller's own read reports it.
+      return;
+    }
+    let readsRoot = true;
+    const refusal = await this.composeFenceRefusal(stackDir, async () => {
+      const files = await this.composeFilesForCommand(stackName, options.pinsComposeFiles === true);
+      readsRoot = files.readsRoot;
+      return files.others;
+    });
+    if (refusal) throw refusal;
+    if (!readsRoot) return;
+    try {
+      await this.readStackContentUnderFences(stackName);
+    } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
+    }
+  }
+
+  /**
+   * The compose files a mutating Compose command for the stack opens, as paths
+   * resolved against the stack directory, and whether the root file Sencho
+   * reads (getStackContent) is one of them. This is the selection the argv
+   * builders in ComposeService make, so it has to follow them:
+   * - an applied Git deploy spec's `-f` files; Compose then reads neither
+   *   COMPOSE_FILE nor an override, nor the discovered root unless the spec
+   *   names it, and Sencho's own update reads render the spec rather than
+   *   read the root. An entry the spawn sink refuses (empty, absolute, or escaping
+   *   the stack) is left out; the sink refuses the whole deploy for it, so
+   *   Compose reads none of them.
+   * - else, when the command names its files itself (a recovery up, or a Mesh
+   *   or Pilot override layer: `authoredComposePrefix` and
+   *   `ensureExplicitComposeFiles`), the root file and the implicit override
+   *   it adds. Any `-f` turns COMPOSE_FILE off, so that selection is not this
+   *   command's. A recovery up that replays a captured file set names those
+   *   files instead; they are known only once the generation is restored, so
+   *   that up's own argv asks them (`refuseIfComposeArgvFenced`).
+   * - else the entries of a COMPOSE_FILE the stack's env sets, split as
+   *   Compose splits them; it replaces override discovery for Compose. The
+   *   root file is asked as well, because Sencho reads it itself.
+   * - else the root file and the implicit override (see below).
+   * Without a spec, when the env sources a COMPOSE_FILE selection comes from
+   * cannot be read here, those sources (and the stack `.env`) are asked too:
+   * a source a restore holds refuses, and otherwise the selection is not the
+   * fence's to answer.
+   * The override names are asked in priority order up to the first one
+   * present, which is the one Compose and `getOverrideFilename` take
+   * (`orderedComposeCandidates`).
+   */
+  private async composeFilesForCommand(
+    stackName: string,
+    pinsComposeFiles: boolean,
+  ): Promise<{ readsRoot: boolean; others: readonly string[] }> {
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    if (spec && Array.isArray(spec.files) && spec.files.length > 0) {
+      return {
+        readsRoot: false,
+        others: spec.files.filter((file): file is string =>
+          typeof file === 'string' && file !== '' && isValidRelativeStackPath(file)),
+      };
+    }
+    const { composeFileEnvVarSelection } = await import('../utils/authoredComposeArgs');
+    const selection = await composeFileEnvVarSelection(stackName, this.nodeId);
+    // An env source a restore holds may be why a selection is unread: asking
+    // them refuses then. A source the reader refuses for its own rules (a link
+    // outside the compose root, a size limit) is one Compose may still read,
+    // so a selection unread for that reason does not refuse a stack whose
+    // sources the fence does not hold. Compose reads those sources for
+    // interpolation whichever files the command names.
+    const unreadSources = selection.kind === 'value' || selection.kind === 'absent'
+      ? []
+      : ['.env', ...selection.loadedEnvFiles];
+    const { MeshService } = await import('./MeshService');
+    const pinned = pinsComposeFiles || await MeshService.getInstance().stackOverrideApplies(this.nodeId, stackName);
+    if (!pinned && selection.kind === 'value') {
+      // Compose ignores empty entries. Sencho itself still reads the root file
+      // during the update (the build-service lookup reads it when no applied
+      // Git deployment names the files), so it is asked too.
+      return { readsRoot: true, others: selection.value.split(selection.pathSeparator).filter((entry) => entry !== '') };
+    }
+    // An unread selection's layers are not known here, so the root file and
+    // the override are what is asked for it. The override is the one Compose
+    // and `getOverrideFilename` pick, the first name present; the names before
+    // it are asked too (one that dangles into, or is missing from, a fenced
+    // directory may be mid-swap), and the ones after it are not, because no
+    // command opens a sibling that the winner shadows.
+    const { orderedComposeCandidates } = await import('../helpers/composeExpansionGuard');
+    const overrides = await orderedComposeCandidates(this.resolveStackDir(stackName), COMPOSE_OVERRIDE_FILENAMES);
+    return { readsRoot: true, others: [...unreadSources, ...overrides] };
+  }
+
   /**
    * Read the resolved compose file along with its mtimeMs, which the route
    * layer surfaces as an ETag for optimistic-concurrency on PUT. The stat
@@ -702,7 +1064,7 @@ export class FileSystemService {
    * state, even if the file is replaced (rename) between the two calls.
    */
   async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number; filename: string }> {
-    const untrustedFilePath = await this.getComposeFilePath(stackName);
+    const untrustedFilePath = await this.composeStepUnderFences(stackName, () => this.getComposeFilePath(stackName));
     // Canonical js/path-injection barrier: resolve against a known-safe root
     // then check the result is contained in that root. The form mirrors
     // CodeQL's documented sanitizer exactly so taint flow recognizes it.
@@ -711,20 +1073,13 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    // Open non-blocking before asking the descriptor what it is. O_NONBLOCK has
-    // no effect on a regular file, but a FIFO that replaced the resolved file in
-    // the check/open gap gives this call a descriptor to inspect instead of
-    // sleeping until a writer appears. The descriptor's own type is authoritative,
-    // so the read still only ever returns a regular compose file.
-    const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-    try {
-      const stat = await fh.stat();
-      if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
-      const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
-    } finally {
-      await fh.close();
-    }
+    // The stat and read share one non-blocking descriptor (readRegularComposeFile).
+    // A read that fails is asked about the fence again: a file gone mid-swap
+    // answers with the fence, not as missing.
+    return this.composeStepUnderFences(stackName, () => this.underDirectoryFences(safePath, async () => {
+      const { content, mtimeMs } = await readRegularComposeFile(safePath);
+      return { content, mtimeMs, filename: path.basename(safePath) };
+    }));
   }
 
   /**
@@ -766,16 +1121,19 @@ export class FileSystemService {
   async saveStackContent(stackName: string, content: string | Buffer): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
-    await this.assertRealWithinBase(filePath);
-    await this.assertRealWithinStack(stackName, stackDir);
-    await this.assertRealWithinStack(stackName, filePath);
+    await this.composeStepUnderFences(stackName, async () => {
+      await this.assertRealWithinBase(filePath);
+      await this.assertRealWithinStack(stackName, stackDir);
+      await this.assertRealWithinStack(stackName, filePath);
+    });
     try {
       // Buffer input is published byte-exact (the encoding option is ignored
       // for Buffers); string input keeps the utf-8 write. Byte-exactness
       // matters to the Git materializer, whose content hashes are computed
       // over raw bytes.
-      await this.publishManagedFile(filePath, content);
+      await this.underDirectoryFences(filePath, () => this.publishManagedFile(filePath, content));
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       console.error('Error writing file:', error);
       throw new Error(`Failed to save stack: ${stackName}`);
     }
@@ -802,10 +1160,15 @@ export class FileSystemService {
   > {
     // A write resolution refuses a compose file that links out of the stack
     // directory: the save would otherwise land in the shared target, which the
-    // read path deliberately follows.
-    const resolved = await this.resolveComposeFile(stackName, 'write');
+    // read path deliberately follows. A link that dangles into a directory a
+    // data restore is overwriting is the fence, not a link out of the stack.
+    const resolved = await this.composeStepUnderFences(stackName, () => this.resolveComposeFile(stackName, 'write'));
     if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
       if (!resolved) {
+        // The opened file missing from a fenced directory may only be
+        // mid-swap: that is the fence, not a different file.
+        const refusal = await this.composeFenceRefusal(this.resolveStackDir(stackName));
+        if (refusal) throw refusal;
         return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
       }
       const current = await this.readContainedCompose(resolved.absolute);
@@ -828,51 +1191,59 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    await this.assertRealWithinBase(safePath);
     // The resolved file is where the write lands, so ownership is checked again
     // at the sink: a link that appeared after the resolution above is refused
     // rather than followed into another stack's file.
-    await this.assertRealWithinStack(stackName, safePath);
+    await this.composeStepUnderFences(stackName, async () => {
+      await this.assertRealWithinBase(safePath);
+      await this.assertRealWithinStack(stackName, safePath);
+    });
 
-    if (expectedMtimeMs !== null && resolved) {
-      let fh: import('fs/promises').FileHandle | null = null;
-      try {
-        fh = await fsPromises.open(safePath, 'r');
-        const stat = await fh.stat();
-        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fh.readFile('utf-8');
-          return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
+    // The comparison and the write are one piece of file work: a fence on the
+    // directory the file sits in (through a link into a bind, too) refuses it
+    // or waits for it.
+    return this.underDirectoryFences(safePath, async () => {
+      if (expectedMtimeMs !== null && resolved) {
+        let opened: OpenedFile | null = null;
+        try {
+          // Non-blocking and regular files only, so a FIFO swapped in after
+          // the admission fails at once instead of holding the fence's drain.
+          opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularComposeFileError);
+          if (Math.floor(opened.stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await opened.fh.readFile('utf-8');
+            return { ok: false, reason: 'mtime', currentMtimeMs: opened.stat.mtimeMs, currentContent, filename };
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          if (expectedFilename !== null) {
+            return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+          }
+        } finally {
+          await opened?.fh.close();
         }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        if (expectedFilename !== null) {
-          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
-        }
-      } finally {
-        if (fh) await fh.close();
       }
-    }
 
-    if (expectedFilename !== null) {
-      const latest = await this.resolveComposeFile(stackName, 'write');
-      if (!latest || latest.filename !== expectedFilename) {
-        if (!latest) {
-          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+      if (expectedFilename !== null) {
+        const latest = await this.resolveComposeFile(stackName, 'write');
+        if (!latest || latest.filename !== expectedFilename) {
+          if (!latest) {
+            return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+          }
+          const current = await this.readContainedCompose(latest.absolute);
+          return {
+            ok: false,
+            reason: 'source',
+            currentMtimeMs: current.mtimeMs,
+            currentContent: current.content,
+            filename: latest.filename,
+          };
         }
-        const current = await this.readContainedCompose(latest.absolute);
-        return {
-          ok: false,
-          reason: 'source',
-          currentMtimeMs: current.mtimeMs,
-          currentContent: current.content,
-          filename: latest.filename,
-        };
       }
-    }
 
-    await this.publishManagedFile(safePath, content);
-    const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+      await this.publishManagedFile(safePath, content);
+      const newStat = await fsPromises.stat(safePath);
+      return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+    });
   }
 
   private async readContainedCompose(untrustedFilePath: string): Promise<{ content: string; mtimeMs: number }> {
@@ -882,14 +1253,11 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
-    const fh = await fsPromises.open(safePath, 'r');
-    try {
-      const stat = await fh.stat();
-      const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs };
-    } finally {
-      await fh.close();
-    }
+    // The conflict answer carries these bytes back to the editor, so the read is
+    // file work on the file actually read: a link into a fenced directory is
+    // refused like the editor's own read, never answered with what is mid-restore.
+    // Opened as the editor's read is, so a FIFO cannot hold the fence's drain.
+    return this.underDirectoryFences(safePath, () => readRegularComposeFile(safePath));
   }
 
   /**
@@ -1012,25 +1380,36 @@ export class FileSystemService {
     await this.assertRealWithinBase(safePath);
     await this.assertRealWithinStack(stackName, safePath);
 
-    if (expectedMtimeMs !== null) {
-      let fh: import('fs/promises').FileHandle | null = null;
-      try {
-        fh = await fsPromises.open(safePath, 'r');
-        const stat = await fh.stat();
-        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fh.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+    return this.underDirectoryFences(safePath, async () => {
+      if (expectedMtimeMs !== null) {
+        let opened: OpenedFile | null = null;
+        try {
+          // Non-blocking and regular files only, here and at the write below,
+          // so a FIFO swapped in after the admission fails at once instead of
+          // holding the fence's drain.
+          opened = await openRegularFile(safePath, fsConstants.O_RDONLY, nonRegularEnvTargetError);
+          if (Math.floor(opened.stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+            const currentContent = await opened.fh.readFile('utf-8');
+            return { ok: false, currentMtimeMs: opened.stat.mtimeMs, currentContent };
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        } finally {
+          await opened?.fh.close();
         }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      } finally {
-        if (fh) await fh.close();
       }
-    }
 
-    await fsPromises.writeFile(safePath, content, 'utf-8');
-    const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs };
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, safePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      await writeRegularEnvFile(contained, content, 'utf-8');
+      const newStat = await fsPromises.stat(contained);
+      return { ok: true, mtimeMs: newStat.mtimeMs };
+    });
   }
 
   /**
@@ -1053,6 +1432,16 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    return this.underDirectoryFences(safePath, () => this.createContainedFileExclusive(safePath, content));
+  }
+
+  private async createContainedFileExclusive(
+    safePath: string,
+    content: string,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
 
     let fh: import('fs/promises').FileHandle | null = null;
     try {
@@ -1078,14 +1467,16 @@ export class FileSystemService {
         // the check and read through a handle that never follows a link: the
         // conflict payload must not become a way to read outside the compose
         // root. A vanished or linked target is refused as an invalid path;
-        // EISDIR propagates and the route answers 409.
+        // EISDIR (a directory) and NOT_A_FILE (a FIFO or socket) propagate and
+        // the route answers 409.
         await this.assertRealWithinBase(safePath);
-        let reader: import('fs/promises').FileHandle | null = null;
+        let reader: OpenedFile | null = null;
         try {
-          reader = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-          const stat = await reader.stat();
-          const currentContent = await reader.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          // Non-blocking and regular files only, so a FIFO at the target
+          // cannot hold the lease this read runs under.
+          reader = await openRegularFile(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW, nonRegularEnvTargetError);
+          const currentContent = await reader.fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: reader.stat.mtimeMs, currentContent };
         } catch (readErr) {
           const code = (readErr as NodeJS.ErrnoException).code;
           if (code === 'ELOOP') {
@@ -1096,7 +1487,7 @@ export class FileSystemService {
           }
           throw readErr;
         } finally {
-          if (reader) await reader.close();
+          await reader?.fh.close();
         }
       }
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
@@ -1180,7 +1571,22 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
-    return fsPromises.readFile(safePath, encoding);
+    return this.underDirectoryFences(safePath, async () => {
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, safePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      // Non-blocking and regular files only, so a FIFO cannot hold the lease.
+      const { fh } = await openRegularFile(contained, fsConstants.O_RDONLY, nonRegularEnvTargetError);
+      try {
+        return await fh.readFile(encoding);
+      } finally {
+        await fh.close();
+      }
+    });
   }
 
   /**
@@ -1235,7 +1641,16 @@ export class FileSystemService {
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
-    return fsPromises.writeFile(filePath, content, encoding);
+    return this.underDirectoryFences(filePath, async () => {
+      // The containment barrier sits inline with the sink, where static
+      // analysis credits it.
+      const baseResolved = path.resolve(this.baseDir);
+      const contained = path.resolve(baseResolved, filePath);
+      if (!contained.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      return writeRegularEnvFile(contained, content, encoding);
+    });
   }
 
   async access(filePath: string): Promise<void> {
@@ -1278,8 +1693,18 @@ export class FileSystemService {
     // that links into another stack is refused rather than overwritten.
     await this.assertRealWithinStack(stackName, envPath);
     try {
-      await fsPromises.writeFile(envPath, content, 'utf-8');
+      await this.underDirectoryFences(envPath, async () => {
+        // The containment barrier sits inline with the sink, where static
+        // analysis credits it.
+        const baseResolved = path.resolve(this.baseDir);
+        const contained = path.resolve(baseResolved, envPath);
+        if (!contained.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+        }
+        await writeRegularEnvFile(contained, content, 'utf-8');
+      });
     } catch (error) {
+      if (isDataRestoreFenceError(error)) throw error;
       console.error('Error writing env file:', error);
       throw new Error(`Failed to save env file for stack: ${stackName}`);
     }
@@ -1381,8 +1806,20 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
     try {
-      await fsPromises.rm(stackDir, { recursive: true, force: true });
+      // Removing the stack directory removes every directory inside it, so it
+      // is refused while a restore overwrites one of them.
+      await this.underDirectoryFences(stackDir, async () => {
+        // The containment barrier sits inline with the sink, where static
+        // analysis credits it.
+        const baseResolved = path.resolve(this.baseDir);
+        const contained = path.resolve(baseResolved, stackDir);
+        if (!contained.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+        }
+        await fsPromises.rm(contained, { recursive: true, force: true });
+      });
     } catch (error: unknown) {
+      if (isDataRestoreFenceError(error)) throw error;
       const fsError = error as NodeJS.ErrnoException;
       if (fsError.code === 'ENOENT') return;
       console.error('Error deleting stack directory:', fsError.message);
@@ -2031,6 +2468,76 @@ export class FileSystemService {
     // Write timestamp marker
     await fsPromises.writeFile(path.join(backupDir, '.timestamp'), Date.now().toString(), 'utf-8');
     if (debug) console.debug(`[FileSystemService:debug] Backup completed in ${Date.now() - t0}ms`, { stackName });
+  }
+
+  /**
+   * Register a stack file transaction (a rollback's restore and the revert it
+   * may need, a backup restore and its undo, a files-only Git revert) with a
+   * data restore's directory fences, before its first write, or throw the
+   * fence's refusal. The files asked are the ones it can read or write: the
+   * managed stack files and project env files, `relativePaths` (a recovery
+   * point's own managed set), the files the stack's live Compose selection
+   * opens, and the files each of `invocationPrefixes` (a recovery point's
+   * captured Compose prefix, global flags only) opens, each by every spelling
+   * a link gives it, and with `backupSlot` every file the stack's backup slot
+   * holds (a backup restore copies each one back). The caller holds the lease until its writes have settled
+   * and its Compose `up` has exited, so a fence recorded meanwhile waits for it
+   * (`waitForFsWorkOn`) instead of landing between a write and its revert.
+   */
+  async admitStackFileWork(
+    stackName: string,
+    relativePaths: readonly string[] = [],
+    invocationPrefixes: ReadonlyArray<readonly string[]> = [],
+    options: { backupSlot?: boolean } = {},
+  ): Promise<import('../helpers/composeArgvFence').FsWorkLeaseLike> {
+    const stackDir = this.resolveStackDir(stackName);
+    const names = new Set<string>([...PROTECTED_STACK_FILES, ...relativePaths]);
+    if (options.backupSlot) {
+      // A backup restore copies every file its slot holds back into the
+      // stack, whatever the project env list says now.
+      const backupRoot = path.resolve(getBackupBaseDir());
+      const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+      if (backupDir.startsWith(backupRoot + path.sep)) {
+        try {
+          for (const item of await fsPromises.readdir(backupDir)) {
+            if (!BACKUP_MARKER_FILES.has(item)) names.add(item);
+          }
+        } catch {
+          // No slot to read: the restore itself reports it.
+        }
+      }
+    }
+    try {
+      for (const f of DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName)) names.add(f);
+    } catch {
+      // A settings read failure: the live selection below still names the env files Compose reads.
+    }
+    const paths: string[] = [];
+    for (const name of names) {
+      if (typeof name !== 'string' || name === '' || !isValidRelativeStackPath(name)) continue;
+      const abs = path.resolve(stackDir, name);
+      if (abs.startsWith(stackDir + path.sep)) paths.push(abs);
+    }
+    const { composeSelectedInputPaths } = await import('../helpers/composeExpansionGuard');
+    const { authoredComposeFileArgs, authoredComposeEnvFileArgs } = await import('../utils/authoredComposeArgs');
+    const prefixes: Array<readonly string[]> = [...invocationPrefixes];
+    try {
+      prefixes.push([
+        ...authoredComposeFileArgs(stackName, this.nodeId),
+        ...await authoredComposeEnvFileArgs(stackName, this.nodeId),
+      ]);
+    } catch {
+      // No live selection to add (an invalid applied spec, say): the managed files above still are.
+    }
+    for (const prefix of prefixes) {
+      try {
+        paths.push(...await composeSelectedInputPaths({ cwd: stackDir, invocation: ['compose', ...prefix] }));
+      } catch {
+        // The selection could not be worked out; its managed files are still asked.
+      }
+    }
+    const { prepareFileWorkAdmission } = await import('../helpers/composeArgvFence');
+    return (await prepareFileWorkAdmission([...new Set(paths)], stackDir)).admit();
   }
 
   async restoreStackFiles(stackName: string): Promise<void> {

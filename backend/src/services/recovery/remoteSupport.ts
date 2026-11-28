@@ -7,7 +7,14 @@ import {
   VOLUME_PROTECTION_CAPABILITY,
   VOLUME_PROTECTION_CAPABILITY_VERSION,
 } from './types';
-import type { PointReadKind, RecoveryErrorClass, RestoreMode, VolumeProtectionStatus } from './types';
+import type {
+  PointReadKind,
+  RecoveryErrorClass,
+  RestoreMode,
+  RestoreScope,
+  StorageKind,
+  VolumeProtectionStatus,
+} from './types';
 
 /**
  * One answer to "can this remote node run recovery work", used by everything
@@ -35,6 +42,10 @@ interface CacheEntry {
   restoreModes: RestoreMode[] | null;
   /** The point reads the node serves, or null when the read did not say. */
   pointReads: PointReadKind[] | null;
+  /** The storage kinds the node captures, or null when the read did not say. */
+  storageKinds: StorageKind[] | null;
+  /** The restore scopes the node executes, or null when the read did not say. */
+  restoreScopes: RestoreScope[] | null;
 }
 
 const cache = new Map<number, CacheEntry>();
@@ -64,6 +75,10 @@ export interface RecoverySupportRead {
   restoreModes: RestoreMode[] | null;
   /** The point reads the node advertised, or null when the read did not say. */
   pointReads: PointReadKind[] | null;
+  /** The storage kinds the node advertised, or null when the read did not say. */
+  storageKinds: StorageKind[] | null;
+  /** The restore scopes the node advertised, or null when the read did not say. */
+  restoreScopes: RestoreScope[] | null;
   fetchedAt: number;
 }
 
@@ -84,6 +99,8 @@ export async function resolveRemoteRecoverySupport(
       status: cached.status,
       restoreModes: cached.restoreModes,
       pointReads: cached.pointReads,
+      storageKinds: cached.storageKinds,
+      restoreScopes: cached.restoreScopes,
       fetchedAt: at,
     };
   }
@@ -101,6 +118,8 @@ export async function resolveRemoteRecoverySupport(
   let status: VolumeProtectionStatus;
   let restoreModes: RestoreMode[] | null;
   let pointReads: PointReadKind[] | null;
+  let storageKinds: StorageKind[] | null;
+  let restoreScopes: RestoreScope[] | null;
   if (read.kind === 'ok' && echoed !== operationId) {
     // An answer to some other dispatch, or from a hop that drops the header, is
     // not evidence about this one.
@@ -111,15 +130,21 @@ export async function resolveRemoteRecoverySupport(
     status = { ...KEY, state: 'unknown', reason: 'descriptor_mismatch' };
     restoreModes = null;
     pointReads = null;
+    storageKinds = null;
+    restoreScopes = null;
   } else {
     const resolved = resolveRemoteRecoveryRead(read);
     status = normalizeRemoteStatus(resolved.status);
     // A node reported as an older build is not asked what it can execute.
     restoreModes = status === resolved.status ? resolved.restoreModes : null;
     pointReads = status === resolved.status ? resolved.pointReads : null;
+    storageKinds = status === resolved.status ? resolved.storageKinds : null;
+    restoreScopes = status === resolved.status ? resolved.restoreScopes : null;
   }
-  cache.set(nodeId, { expiresAt: at + RECOVERY_SUPPORT_CACHE_TTL_MS, status, restoreModes, pointReads });
-  return { operationId, status, restoreModes, pointReads, fetchedAt: at };
+  cache.set(nodeId, {
+    expiresAt: at + RECOVERY_SUPPORT_CACHE_TTL_MS, status, restoreModes, pointReads, storageKinds, restoreScopes,
+  });
+  return { operationId, status, restoreModes, pointReads, storageKinds, restoreScopes, fetchedAt: at };
 }
 
 export type RecoveryPreflight =
@@ -138,13 +163,37 @@ export type RecoveryPreflight =
  *
  * `requiredRead` does the same for a point read: a node that never advertised
  * it has no such route, and would answer a browse with a bare 404.
+ *
+ * `requirements.storageKind` and `requirements.restoreScope` cover a host
+ * directory capture and a path restore. A node that never advertised them has
+ * neither route and would answer a bare 404, so both are refused here as an
+ * update.
  */
 export async function preflightRecoveryRequest(
   nodeId: number,
   requiredMode?: RestoreMode,
   requiredRead?: PointReadKind,
+  requirements: { storageKind?: StorageKind; restoreScope?: RestoreScope } = {},
 ): Promise<RecoveryPreflight> {
-  const { status, restoreModes, pointReads } = await resolveRemoteRecoverySupport(nodeId);
+  const { status, restoreModes, pointReads, storageKinds, restoreScopes } = await resolveRemoteRecoverySupport(nodeId);
+  if (requirements.storageKind !== undefined && storageKinds !== null && !storageKinds.includes(requirements.storageKind)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      code: 'UPDATE_REQUIRED',
+      errorClass: 'update_required',
+      message: 'This node needs an update before it can protect a directory a stack binds or keeps its source in.',
+    };
+  }
+  if (requirements.restoreScope !== undefined && restoreScopes !== null && !restoreScopes.includes(requirements.restoreScope)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      code: 'UPDATE_REQUIRED',
+      errorClass: 'update_required',
+      message: 'This node needs an update before it can restore one path of a recovery point.',
+    };
+  }
   if (requiredRead !== undefined && pointReads !== null && !pointReads.includes(requiredRead)) {
     return {
       ok: false,

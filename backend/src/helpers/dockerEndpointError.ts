@@ -15,6 +15,12 @@ export interface DockerEndpointRefusal {
   reason: EndpointRefusalReason;
   service: string | null;
   message: string;
+  /**
+   * Set when the refusal is that the compose file could not be rendered, so a
+   * pre-check can ask whether a data restore is swapping that file and answer
+   * with the restore's fence instead.
+   */
+  renderFailed?: true;
 }
 
 export class DockerEndpointProtectedError extends Error {

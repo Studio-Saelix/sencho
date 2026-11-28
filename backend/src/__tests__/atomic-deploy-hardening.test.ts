@@ -22,13 +22,20 @@ const {
   mockGetBackupInfo,
   mockRestoreStackFiles,
   mockSnapshotStackFiles,
-} = vi.hoisted(() => ({
+  mockAdmitStackFileWork,
+  leaseReleased,
+} = vi.hoisted(() => {
+  const leaseReleased = vi.fn();
+  return {
+  leaseReleased,
+  mockAdmitStackFileWork: vi.fn(async () => ({ recheck: () => null, release: leaseReleased })),
   mockDeployStack: vi.fn(),
   mockComposeUpWithRecoveryOverride: vi.fn(),
   mockGetBackupInfo: vi.fn(),
   mockRestoreStackFiles: vi.fn(),
   mockSnapshotStackFiles: vi.fn(),
-}));
+  };
+});
 
 vi.mock('../services/ComposeService', async () => {
   const actual = await vi.importActual<typeof import('../services/ComposeService')>(
@@ -52,9 +59,11 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getBaseDir: () => '/tmp/compose',
       hasComposeFile: vi.fn().mockResolvedValue(true),
+      refuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
       getBackupInfo: mockGetBackupInfo,
       restoreStackFiles: mockRestoreStackFiles,
       snapshotStackFiles: mockSnapshotStackFiles,
+      admitStackFileWork: mockAdmitStackFileWork,
     }),
   },
 }));
@@ -241,6 +250,84 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     mockDeployStack.mockResolvedValueOnce({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const second = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(second.status).toBe(200);
+  });
+});
+
+describe('A data restore fence recorded after the rollback pre-check', () => {
+  it('answers 409 data_restore with the restore\'s class when the recovery up is refused', async () => {
+    mockTier('paid');
+    insertGeneration({ id: 'gen-fenced' });
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const compensate = vi.spyOn(StackUpdateRecoveryService.prototype, 'compensateWithCandidateOutcome')
+      .mockRejectedValue(Object.assign(new DataRestoreFenceError('/srv/data', 'browse', 'directory'), { failureClass: 'pre_mutation' }));
+    const { NotificationService } = await import('../services/NotificationService');
+    const alert = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+    const errors = vi.spyOn(console, 'error');
+    try {
+      const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+      expect(alert.mock.calls.filter(([level]) => level === 'error')).toEqual([]);
+      // A refusal, not a failed rollback.
+      expect(errors.mock.calls.filter(([first]) => String(first).includes('Rollback failed'))).toEqual([]);
+    } finally {
+      errors.mockRestore();
+      clearGenerations();
+      compensate.mockRestore();
+    }
+  });
+
+  it('registers the backup rollback\'s files before the snapshot, moves nothing when one is held, and releases it when the route answers', async () => {
+    mockTier('paid');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockSnapshotStackFiles.mockClear();
+    mockRestoreStackFiles.mockClear();
+    mockDeployStack.mockClear();
+    mockAdmitStackFileWork.mockClear();
+    mockAdmitStackFileWork.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const refused = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+    expect(mockSnapshotStackFiles).not.toHaveBeenCalled();
+    expect(mockRestoreStackFiles).not.toHaveBeenCalled();
+    expect(mockDeployStack).not.toHaveBeenCalled();
+
+    // Admitted: held through the snapshot, the restore and the deploy, then released.
+    leaseReleased.mockClear();
+    mockSnapshotStackFiles.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
+    let releasedDuringDeploy: boolean | null = null;
+    mockDeployStack.mockImplementationOnce(async () => {
+      releasedDuringDeploy = leaseReleased.mock.calls.length > 0;
+    });
+    const ok = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(ok.status).toBe(200);
+    expect(releasedDuringDeploy).toBe(false);
+    expect(mockAdmitStackFileWork.mock.invocationCallOrder[1]).toBeLessThan(mockSnapshotStackFiles.mock.invocationCallOrder[0]);
+    expect(leaseReleased).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts the restored backup files back and answers 409 data_restore when the deploy is refused', async () => {
+    mockTier('paid');
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const revert = vi.fn().mockResolvedValue(undefined);
+    mockSnapshotStackFiles.mockResolvedValue(revert);
+    mockDeployStack.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const errors = vi.spyOn(console, 'error');
+    const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'data_restore', failureClass: 'pre_mutation' });
+    expect(revert).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls.filter(([first]) => String(first).includes('Rollback failed'))).toEqual([]);
+    errors.mockRestore();
+
+    // A revert that fails leaves restored files in place: the answer says something moved.
+    revert.mockReset().mockRejectedValue(new Error('disk full'));
+    mockDeployStack.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const mixed = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
+    expect(mixed.status).toBe(409);
+    expect(mixed.body).toMatchObject({ code: 'data_restore', failureClass: 'post_mutation' });
   });
 });
 

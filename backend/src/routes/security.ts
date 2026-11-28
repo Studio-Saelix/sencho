@@ -17,6 +17,7 @@ import {
   isTriageStatus,
   isTriageJustification,
 } from '../utils/suppression-filter';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { buildSecurityOverview } from '../services/securityOverview';
 import {
@@ -613,6 +614,10 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
     const scan = await svc.scanComposeStack(req.nodeId, stackName, 'manual');
     res.status(201).json(scan);
   } catch (error) {
+    // A compose file mid-swap under a data restore is not a missing one.
+    if (isDataRestoreFenceError(error)) {
+      res.status(409).json({ error: error.message, code: DATA_RESTORE_FENCE_CODE }); return;
+    }
     const message = (error as Error).message || '';
     if (message === 'Invalid stack path' || message.startsWith('No compose file found')) {
       res.status(404).json({ error: message }); return;

@@ -6,6 +6,7 @@ import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryServi
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
 import { invalidateNodeCaches } from './cacheInvalidation';
+import { DATA_RESTORE_FENCE_CODE } from './dataRestoreFenceError';
 import {
   FLEET_SNAPSHOT_APPLY_FILENAMES,
   type FleetSnapshotApplyFilename,
@@ -49,7 +50,8 @@ export type FleetSnapshotApplyConflictCode =
   | 'stack_op_in_progress'
   | 'HEALTH_GATE_OBSERVING'
   | 'stack_deletion_in_progress'
-  | 'snapshot_compose_missing';
+  | 'snapshot_compose_missing'
+  | typeof DATA_RESTORE_FENCE_CODE;
 
 export function fleetSnapshotApplyConflictCode(error: unknown): FleetSnapshotApplyConflictCode | undefined {
   const code = getCodedError(error)?.code;
@@ -58,6 +60,7 @@ export function fleetSnapshotApplyConflictCode(error: unknown): FleetSnapshotApp
     || code === 'HEALTH_GATE_OBSERVING'
     || code === 'stack_deletion_in_progress'
     || code === 'snapshot_compose_missing'
+    || code === DATA_RESTORE_FENCE_CODE
   ) return code;
   return undefined;
 }

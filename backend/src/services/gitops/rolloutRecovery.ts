@@ -14,7 +14,7 @@
  * generation-selection contract, so both paths enforce identical evidence
  * rules.
  */
-import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointError';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, type DockerEndpointRefusal } from '../../helpers/dockerEndpointError';
 import axios from 'axios';
 import type { PermissionAction } from '../../middleware/permissions';
 import { DatabaseService } from '../DatabaseService';
@@ -23,6 +23,8 @@ import { LicenseService } from '../LicenseService';
 import { StackUpdateRecoveryService } from '../StackUpdateRecoveryService';
 import { StackOpLockService } from '../StackOpLockService';
 import { ComposeService } from '../ComposeService';
+import { FileSystemService } from '../FileSystemService';
+import { DATA_RESTORE_FENCE_CODE, isDataRestoreFenceError } from '../../helpers/dataRestoreFenceError';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { safeAxiosTransport } from '../../utils/outboundTarget';
 import { formatScopedStackActionsHeader } from '../../helpers/stackRouteAuth';
@@ -341,8 +343,34 @@ function restoreLocal(args: {
       try {
         // A restore pins every service to its recovery tag, which recreates the
         // container carrying this node's Docker API when the stack holds it.
-        const endpointRefusal = await ComposeService.getInstance(args.nodeId)
-          .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+        let endpointRefusal: DockerEndpointRefusal | null;
+        try {
+          // The restore's up names its files itself (the recovery layer is
+          // appended last), so the root file and its override are asked
+          // whether or not the connection check below can render; a captured
+          // file set is asked at the up's own argv, once it is restored.
+          await FileSystemService.getInstance(args.nodeId)
+            .refuseIfComposeFenced(args.stackName, { pinsComposeFiles: true });
+          endpointRefusal = await ComposeService.getInstance(args.nodeId)
+            .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+          // A compose file a data restore is swapping does not render: the
+          // fence answers, as it does on the node rollback route a hub reaches.
+          if (endpointRefusal?.renderFailed) {
+            await FileSystemService.getInstance(args.nodeId)
+              .refuseIfComposeFenced(args.stackName, { pinsComposeFiles: true });
+          }
+        } catch (error) {
+          // The fence's refusal at this pre-check: nothing has moved yet.
+          if (isDataRestoreFenceError(error)) {
+            return {
+              ok: false as const,
+              code: DATA_RESTORE_FENCE_CODE,
+              error: error.message,
+              failureClass: 'pre_mutation' as const,
+            };
+          }
+          throw error;
+        }
         if (endpointRefusal) {
           return {
             ok: false as const,
@@ -367,11 +395,15 @@ function restoreLocal(args: {
         }
         return { ok: true as const, ...(policyEvidence ? { policyEvidence } : {}) };
       } catch (error) {
-        console.error(
-        '[GitOps recovery] Local restore failed for %s:',
-        sanitizeForLog(args.stackName),
-        sanitizeForLog(error instanceof Error ? error.message : String(error)),
-      );
+        // A data restore's fence refusing the restore's up is a refusal with
+        // its own code and class, not a failure to log.
+        if (!isDataRestoreFenceError(error)) {
+          console.error(
+            '[GitOps recovery] Local restore failed for %s:',
+            sanitizeForLog(args.stackName),
+            sanitizeForLog(error instanceof Error ? error.message : String(error)),
+          );
+        }
         return { ok: false as const, code: errorCode(error), error: errorText(error), ...restoreFailureClassOf(error) };
       }
     })

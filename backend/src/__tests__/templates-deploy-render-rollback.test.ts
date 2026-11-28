@@ -276,6 +276,96 @@ describe('POST /api/templates/deploy when the rollback teardown is refused', () 
   });
 });
 
+describe('POST /api/templates/deploy when a data restore fence refuses the rollback teardown', () => {
+  it('keeps the stack files, because nothing was taken down, and reports no rollback', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new DataRestoreFenceError('/srv/data', 'browse', 'directory'),
+    );
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'fenced-down',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'fenced-down', template: minimalTemplate });
+
+    expect(res.body.rolledBack).toBe(false);
+    // The deploy failed for its own reason; the teardown's refusal is named as the fence's.
+    expect(res.status).toBe(500);
+    expect(res.body.rollbackRefusal).toMatchObject({ code: 'data_restore' });
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).toContain('fenced-down');
+  });
+});
+
+describe('POST /api/templates/deploy when a data restore fence refuses the deploy itself', () => {
+  it('answers 409 data_restore, takes nothing down, and removes the files it wrote', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+    const deploy = vi.spyOn(ComposeService.prototype, 'deployStack')
+      .mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    try {
+      const res = await request(app)
+        .post('/api/templates/deploy')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ stackName: 'fenced-deploy', template: minimalTemplate });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'data_restore', rolledBack: true });
+      expect(down).not.toHaveBeenCalled();
+      expect(errors.mock.calls.filter(([first]) => String(first).includes('Deploy failed'))).toEqual([]);
+      const { FileSystemService } = await import('../services/FileSystemService');
+      expect(await FileSystemService.getInstance().getStacks()).not.toContain('fenced-deploy');
+    } finally {
+      deploy.mockRestore();
+      down.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
+  it('answers 409 data_restore when the save is refused, and says whether the files it wrote could be removed', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const deploy = vi.spyOn(ComposeService.prototype, 'deployStack');
+    const save = vi.spyOn(FileSystemService.prototype, 'saveStackContent')
+      .mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    try {
+      const res = await request(app)
+        .post('/api/templates/deploy')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ stackName: 'fenced-save', template: minimalTemplate });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'data_restore', rolledBack: true });
+      expect(deploy).not.toHaveBeenCalled();
+      expect(await FileSystemService.getInstance().getStacks()).not.toContain('fenced-save');
+
+      // The cleanup is file work the same fence can refuse: the files stay, and the answer says so.
+      const remove = vi.spyOn(FileSystemService.prototype, 'deleteStack')
+        .mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      save.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+      const kept = await request(app)
+        .post('/api/templates/deploy')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ stackName: 'fenced-save-kept', template: minimalTemplate });
+      expect(kept.status).toBe(409);
+      expect(kept.body).toMatchObject({ code: 'data_restore', rolledBack: false });
+      remove.mockRestore();
+    } finally {
+      save.mockRestore();
+      deploy.mockRestore();
+    }
+  });
+});
+
 describe('POST /api/templates/deploy refused by the alias-expansion guard', () => {
   const REFUSAL = 'Compose file "compose.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
 

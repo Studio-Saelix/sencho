@@ -1,7 +1,9 @@
 import WebSocket from 'ws';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isDataRestoreFenceError } from '../helpers/dataRestoreFenceError';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
+import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { AutoHealService } from './AutoHealService';
 import { ImageUpdateService } from './ImageUpdateService';
@@ -296,6 +298,8 @@ export class StackUpdateOrchestrator {
     // leaves nothing behind.
     const updateRefusal = await ComposeService.getInstance(nodeId)
       .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    // A compose file a data restore is swapping does not render: the fence answers.
+    if (updateRefusal?.renderFailed) await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     if (updateRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, updateRefusal.message, { serviceName });
     }
@@ -356,6 +360,11 @@ export class StackUpdateOrchestrator {
           },
         );
       } catch (composeError) {
+        // A compose file the service's pull or up names went under a data
+        // restore's fence: that command did not start and no container was
+        // replaced, so the route answers it as the fence's refusal, not as a
+        // failed update.
+        if (isDataRestoreFenceError(composeError)) throw composeError;
         if (composeError instanceof PulledCandidateBlockedError) {
           return serviceFailed(
             'policy_blocked',
@@ -471,9 +480,20 @@ export class StackUpdateOrchestrator {
         { recoveryId },
       );
     }
+    // A compose file a data restore is overwriting throws the fence's refusal
+    // here, before the endpoint check's render, the spec load, the rollback
+    // gate, the claim or the recreate, so a file the swap moved aside is
+    // answered with the fence and not as one that cannot be rendered. The route
+    // asks the same before calling restore; this keeps the order for every caller.
+    await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     // Before the claim, the retag, or the gate: a refusal here leaves nothing behind.
     const restoreRefusal = await ComposeService.getInstance(nodeId)
       .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    // The endpoint check is not fenced file work, so a fence can be recorded
+    // while it renders: a compose file that did not render is asked again, as
+    // service update does, and a fence that holds a file Compose reads answers
+    // instead of the connection.
+    if (restoreRefusal?.renderFailed) await FileSystemService.getInstance(nodeId).refuseIfComposeFenced(stackName);
     if (restoreRefusal) {
       return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, restoreRefusal.message, { serviceName, recoveryId });
     }
@@ -522,22 +542,36 @@ export class StackUpdateOrchestrator {
 
       const previousImageId = (await this.snapshotServiceReplicas(nodeId, stackName, serviceName))[0]?.imageId ?? null;
 
-      try {
-        const { repo, tag } = splitImageRef(recovery.declared_image_ref);
-        await DockerController.getInstance(nodeId).getDocker()
-          .getImage(recovery.majority_image_id).tag({ repo, tag });
-      } catch (retagError) {
-        return serviceFailed(
-          'restore_retag_failed',
-          getErrorMessage(retagError, 'Could not retag the recovery image'),
-          { serviceName, mutationStage: 'retag', recoveryId },
-        );
-      }
+      // The retag is the recreate's last step before Compose starts, run by
+      // recreateServiceFromLocal once its files are admitted against a data
+      // restore's directory fences. A refusal or a failed render that comes
+      // first therefore leaves the declared tag untouched, and the stack's
+      // services running what they ran.
+      let retagFailure: { error: unknown } | null = null;
       try {
         await ComposeService.getInstance(nodeId).recreateServiceFromLocal(
           stackName, serviceName, options.terminalWs ?? undefined,
+          async () => {
+            try {
+              const { repo, tag } = splitImageRef(recovery.declared_image_ref);
+              await DockerController.getInstance(nodeId).getDocker()
+                .getImage(recovery.majority_image_id).tag({ repo, tag });
+            } catch (retagError) {
+              retagFailure = { error: retagError };
+              throw retagError;
+            }
+          },
         );
       } catch (composeError) {
+        if (retagFailure) {
+          return serviceFailed(
+            'restore_retag_failed',
+            getErrorMessage((retagFailure as { error: unknown }).error, 'Could not retag the recovery image'),
+            { serviceName, mutationStage: 'retag', recoveryId },
+          );
+        }
+        // As for a service update: the fence's refusal is not a failed restore.
+        if (isDataRestoreFenceError(composeError)) throw composeError;
         if (isDockerEndpointProtectedError(composeError)) {
           return serviceFailed(
             composeError.code,

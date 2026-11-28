@@ -24,7 +24,7 @@ const {
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
-  mockGetStackContent, mockGetEnvContent,
+  mockGetStackContent, mockGetEnvContent, mockRefuseIfComposeFenced,
   mockLoadStackBuildServices,
   mockResolveMissingExternalNetworks,
   mockCreateNetwork,
@@ -87,6 +87,7 @@ const {
   mockGetBindMounts: vi.fn().mockResolvedValue(null),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
+  mockRefuseIfComposeFenced: vi.fn().mockResolvedValue(undefined),
   mockLoadStackBuildServices: vi.fn().mockResolvedValue([]),
   mockResolveMissingExternalNetworks: vi.fn().mockResolvedValue({
     status: 'ok',
@@ -253,6 +254,7 @@ vi.mock('../services/FileSystemService', () => ({
       getOverrideFilename: mockGetOverrideFilename,
       getStackContent: mockGetStackContent,
       getEnvContent: mockGetEnvContent,
+      refuseIfComposeFenced: mockRefuseIfComposeFenced,
     }),
   },
 }));
@@ -408,6 +410,7 @@ beforeEach(() => {
   mockGetComposeFilename.mockResolvedValue('compose.yaml');
   mockGetOverrideFilename.mockResolvedValue(null);
   mockEnsureStackOverride.mockResolvedValue(null);
+  mockRefuseIfComposeFenced.mockResolvedValue(undefined);
   mockIsMeshStackEnabled.mockReturnValue(false);
   mockGetRegistries.mockReturnValue([]);
   mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
@@ -1593,6 +1596,48 @@ describe('ComposeService - deployStack', () => {
     expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
   });
 
+  it('abandons the atomic generation and throws the fence refusal itself when a compose file the up names is fenced', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    // The argv check sits where the up's argv is assembled, beside this guard:
+    // the refusal lands there, before Compose is handed the up.
+    mockAssertComposeInputs.mockImplementation(async (opts: unknown) => {
+      const { invocation } = opts as { invocation: string[] };
+      if (invocation.includes('up')) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    });
+    try {
+      const error = await ComposeService.getInstance(1).deployStack('my-stack', undefined, true).then(() => null, (e: unknown) => e);
+      expect(isDataRestoreFenceError(error)).toBe(true);
+      expect(getComposeRollbackInfo(error)).toBeNull();
+      expect(mockAbandon).toHaveBeenCalledWith('recovery-1');
+      expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('up'))).toBe(false);
+    } finally {
+      mockAssertComposeInputs.mockReset().mockResolvedValue(undefined);
+    }
+  });
+
+  it('keeps the original error and says why when a data restore fence refused the rollback', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    const fence = new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    mockCompensateWithCandidate.mockRejectedValueOnce(fence);
+
+    const result = ComposeService.getInstance(1).deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).toContain(`The rollback did not run: ${fence.message}`);
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
   it('abandons the atomic generation on a candidate block instead of compensating a runtime nothing replaced', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
@@ -2079,6 +2124,62 @@ describe('ComposeService - deployStack', () => {
     }
   });
 
+  it('opens no GitOps deploy for a deploy a data restore fence refuses up front, atomic or not, and starts no Compose process', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    const handle = trackedHandle();
+    const spy = mockTrackedDeploy(handle);
+    mockRefuseIfComposeFenced.mockRejectedValue(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    try {
+      for (const atomic of [true, false]) {
+        const error = await ComposeService.getInstance(1).deployStack('my-stack', undefined, atomic).then(() => null, (e: unknown) => e);
+        expect(isDataRestoreFenceError(error), `atomic=${atomic}`).toBe(true);
+      }
+      expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack', { pinsComposeFiles: false });
+      expect(spy).not.toHaveBeenCalled();
+      expect(handle.failed).not.toHaveBeenCalled();
+      expect(mockCaptureCandidate).not.toHaveBeenCalled();
+      expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('asks a digest-pinned deploy for the root and the override it names', async () => {
+    const { DataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    mockRefuseIfComposeFenced.mockRejectedValue(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'manual', actor: null, digestPins: { web: `nginx@sha256:${'a'.repeat(64)}` } } as never)
+      .catch(() => undefined);
+    expect(mockRefuseIfComposeFenced).toHaveBeenCalledWith('my-stack', { pinsComposeFiles: true });
+  });
+
+  it('opens no GitOps deploy for an update whose up a data restore fence refuses, and does not compensate it', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    const handle = trackedHandle();
+    const spy = mockTrackedDeploy(handle);
+    // The up-front ask passed; the fence is recorded by the time the up's argv is assembled.
+    mockAssertComposeInputs.mockImplementation(async (opts: unknown) => {
+      const { invocation } = opts as { invocation: string[] };
+      if (invocation.includes('up')) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    });
+    try {
+      const error = await ComposeService.getInstance(1).updateStack('my-stack').then(() => null, (e: unknown) => e);
+      expect(isDataRestoreFenceError(error)).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+      expect(handle.failed).not.toHaveBeenCalled();
+      expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+      expect(mockAbandon).toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('up'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+      mockAssertComposeInputs.mockReset().mockResolvedValue(undefined);
+    }
+  });
+
   // A deploy against a GitOps decrypt overlay runs Compose over decrypted
   // secret files, and Compose echoes interpolated values back in its
   // diagnostics (`unable to get image 'audit-...?': invalid reference
@@ -2113,7 +2214,7 @@ describe('ComposeService - deployStack', () => {
   it('withholds Compose output when the deploy runs against a decrypt overlay', async () => {
     const { error, streamed } = await runFailingDeploy({
       source: 'git_apply',
-      overlayDir: '/tmp/git-secrets/1/my-stack/op-1',
+      overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
     });
     expect(error?.message).toBe(WITHHELD_DECRYPTED_COMPOSE_OUTPUT);
     expect(streamed).not.toContain('audit-decrypted-value-marker');
@@ -3225,6 +3326,15 @@ describe('ComposeService - a volume removal that would delete the recovery repos
     expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'down'], expect.any(Object));
   });
 
+  it('does not swallow a data restore fence refusal of a teardown, and starts no down', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockAssertComposeInputs.mockRejectedValueOnce(new DataRestoreFenceError('/srv/data', 'browse', 'directory'));
+    const error = await ComposeService.getInstance(1).downStack('my-stack').then(() => null, (e: unknown) => e);
+    expect(isDataRestoreFenceError(error)).toBe(true);
+    expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('down'))).toBe(false);
+  });
+
   it('still takes the same stack down, and deletes it, without removing volumes', async () => {
     setupAutoCloseSpawn();
     const svc = ComposeService.getInstance(1);
@@ -3492,6 +3602,28 @@ describe('ComposeService - idle-output stall backstop', () => {
     proc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(3100); // health probe
     await promise;
+  });
+
+  it('abandons the update\'s generation and throws the fence refusal itself when a compose file the up names is fenced', async () => {
+    const { DataRestoreFenceError, isDataRestoreFenceError } = await import('../helpers/dataRestoreFenceError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockAssertComposeInputs.mockImplementation(async (opts: unknown) => {
+      const { invocation } = opts as { invocation: string[] };
+      if (invocation.includes('up')) throw new DataRestoreFenceError('/srv/data', 'browse', 'directory');
+    });
+    try {
+      const result = ComposeService.getInstance(1).updateStack('my-stack', undefined, true).then(() => null, (e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const error = await result;
+      expect(isDataRestoreFenceError(error)).toBe(true);
+      expect(getComposeRollbackInfo(error)).toBeNull();
+      expect(mockAbandon).toHaveBeenCalledWith('recovery-1');
+      expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+      expect(mockSpawn.mock.calls.some(([, args]) => (args as string[]).includes('up'))).toBe(false);
+    } finally {
+      mockAssertComposeInputs.mockReset().mockResolvedValue(undefined);
+    }
   });
 
   it('surfaces STACK_STALLED_OUTPUT on acquire stall without runtime compensation', async () => {
