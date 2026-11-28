@@ -265,6 +265,8 @@ Open the rules editor from any of these entry points:
 | **Duration (mins)** | How long a container's breach must persist before firing. Default `5`, range 0 to 1440. |
 | **Cooldown (mins)** | Silence window between fires for the same Compose service after a rule triggers. Default `60`, range 0 to 10080. |
 
+The **Service** picker only lists the Compose services the active node could read. If that lookup is refused or fails, the form shows the reason and keeps **Target all services in this stack** as an explicit confirmation; **Add Rule** stays disabled until you choose a listed service or confirm all services. Opening the form from a container whose service is not in the file shows the name as missing and asks you to choose a listed service or confirm all services. Choosing a service clears the all-services confirmation, and confirming all services clears a picked service, so the saved rule always matches the visible choice. A node that does not support service-scoped alert rules skips the lookup and keeps the stack-wide behavior.
+
 Sencho tracks the start of each breach per container in memory; the rule fires only after that container's breach has lasted for the full **Duration**, and only if the previous fire for the same Compose service is older than **Cooldown**. The notification names the triggering service and container. Containers without a Compose service label are grouped under one shared cooldown key and appear as **unknown service** in the message; that label is not selectable as a rule target. A scoped rule whose service is no longer listed in the compose file shows **Not in compose** in the rules list; evaluation still matches running containers that carry that Compose service label.
 
 ### Available metrics

@@ -1189,7 +1189,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 )}
                 {currentAction.supportsServiceSelection && formTargetId && !servicesError && (
                   availableServices.length > 1
-                  || (availableServices.length === 1 && (formTargetServices.length > 0 || !!servicesNotice))
+                  || (availableServices.length === 1
+                    && (formTargetServices.length > 0 || !!servicesNotice || editingTask !== null))
                 ) && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>

@@ -44,7 +44,8 @@
  * refusals at classification time.
  */
 import path from 'path';
-import YAML from 'yaml';
+import YAML, { isAlias, isMap, isScalar, isSeq, Scalar } from 'yaml';
+import type { Document, Node, YAMLMap } from 'yaml';
 import type {
     DeclaredInput,
     DynamicInput,
@@ -268,64 +269,184 @@ export class ComposeServiceListRefusal extends Error {
     }
 }
 
-export interface ParseComposeYamlOptions {
-    /**
-     * Expand YAML merge keys (`<<`) into the returned value. The inventory
-     * leaves this off so it can inspect merges for hidden declarations; a name
-     * projection may turn it on only after the expansion guard has bounded the
-     * source, because expansion copies an anchor once per reference.
-     */
-    expandMerges?: boolean;
+/**
+ * Keep every mapping key's literal text on the syntax tree before the library
+ * converts it to a JavaScript object.
+ *
+ * `toJS` stringifies a key's resolved value, so the plain keys `1e999` and
+ * `Infinity` both become `"Infinity"` (one property is lost) and a long
+ * hexadecimal or octal key is rewritten as its decimal value. Compose reads a
+ * map key as the text it was written with, so a scalar key that resolves to a
+ * non-string keeps its source text. Scalar values are untouched.
+ */
+function preserveLiteralMapKeys(node: unknown): void {
+    const stack: unknown[] = [node];
+    const seen = new WeakSet<object>();
+    while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current || typeof current !== 'object' || seen.has(current)) continue;
+        seen.add(current);
+        if (isMap(current)) {
+            for (const pair of current.items) {
+                const key = pair.key;
+                if (isScalar(key) && typeof key.value !== 'string') {
+                    key.value = typeof key.source === 'string' ? key.source : String(key.value);
+                }
+                stack.push(pair.value);
+            }
+            continue;
+        }
+        if (isSeq(current)) {
+            for (const item of current.items) stack.push(item);
+        }
+    }
+}
+
+/**
+ * Parse one Compose document under the parser's finite alias budget and keep
+ * its mapping keys literal (see `preserveLiteralMapKeys`).
+ *
+ * Every document is read with the YAML 1.2 core schema, even when it carries an
+ * explicit `%YAML 1.1` directive. Letting the directive select the library's
+ * 1.1 schema would make its scalar typing (for example `on`, `yes` or a
+ * timestamp) diverge from the 1.2 view the Compose inventory and the authored
+ * source reader use. A 1.1 directive is accepted, so it alone never refuses the
+ * file, and its `<<` keys are inspected exactly like a 1.2 document's.
+ * Explicitly tagged merges are still refused because yaml expands them under
+ * any schema, before materialisation.
+ */
+function parseComposeDocument(content: string): Document.Parsed {
+    const document = YAML.parseDocument(content, { schema: 'core', resolveKnownTags: true });
+    if (document.errors.length > 0) throw document.errors[0];
+    if (hasTaggedMergeKey(document.contents)) {
+        throw new UnsupportedComposeMergeError('tagged YAML merge keys are not supported');
+    }
+    preserveLiteralMapKeys(document.contents);
+    return document;
 }
 
 /**
  * Parse a Compose document under the parser's finite alias budget.
  *
- * Every document is read with the YAML 1.2 core schema, even when it carries an
- * explicit `%YAML 1.1` directive. Letting the directive select the library's
- * 1.1 schema makes yaml expand merge keys inside `toJS()` regardless of the
- * merge option, before the fail-closed merge check can inspect them, and its
- * scalar typing (for example `on`, `yes` or a timestamp) would diverge from the
- * 1.2 view the Compose inventory and the authored source reader use. A 1.1
- * directive is accepted, so it alone never refuses the file, and its `<<` keys
- * are inspected exactly like a 1.2 document's. Explicitly tagged merges are
- * still refused because yaml expands them under any schema, before
- * materialisation.
- *
- * Merges stay unexpanded by default so the inventory can inspect them; see
- * `ParseComposeYamlOptions.expandMerges` for the guarded name-projection path.
+ * Merges stay unexpanded so the inventory can inspect them for hidden
+ * declarations; the service-name projection expands them itself.
  */
-export function parseComposeYaml(content: string, options: ParseComposeYamlOptions = {}): unknown {
-    const expandMerges = options.expandMerges === true;
-    const document = YAML.parseDocument(content, {
-        schema: 'core',
-        resolveKnownTags: true,
-        merge: expandMerges,
-    });
-    if (document.errors.length > 0) throw document.errors[0];
-    if (hasTaggedMergeKey(document.contents)) {
-        throw new UnsupportedComposeMergeError('tagged YAML merge keys are not supported');
+export function parseComposeYaml(content: string): unknown {
+    return parseComposeDocument(content).toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+}
+
+/** Bound on keys inspected while expanding merges for the service list. */
+const MAX_SERVICE_KEY_SCANS = 100_000;
+
+interface ProjectedMapEntry {
+    key: string;
+    value: Node | null;
+}
+
+/** Literal key text for a scalar or alias key; null for a collection key. */
+function literalKeyText(key: Node | null, document: Document.Parsed): string | null {
+    let node = key;
+    if (isAlias(node)) node = node.resolve(document) ?? null;
+    if (!isScalar(node)) return null;
+    if (typeof node.value === 'string') return node.value;
+    return typeof node.source === 'string' ? node.source : String(node.value);
+}
+
+/** True only for the YAML merge key: an untagged plain `<<` scalar. */
+function isMergeKey(key: Node | null): boolean {
+    return isScalar(key)
+        && key.tag === undefined
+        && (key.type === undefined || key.type === Scalar.PLAIN)
+        && key.value === '<<';
+}
+
+/** The mapping nodes an ordinary merge key contributes, through aliases. */
+function projectedMergeSourceMaps(value: Node | null, document: Document.Parsed): YAMLMap[] {
+    const resolved = isAlias(value) ? value.resolve(document) ?? null : value;
+    if (isSeq(resolved)) {
+        const maps: YAMLMap[] = [];
+        for (const item of resolved.items) {
+            const target = isAlias(item) ? item.resolve(document) ?? null : item;
+            if (isMap(target)) maps.push(target);
+        }
+        return maps;
     }
-    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+    if (isMap(resolved)) return [resolved];
+    throw new ComposeServiceListRefusal(
+        'uses a YAML merge key whose value is not a mapping. Replace it with a mapping or remove it, then try again.',
+    );
+}
+
+/**
+ * Entries of a mapping after ordinary `<<` merges, with explicit keys winning
+ * and an earlier map in a merge sequence winning over a later one.
+ */
+function effectiveMapEntries(
+    map: YAMLMap,
+    document: Document.Parsed,
+    budget: { remaining: number },
+    active: Set<object>,
+): ProjectedMapEntry[] {
+    if (active.has(map)) return [];
+    active.add(map);
+    const entries: ProjectedMapEntry[] = [];
+    const byKey = new Map<string, ProjectedMapEntry>();
+    for (const pair of map.items) {
+        const keyNode = pair.key as Node | null;
+        const valueNode = pair.value as Node | null;
+        if (budget.remaining-- <= 0) throw serviceKeyBudgetRefusal();
+        if (isMergeKey(keyNode)) {
+            for (const source of projectedMergeSourceMaps(valueNode, document)) {
+                for (const entry of effectiveMapEntries(source, document, budget, active)) {
+                    if (budget.remaining-- <= 0) throw serviceKeyBudgetRefusal();
+                    if (byKey.has(entry.key)) continue;
+                    byKey.set(entry.key, entry);
+                    entries.push(entry);
+                }
+            }
+            continue;
+        }
+        const key = literalKeyText(keyNode, document);
+        if (key === null) continue;
+        const existing = byKey.get(key);
+        if (existing) existing.value = valueNode;
+        else {
+            const entry = { key, value: valueNode };
+            byKey.set(key, entry);
+            entries.push(entry);
+        }
+    }
+    return entries;
+}
+
+function serviceKeyBudgetRefusal(): ComposeServiceListRefusal {
+    return new ComposeServiceListRefusal(
+        `expands YAML merges beyond the ${MAX_SERVICE_KEY_SCANS.toLocaleString('en-US')}-key listing budget, ` +
+        'so Sencho refused to list its services. Remove some merge reuse or list the services directly, then try again.',
+    );
 }
 
 /**
  * Project a Compose document to the service names the Compose model reports.
  *
- * Names stay literal: the document is read with the core schema, so a
- * `%YAML 1.1` directive cannot turn the service `on` into the boolean `true`.
- * Merge keys are expanded, so a `<<` on the `services` map contributes its
- * service names and a merge inside one service definition only contributes
- * attributes. The caller must have bounded the source with the expansion guard
- * first: merge expansion copies an anchor once per reference, and the guard is
- * what caps that copy count. Throws `ComposeServiceListRefusal` for an explicit
- * merge tag, which the parser does not expand; parser errors and the alias
- * budget error from `parseComposeYaml` are rethrown for the caller to map.
+ * Names stay literal: the keys are read from the syntax tree, so a resolved
+ * number such as `1e999` keeps its source spelling and stays distinct from
+ * `Infinity`, and a `%YAML 1.1` directive cannot turn the service `on` into a
+ * boolean. Ordinary merge keys are expanded, so a `<<` on the `services` map or
+ * the document root contributes the names Compose lists; a merge inside one
+ * service definition only contributes attributes and does not add a name. An
+ * explicitly tagged `!!str <<` is a literal key, not a merge; an explicit
+ * `!!merge` tag is refused because Compose expands it before this parser can
+ * inspect it. The caller must have bounded the source with the expansion guard
+ * first: merge expansion copies a source map once per reference, and the key
+ * scan has its own bound. Throws `ComposeServiceListRefusal` for an explicit
+ * merge tag or an unlistable merge; parser errors and the alias budget error
+ * from the shared parser are rethrown for the caller to map.
  */
 export function listComposeServiceNames(content: string): string[] {
-    let parsed: unknown;
+    let document: Document.Parsed;
     try {
-        parsed = parseComposeYaml(content, { expandMerges: true });
+        document = parseComposeDocument(content);
     } catch (error) {
         if (error instanceof UnsupportedComposeMergeError) {
             throw new ComposeServiceListRefusal(
@@ -335,10 +456,17 @@ export function listComposeServiceNames(content: string): string[] {
         }
         throw error;
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    const services = (parsed as Record<string, unknown>).services;
-    if (!services || typeof services !== 'object' || Array.isArray(services)) return [];
-    return Object.keys(services as Record<string, unknown>);
+    // Materialise once under the shared alias budget, exactly as the inventory
+    // parser does, so this path keeps the same finite alias accounting.
+    document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+    if (!isMap(document.contents)) return [];
+    const budget = { remaining: MAX_SERVICE_KEY_SCANS };
+    const rootEntries = effectiveMapEntries(document.contents, document, budget, new Set());
+    const servicesEntry = rootEntries.find((entry) => entry.key === 'services');
+    let services = servicesEntry?.value ?? null;
+    if (isAlias(services)) services = services.resolve(document) ?? null;
+    if (!isMap(services)) return [];
+    return effectiveMapEntries(services, document, budget, new Set()).map((entry) => entry.key);
 }
 
 /**

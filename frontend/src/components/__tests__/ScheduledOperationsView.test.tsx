@@ -445,6 +445,40 @@ describe('ScheduledOperationsView', () => {
     });
   });
 
+  it('restores the only listed service after clearing it in the edit form', async () => {
+    tasksFixture = [makeTask({
+      id: 54, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['mariadb']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const mariadb = await screen.findByRole('checkbox', { name: 'mariadb' });
+    expect(mariadb).toBeChecked();
+    await userEvent.click(mariadb);
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'mariadb' }));
+    expect(screen.getByRole('checkbox', { name: 'mariadb' })).toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/54' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
+    });
+  });
+
   it('ignores a late refusal for a stack that is no longer selected', async () => {
     let resolveWeb: ((res: Response) => void) | undefined;
     const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });

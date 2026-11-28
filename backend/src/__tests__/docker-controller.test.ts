@@ -3125,6 +3125,24 @@ services:
     });
   });
 
+  it('keeps distinct numeric-looking service keys in the legacy scan', async () => {
+    await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), [
+      'services:',
+      '  1e999:',
+      '    image: nginx:alpine',
+      '    container_name: legacy-special',
+      '  Infinity:',
+      '    image: nginx:alpine',
+      '',
+    ].join('\n'));
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-special', '/legacy-special', {
+        'com.docker.compose.project.working_dir': stackDir,
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-special' }]);
+  });
+
   it('classifies an alias-heavy stack through smartFallback when compose ps is empty', async () => {
     let compose = 'x-r: &r unless-stopped\n';
     for (let i = 1; i <= 101; i++) compose += `x-a${i}: *r\n`;

@@ -202,6 +202,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
         enabledTypes: [],
     });
     const [servicesState, setServicesState] = useState<ServicesState>({ status: 'idle' });
+    const [servicesNodeId, setServicesNodeId] = useState<number | null>(null);
     const [targetAllServices, setTargetAllServices] = useState(false);
     const [missingInitialService, setMissingInitialService] = useState<string | null>(null);
 
@@ -218,22 +219,26 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
         fetchAgentStatus();
     }, [stackName, activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    const activeNodeId = activeNode?.id ?? null;
+
     useEffect(() => {
         if (!stackName || !canScopeService) {
             setServicesState({ status: 'idle' });
+            setServicesNodeId(activeNodeId);
             setService('');
             return;
         }
 
         let cancelled = false;
         setServicesState({ status: 'loading' });
+        setServicesNodeId(activeNodeId);
         setTargetAllServices(false);
         setMissingInitialService(null);
         setService('');
 
         void (async () => {
             try {
-                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`, { nodeId: activeNodeId });
                 if (cancelled) return;
                 if (!res.ok) {
                     const refusal = await readComposeInputsRefusal(res);
@@ -263,7 +268,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
         })();
 
         return () => { cancelled = true; };
-    }, [stackName, activeNode?.id, canScopeService, initialService]);
+    }, [stackName, activeNodeId, canScopeService, initialService]);
 
     const fetchAlerts = async () => {
         try {
@@ -304,7 +309,9 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             return;
         }
         setIsLoading(true);
-        const scopedServiceName = canScopeService && service !== '' ? service : null;
+        // The visible choice is the saved one: the all-services confirmation
+        // clears any picked name, and a picked name clears the confirmation.
+        const scopedServiceName = canScopeService && !targetAllServices && service !== '' ? service : null;
         const newAlert = {
             stack_name: stackName,
             service_name: scopedServiceName,
@@ -318,6 +325,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             const res = await apiFetch('/alerts', {
                 method: 'POST',
                 body: JSON.stringify(newAlert),
+                nodeId: servicesNodeId,
             });
             if (res.ok) {
                 toast.success('Alert rule added.');
@@ -370,7 +378,8 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
         && !targetAllServices
         && (servicesState.status === 'loading'
             || servicesState.status === 'error'
-            || missingInitialService !== null);
+            || missingInitialService !== null
+            || servicesNodeId !== activeNodeId);
 
     const renderTargetLabel = (alert: StackAlert) => {
         if (!alert.service_name) {
@@ -508,7 +517,10 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                                     <Checkbox
                                         checked={targetAllServices}
-                                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                        onCheckedChange={(checked) => {
+                                            setTargetAllServices(checked === true);
+                                            if (checked === true) setService('');
+                                        }}
                                     />
                                     <span>Target all services in this stack</span>
                                 </label>
@@ -519,7 +531,10 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                 <Combobox
                                     options={serviceComboOptions}
                                     value={service}
-                                    onValueChange={setService}
+                                    onValueChange={(value) => {
+                                        setService(value);
+                                        if (value !== '') setTargetAllServices(false);
+                                    }}
                                     placeholder="All services"
                                     searchPlaceholder="Search services..."
                                     emptyText="No services found."
@@ -533,7 +548,10 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                         <label className="flex items-center gap-2 text-sm cursor-pointer">
                                             <Checkbox
                                                 checked={targetAllServices}
-                                                onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                                onCheckedChange={(checked) => {
+                                                    setTargetAllServices(checked === true);
+                                                    if (checked === true) setService('');
+                                                }}
                                             />
                                             <span>Target all services in this stack</span>
                                         </label>
@@ -660,6 +678,7 @@ function AutoHealTab({
 }) {
     const { can } = useAuth();
     const { activeNode } = useNodes();
+    const activeNodeId = activeNode?.id ?? null;
     const canEditAutoHeal = can('stack:edit', 'stack', stackName, activeNode?.id);
     const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
     const [loading, setLoading] = useState(false);
@@ -668,6 +687,7 @@ function AutoHealTab({
     const [serviceOptions, setServiceOptions] = useState<{ value: string; label: string }[]>([]);
     const [servicesLoading, setServicesLoading] = useState(false);
     const [servicesError, setServicesError] = useState<string | null>(null);
+    const [servicesNodeId, setServicesNodeId] = useState<number | null>(null);
     const [targetAllServices, setTargetAllServices] = useState(false);
     const [missingInitialService, setMissingInitialService] = useState<string | null>(null);
 
@@ -684,10 +704,11 @@ function AutoHealTab({
         setService('');
         setServiceOptions([]);
         setServicesLoading(true);
+        setServicesNodeId(activeNodeId);
         setServicesError(null);
         setTargetAllServices(false);
         setMissingInitialService(null);
-        apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
+        apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`, { nodeId: activeNodeId })
             .then(res => res.json() as Promise<AutoHealPolicy[]>)
             .then(data => { if (!cancelled) setPolicies(data); })
             .catch(() => { if (!cancelled) toast.error('Failed to load auto-heal policies.'); })
@@ -695,7 +716,7 @@ function AutoHealTab({
 
         void (async () => {
             try {
-                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`, { nodeId: activeNodeId });
                 if (cancelled) return;
                 if (!res.ok) {
                     const refusal = await readComposeInputsRefusal(res);
@@ -722,14 +743,16 @@ function AutoHealTab({
         })();
 
         return () => { cancelled = true; };
-    }, [open, stackName, initialService]);
+    }, [open, stackName, initialService, activeNodeId]);
 
     const handleToggle = async (id: number, enabled: boolean) => {
         setSaving(true);
+        const policyNodeId = policies.find(policy => policy.id === id)?.node_id;
         try {
             const res = await apiFetch(`/auto-heal/policies/${id}`, {
                 method: 'PATCH',
                 body: JSON.stringify({ enabled: enabled ? 1 : 0 }),
+                nodeId: policyNodeId,
             });
             if (res.ok) {
                 setPolicies(prev =>
@@ -749,8 +772,9 @@ function AutoHealTab({
 
     const handleDelete = async (id: number) => {
         setDeleting(true);
+        const policyNodeId = policies.find(policy => policy.id === id)?.node_id;
         try {
-            const res = await apiFetch(`/auto-heal/policies/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/auto-heal/policies/${id}`, { method: 'DELETE', nodeId: policyNodeId });
             if (res.ok) {
                 toast.success('Policy deleted.');
                 setPolicies(prev => prev.filter(p => p.id !== id));
@@ -770,7 +794,10 @@ function AutoHealTab({
         setSaving(true);
         const body = {
             stack_name: stackName,
-            service_name: service === '' ? null : service,
+            // The visible choice is the saved one: the all-services
+            // confirmation clears any picked name, and a picked name clears
+            // the confirmation.
+            service_name: targetAllServices || service === '' ? null : service,
             unhealthy_duration_mins: parseInt(unhealthyFor, 10) || 5,
             cooldown_mins: parseInt(cooldown, 10) || 5,
             max_restarts_per_hour: parseInt(maxRestarts, 10) || 3,
@@ -780,6 +807,7 @@ function AutoHealTab({
             const res = await apiFetch('/auto-heal/policies', {
                 method: 'POST',
                 body: JSON.stringify(body),
+                nodeId: servicesNodeId,
             });
             if (res.ok) {
                 toast.success('Policy added.');
@@ -789,7 +817,7 @@ function AutoHealTab({
                 setCooldown('5');
                 setMaxRestarts('3');
                 setAutoDisableAfter('5');
-                apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
+                apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`, { nodeId: servicesNodeId })
                     .then(res => res.json() as Promise<AutoHealPolicy[]>)
                     .then(data => setPolicies(data))
                     .catch(() => toast.error('Failed to reload policies.'));
@@ -811,11 +839,13 @@ function AutoHealTab({
         ...serviceOptions,
     ];
 
-    // A lookup in progress, a failed lookup, or a requested service this stack
-    // does not list is not an all-services choice until the operator says so.
+    // A lookup in progress, a failed lookup, a node whose lookup has not run
+    // yet, or a requested service this stack does not list is not an
+    // all-services choice until the operator says so.
     const needsExplicitAllServices = service === ''
         && !targetAllServices
-        && (servicesLoading || servicesError !== null || missingInitialService !== null);
+        && (servicesLoading || servicesError !== null || missingInitialService !== null
+            || servicesNodeId !== activeNodeId);
 
     return (
         <>
@@ -858,7 +888,10 @@ function AutoHealTab({
                             <label className="flex items-center gap-2 text-sm cursor-pointer">
                                 <Checkbox
                                     checked={targetAllServices}
-                                    onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                    onCheckedChange={(checked) => {
+                                        setTargetAllServices(checked === true);
+                                        if (checked === true) setService('');
+                                    }}
                                 />
                                 <span>Target all services in this stack</span>
                             </label>
@@ -869,7 +902,10 @@ function AutoHealTab({
                             <Combobox
                                 options={serviceComboOptions}
                                 value={service}
-                                onValueChange={setService}
+                                onValueChange={(value) => {
+                                    setService(value);
+                                    if (value !== '') setTargetAllServices(false);
+                                }}
                                 placeholder="All services"
                                 searchPlaceholder="Search services..."
                                 emptyText="No services found."
@@ -883,7 +919,10 @@ function AutoHealTab({
                                     <label className="flex items-center gap-2 text-sm cursor-pointer">
                                         <Checkbox
                                             checked={targetAllServices}
-                                            onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                            onCheckedChange={(checked) => {
+                                                setTargetAllServices(checked === true);
+                                                if (checked === true) setService('');
+                                            }}
                                         />
                                         <span>Target all services in this stack</span>
                                     </label>

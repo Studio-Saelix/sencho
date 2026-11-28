@@ -404,6 +404,89 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.body).not.toContain('<<');
   });
 
+  it('keeps numeric-looking names in Compose spelling under ordinary alias reuse', async () => {
+    const reuse = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`).join('\n');
+    writeCompose(
+      [
+        'x-image: &image nginx:alpine',
+        'services:',
+        '  1e999:',
+        '    image: *image',
+        '  Infinity:',
+        '    image: *image',
+        '  0x10:',
+        '    image: *image',
+        reuse,
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    const expected = [
+      '1e999', 'Infinity', '0x10',
+      ...Array.from({ length: 150 }, (_, i) => `svc${i}`),
+    ];
+    expect(res.body).toEqual(expected);
+  });
+
+  it('keeps numeric-looking names a merged services map contributes', async () => {
+    writeCompose(
+      [
+        'x-services: &svcs',
+        '  1e999:',
+        '    image: nginx:alpine',
+        'services:',
+        '  <<: *svcs',
+        '  Infinity:',
+        '    image: nginx:alpine',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['1e999', 'Infinity']);
+  });
+
+  it('keeps numeric-looking names a merged document root contributes', async () => {
+    writeCompose(
+      [
+        'x-root: &root',
+        '  services:',
+        '    1e999:',
+        '      image: nginx:alpine',
+        '<<: *root',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['1e999']);
+  });
+
+  it.each([
+    {
+      where: 'an unrelated extension field',
+      lines: ['x-ext:', '  !!str <<: a literal extension key', 'services:', '  web:', '    image: nginx:alpine', ''],
+    },
+    {
+      where: 'a service label',
+      lines: ['services:', '  web:', '    image: nginx:alpine', '    labels:', '      !!str <<: a literal label key', ''],
+    },
+  ])('lists services when a literal string-tagged << key appears in $where', async ({ lines }) => {
+    writeCompose(lines.join('\n'));
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
   it('lists services when a merge only contributes service attributes', async () => {
     writeCompose(
       [

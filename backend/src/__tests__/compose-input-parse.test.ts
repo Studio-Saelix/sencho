@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDynamicPath, listComposeServiceNames, parseDeclaredInputs } from '../helpers/composeInputParse';
+import { isDynamicPath, listComposeServiceNames, parseComposeYaml, parseDeclaredInputs } from '../helpers/composeInputParse';
 import type { DeclaredInput, DynamicInput } from '../types/gitProjectManifest';
 
 /** In-memory repo fixture: maps repo paths to contents. */
@@ -79,6 +79,23 @@ describe('parseDeclaredInputs', () => {
         const { result } = parse({ 'deploy/compose.yaml': 'services: {}\n' }, 'deploy');
         const interp = byKind(result, 'interpolation-env');
         expect(interp[0].sourcePath).toBe('deploy/.env');
+    });
+
+    it('walks declarations of every Compose-accepted service key', () => {
+        const { result } = parse({
+            'compose.yaml': [
+                'services:',
+                '  1e999:',
+                '    image: alpine',
+                '    env_file: first.env',
+                '  Infinity:',
+                '    image: alpine',
+                '    env_file: second.env',
+                '',
+            ].join('\n'),
+        });
+        const envFiles = byKind(result, 'env_file');
+        expect(envFiles.map((entry) => entry.sourcePath).sort()).toEqual(['first.env', 'second.env']);
     });
 
     it('walks include list form and recurses into included files', () => {
@@ -1120,6 +1137,58 @@ describe('listComposeServiceNames', () => {
             .toEqual(['on', 'true']);
     });
 
+    it('keeps numeric-looking, hexadecimal, octal, and boolean keys in Compose spelling', () => {
+        expect(listComposeServiceNames([
+            'services:',
+            '  1e999:',
+            '    image: nginx',
+            '  Infinity:',
+            '    image: nginx',
+            '  0x10:',
+            '    image: nginx',
+            '  0o17:',
+            '    image: nginx',
+            '  true:',
+            '    image: nginx',
+            '  "123":',
+            '    image: nginx',
+        ].join('\n'))).toEqual(['1e999', 'Infinity', '0x10', '0o17', 'true', '123']);
+    });
+
+    it('keeps numeric-looking names through a services-map merge', () => {
+        expect(listComposeServiceNames([
+            'x-svcs: &svcs',
+            '  1e999:',
+            '    image: nginx',
+            'services:',
+            '  <<: *svcs',
+            '  Infinity:',
+            '    image: nginx',
+        ].join('\n'))).toEqual(['1e999', 'Infinity']);
+    });
+
+    it('keeps numeric-looking names through a document-root merge', () => {
+        expect(listComposeServiceNames([
+            'x-root: &root',
+            '  services:',
+            '    1e999:',
+            '      image: nginx',
+            '<<: *root',
+        ].join('\n'))).toEqual(['1e999']);
+    });
+
+    it('treats an explicitly string-tagged << as a literal key', () => {
+        expect(listComposeServiceNames([
+            'x-ext:',
+            '  !!str <<: a literal extension key',
+            'services:',
+            '  web:',
+            '    image: nginx',
+            '    labels:',
+            '      !!str <<: a literal label key',
+        ].join('\n'))).toEqual(['web']);
+    });
+
     it('expands a services-map merge and a document-root merge', () => {
         expect(listComposeServiceNames(
             'x-svcs: &svcs\n  web:\n    image: nginx\nservices:\n  <<: *svcs\n  db:\n    image: postgres\n',
@@ -1133,5 +1202,15 @@ describe('listComposeServiceNames', () => {
         expect(() => listComposeServiceNames(
             'x-base: &base\n  image: nginx\nservices:\n  web:\n    !!merge <<: *base\n',
         )).toThrowError(/explicit YAML merge tag/);
+    });
+});
+
+describe('parseComposeYaml', () => {
+    it('keeps Compose-accepted mapping keys literal for every consumer', () => {
+        const parsed = parseComposeYaml(
+            'services:\n  1e999:\n    image: a\n  0x10:\n    image: b\n',
+        ) as { services: Record<string, unknown> };
+
+        expect(Object.keys(parsed.services)).toEqual(['1e999', '0x10']);
     });
 });
