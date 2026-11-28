@@ -198,6 +198,8 @@ export interface BootstrapOperation {
   stage: string | null;
   step: string | null;
   nodeId: number | null;
+  /** True when this run registered a node and that node is still in Fleet. */
+  nodeExists: boolean;
   changesMade: boolean;
   /** The Pilot container was started, so the Pilot can still connect after the run stopped. */
   agentStarted: boolean;

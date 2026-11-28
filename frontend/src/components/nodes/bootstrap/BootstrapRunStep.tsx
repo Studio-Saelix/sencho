@@ -181,7 +181,7 @@ export function BootstrapRunStep({
       >
         <p className="text-sm text-muted-foreground">
           Another bootstrap can then run on {operation.host}. Steps this run already made stay on the server
-          {operation.nodeId !== null ? ', and the node record stays in Fleet' : ''}. Nothing is removed.
+          {operation.nodeId !== null ? (operation.nodeExists ? ', and the node record stays in Fleet' : ', and the node record is no longer in Fleet') : ''}. Nothing is removed.
         </p>
       </ConfirmModal>
     </>

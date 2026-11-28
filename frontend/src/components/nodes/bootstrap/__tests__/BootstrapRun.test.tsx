@@ -150,6 +150,7 @@ function operation(overrides: Partial<BootstrapOperationDetail> = {}): Bootstrap
     stage: 'docker_packages',
     step: 'install-docker-packages',
     nodeId: null,
+    nodeExists: false,
     changesMade: true,
     agentStarted: true,
     active: true,
@@ -381,6 +382,24 @@ describe('coming back to a run', () => {
     expect(confirm).toHaveTextContent(/Nothing is removed/);
     await user.click(within(confirm).getByRole('button', { name: 'Release server' }));
     await waitFor(() => expect(releaseBootstrapOperation).toHaveBeenCalledWith(STOPPED.id));
+  });
+
+  it.each([
+    ['still exists', true, /node record stays in Fleet/],
+    ['was deleted', false, /node record is no longer in Fleet/],
+  ])('names the node record correctly when it %s', async (_label, nodeExists, expected) => {
+    const stopped = { ...STOPPED, nodeId: 4, nodeExists };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [stopped], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValue(stopped);
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const row = await screen.findByTestId(`bootstrap-run-${stopped.id}`);
+    await user.click(within(row).getByRole('button', { name: 'View' }));
+    const answer = await screen.findByTestId('bootstrap-run-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Release server' }));
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveTextContent(expected);
+    expect(confirm).not.toHaveTextContent(nodeExists ? /no longer in Fleet/ : /stays in Fleet/);
   });
 
   it('retries with the server and directories filled in and the key entered again', async () => {
