@@ -298,6 +298,32 @@ describe('StackAlertSheet Alerts tab', () => {
     expect(addRule).toBeEnabled();
   });
 
+  it('clears the explicit all-services confirmation after a rule is added', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url.includes('/services')) return jsonRes({ error: 'Compose file too large to parse' }, false, 413);
+      if (url.startsWith('/alerts') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/alerts' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      return jsonRes(null, false);
+    });
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+    await screen.findByRole('alert');
+    fireEvent.change(screen.getByPlaceholderText('e.g. 90'), { target: { value: '80' } });
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await userEvent.click(targetAll);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Rule' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Alert rule added.'));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Add Rule' })).toBeDisabled();
+  });
+
   it('ignores a late service list for a stack that is no longer selected', async () => {
     let resolveWeb: ((res: Response) => void) | undefined;
     const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
@@ -656,6 +682,32 @@ describe('StackAlertSheet Alerts tab', () => {
 
     await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
     expect(addPolicy).toBeEnabled();
+  });
+
+  it('clears the explicit all-services confirmation after a policy is added', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/auto-heal/policies') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes([]);
+      }
+      if (url === '/auto-heal/policies' && init?.method === 'POST') {
+        return jsonRes({ id: 99 }, true, 201);
+      }
+      if (url.includes('/services')) return jsonRes(null, false, 500);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" initialTab="auto-heal" />,
+    );
+    await screen.findByRole('alert');
+    const targetAll = screen.getByRole('checkbox', { name: /Target all services in this stack/ });
+    await userEvent.click(targetAll);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Policy' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Policy added.'));
+    expect(targetAll).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Add Policy' })).toBeDisabled();
   });
 
   it('ignores a late auto-heal service list for a stack that is no longer selected', async () => {

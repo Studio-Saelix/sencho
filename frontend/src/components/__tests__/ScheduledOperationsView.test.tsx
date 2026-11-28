@@ -300,7 +300,11 @@ describe('ScheduledOperationsView', () => {
     const update = screen.getByRole('button', { name: 'Update' });
     expect(update).toBeDisabled();
 
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(update).toBeEnabled();
     await userEvent.click(await screen.findByRole('checkbox', { name: 'api' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /Target all services in this stack/ })).not.toBeInTheDocument();
     expect(update).toBeEnabled();
     await userEvent.click(update);
 
@@ -311,6 +315,38 @@ describe('ScheduledOperationsView', () => {
       expect(putCall).toBeTruthy();
       expect(JSON.parse(putCall![1].body).target_services).toEqual(['api']);
     });
+  });
+
+  it('revalidates a saved service when a second task opens on the same stack', async () => {
+    tasksFixture = [
+      makeTask({
+        id: 50, name: 'edit-a', target_type: 'stack', target_id: 'web', node_id: 1,
+        action: 'restart', target_services: JSON.stringify(['api']),
+      }),
+      makeTask({
+        id: 51, name: 'edit-b', target_type: 'stack', target_id: 'web', node_id: 1,
+        action: 'restart', target_services: JSON.stringify(['cache']),
+      }),
+    ];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+
+    const rowA = screen.getByText('edit-a').closest('tr');
+    await userEvent.click(within(rowA!).getByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    const rowB = screen.getByText('edit-b').closest('tr');
+    await userEvent.click(within(rowB!).getByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (cache) is not in this stack');
+    expect(screen.getByRole('button', { name: 'Update' })).toBeDisabled();
   });
 
   it('keeps a saved service when the stack lists only that service', async () => {

@@ -149,7 +149,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [servicesNotice, setServicesNotice] = useState<string | null>(null);
   const [targetAllServices, setTargetAllServices] = useState(false);
   const [saving, setSaving] = useState(false);
-  const savedTargetServicesRef = useRef<string[]>([]);
+  // The selection at the moment a target's service lookup starts. The lookup
+  // effect does not depend on the checkboxes, so it reads the latest value here.
+  const currentTargetServicesRef = useRef<string[]>([]);
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null);
   const [runsPage, setRunsPage] = useState(1);
   const [runsTotal, setRunsTotal] = useState(0);
@@ -241,12 +243,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   }, []);
 
   useEffect(() => {
-    savedTargetServicesRef.current = formTargetServices;
+    currentTargetServicesRef.current = formTargetServices;
   }, [formTargetServices]);
 
   useEffect(() => {
     const actionDef = getActionById(formAction);
-    if (!actionDef?.supportsServiceSelection || !formTargetId) {
+    if (!dialogOpen || !actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
       setServicesLoading(false);
       setServicesError(null);
@@ -285,9 +287,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
         setServicesLoading(false);
         setAvailableServices(services);
         // A saved edit can name a service the file no longer declares. Clear
-        // the invisible names and require a fresh choice; never let a one-name
-        // list silently turn the saved scope into all services.
-        const missing = savedTargetServicesRef.current.filter((name) => !services.includes(name));
+        // the whole saved selection and require a fresh choice; never let a
+        // one-name list silently turn the saved scope into all services.
+        const missing = currentTargetServicesRef.current.filter((name) => !services.includes(name));
         if (missing.length > 0) {
           setFormTargetServices([]);
           setServicesNotice(
@@ -305,7 +307,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     };
     fetchServices();
     return () => { cancelled = true; };
-  }, [formAction, formTargetId, formNodeId]);
+  }, [dialogOpen, editingTask?.id, formAction, formTargetId, formNodeId]);
 
   useEffect(() => {
     if (!dialogOpen || formAction !== 'update-by-label') return;
@@ -396,6 +398,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormDeleteAfterRun(false);
     setFormPruneTargets(DEFAULT_PRUNE_TARGETS);
     setFormTargetServices([]);
+    setAvailableServices([]);
+    setServicesLoading(false);
+    setServicesError(null);
+    setServicesNotice(null);
+    setTargetAllServices(false);
     setFormPruneLabelFilter('');
     setFormSelectorValue('');
     setFormLabelScope('fleet');
@@ -431,6 +438,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormTargetServices(
       task.target_services ? JSON.parse(task.target_services) : []
     );
+    setAvailableServices([]);
+    setServicesLoading(false);
+    setServicesError(null);
+    setServicesNotice(null);
+    setTargetAllServices(false);
     setFormPruneLabelFilter(task.prune_label_filter || '');
     setFormSelectorValue(task.selector_value || '');
     setFormLabelScope(
@@ -666,6 +678,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     });
   }, [can, currentAction, formNodeId, formTargetId, formLabelScope]);
 
+  // A saved edit can still hold a name the loaded list does not show, for one
+  // render before the services effect reconciles it. Never submit it.
+  const invisibleSavedServices = dialogOpen && !servicesLoading && !servicesError
+    ? formTargetServices.filter((name) => !availableServices.includes(name))
+    : [];
+  const showServicesNotice = !servicesError
+    && !!servicesNotice
+    && formTargetServices.length === 0
+    && !targetAllServices;
+
   const isSaveDisabled =
     saving || !currentAction || !formName || scheduleInvalid
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
@@ -678,21 +700,26 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     ))
     || servicesLoading
     || (!!servicesError && !targetAllServices)
-    || (!!servicesNotice && formTargetServices.length === 0 && !targetAllServices)
+    || (invisibleSavedServices.length > 0 && !targetAllServices)
+    || showServicesNotice
     || !canSaveWithCurrentTarget;
 
   const saveDisabledReason = useMemo((): string | null => {
     if (saving || !currentAction || !formName || scheduleInvalid) return null;
     if (servicesLoading) return "Loading the stack's services...";
-    if (servicesError && !targetAllServices) return 'Choose a service, or confirm all services.';
-    if (servicesNotice && formTargetServices.length === 0 && !targetAllServices) return servicesNotice;
+    if (servicesError && !targetAllServices) return 'Confirm all services, or fix the stack file.';
+    if (invisibleSavedServices.length > 0 && !targetAllServices) {
+      return 'Choose a service, or confirm all services.';
+    }
+    if (showServicesNotice) return servicesNotice;
     if (!canSaveWithCurrentTarget) {
       return 'You do not have permission to schedule this action on the selected target.';
     }
     return null;
   }, [
     saving, currentAction, formName, scheduleInvalid, servicesLoading, servicesError,
-    servicesNotice, targetAllServices, formTargetServices, canSaveWithCurrentTarget,
+    invisibleSavedServices.length, showServicesNotice, servicesNotice, targetAllServices,
+    canSaveWithCurrentTarget,
   ]);
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
@@ -1137,7 +1164,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     </label>
                   </div>
                 )}
-                {currentAction.supportsServiceSelection && formTargetId && !servicesError && servicesNotice && (
+                {currentAction.supportsServiceSelection && formTargetId && showServicesNotice && (
                   <div className="space-y-2">
                     <p role="alert" className="text-xs text-warning">{servicesNotice}</p>
                     <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -1151,7 +1178,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 )}
                 {currentAction.supportsServiceSelection && formTargetId && !servicesError && (
                   availableServices.length > 1
-                  || (availableServices.length === 1 && (formTargetServices.length > 0 || !!servicesNotice))
+                  || (availableServices.length === 1 && (formTargetServices.length > 0 || showServicesNotice))
                 ) && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
@@ -1164,6 +1191,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                               setFormTargetServices(prev =>
                                 checked ? [...prev, svc] : prev.filter(s => s !== svc)
                               );
+                              if (checked) setTargetAllServices(false);
                             }}
                           />
                           <span className="font-mono text-xs">{svc}</span>

@@ -389,8 +389,8 @@ describe('refused stack: GET /services names the refusal', () => {
   });
 
   it('keeps literal YAML 1.1 service names under ordinary alias reuse', async () => {
-    // Docker Compose lists both `on` and the quoted `true`; the library's 1.1
-    // schema would turn `on` into a boolean key and drop it from the list.
+    // A 1.1 directive would turn `on` into a boolean key and drop it from the
+    // list; the core schema keeps both names literal.
     const reuse = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`).join('\n');
     writeCompose(
       `%YAML 1.1\n---\nx-image: &image nginx:alpine\nservices:\n  on:\n    image: *image\n  "true":\n    image: *image\n${reuse}\n`,
