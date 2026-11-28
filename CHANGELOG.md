@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.4](https://github.com/Studio-Saelix/sencho/compare/v0.98.3...v0.98.4) (2026-11-28)
 
 
+### Highlights
+
+<!-- highlights-hash: ec186dd0b3231b49 -->
+
+Node bootstrap now sits behind the experimental flag, so it stays out of the way unless you have opted in. If you rely on it, enable the flag before upgrading.
+
+Two fixes tighten up node and recovery behavior. A finished bootstrap run no longer lingers in the list after its node is deleted, and rollback capture now accepts ordinary Compose alias reuse instead of rejecting it.
+
 ### Added
 
 * **nodes:** gate node bootstrap behind the experimental flag ([#2334](https://github.com/Studio-Saelix/sencho/issues/2334)) ([696d516](https://github.com/Studio-Saelix/sencho/commit/696d516acbac071b9959e65bebc3ecf47835dbe3))
