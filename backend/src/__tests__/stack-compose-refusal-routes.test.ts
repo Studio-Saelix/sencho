@@ -374,6 +374,18 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.body).toContain('svc0');
     expect(res.body).toContain('svc149');
   });
+
+  it('answers 409 with a reason when one document reuses aliases past the shared budget', async () => {
+    const refs = Array.from({ length: 10_001 }, () => '*label').join(', ');
+    writeCompose(`x-label: &label app=web\nservices:\n  web:\n    labels: [${refs}]\n`);
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('Compose file "compose.yaml"');
+    expect(res.body.error).toContain('reuses YAML aliases');
+  });
 });
 
 describe('refused stack: the real guard, the real down, and Delete together', () => {

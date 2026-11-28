@@ -134,6 +134,11 @@ import type { GitOpsRevisionProjection } from '../services/gitops/types';
 // adversarial) file cannot exhaust heap during an env or service lookup.
 const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 
+/** The YAML library's alias-count refusal, distinct from its unresolved-alias ReferenceError. */
+function isYamlAliasBudgetError(error: unknown): boolean {
+  return error instanceof ReferenceError && error.message.includes('Excessive alias count');
+}
+
 /**
  * Diagnostic-mode log helper. Wraps console.log so non-essential informational
  * lines (deploys completed, files saved, stacks created) stay silent in
@@ -1740,13 +1745,21 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
       res.status(413).json({ error: 'Compose file too large to parse' });
       return;
     }
-    // Run the same expansion guard every other Compose read runs, so an
-    // over-cap file answers with the reason it was refused instead of the YAML
-    // library's generic alias error.
+    // Bound this document before parsing it. The expansion guard refuses a
+    // file whose aliases expand too far, and the shared alias budget refuses a
+    // file that reuses aliases more than an ordinary project does.
     assertComposeSourceWithinExpansionLimits(content, filename);
-    // The guard above is the alias bound for this file; the library's own
-    // 100-alias default would refuse ordinary anchor reuse it already accepted.
-    const parsed = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+    let parsed: { services?: Record<string, unknown> } | null;
+    try {
+      parsed = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+    } catch (error) {
+      if (!isYamlAliasBudgetError(error)) throw error;
+      res.status(409).json({
+        error: `Compose file "${filename}" reuses YAML aliases more than ${MAX_COMPOSE_ALIAS_COUNT.toLocaleString('en-US')} times, so Sencho refused to parse it. Remove some alias references or split the file, then try again.`,
+        code: COMPOSE_INPUTS_REFUSED_CODE,
+      });
+      return;
+    }
     const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
   } catch (error) {
