@@ -116,6 +116,7 @@ export function BootstrapRunStep({
   onCancel,
   onRetry,
   onRelease,
+  onRefresh,
   onVerify,
 }: {
   operation: BootstrapOperationDetail;
@@ -123,10 +124,16 @@ export function BootstrapRunStep({
   onCancel: () => void;
   onRetry: () => void;
   onRelease: () => Promise<void>;
+  /** Read the run again before the Release confirmation, so a node deleted meanwhile is named correctly. */
+  onRefresh: () => Promise<BootstrapOperationDetail | null>;
   onVerify: () => void;
 }) {
   const [confirmRelease, setConfirmRelease] = useState(false);
   const { actions } = operation;
+  const openRelease = async () => {
+    const fresh = await onRefresh();
+    if (fresh?.actions.release) setConfirmRelease(true);
+  };
   const verbs = (actions.cancel || actions.retry || actions.release || actions.verify) ? (
     <div className="flex flex-wrap items-center gap-2">
       {actions.verify && (
@@ -150,7 +157,7 @@ export function BootstrapRunStep({
         </BusyButton>
       )}
       {actions.release && (
-        <Button size="sm" variant="ghost" onClick={() => setConfirmRelease(true)} disabled={busy !== null}>
+        <Button size="sm" variant="ghost" onClick={() => { void openRelease(); }} disabled={busy !== null}>
           Release server
         </Button>
       )}

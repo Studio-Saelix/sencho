@@ -192,6 +192,7 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
   const follow = async (id: string) => {
     if (await run.openOperation(id)) wizard.setStep('run');
   };
+  const shownOperation = run.operation;
 
   return (
     <ModalBody className="max-h-[65vh] overflow-y-auto">
@@ -237,21 +238,22 @@ function DialogBody({ wizard, run }: { wizard: UseNodeBootstrap; run: UseBootstr
 
         {step === 'target' && <BootstrapTargetStep wizard={wizard} />}
 
-        {step === 'run' && run.operation && run.progressStale && (isOperationRunning(run.operation) || run.settling) && (
+        {step === 'run' && shownOperation && run.progressStale && (isOperationRunning(shownOperation) || run.settling) && (
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning" data-testid="bootstrap-progress-stale">
-            {isOperationRunning(run.operation)
+            {isOperationRunning(shownOperation)
               ? 'Progress could not be refreshed. The run continues on the hub; reopen it to check again.'
               : 'Whether the Pilot has connected since could not be checked. Reopen the run to check again.'}
           </p>
         )}
 
-        {step === 'run' && run.operation && (
+        {step === 'run' && shownOperation && (
           <BootstrapRunStep
-            operation={run.operation}
+            operation={shownOperation}
             busy={run.busy}
             onCancel={() => { void run.cancel(); }}
-            onRetry={() => { if (run.operation) wizard.startRetry(run.operation); }}
+            onRetry={() => wizard.startRetry(shownOperation)}
             onRelease={run.release}
+            onRefresh={() => run.openOperation(shownOperation.id)}
             onVerify={() => { void run.verify(); }}
           />
         )}

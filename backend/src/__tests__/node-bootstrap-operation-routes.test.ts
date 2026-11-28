@@ -210,6 +210,23 @@ describe('bootstrap operation routes: refusals', () => {
     expect(released.body.events.at(-1).message).not.toMatch(/stays in Fleet/);
   });
 
+  it('leaves the node sentence out when the run never registered a node', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const id = '00000000-0000-4000-8000-000000003004';
+    db.insertNodeBootstrapOperation({
+      id, target_key: 'route-null-node.example.com:22', host: 'route-null-node.example.com', port: 22, username: 'ubuntu', address: '192.168.1.93',
+      target_name: 'route-null-node', host_key_fingerprint: 'SHA256:route-null-node', compose_dir: '/opt/docker/sencho', agent_dir: '/opt/sencho-agent',
+      plan_json: '{}', plan_digest: 'd', approved_by: 'admin', approved_at: now, attempt: 1, state: 'partial', stage: null, step: null,
+      node_id: null, changes_made: 1, agent_started: 0, active: 1, cancel_requested: 0, error_code: null, error_message: null, enrollment_expires_at: null,
+      created_at: now, updated_at: now, finished_at: now,
+    });
+    const released = await request(app).post(`/api/nodes/bootstrap/operations/${id}/release`).set('Authorization', adminAuth).send({});
+    expect(released.status).toBe(200);
+    expect(released.body.nodeExists).toBe(false);
+    expect(released.body.events.at(-1).message).not.toMatch(/Fleet/);
+  });
+
   it('checks an enrolled run\'s node and answers with the verdict, never ready without a tunnel', async () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();

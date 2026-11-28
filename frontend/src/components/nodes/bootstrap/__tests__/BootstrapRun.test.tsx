@@ -289,7 +289,7 @@ describe('readiness of an enrolled run', () => {
       actions: { cancel: false, retry: false, release: false, verify: false },
     });
     const user = userEvent.setup();
-    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={async () => op} onVerify={vi.fn()} />);
     await user.click(screen.getByRole('button', { name: /Activity/ }));
     expect(screen.queryAllByTestId('bootstrap-readiness-gate')).toHaveLength(0);
   });
@@ -308,7 +308,7 @@ describe('readiness of an enrolled run', () => {
       actions: { cancel: false, retry: false, release: false, verify: true },
     });
     const user = userEvent.setup();
-    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={onVerify} />);
+    render(<BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={async () => op} onVerify={onVerify} />);
     await user.click(screen.getByRole('button', { name: 'Verify again' }));
     expect(onVerify).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole('button', { name: /Activity/ }));
@@ -320,10 +320,10 @@ describe('readiness of an enrolled run', () => {
 
   it('offers Verify now before the first check, and no verb while one runs', () => {
     const provisional = operation({ state: 'enrolled', stage: 'enroll', readiness: readiness('provisional'), actions: { cancel: false, retry: false, release: false, verify: true } });
-    const { rerender } = render(<BootstrapRunStep operation={provisional} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    const { rerender } = render(<BootstrapRunStep operation={provisional} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={async () => provisional} onVerify={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'Verify now' })).toBeInTheDocument();
     const verifying = { ...provisional, readiness: readiness('verifying'), actions: { ...provisional.actions, verify: false } };
-    rerender(<BootstrapRunStep operation={verifying} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onVerify={vi.fn()} />);
+    rerender(<BootstrapRunStep operation={verifying} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={async () => verifying} onVerify={vi.fn()} />);
     expect(screen.queryByRole('button', { name: /Verify/ })).not.toBeInTheDocument();
   });
 });
@@ -380,8 +380,25 @@ describe('coming back to a run', () => {
     await user.click(within(answer).getByRole('button', { name: 'Release server' }));
     const confirm = await screen.findByRole('alertdialog');
     expect(confirm).toHaveTextContent(/Nothing is removed/);
+    expect(confirm).not.toHaveTextContent(/node record/);
     await user.click(within(confirm).getByRole('button', { name: 'Release server' }));
     await waitFor(() => expect(releaseBootstrapOperation).toHaveBeenCalledWith(STOPPED.id));
+  });
+
+  it('reads the run again before Release so a node deleted meanwhile is named correctly', async () => {
+    const viewed = { ...STOPPED, nodeId: 4, nodeExists: true };
+    const deleted = { ...viewed, nodeExists: false };
+    vi.mocked(listBootstrapOperations).mockResolvedValue({ operations: [viewed], nextCursor: null });
+    vi.mocked(fetchBootstrapOperation).mockResolvedValueOnce(viewed).mockResolvedValueOnce(deleted);
+    const user = userEvent.setup();
+    render(<BootstrapServerDialog open onOpenChange={() => {}} />);
+    const row = await screen.findByTestId(`bootstrap-run-${viewed.id}`);
+    await user.click(within(row).getByRole('button', { name: 'View' }));
+    const answer = await screen.findByTestId('bootstrap-run-answer');
+    await user.click(within(answer).getByRole('button', { name: 'Release server' }));
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveTextContent(/node record is no longer in Fleet/);
+    expect(confirm).not.toHaveTextContent(/stays in Fleet/);
   });
 
   it.each([
@@ -400,6 +417,27 @@ describe('coming back to a run', () => {
     const confirm = await screen.findByRole('alertdialog');
     expect(confirm).toHaveTextContent(expected);
     expect(confirm).not.toHaveTextContent(nodeExists ? /no longer in Fleet/ : /stays in Fleet/);
+  });
+
+  it('does not open the Release confirmation when the run cannot be read again or is no longer releasable', async () => {
+    const op = operation({
+      state: 'partial',
+      nodeId: 4,
+      nodeExists: true,
+      actions: { cancel: false, retry: true, release: true, verify: false },
+    });
+    const user = userEvent.setup();
+    const renderStep = (refresh: () => Promise<BootstrapOperationDetail | null>) => render(
+      <BootstrapRunStep operation={op} busy={null} onCancel={vi.fn()} onRetry={vi.fn()} onRelease={vi.fn()} onRefresh={refresh} onVerify={vi.fn()} />,
+    );
+    const { unmount } = renderStep(async () => null);
+    await user.click(screen.getByRole('button', { name: 'Release server' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    unmount();
+
+    renderStep(async () => ({ ...op, actions: { ...op.actions, release: false } }));
+    await user.click(screen.getByRole('button', { name: 'Release server' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
   it('retries with the server and directories filled in and the key entered again', async () => {

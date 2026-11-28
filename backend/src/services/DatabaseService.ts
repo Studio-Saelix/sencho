@@ -6485,6 +6485,11 @@ stmt.run('gitops_schema_version', '1');
         return this.decryptNodeRow(row);
     }
 
+    /** Whether a node row still exists, without decrypting its credentials. */
+    public nodeExists(id: number): boolean {
+        return this.db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(id) !== undefined;
+    }
+
     public getDefaultNode(): Node | undefined {
         const stmt = this.db.prepare(`SELECT ${DatabaseService.NODE_COLUMNS} FROM nodes WHERE is_default = 1 LIMIT 1`);
         const row = stmt.get() as any;

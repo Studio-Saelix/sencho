@@ -524,7 +524,7 @@ export class NodeBootstrapOperationService {
     return this.detail(id);
   }
 
-  /** Release the target lock without touching the host. The record and its node stay. */
+  /** Release the target lock without touching the host. The record stays; its node stays only if it still exists. */
   public release(id: string, audit: BootstrapAuditContext): OperationDetail {
     const op = this.reconcile(this.requireOperation(id));
     if (!op.active || RUNNING_STATES.includes(op.state) || this.runs.has(id)) {
@@ -535,7 +535,7 @@ export class NodeBootstrapOperationService {
       throw new BootstrapError(409, 'OPERATION_NOT_RELEASABLE', 'This bootstrap changed state. Refresh it and try again.');
     }
     this.audit(audit, 'bootstrap.execute.release', op, {});
-    const nodeExists = op.node_id !== null && this.deps.db.getNode(op.node_id) !== undefined;
+    const nodeExists = op.node_id !== null && this.deps.db.nodeExists(op.node_id);
     this.event(op, 'info', `Released by ${audit.username}. Nothing on the host was changed or removed${op.node_id !== null ? (nodeExists ? ', and the node record stays in Fleet' : ', and the node record is no longer in Fleet') : ''}.`);
     return this.detail(id);
   }
@@ -1154,7 +1154,7 @@ export class NodeBootstrapOperationService {
       stage: op.stage,
       step: op.step,
       nodeId: op.node_id,
-      nodeExists: op.node_id !== null && this.deps.db.getNode(op.node_id) !== undefined,
+      nodeExists: op.node_id !== null && this.deps.db.nodeExists(op.node_id),
       changesMade: op.changes_made === 1,
       agentStarted: op.agent_started === 1,
       active: op.active === 1,
