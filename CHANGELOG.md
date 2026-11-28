@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 * **nodes:** stop listing a finished bootstrap run once its node is deleted ([#2329](https://github.com/Studio-Saelix/sencho/issues/2329)) ([a9839c3](https://github.com/Studio-Saelix/sencho/commit/a9839c35f0916d24d1bf396ae523a602d53e8fa5))
-* **recovery:** accept ordinary Compose alias reuse during rollback capture ([#2337](https://github.com/Studio-Saelix/sencho/issues/2337)) ([d5eb284](https://github.com/Studio-Saelix/sencho/commit/d5eb2849341bb71c199e424a83ae0719053b315a))
+* **recovery:** accept ordinary Compose alias reuse during rollback capture ([#2337](https://github.com/Studio-Saelix/sencho/issues/2337)) ([d5eb284](https://github.com/Studio-Saelix/sencho/commit/d5eb2849341bb71c199e424a83ae0719053b315a)), thanks @vasyl83
 
 ## [0.98.3](https://github.com/Studio-Saelix/sencho/compare/v0.98.2...v0.98.3) (2026-11-24)
 
