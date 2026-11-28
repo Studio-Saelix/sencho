@@ -19,6 +19,17 @@ import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
 
 const REFUSAL = 'Compose file "bomb.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
 
+/** A small file whose nested anchors expand past the guard's node budget. */
+const ALIAS_BOMB = (() => {
+  const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
+  for (let level = 1; level <= 12; level += 1) {
+    const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
+    lines.push(`x${level}: &a${level} [${refs}]`);
+  }
+  lines.push('services:', '  web:', '    image: nginx:alpine');
+  return `${lines.join('\n')}\n`;
+})();
+
 const mocks = {
   runDown: vi.fn(),
   downStack: vi.fn(),
@@ -334,23 +345,44 @@ describe('refused stack: the Fleet container list', () => {
   });
 });
 
-describe('refused stack: the real guard, the real down, and Delete together', () => {
-  const BOMB = (() => {
-    const lines = ['x0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]'];
-    for (let level = 1; level <= 12; level += 1) {
-      const refs = Array.from({ length: 9 }, () => `*a${level - 1}`).join(', ');
-      lines.push(`x${level}: &a${level} [${refs}]`);
-    }
-    lines.push('services:', '  web:', '    image: nginx:alpine');
-    return `${lines.join('\n')}\n`;
-  })();
+describe('refused stack: GET /services names the refusal', () => {
+  function writeCompose(content: string) {
+    fs.mkdirSync(stackDir('refused'), { recursive: true });
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), content);
+  }
 
+  it('answers 409 with the guard text for an over-cap file, not the YAML library 500', async () => {
+    writeCompose(ALIAS_BOMB);
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('Compose file "compose.yaml"');
+    expect(res.body.error).toContain('nested YAML aliases');
+    expect(res.body.error).not.toContain(stackDir('refused'));
+  });
+
+  it('lists services when one anchor is reused more often than the YAML library default', async () => {
+    const services = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`);
+    writeCompose(['x-image: &image nginx:alpine', 'services:', ...services].join('\n'));
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(150);
+    expect(res.body).toContain('svc0');
+    expect(res.body).toContain('svc149');
+  });
+});
+
+describe('refused stack: the real guard, the real down, and Delete together', () => {
   beforeEach(() => {
     // The refusal below comes from the real guard reading a real file; only the
     // Docker endpoint guard and the spawn are out of the picture.
     vi.mocked(ComposeService.prototype.downStack).mockRestore();
     vi.spyOn(ComposeService.prototype as unknown as { assertDockerEndpointSafe: () => Promise<void> }, 'assertDockerEndpointSafe').mockResolvedValue(undefined);
-    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), BOMB);
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), ALIAS_BOMB);
   });
 
   it('keeps the files of a bombed stack whose containers are still bound, and says why', async () => {

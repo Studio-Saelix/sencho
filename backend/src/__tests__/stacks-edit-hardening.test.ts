@@ -32,6 +32,11 @@ vi.mock('../services/FileSystemService', () => ({
       getBaseDir: () => '/tmp/compose',
       hasComposeFile: vi.fn().mockResolvedValue(true),
       getStackContent: mockGetStackContent,
+      getStackContentWithMtime: async () => ({
+        content: await mockGetStackContent(),
+        mtimeMs: 0,
+        filename: 'compose.yaml',
+      }),
     }),
   },
 }));

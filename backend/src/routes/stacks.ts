@@ -118,7 +118,8 @@ import {
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../helpers/composeRefusalRoute';
-import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
+import { assertComposeSourceWithinExpansionLimits, ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
+import { MAX_COMPOSE_ALIAS_COUNT } from '../helpers/composeInputParse';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
@@ -1733,17 +1734,24 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     return;
   }
   try {
-    const content = await FileSystemService.getInstance(req.nodeId).getStackContent(stackName);
+    const { content, filename } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
     if (content.length > MAX_COMPOSE_PARSE_BYTES) {
       console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_PARSE_BYTES} bytes; refusing to parse services`);
       res.status(413).json({ error: 'Compose file too large to parse' });
       return;
     }
-    const parsed = YAML.parse(content);
+    // Run the same expansion guard every other Compose read runs, so an
+    // over-cap file answers with the reason it was refused instead of the YAML
+    // library's generic alias error.
+    assertComposeSourceWithinExpansionLimits(content, filename);
+    // The guard above is the alias bound for this file; the library's own
+    // 100-alias default would refuse ordinary anchor reuse it already accepted.
+    const parsed = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
     const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
   } catch (error) {
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    if (sendIfComposeInputsRefused(res, error)) return;
     res.status(500).json({ error: 'Failed to fetch services' });
   }
 });
