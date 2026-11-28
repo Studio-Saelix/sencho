@@ -77,6 +77,80 @@ describe('discoverFromClone', () => {
         expect(envFiles[0].contentSha256).toBeTruthy();
     });
 
+    it('discovers an aliased dependency across many services reusing anchors', async () => {
+        let compose = `x-defaults: &defaults
+  restart: unless-stopped
+x-env-file: &env-file shared.env
+services:
+`;
+        for (let i = 0; i < 101; i++) {
+            compose += `  svc${i}:
+    <<: *defaults
+    image: alpine
+    env_file: *env-file
+`;
+        }
+        const clone = makeClone({
+            'compose.yaml': compose,
+            'shared.env': 'SHARED=1\n',
+            '.env': 'PROJECT=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals).toEqual([]);
+        const envFiles = result.inputs.filter((i) => i.dependencyKind === 'env_file');
+        expect(envFiles).toHaveLength(1);
+        expect(envFiles[0]).toMatchObject({
+            sourcePath: 'shared.env',
+            materializedPath: 'shared.env',
+            ownership: 'managed',
+            state: 'present',
+        });
+        expect(envFiles[0].contentSha256).toBeTruthy();
+    });
+
+    it('discovers a YAML 1.1 compose file that declares no merges', async () => {
+        const clone = makeClone({
+            'compose.yaml': `%YAML 1.1
+---
+services:
+  web:
+    image: alpine
+    env_file: shared.env
+`,
+            'shared.env': 'SHARED=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals).toEqual([]);
+        const envFiles = result.inputs.filter((i) => i.dependencyKind === 'env_file');
+        expect(envFiles).toHaveLength(1);
+        expect(envFiles[0]).toMatchObject({
+            sourcePath: 'shared.env',
+            materializedPath: 'shared.env',
+            ownership: 'managed',
+            state: 'present',
+        });
+    });
+
+    it('refuses a merge that would hide an inherited dependency', async () => {
+        const clone = makeClone({
+            'compose.yaml': `x-defaults: &defaults
+  env_file: shared.env
+services:
+  web:
+    <<: *defaults
+    image: alpine
+`,
+            'shared.env': 'SHARED=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+
+        expect(result.refusals.some((r) => r.kind === 'parse-error' && r.actionable)).toBe(true);
+        expect(result.refusals.some((r) => r.reason.includes('YAML merge key hides declaration "env_file"'))).toBe(true);
+        expect(result.inputs.some((i) => i.sourcePath === 'shared.env')).toBe(false);
+    });
+
     it('refuses out-of-bound ../ include targets', async () => {
         const clone = makeClone({
             'compose.yaml': 'include:\n  - ../outside.yaml\nservices: {}\n',

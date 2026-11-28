@@ -2,12 +2,12 @@ import Docker from 'dockerode';
 import { isIP } from 'node:net';
 import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isSecretVolume, isSecretVolumeRef, SecretVolumeProtectedError, secretVolumeAccessMessage } from '../helpers/secretVolume';
+import { parseComposeYaml } from '../helpers/composeInputParse';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import * as yaml from 'yaml';
 
 import { NodeRegistry } from './NodeRegistry';
 import { CacheService } from './CacheService';
@@ -3111,9 +3111,12 @@ class DockerController {
             const filePath = path.join(COMPOSE_DIR, stackDir, fileName);
             try {
               const content = await fs.readFile(filePath, 'utf-8');
-              const parsed = yaml.parse(content);
-              if (parsed?.name && typeof parsed.name === 'string') {
-                map.set(parsed.name, stackDir);
+              const parsed = parseComposeYaml(content);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                const name = (parsed as Record<string, unknown>).name;
+                if (typeof name === 'string') {
+                  map.set(name, stackDir);
+                }
               }
               break;
             } catch (err: unknown) {
@@ -3671,12 +3674,18 @@ class DockerController {
     }
     if (!yamlContent) return [];
 
-    const parsedYaml = yaml.parse(yamlContent);
-    if (!parsedYaml || !parsedYaml.services) return [];
+    // This scan runs before a stopped stack's update reaches Compose. Parse it
+    // through the same finite-budget, fail-closed helper as rollback capture so
+    // an alias-heavy file is neither refused here nor materialised without a
+    // bound.
+    const parsedYaml = parseComposeYaml(yamlContent);
+    if (!parsedYaml || typeof parsedYaml !== 'object' || Array.isArray(parsedYaml)) return [];
+    const services = (parsedYaml as Record<string, unknown>).services;
+    if (!services || typeof services !== 'object' || Array.isArray(services)) return [];
 
     const expectedNames: string[] = [];
     const nameToService = new Map<string, string>();
-    for (const [serviceName, serviceConfig] of Object.entries(parsedYaml.services)) {
+    for (const [serviceName, serviceConfig] of Object.entries(services as Record<string, unknown>)) {
       const config = serviceConfig as { container_name?: string };
       nameToService.set(serviceName, serviceName);
       if (config.container_name) {

@@ -16,6 +16,10 @@ import { cn } from '@/lib/utils';
 import { buildStackTopologyGraph } from '@/lib/mesh-topology-layout';
 import type { MeshAlias, MeshNodeStatus } from '@/types/mesh';
 
+// React Flow 13 reads a numeric fitView padding as pixels. The percentage
+// below keeps the padding the canvas had on React Flow 12.
+const FIT_VIEW_PADDING = '8.3%';
+
 interface Props {
     nodeId: number | null;
     stackName: string | null;
@@ -192,7 +196,7 @@ export function MeshStackTopologyView({ nodeId, stackName, status, aliases }: Pr
                             onEdgesChange={onEdgesChange}
                             nodeTypes={nodeTypes}
                             fitView
-                            fitViewOptions={{ padding: 0.2, minZoom: 0.4 }}
+                            fitViewOptions={{ padding: FIT_VIEW_PADDING, minZoom: 0.4 }}
                             proOptions={{ hideAttribution: true }}
                             nodesConnectable={false}
                             className="bg-background"
