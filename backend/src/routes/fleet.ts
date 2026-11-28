@@ -3490,7 +3490,7 @@ async function redeploySnapshotStack(
     transport: {
       recheckRemoteStack: (id, stack, signal) =>
         import('../services/RemoteImageUpdateService').then(
-          m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+          m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal, { verification: true }),
         ),
     },
   });

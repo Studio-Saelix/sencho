@@ -2,6 +2,18 @@ import { randomBytes } from 'crypto';
 import { NodeRegistry } from './NodeRegistry';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { IMAGE_UPDATE_FACTS_BYTE_LIMIT, type ImageUpdateStackFacts } from './imageUpdateFacts';
+
+/**
+ * What the hub asks a target's facts for. Each key is sent only when set, and
+ * the caller sets `detection` only for a target that advertises the detection
+ * capability, so an older target never sees a key it would refuse.
+ */
+export interface RemoteImageUpdateFactsOptions {
+    includePolicy?: boolean;
+    detection?: boolean;
+    /** With `detection`: probe every image, for the pre-flight of an unattended update. */
+    probeAll?: boolean;
+}
 import { parseRemoteImageUpdateFacts, parseRemoteImageUpdateRoster } from './remoteImageUpdateFacts';
 
 async function readFactsBody(response: Awaited<ReturnType<typeof safeRemoteFetch>>): Promise<unknown> {
@@ -30,7 +42,7 @@ async function requestFacts(
     nodeId: number,
     selection: { stack: string } | { roster: true },
     signal: AbortSignal,
-    options?: { includePolicy?: boolean },
+    options?: RemoteImageUpdateFactsOptions,
 ) {
     signal.throwIfAborted();
     const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
@@ -41,6 +53,8 @@ async function requestFacts(
         body: JSON.stringify({
             contractVersion: 1, requestNonce: nonce, ...selection,
             ...(options?.includePolicy ? { policy: true } : {}),
+            ...(options?.detection ? { detection: true } : {}),
+            ...(options?.detection && options.probeAll ? { probeAll: true } : {}),
         }), signal,
     }, target.trustedLoopback);
     if (!response.ok) {
@@ -56,10 +70,10 @@ export async function fetchRemoteImageUpdateFacts(
     nodeId: number,
     stack: string,
     signal: AbortSignal,
-    options?: { includePolicy?: boolean },
+    options?: RemoteImageUpdateFactsOptions,
 ): Promise<ImageUpdateStackFacts> {
     const { nonce, value } = await requestFacts(nodeId, { stack }, signal, options);
-    return parseRemoteImageUpdateFacts(value, nonce, stack).stacks[0];
+    return parseRemoteImageUpdateFacts(value, nonce, stack, options?.detection === true).stacks[0];
 }
 
 export async function fetchRemoteImageUpdateRoster(nodeId: number, signal: AbortSignal): Promise<string[]> {

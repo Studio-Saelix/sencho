@@ -342,6 +342,19 @@ export async function resolveUpdatePolicyPair(
     POLICY_READ_TIMEOUT_MS,
     'update policy render',
   ).catch(() => null);
+  return evaluateUpdatePolicyPair(resolution, stackName, target);
+}
+
+/**
+ * Pure. Both trigger classes from a resolution a caller already holds, so a
+ * reader that rendered the model for another purpose does not render it again.
+ * Null for a resolution that could not be read, as `resolveUpdatePolicyPair`.
+ */
+export function evaluateUpdatePolicyPair(
+  resolution: SenchoLabelResolution | null,
+  stackName: string,
+  target: UpdateTarget,
+): UpdatePolicyPair | null {
   if (!resolution) return null;
   return {
     manual: evaluateUpdatePolicy(resolution, { stack: stackName, target, trigger: 'manual' }),

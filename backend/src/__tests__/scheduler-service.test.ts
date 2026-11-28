@@ -32,6 +32,8 @@ const {
   mockBackupStackFiles,
   mockCaptureCurrentBackup,
   mockEnforcePolicyPreDeploy,
+  mockRenderConfig,
+  mockRevalidateTrigger,
 } = vi.hoisted(() => ({
   mockGetDueScheduledTasks: vi.fn().mockReturnValue([]),
   mockCreateScheduledTaskRun: vi.fn().mockReturnValue(1),
@@ -84,7 +86,21 @@ const {
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
   mockCaptureCurrentBackup: vi.fn().mockResolvedValue({ id: 'gen-1' }),
   mockEnforcePolicyPreDeploy: vi.fn(),
+  mockRenderConfig: vi.fn().mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '', code: 0, timedOut: false,
+  }),
+  mockRevalidateTrigger: vi.fn().mockResolvedValue(null),
 }));
+
+vi.mock('../helpers/autoUpdateDigestGate', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/autoUpdateDigestGate')>();
+  return {
+    ...actual,
+    revalidateLocalAutoUpdateTrigger: (...args: Parameters<typeof actual.revalidateLocalAutoUpdateTrigger>) =>
+      mockRevalidateTrigger(...args),
+  };
+});
 
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
@@ -157,10 +173,7 @@ vi.mock('../services/ComposeService', () => ({
   ComposeService: {
     getInstance: () => ({
       // A scheduled update evaluates io.sencho.update first and before the gate.
-      renderConfig: async () => ({
-        rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
-        stderr: '', code: 0, timedOut: false,
-      }),
+      renderConfig: mockRenderConfig,
       updateStack: mockUpdateStack,
       runCommand: mockRunCommand,
       deployStack: mockDeployStack,
@@ -295,6 +308,11 @@ beforeEach(() => {
   mockGetStackDossier.mockReturnValue(undefined);
   // Default: the scan-policy gate allows. Individual tests override to a block.
   mockEnforcePolicyPreDeploy.mockResolvedValue({ ok: true, bypassed: false, violations: [] });
+  mockRenderConfig.mockResolvedValue({
+    rendered: JSON.stringify({ services: { web: { image: 'nginx:1' } } }),
+    stderr: '', code: 0, timedOut: false,
+  });
+  mockRevalidateTrigger.mockResolvedValue(null);
   (SchedulerService as any).instance = undefined;
 });
 
@@ -970,7 +988,7 @@ describe('SchedulerService - executeUpdate', () => {
     await svc.triggerTask(80, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true, expect.any(Function));
-    expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
+    expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app', { verification: true });
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
     expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'state-invalidate',
@@ -978,6 +996,33 @@ describe('SchedulerService - executeUpdate', () => {
       nodeId: 1,
       stackName: 'web-app',
     }));
+  });
+
+  it('re-checks the trigger under the lock before a scheduled apply', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 187,
+      name: 'update-label-change',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
+    mockRevalidateTrigger.mockResolvedValue('Stack "web-app": the only available update is skipped; no update applied');
+
+    await SchedulerService.getInstance().triggerTask(187, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockRevalidateTrigger).toHaveBeenCalledWith(1, 'web-app', expect.any(Function), expect.any(Function));
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockRecheckStack).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'success', output: expect.stringContaining('skipped') }),
+    );
   });
 
   it('blocks scheduled Compose apply when a sibling image check failed', async () => {
@@ -1070,7 +1115,7 @@ describe('SchedulerService - executeUpdate', () => {
       await SchedulerService.getInstance().triggerTask(83, { userId: 1, username: 'admin', role: 'admin' } as const);
 
       expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler', { deployedGenerationId: null });
-      expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
+      expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app', { verification: true });
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {
       beginSpy.mockRestore();
@@ -2304,7 +2349,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
 
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
     const run = SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
-    await vi.waitFor(() => expect(mockRecheckRemoteStack).toHaveBeenCalledWith(2, 'my-stack', expect.any(AbortSignal)));
+    await vi.waitFor(() => expect(mockRecheckRemoteStack).toHaveBeenCalledWith(2, 'my-stack', expect.any(AbortSignal), { verification: true }));
     expect(mockUpdateScheduledTaskRun).not.toHaveBeenCalled();
     release();
     await run;

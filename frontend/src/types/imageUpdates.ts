@@ -70,6 +70,15 @@ export interface StackServiceUpdateStatus {
     hasUpdate: boolean;
     checkStatus: ServiceCheckStatus;
     lastError: string | null;
+    /**
+     * What the service's update detection labels did on the last check: `off`
+     * when `io.sencho.update.check` is false, `ignored` when every pending
+     * update was skipped by `io.sencho.update.ignore`. Absent otherwise, and on
+     * an older node.
+     */
+    detection?: 'off' | 'ignored';
+    /** Refs whose every pending candidate the last check skipped; Security reads this. */
+    ignoredRefs?: string[];
 }
 
 /**
@@ -119,14 +128,75 @@ export function isConfirmedServiceUpdate(info: {
  * True when a live update-preview is safe to treat as "no update" for Fleet
  * card drops and similar UI reconcile. Mirrors backend
  * UpdatePreviewService.isAuthoritativeNegativePreview: every image must be
- * explicitly ok, and !has_update. Empty / mixed not_checkable previews never clear.
+ * explicitly ok with no detection label that hid or cleared it, and
+ * !has_update. Empty / mixed not_checkable previews never clear.
  */
 export function isAuthoritativeNegativePreview(preview: {
-    images: Array<{ check_status?: string | null }>;
+    images: Array<{ check_status?: string | null; detection?: 'off' | 'ignored' }>;
     summary: { has_update: boolean; check_status?: string | null };
 } | null | undefined): boolean {
     if (!preview) return false;
     return preview.images.length > 0
-        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.images.every((i) => i.check_status === 'ok' && i.detection === undefined)
         && preview.summary.has_update === false;
+}
+
+export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
+export type UpdateKind = 'tag' | 'digest' | 'none';
+
+/**
+ * One image of `GET /stacks/:name/update-preview`, per service. Shared by the
+ * Updates view and the stack's Anatomy update banner. Optional fields are
+ * absent on older nodes.
+ */
+export interface UpdatePreviewImage {
+    service: string;
+    image: string;
+    current_tag: string;
+    next_tag: string | null;
+    has_update: boolean;
+    digest_update?: boolean;
+    tag_update?: boolean;
+    semver_bump: SemverBump;
+    /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
+    check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
+    check_error?: string | null;
+    /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+    digest_error?: string | null;
+    /**
+     * What the service's update detection labels did: `off` when its checks are
+     * off, `ignored` when every pending update was skipped.
+     */
+    detection?: 'off' | 'ignored';
+    /** The registry's current digest for the tag on a same-tag rebuild: the entry that skips it. */
+    candidate_digest?: string | null;
+    /** The service's `io.sencho.update.changelog` link, on a pending update only. */
+    changelog_url?: string | null;
+    /** The entries already saved in the service's `io.sencho.update.ignore` label. */
+    ignore_entries?: string[];
+}
+
+export interface UpdatePreviewSummary {
+    has_update: boolean;
+    primary_image: string | null;
+    current_tag: string | null;
+    next_tag: string | null;
+    semver_bump: SemverBump;
+    update_kind?: UpdateKind;
+    blocked: boolean;
+    blocked_reason: string | null;
+    has_build_services?: boolean;
+    rebuild_available?: boolean;
+    /** Absent on older remotes; treat missing as non-authoritative. */
+    check_status?: 'ok' | 'partial' | 'failed';
+    verification_failed?: boolean;
+    verification_error?: string | null;
+}
+
+export interface UpdatePreview {
+    stack_name?: string;
+    images: UpdatePreviewImage[];
+    summary: UpdatePreviewSummary;
+    build_services?: string[];
+    rollback_target?: string | null;
 }

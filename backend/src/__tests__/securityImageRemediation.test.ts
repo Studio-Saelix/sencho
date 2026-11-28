@@ -295,3 +295,56 @@ describe('classifyImageRemediation', () => {
     expect(facts.imageRefsUpdateAvailable).toEqual(['nginx:1.14']);
   });
 });
+
+describe('classifyImageRemediation with update detection labels', () => {
+  const classify = (svc: StackServiceStatus) => classifyImageRemediation({
+    findings: [{ image_ref: 'nginx:1.25', count: 2 }],
+    details: { web: detail([svc]) },
+    checksEnabled: true,
+    freshnessWindowMs: FRESH_WINDOW,
+    now: NOW,
+  });
+
+  it('never reads a skipped update as waiting on upstream', () => {
+    const facts = classify(service({
+      service: 'app', hasUpdate: false, checkStatus: 'ok', detection: 'ignored', ignoredRefs: ['nginx:1.25'],
+    }));
+    expect(facts.fixableWaitingUpstream).toBe(0);
+    expect(facts.fixableWithImageUpdate).toBe(2);
+    expect(facts.imageRefsUpdateAvailable).toEqual(['nginx:1.25']);
+    expect(facts.updateServiceTargets).toEqual([{ imageRef: 'nginx:1.25', stackName: 'web', serviceName: 'app' }]);
+  });
+
+  it('does not attribute a skip on another runtime ref to the finding image', () => {
+    const facts = classify(service({
+      service: 'app', runtimeImages: ['sidecar:1'], hasUpdate: false, checkStatus: 'ok',
+      detection: 'ignored', ignoredRefs: ['sidecar:1'],
+    }));
+    expect(facts.fixableWithImageUpdate).toBe(0);
+    expect(facts.fixableWaitingUpstream).toBe(2);
+  });
+
+  it('keeps a skip row without ref-level evidence uncertain, never waiting upstream', () => {
+    const facts = classify(service({
+      service: 'app', hasUpdate: false, checkStatus: 'ok', detection: 'ignored',
+    }));
+    expect(facts.fixableUpdateUnknown).toBe(2);
+    expect(facts.fixableWaitingUpstream).toBe(0);
+    expect(facts.fixableWithImageUpdate).toBe(0);
+  });
+
+  it('keeps a partial skipped check uncertain', () => {
+    const facts = classify(service({
+      service: 'app', hasUpdate: false, checkStatus: 'partial', detection: 'ignored', ignoredRefs: ['nginx:1.25'],
+    }));
+    expect(facts.fixableUpdateUnknown).toBe(2);
+    expect(facts.fixableWaitingUpstream).toBe(0);
+  });
+
+  it('keeps a service with checks off unknown', () => {
+    const facts = classify(service({ service: 'app', hasUpdate: false, checkStatus: 'not_checkable', detection: 'off' }));
+    expect(facts.fixableUpdateUnknown).toBe(2);
+    expect(facts.fixableWaitingUpstream).toBe(0);
+    expect(facts.fixableWithImageUpdate).toBe(0);
+  });
+});

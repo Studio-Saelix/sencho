@@ -17,7 +17,8 @@ const {
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
   mockGetAllContainers, mockGetGlobalSettings, mockInspect,
   mockBuildEffectiveServiceModel,
-  mockResolveUpdatePolicyPair,
+  mockReadLabels,
+  mockReadFactsHook,
 } = vi.hoisted(() => ({
   mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
@@ -46,9 +47,13 @@ const {
   // (falls back to the legacy whole-stack tally) unless a test overrides this,
   // matching how no real Compose model exists in this unit-test environment.
   mockBuildEffectiveServiceModel: vi.fn().mockResolvedValue({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' }),
-  // A status write records the unattended decision when it can read it; a null
-  // pair means the policy render failed closed, which records skip.
-  mockResolveUpdatePolicyPair: vi.fn().mockResolvedValue(null),
+  // The label resolution of the same render. A status write records the
+  // unattended decision from it; null means it could not be read, which records
+  // skip and applies no detection label.
+  mockReadLabels: vi.fn().mockResolvedValue(null),
+  // Lets one test pause the full scan after its generation reservation and
+  // commit a newer recheck before the scan reads its labels.
+  mockReadFactsHook: { fn: undefined as undefined | (() => Promise<void>) },
 }));
 
 vi.mock('../services/RegistryService', () => ({
@@ -81,16 +86,34 @@ vi.mock('../services/DatabaseService', () => ({
   },
 }));
 
+// One render per stack: the model and the label resolution come from the same
+// read. The real policy evaluator and detection rules stay in place.
 vi.mock('../services/effectiveServiceModel', () => ({
   buildEffectiveServiceModel: mockBuildEffectiveServiceModel,
+  readEffectiveStackFacts: async (nodeId: number, stackName: string) => {
+    const hook = mockReadFactsHook.fn;
+    if (hook) {
+      mockReadFactsHook.fn = undefined;
+      await hook();
+    }
+    return {
+      model: await mockBuildEffectiveServiceModel(nodeId, stackName),
+      labels: await mockReadLabels(nodeId, stackName),
+    };
+  },
 }));
 
-// The real evaluator stays in place; only the render-backed pair lookup is
-// stubbed, because this file has no Compose model to render.
-vi.mock('../services/updatePolicy', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../services/updatePolicy')>();
-  return { ...actual, resolveUpdatePolicyPair: mockResolveUpdatePolicyPair };
-});
+/** A rendered label resolution with per-service overrides on the defaults. */
+function labelsFor(services: Record<string, Partial<import('../helpers/senchoLabels').SenchoServiceLabels>>) {
+  const out: Record<string, import('../helpers/senchoLabels').SenchoServiceLabels> = {};
+  for (const [name, overrides] of Object.entries(services)) {
+    out[name] = {
+      links: [], order: null, hidden: false, update: null, notifyRoute: null,
+      updateCheck: true, updateIgnore: [], updateChangelog: null, ...overrides,
+    };
+  }
+  return { renderable: true as const, services: out, entries: [] };
+}
 
 vi.mock('../services/NotificationService', () => ({
   NotificationService: {
@@ -148,6 +171,7 @@ vi.mock('../services/registry-api', async (importOriginal) => {
   return {
     ...actual,
     compareLocalToRemoteTag: mockCompareLocalToRemoteTag,
+    compareLocalToRemoteTagDetailed: mockCompareLocalToRemoteTag,
     listRegistryTagsResult: mockListRegistryTagsResult,
   };
 });
@@ -171,8 +195,11 @@ import {
   ImageUpdateService,
   UPDATE_DIGEST_UNCHANGED_WARNING,
   UPDATE_STILL_PRESENT_WARNING,
+  UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+  loadStackBuildServices,
   otherServicesStillPresentWarning,
 } from '../services/ImageUpdateService';
+import { checkResultFromDetection } from '../services/updateDetectionDirectives';
 import YAML from 'yaml';
 
 // ── parseImageRef (tested indirectly via checkImage) ──────────────────
@@ -381,7 +408,10 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     } as any;
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(docker, 'redis:8.8.0');
-    expect(result).toEqual({ hasUpdate: false, digestUpdate: false, tagUpdate: false, checkStatus: 'ok' });
+    expect(result).toEqual({
+      hasUpdate: false, digestUpdate: false, tagUpdate: false, checkStatus: 'ok',
+      detection: expect.objectContaining({ hasUpdate: false, candidateDigest: null }),
+    });
     expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
       [STALE, CURRENT],
       'registry-1.docker.io',
@@ -1721,17 +1751,7 @@ services:
       renderable: true,
       services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
     });
-    mockResolveUpdatePolicyPair.mockResolvedValueOnce({
-      manual: { decision: 'block' },
-      unattended: {
-        decision: 'skip',
-        evaluation: 'evaluated',
-        services: [
-          { service: 'web', policy: 'manual', eligible: false, reason: 'set to manual' },
-          { service: 'worker', policy: 'default', eligible: true },
-        ],
-      },
-    });
+    mockReadLabels.mockResolvedValueOnce(labelsFor({ web: { update: 'manual' }, worker: {} }));
     const service = ImageUpdateService.getInstance();
     stubCheckImagePerRef(service, ['web:latest']);
 
@@ -1753,9 +1773,9 @@ services:
       renderable: true,
       services: [specFor('web', 'web:latest')],
     });
-    // The policy render fails closed (resolveUpdatePolicyPair returns null), so
-    // the row must show the skip an unattended run would take, not a stale allow.
-    mockResolveUpdatePolicyPair.mockResolvedValueOnce(null);
+    // The label resolution cannot be read (null), so the row must show the
+    // skip an unattended run would take, not a stale allow.
+    mockReadLabels.mockResolvedValueOnce(null);
     const service = ImageUpdateService.getInstance();
     stubCheckImagePerRef(service, ['web:latest']);
 
@@ -1777,14 +1797,7 @@ services:
       renderable: true,
       services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
     });
-    mockResolveUpdatePolicyPair.mockResolvedValueOnce({
-      manual: { decision: 'block' },
-      unattended: {
-        decision: 'skip',
-        evaluation: 'evaluated',
-        services: [{ service: 'web', policy: 'disabled', eligible: false, reason: 'set to disabled' }],
-      },
-    });
+    mockReadLabels.mockResolvedValueOnce(labelsFor({ web: { update: 'disabled' }, worker: {} }));
     const service = ImageUpdateService.getInstance();
     // Every image check fails, so the row is recorded through the failure path.
     (service as any).checkImage = vi.fn().mockResolvedValue({
@@ -1900,6 +1913,41 @@ services:
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
 
+  it('reserves the full-scan generation before reading labels, so a racing recheck keeps its newer state', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue('services:\n  web:\n    image: web:latest\n');
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [specFor('web', 'web:latest')],
+    });
+    const service = ImageUpdateService.getInstance();
+    // The recheck runs while the full scan is still gathering inputs, and
+    // commits a checks-off label state; the scan then reads the older default.
+    mockReadLabels
+      .mockResolvedValueOnce(labelsFor({ web: { updateCheck: false } }))
+      .mockResolvedValueOnce(labelsFor({}));
+    mockGetAllContainers.mockResolvedValue([
+      { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+    ]);
+    let recheck: Promise<unknown> | undefined;
+    mockReadFactsHook.fn = async () => {
+      recheck = service.recheckStack(1, 'stackA');
+      await recheck;
+    };
+    (service as any).checkImage = vi.fn()
+      .mockResolvedValueOnce({ hasUpdate: false, checkStatus: 'ok' })
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true, checkStatus: 'ok' });
+
+    await (service as any).checkNode(1, fakeDb());
+    await recheck;
+
+    // Only the recheck committed; the older scan write was dropped.
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledTimes(1);
+    expect(mockUpsertStackUpdateStatus.mock.calls[0][6]).toEqual([
+      expect.objectContaining({ service: 'web', hasUpdate: false, detection: 'off' }),
+    ]);
+  });
+
   describe('recheckStack', () => {
     it('skips registry probes and DB writes when checks are disabled', async () => {
       mockGetGlobalSettings.mockReturnValueOnce({ image_update_checks_enabled: '0' });
@@ -1967,6 +2015,180 @@ services:
       const result = await service.recheckStack(1, 'stackA');
 
       expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING });
+    });
+
+    it('reports ignored digest drift as still present when verifying an operation', async () => {
+      const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockReadLabels.mockResolvedValueOnce(labelsFor({
+        web: { updateIgnore: [{ kind: 'digest', digest: DIGEST_A }] },
+      }));
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue(checkResultFromDetection({
+        hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: 'latest', digestError: null,
+        tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'patch',
+        candidateDigest: DIGEST_A,
+      }));
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING });
+      // Reporting still stores the label-filtered state.
+      expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+        1, 'stackA', false, expect.any(Number), 'ok', null,
+        [expect.objectContaining({ service: 'web', hasUpdate: false, detection: 'ignored' })],
+        expect.any(Number),
+        expect.any(Object),
+      );
+    });
+
+    it('reports a checks-off ref whose verification could not run as incomplete', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockReadLabels.mockResolvedValueOnce(labelsFor({ web: { updateCheck: false } }));
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockRejectedValue(new Error('registry down'));
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(result).toEqual({ outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING });
+    });
+
+    it('probes a checks-off ref and clears when its verified digest is clean', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockReadLabels.mockResolvedValueOnce(labelsFor({ web: { updateCheck: false } }));
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      const check = vi.fn().mockResolvedValue({ hasUpdate: false, checkStatus: 'ok' });
+      (service as any).checkImage = check;
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(check).toHaveBeenCalledWith(expect.anything(), 'web:latest');
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+    });
+
+    it('clears an ignored candidate once the verified digest has moved', async () => {
+      const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockReadLabels.mockResolvedValueOnce(labelsFor({
+        web: { updateIgnore: [{ kind: 'digest', digest: DIGEST_A }] },
+      }));
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false, checkStatus: 'ok' });
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+    });
+
+    it('does not treat a build-backed service digest as a failed update', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), { ...specFor('builder', 'builder:latest'), hasBuild: true }],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'builder:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'builder' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'builder:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+    });
+
+    it('does not fail verification on a build-backed service check error', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), { ...specFor('builder', 'builder:latest'), hasBuild: true }],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'builder:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'builder' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'builder:latest'
+          ? { hasUpdate: false, checkStatus: 'failed', error: 'inspect failed' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { verification: true });
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+    });
+
+    it('does not name a build-backed sibling in service-scoped verification', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), { ...specFor('builder', 'builder:latest'), hasBuild: true }],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'builder:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'builder' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'builder:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { updatedService: 'web', verification: true });
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+    });
+
+    it('keeps sibling attribution on a verified service-scoped update', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'worker:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'worker' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'worker:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { updatedService: 'web', verification: true });
+
+      expect(result).toEqual({
+        outcome: 'still_present',
+        warning: otherServicesStillPresentWarning('web', ['worker']),
+      });
     });
 
     it('names sibling services when a service-scoped recheck cleared the target but siblings remain', async () => {
@@ -2180,6 +2402,189 @@ services:
       });
       expect((service as any).checkImage).not.toHaveBeenCalled();
       expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(
+        1, 'stackA', UPDATE_VERIFICATION_INCOMPLETE_WARNING, expect.any(Number), undefined, expect.any(Number),
+      );
     });
+  });
+});
+
+describe('ImageUpdateService - update detection labels', () => {
+  const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+  const fakeDb = () => ({
+    getStackUpdateStatus: mockGetStackUpdateStatus,
+    upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
+    clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
+    recordUnattendedPolicy: mockRecordUnattendedPolicy,
+    getSystemState: mockGetSystemState,
+    setSystemState: mockSetSystemState,
+    addNotificationHistory: mockAddNotificationHistory,
+  });
+  const spec = (name: string, image: string) => ({
+    name, declaredImage: image, hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false,
+  });
+  /** A same-tag rebuild whose registry digest is DIGEST_A, carried the way checkImage carries it. */
+  const rebuild = () => checkResultFromDetection({
+    hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: 'latest', digestError: null,
+    tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'patch',
+    candidateDigest: DIGEST_A,
+  });
+  const upToDate = () => ({ hasUpdate: false, digestUpdate: false, tagUpdate: false, checkStatus: 'ok' as const });
+  const COMPOSE = `
+services:
+  web:
+    image: web:latest
+  worker:
+    image: worker:latest
+`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetSystemState.mockReturnValue('1');
+    mockGetAllContainers.mockResolvedValue([]);
+    mockEnvExists.mockResolvedValue(false);
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    mockReadLabels.mockResolvedValue(null);
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true, services: [spec('web', 'web:latest'), spec('worker', 'worker:latest')],
+    });
+  });
+
+  it('does not check an image only a checks-off service uses, and records that service as off', async () => {
+    mockReadLabels.mockResolvedValue(labelsFor({ web: {}, worker: { updateCheck: false } }));
+    const service = ImageUpdateService.getInstance();
+    const checkImage = vi.fn().mockImplementation(async (_d: unknown, ref: string) => (ref === 'worker:latest' ? rebuild() : upToDate()));
+    (service as any).checkImage = checkImage;
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(checkImage.mock.calls.map(call => call[1])).toEqual(['web:latest']);
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', false, expect.any(Number), 'ok', null,
+      [
+        { service: 'web', image: 'web:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
+        { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'not_checkable', lastError: null, detection: 'off' },
+      ],
+      expect.any(Number),
+      expect.any(Object),
+    );
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('checks a shared image once and reports it only for the service that still checks', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true, services: [spec('web', 'shared:latest'), spec('worker', 'shared:latest')],
+    });
+    mockGetStackContent.mockResolvedValue('services:\n  web:\n    image: shared:latest\n  worker:\n    image: shared:latest\n');
+    mockReadLabels.mockResolvedValue(labelsFor({ web: {}, worker: { updateCheck: false } }));
+    const service = ImageUpdateService.getInstance();
+    const checkImage = vi.fn().mockResolvedValue(rebuild());
+    (service as any).checkImage = checkImage;
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(checkImage).toHaveBeenCalledTimes(1);
+    const services = mockUpsertStackUpdateStatus.mock.calls[0][6];
+    expect(services).toEqual([
+      expect.objectContaining({ service: 'web', hasUpdate: true, checkStatus: 'ok' }),
+      expect.objectContaining({ service: 'worker', hasUpdate: false, detection: 'off' }),
+    ]);
+  });
+
+  it('records a stack whose only update is skipped as having none, and sends no notification', async () => {
+    mockReadLabels.mockResolvedValue(labelsFor({
+      web: { updateIgnore: [{ kind: 'digest', digest: DIGEST_A }] }, worker: {},
+    }));
+    const service = ImageUpdateService.getInstance();
+    (service as any).checkImage = vi.fn().mockImplementation(async (_d: unknown, ref: string) => (ref === 'web:latest' ? rebuild() : upToDate()));
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', false, expect.any(Number), 'ok', null,
+      [
+        {
+          service: 'web', image: 'web:latest', hasUpdate: false, checkStatus: 'ok', lastError: null,
+          detection: 'ignored', ignoredRefs: ['web:latest'],
+        },
+        { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
+      ],
+      expect.any(Number),
+      expect.any(Object),
+    );
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('renders each stack once per scan, also when the model does not render', async () => {
+    mockGetStacks.mockResolvedValue(['stackA', 'stackB']);
+    mockBuildEffectiveServiceModel.mockImplementation(async (_n: number, stack: string) => (stack === 'stackB'
+      ? { renderable: false, code: 'effective_model_render_failed', error: 'render failed' }
+      : { renderable: true, services: [spec('web', 'web:latest'), spec('worker', 'worker:latest')] }));
+    const service = ImageUpdateService.getInstance();
+    (service as any).checkImage = vi.fn().mockResolvedValue(upToDate());
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockBuildEffectiveServiceModel.mock.calls.map(call => call[1]).sort()).toEqual(['stackA', 'stackB']);
+    expect(mockReadLabels).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies no label when the model does not render, so every update still reports', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue({ renderable: false, code: 'effective_model_render_failed', error: 'render failed' });
+    mockReadLabels.mockResolvedValue(labelsFor({ web: { updateCheck: false }, worker: { updateCheck: false } }));
+    const service = ImageUpdateService.getInstance();
+    const checkImage = vi.fn().mockResolvedValue(rebuild());
+    (service as any).checkImage = checkImage;
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(checkImage.mock.calls.map(call => call[1]).sort()).toEqual(['web:latest', 'worker:latest']);
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
+  });
+
+  it('skips a checks-off service image on a stack recheck, rendering once', async () => {
+    mockReadLabels.mockResolvedValue(labelsFor({ web: {}, worker: { updateCheck: false } }));
+    const service = ImageUpdateService.getInstance();
+    const checkImage = vi.fn().mockResolvedValue(rebuild());
+    (service as any).checkImage = checkImage;
+
+    const result = await service.recheckStack(1, 'stackA');
+
+    expect(checkImage.mock.calls.map(call => call[1])).toEqual(['web:latest']);
+    expect(mockBuildEffectiveServiceModel).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe('still_present');
+    expect(mockUpsertStackUpdateStatus.mock.calls[0][6]).toEqual([
+      expect.objectContaining({ service: 'web', hasUpdate: true }),
+      expect.objectContaining({ service: 'worker', hasUpdate: false, detection: 'off' }),
+    ]);
+  });
+
+  it('reports the update again once the label is removed', async () => {
+    mockReadLabels.mockResolvedValue(labelsFor({ web: { updateIgnore: [{ kind: 'digest', digest: DIGEST_A }] }, worker: {} }));
+    const service = ImageUpdateService.getInstance();
+    (service as any).checkImage = vi.fn().mockImplementation(async (_d: unknown, ref: string) => (ref === 'web:latest' ? rebuild() : upToDate()));
+    expect((await service.recheckStack(1, 'stackA')).outcome).toBe('cleared');
+
+    mockReadLabels.mockResolvedValue(labelsFor({ web: {}, worker: {} }));
+    expect((await service.recheckStack(1, 'stackA')).outcome).toBe('still_present');
+  });
+});
+
+describe('loadStackBuildServices', () => {
+  it('reads build services from the effective model for a non-Git stack', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [
+        { name: 'builder', declaredImage: 'builder:latest', hasBuild: true, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+        { name: 'web', declaredImage: 'web:latest', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+      ],
+    });
+    mockGetStackContent.mockResolvedValue('services:\n  web:\n    image: web:latest\n');
+    expect(await loadStackBuildServices(1, 'stackA')).toEqual(['builder']);
   });
 });

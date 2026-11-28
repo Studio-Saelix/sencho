@@ -414,6 +414,7 @@ export class StackUpdateOrchestrator {
       }
       const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName, {
         updatedService: serviceName,
+        verification: true,
       });
       await DriftLedgerService.getInstance().reconcileServiceForStack(nodeId, stackName, serviceName);
       await this.refreshMeshIfEnabled(nodeId, stackName);
@@ -575,6 +576,7 @@ export class StackUpdateOrchestrator {
 
       const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName, {
         updatedService: serviceName,
+        verification: true,
       });
       await this.refreshMeshIfEnabled(nodeId, stackName);
 

@@ -423,6 +423,26 @@ describe('GET/POST /api/stacks/:stackName/update-preview reconcile', () => {
     expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
   });
 
+  it('POST does not erase a confirmed row when a skip label cleared the image report', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'ok', null);
+
+    const preview = negativeOkPreview('web');
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue({
+      ...preview,
+      images: [{ ...preview.images[0], detection: 'ignored' as const }],
+    });
+
+    const res = await request(app)
+      .post('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
+    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+  });
+
   it('POST does not mutate when check_status is missing from summary rollup fields still fail every-ok', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;

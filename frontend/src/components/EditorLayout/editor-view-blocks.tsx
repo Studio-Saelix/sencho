@@ -789,6 +789,7 @@ export function ContainersHealth({
                                                     service={composeService}
                                                     applicationLinkShown={portLinkOpensApplication([container], composeService, serviceUrlEntry, activeNode)}
                                                     onRenameRetiredUrl={renameRetiredUrlFor(composeService)}
+                                                    updateStatus={serviceUpdateStatuses.find(s => s.service === composeService)}
                                                 />
                                             )}
                                         </div>
@@ -1043,7 +1044,7 @@ export function ContainersHealth({
                                                 </span>
                                             )}
                                         </div>
-                                        <ServiceSenchoLinks resolution={sencho} service={spec.name} applicationLinkShown={false} onRenameRetiredUrl={renameRetiredUrlFor(spec.name)} />
+                                        <ServiceSenchoLinks resolution={sencho} service={spec.name} applicationLinkShown={false} onRenameRetiredUrl={renameRetiredUrlFor(spec.name)} updateStatus={status} />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
@@ -1075,6 +1076,7 @@ export function ContainersHealth({
                                             service={spec.name}
                                             applicationLinkShown={portLinkOpensApplication(group, spec.name, serviceUrlEntry, activeNode)}
                                             onRenameRetiredUrl={renameRetiredUrlFor(spec.name)}
+                                            updateStatus={status}
                                         />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">

@@ -111,3 +111,35 @@ describe('update policy', () => {
     expect(serviceUpdateButtonState(policy('disabled'), 'db')).toEqual({ disabled: false });
   });
 });
+
+describe('update detection chips', () => {
+  const base = { links: [], order: null, hidden: false };
+
+  it('shows Update checks: off from the label itself', () => {
+    render(
+      <ServiceSenchoLinks resolution={resolution({ web: { ...base, updateCheck: false } })} service="web" applicationLinkShown={false} />,
+    );
+    expect(screen.getByTestId('service-update-detection-off')).toHaveTextContent('Update checks: off');
+    expect(screen.queryByTestId('service-update-detection-ignored')).toBeNull();
+  });
+
+  it('shows Update skipped only when the last check actually skipped an update', () => {
+    const declared = resolution({ web: { ...base, updateIgnore: [{ kind: 'tag', tag: '2.0.0' }] } });
+    const { rerender } = render(
+      <ServiceSenchoLinks resolution={declared} service="web" applicationLinkShown={false} updateStatus={{}} />,
+    );
+    // A skip label that matched nothing claims nothing.
+    expect(screen.queryByTestId('service-update-detection-ignored')).toBeNull();
+    rerender(
+      <ServiceSenchoLinks resolution={declared} service="web" applicationLinkShown={false} updateStatus={{ detection: 'ignored' }} />,
+    );
+    expect(screen.getByTestId('service-update-detection-ignored')).toHaveTextContent('Update skipped');
+  });
+
+  it('renders nothing new for a service without the labels', () => {
+    const { container } = render(
+      <ServiceSenchoLinks resolution={resolution({ web: base })} service="web" applicationLinkShown={false} updateStatus={{}} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});

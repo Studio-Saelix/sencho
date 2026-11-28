@@ -115,7 +115,7 @@ async function mockReadiness(page: Page, { nodeId }: ReadinessMocks): Promise<vo
         },
         build_services: [],
         rollback_target: null,
-        changelog: 'Security fixes.',
+        changelog: null,
       }),
     });
   });

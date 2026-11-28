@@ -71,3 +71,24 @@ it('does not contact a target after cancellation', async () => {
     await expect(fetchRemoteImageUpdateRoster(2, controller.signal)).rejects.toThrow();
     expect(safeRemoteFetch).not.toHaveBeenCalled();
 });
+
+it('sends detection and probeAll only when asked, and probeAll only with detection', async () => {
+    const stack = {
+        name: 'web', observationRevision: 1, observationToken: 'signed-observation',
+        model: { renderable: true }, services: [{ name: 'app', declaredImage: null, runtimeImages: [], hasBuild: true }], images: [],
+        directives: [{ service: 'app', check: false, ignore: [], changelogUrl: null }],
+    };
+    vi.mocked(safeRemoteFetch).mockImplementation(async () => (
+        new Response(JSON.stringify({ contractVersion: 1, requestNonce: nonce, stacks: [stack] }))
+    ));
+    const signal = new AbortController().signal;
+    const body = () => JSON.parse(vi.mocked(safeRemoteFetch).mock.calls[0][1]?.body as string);
+
+    expect(await fetchRemoteImageUpdateFacts(2, 'web', signal, { detection: true, probeAll: true })).toEqual(stack);
+    expect(body()).toEqual({ contractVersion: 1, requestNonce: nonce, stack: 'web', detection: true, probeAll: true });
+
+    vi.mocked(safeRemoteFetch).mockClear();
+    await expect(fetchRemoteImageUpdateFacts(2, 'web', signal, { probeAll: true })).rejects.toThrow('Invalid remote image facts');
+    // probeAll alone is never sent, and a reply carrying directives unasked is refused.
+    expect(body()).toEqual({ contractVersion: 1, requestNonce: nonce, stack: 'web' });
+});

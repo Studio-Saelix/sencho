@@ -100,7 +100,7 @@ describe('automatic stack apply pipeline', () => {
   it('retains local verification and keeps successful mutation on recheck failure', async () => {
     mocks.recheck.mockRejectedValue(new Error('registry unavailable'));
     const result = await applyAutomaticStackUpdate({ ...input, verificationOwner: 'target_local' });
-    expect(mocks.recheck).toHaveBeenCalledWith(1, 'web');
+    expect(mocks.recheck).toHaveBeenCalledWith(1, 'web', { verification: true });
     expect(result).toMatchObject({ applied: true, recheckWarning: 'Verification incomplete' });
   });
 
@@ -113,6 +113,20 @@ describe('automatic stack apply pipeline', () => {
     expect(mocks.execute).not.toHaveBeenCalled();
     expect(mocks.beginStack).not.toHaveBeenCalled();
     expect(mocks.recheck).not.toHaveBeenCalled();
+  });
+
+  it('leaves Compose uncalled and the observation unspent when the trigger is suppressed under the lock', async () => {
+    const consume = vi.fn();
+    const revalidateTrigger = vi.fn().mockResolvedValue('Stack "web": the only available update is skipped; no update applied');
+    const result = await applyAutomaticStackUpdate({
+      ...input, verificationOwner: 'hub_authority', observation: { verify: vi.fn(), consume }, revalidateTrigger,
+    });
+    expect(result).toMatchObject({ result: 'rejected', applied: false, healthGateId: null });
+    expect(result.message).toContain('skipped');
+    expect(revalidateTrigger).toHaveBeenCalledTimes(1);
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(mocks.beginStack).not.toHaveBeenCalled();
   });
 
   it('reports the reason and keeps the observation unspent when the Docker endpoint guard refuses', async () => {

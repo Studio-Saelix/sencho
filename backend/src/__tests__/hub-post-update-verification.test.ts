@@ -19,6 +19,7 @@ describe('awaited hub verification', () => {
     let settled = false;
     const operation = awaitHubPostUpdateVerification({ ...input, transport: { recheckRemoteStack } }).then(value => { settled = true; return value; });
     await vi.waitFor(() => expect(recheckRemoteStack).toHaveBeenCalledTimes(1));
+    expect(recheckRemoteStack).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { verification: true });
     expect(settled).toBe(false);
     complete({ warning: null });
     const verification = await operation;

@@ -3,18 +3,28 @@ import YAML from 'yaml';
 import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
 import { DatabaseService, type StackCheckStatus, type StackServiceStatus, type StackUpdateUnattendedPolicy } from './DatabaseService';
-import { resolveUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
+import { evaluateUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
-import { detectImageUpdate, type PreviewImageCheckStatus } from './imageUpdateDetect';
+import { detectImageUpdate, type ImageUpdateDetectResult, type PreviewImageCheckStatus } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { readEffectiveStackFacts, type EffectiveStackFacts } from './effectiveServiceModel';
+import {
+    applyIgnoreToCheck,
+    checkResultFromDetection,
+    directiveFor,
+    directivesFromFacts,
+    directivesFromResolution,
+    uncheckedRefs,
+    type DetectionDirectives,
+    type ServiceDetectionDirective,
+} from './updateDetectionDirectives';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import type { ImageUpdateStackFacts } from './imageUpdateFacts';
 
@@ -58,6 +68,12 @@ function formatServiceList(names: string[]): string {
 export interface RecheckStackOptions {
     /** When set after a service-scoped update, attribution prefers siblings over daemon blame. */
     updatedService?: string;
+    /**
+     * Post-operation verification: derive the outcome from the raw registry
+     * evidence the operation pulled, not from the label-filtered reporting
+     * state. A skipped candidate that did not move still fails verification.
+     */
+    verification?: boolean;
 }
 
 export interface ImageCheckResult {
@@ -76,6 +92,11 @@ export interface ImageCheckResult {
      * tally rather than counted as a failed or up-to-date check.
      */
     notCheckable?: boolean;
+    /**
+     * The detection behind this result, when it came from the registry. The
+     * update detection labels read the pending candidates from it.
+     */
+    detection?: ImageUpdateDetectResult;
 }
 
 /**
@@ -279,33 +300,26 @@ export function extractBuildServicesFromRenderedConfig(renderedJson: string): st
 }
 
 /**
- * Service names that use `build:` for a stack. For a Git stack with an applied
- * multi-file / context-dir spec, reads the effective merged model so override-only
- * build services are included. Returns null for single-file stacks (and on render
- * failure) so the caller falls back to the root-compose parse.
+ * Resolved build-service names for any stack. The effective model is the one
+ * source, so a build declared by an include, override, or extends entry is
+ * built (and its registry image skipped) on every stack, not only a Git one.
+ * An unrenderable model still falls back to the root compose file.
  */
-export async function loadEffectiveBuildServices(nodeId: number, stackName: string): Promise<string[] | null> {
-    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
-    if (!spec || spec.files.length === 0) return null;
-    const { ComposeService } = await import('./ComposeService');
-    const rendered = await ComposeService.getInstance(nodeId).renderConfig(stackName);
-    if (!rendered.rendered) {
-        console.warn(
-            `[ImageUpdateService] effective build render failed for "${sanitizeForLog(stackName)}" (code=${rendered.code} timedOut=${rendered.timedOut}); falling back to root-compose parse: ${sanitizeForLog(rendered.stderr)}`,
-        );
-        return null;
-    }
-    return extractBuildServicesFromRenderedConfig(rendered.rendered);
-}
-
-/** Resolved build-service names for any stack (effective model or root compose). */
 export async function loadStackBuildServices(nodeId: number, stackName: string): Promise<string[]> {
-    const effective = await loadEffectiveBuildServices(nodeId, stackName);
-    if (effective) return effective;
+    const facts = await readEffectiveStackFacts(nodeId, stackName);
+    if (facts.model.renderable) {
+        return facts.model.services.filter(service => service.hasBuild).map(service => service.name);
+    }
 
     const fs = FileSystemService.getInstance(nodeId);
     const composeContent = await fs.getStackContent(stackName);
     return extractBuildServicesFromCompose(composeContent);
+}
+
+/** True for a Git stack deployed from a multi-file / context-dir spec, whose images come from the effective model. */
+function hasAppliedMultiFileSpec(stackName: string): boolean {
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    return !!spec && spec.files.length > 0;
 }
 
 // ─── Per-service reduction (model-based status) ─────────────────────────────
@@ -321,11 +335,29 @@ export function reduceServiceStatus(
     runtimeImages: string[],
     imageUpdateMap: Map<string, ImageCheckResult>,
     prior: StackServiceStatus | undefined,
+    directive?: ServiceDetectionDirective,
 ): ServiceReduction {
     const dedupedRuntime = [...new Set(runtimeImages)].sort();
     const refs = new Set<string>();
     if (declaredImage) refs.add(declaredImage);
     for (const ref of dedupedRuntime) refs.add(ref);
+
+    // Checks off: nothing is reported for this service, whatever the image
+    // shows for another service that shares it.
+    if (directive && !directive.check) {
+        return {
+            status: {
+                service,
+                image: declaredImage,
+                ...(dedupedRuntime.length > 0 ? { runtimeImages: dedupedRuntime } : {}),
+                hasUpdate: false,
+                checkStatus: 'not_checkable',
+                lastError: null,
+                detection: 'off',
+            },
+            confirmedUpdateThisRun: false,
+        };
+    }
 
     if (refs.size === 0) {
         return {
@@ -334,12 +366,22 @@ export function reduceServiceStatus(
         };
     }
 
+    const ignore = directive?.ignore ?? [];
+    let skipped = false;
+    // The refs whose pending candidates this check skipped, so a confirmed
+    // Security finding on a different runtime ref is not attributed to them.
+    const ignoredRefs: string[] = [];
     const checkableResults: ImageCheckResult[] = [];
     for (const ref of refs) {
-        const result = imageUpdateMap.get(ref);
-        if (!result) continue;
-        if (normalizeImageCheckStatus(result) === 'not_checkable') continue;
-        checkableResults.push(result);
+        const raw = imageUpdateMap.get(ref);
+        if (!raw) continue;
+        if (normalizeImageCheckStatus(raw) === 'not_checkable') continue;
+        const applied = applyIgnoreToCheck(ref, raw, ignore);
+        if (applied.ignored) {
+            skipped = true;
+            if (!applied.result.hasUpdate) ignoredRefs.push(ref);
+        }
+        checkableResults.push(applied.result);
     }
 
     if (checkableResults.length === 0) {
@@ -355,9 +397,14 @@ export function reduceServiceStatus(
     const confirmedUpdateThisRun = checkableResults.some(
         (r, i) => statuses[i] === 'ok' && r.hasUpdate === true,
     );
+    // A skipped update is never carried over from an earlier check, but another
+    // ref's uncertainty is: dropping the positive because a distinct runtime
+    // ref timed out would report a failed check as a clean skip.
+    const priorHasUpdate = skipped && statuses.every(status => status === 'ok')
+        ? false
+        : (prior?.hasUpdate ?? false);
 
     if (failed.length === checkableResults.length) {
-        const priorHasUpdate = prior?.hasUpdate ?? false;
         return {
             status: {
                 service,
@@ -376,7 +423,7 @@ export function reduceServiceStatus(
     const uncertain = [...partial, ...failed];
     const lastError = uncertain.length > 0 ? (uncertain[0].error ?? null) : null;
     const hasUpdate = checkStatus === 'partial'
-        ? (confirmedUpdateThisRun || (prior?.hasUpdate ?? false))
+        ? (confirmedUpdateThisRun || priorHasUpdate)
         : confirmedUpdateThisRun;
 
     return {
@@ -387,8 +434,49 @@ export function reduceServiceStatus(
             hasUpdate,
             checkStatus,
             lastError,
+            ...(ignoredRefs.length > 0 ? { ignoredRefs: [...ignoredRefs].sort() } : {}),
+            // `ignored` is a clean reporting state. A partial check stays
+            // partial even when one candidate was skipped, so Security never
+            // reads a timeout as a confirmed skip.
+            ...(skipped && !hasUpdate && ignoredRefs.length > 0 && checkStatus === 'ok'
+                ? { detection: 'ignored' as const }
+                : {}),
         },
         confirmedUpdateThisRun,
+    };
+}
+
+/** Every service of a rendered model reduced under its detection directive. */
+function reduceModelServices(
+    services: readonly { name: string; declaredImage: string | null }[],
+    runtimeByService: Map<string, string[]>,
+    imageUpdateMap: Map<string, ImageCheckResult>,
+    priorByService: Map<string, StackServiceStatus>,
+    directives: DetectionDirectives,
+): StackServiceStatus[] {
+    return services.map((spec) => reduceServiceStatus(
+        spec.name,
+        spec.declaredImage,
+        runtimeByService.get(spec.name) ?? [],
+        imageUpdateMap,
+        priorByService.get(spec.name),
+        directiveFor(directives, spec.name),
+    ).status);
+}
+
+/** The refs a rendered stack uses, by service, with the refs only checks-off services use. */
+function stackRefs(
+    services: readonly { name: string; declaredImage: string | null }[],
+    runtimeByService: Map<string, string[]>,
+    directives: DetectionDirectives,
+): { all: Set<string>; unchecked: Set<string> } {
+    const owned = services.map(spec => ({
+        name: spec.name,
+        refs: [...(spec.declaredImage ? [spec.declaredImage] : []), ...(runtimeByService.get(spec.name) ?? [])],
+    }));
+    return {
+        all: new Set(owned.flatMap(entry => entry.refs)),
+        unchecked: uncheckedRefs(owned, directives),
     };
 }
 
@@ -942,14 +1030,29 @@ export class ImageUpdateService {
             console.log(`[ImageUpdateService:debug] Node ${nodeId}: Phase 1 complete - ${stacks.length} stack(s) found`);
         }
 
-        // Phase 2: Parse compose files for image refs
+        // Reserve write generations before the first observation (the label
+        // render below), so a recheck that commits while this scan is still
+        // gathering inputs always owns a newer generation and the older scan
+        // cannot restore its labels afterwards.
+        const writeGenerations = new Map<string, number>();
         for (const stackName of stacks) {
+            writeGenerations.set(stackName, this.reserveStackWriteGeneration(nodeId, stackName));
+        }
+
+        // Phase 2: one effective-model render per stack (services, image refs,
+        // detection labels and update policy all come from it), then the image
+        // refs: the effective model for multi-file / context-dir Git stacks so
+        // override-only images are captured, the root compose file otherwise.
+        const stackFacts = new Map<string, EffectiveStackFacts>();
+        for (const stackName of stacks) {
+            const facts = await readEffectiveStackFacts(nodeId, stackName);
+            stackFacts.set(stackName, facts);
             try {
-                // Multi-file / context-dir Git stacks resolve images from the
-                // effective merged model so override-only images are captured.
-                const effective = await loadEffectiveServiceImages(nodeId, stackName);
-                if (effective) {
-                    for (const e of effective) stackImages.get(stackName)?.add(e.image);
+                if (facts.model.renderable && hasAppliedMultiFileSpec(stackName)) {
+                    for (const spec of facts.model.services) {
+                        const ref = spec.declaredImage?.trim();
+                        if (ref && !ref.startsWith('sha256:')) stackImages.get(stackName)?.add(ref);
+                    }
                     continue;
                 }
 
@@ -1027,17 +1130,24 @@ export class ImageUpdateService {
             console.log(`[ImageUpdateService:debug] Node ${nodeId}: Phase 3 complete - ${totalBeforeDedup} image(s) across all stacks (pre-dedup)`);
         }
 
-        // Phase 4: Deduplicate and check all unique images
-        // Reserve write generations before the slow registry checks so a concurrent
-        // recheckStack that finishes first keeps its write (stale full-scan commits
-        // are dropped in withStackWriteLock).
-        const writeGenerations = new Map<string, number>();
-        for (const stackName of stackImages.keys()) {
-            writeGenerations.set(stackName, this.reserveStackWriteGeneration(nodeId, stackName));
-        }
-
+        // Phase 4: Deduplicate and check all unique images. The write
+        // generations were reserved before the first observation above.
+        // A ref that only checks-off services use is not sent to the registry,
+        // unless another stack's service still checks it.
+        const stackDirectives = new Map<string, DetectionDirectives>();
         const allImages = new Set<string>();
-        for (const imgs of stackImages.values()) for (const img of imgs) allImages.add(img);
+        for (const [stackName, imgs] of stackImages) {
+            const facts = stackFacts.get(stackName);
+            const directives = directivesFromResolution(facts?.model.renderable ? facts.labels : null);
+            stackDirectives.set(stackName, directives);
+            const unchecked = facts?.model.renderable && directives.size > 0
+                ? stackRefs(facts.model.services, this.runtimeImagesByService(stackName, allContainers), directives).unchecked
+                : new Set<string>();
+            for (const img of imgs) if (!unchecked.has(img)) allImages.add(img);
+            if (isDebugEnabled() && unchecked.size > 0) {
+                console.log(`[ImageUpdateService:debug] Stack "${sanitizeForLog(stackName)}": update checks off for ${unchecked.size} image(s); not checked for this stack`);
+            }
+        }
 
         const imageUpdateMap = new Map<string, ImageCheckResult>();
 
@@ -1072,6 +1182,8 @@ export class ImageUpdateService {
             const outcome = await this.writeStackUpdateStatus(
                 nodeId,
                 stackName,
+                stackFacts.get(stackName) ?? null,
+                stackDirectives.get(stackName) ?? directivesFromResolution(null),
                 stackImages.get(stackName) ?? new Set(),
                 imageUpdateMap,
                 previousState,
@@ -1158,7 +1270,8 @@ export class ImageUpdateService {
         const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(nodeId);
-        const model = await buildEffectiveServiceModel(nodeId, stackName);
+        const facts = await readEffectiveStackFacts(nodeId, stackName);
+        const model = facts.model;
         if (!model.renderable) {
             // The update result is unknown, but an unattended run fails closed
             // on this same unreadable model. Record that skip without touching
@@ -1183,21 +1296,32 @@ export class ImageUpdateService {
             );
             // Do not clear or upsert from declared-image-only checks: runtime
             // digests were never observed, so "cleared" would be a false negative.
+            // Record the failed observation at this generation so a scan that
+            // reserved earlier cannot overwrite it with staler evidence.
+            await this.withStackWriteLock(nodeId, stackName, generation, gen => {
+                db.recordStackCheckFailure(
+                    nodeId, stackName, UPDATE_VERIFICATION_INCOMPLETE_WARNING, Date.now(), undefined, gen,
+                );
+            }).catch(error => {
+                console.warn('[ImageUpdateService] Could not record failed recheck for %s:',
+                    sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+            });
             return {
                 outcome: 'verification_incomplete',
                 warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
             };
         }
 
-        const refs = new Set<string>();
         const runtimeByService = this.runtimeImagesByService(stackName, containers);
-        for (const spec of model.services) {
-            if (spec.declaredImage) refs.add(spec.declaredImage);
-            for (const ref of runtimeByService.get(spec.name) ?? []) refs.add(ref);
-        }
+        const directives = directivesFromResolution(facts.labels);
+        const { all: refs, unchecked } = stackRefs(model.services, runtimeByService, directives);
 
         const imageUpdateMap = new Map<string, ImageCheckResult>();
         for (const imageRef of refs) {
+            // Verification probes every image the operation would pull, even a
+            // ref only checks-off services use; reporting suppression is not
+            // evidence that the pull was safe.
+            if (!options?.verification && unchecked.has(imageRef)) continue;
             try {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
@@ -1211,15 +1335,18 @@ export class ImageUpdateService {
         }
 
         const priorByService = new Map(db.getStackServicesJson(nodeId, stackName).map((s) => [s.service, s]));
-        const reductions = model.services.map((spec) => reduceServiceStatus(
-            spec.name,
-            spec.declaredImage,
-            runtimeByService.get(spec.name) ?? [],
-            imageUpdateMap,
-            priorByService.get(spec.name),
-        ));
-        const services = reductions.map((r) => r.status);
+        const services = reduceModelServices(model.services, runtimeByService, imageUpdateMap, priorByService, directives);
         const checkStatus = aggregateServiceCheckStatus(services);
+        // A build-backed service is built, not pulled, so its registry check
+        // cannot decide whether the operation took effect.
+        const buildServices = new Set(model.services.filter(spec => spec.hasBuild).map(spec => spec.name));
+        const verifiedServices = options?.verification
+            ? services.filter(service => !buildServices.has(service.service))
+            : services;
+        const verificationCheckStatus = options?.verification
+            ? aggregateServiceCheckStatus(verifiedServices)
+            : checkStatus;
+        const verificationHasUpdate = verifiedServices.some(service => service.hasUpdate);
         const hasUpdate = services.some((s) => s.hasUpdate);
         // Every still-present update being a same-tag digest rebuild (no higher
         // semver tag) signals the local content for that image did not move: the
@@ -1227,8 +1354,12 @@ export class ImageUpdateService {
         // run the previous image. After a service-scoped update, prefer naming
         // sibling services that still need work over blaming the daemon for the
         // service that was just updated.
-        const updatingEntries = [...imageUpdateMap.values()]
-            .filter((r) => r.hasUpdate && normalizeImageCheckStatus(r) !== 'not_checkable');
+        const reportingRefs = new Set(services.filter(s => s.hasUpdate).flatMap(s => [
+            ...(s.image ? [s.image] : []), ...(s.runtimeImages ?? []),
+        ]));
+        const updatingEntries = [...imageUpdateMap.entries()]
+            .filter(([ref, r]) => reportingRefs.has(ref) && r.hasUpdate && normalizeImageCheckStatus(r) !== 'not_checkable')
+            .map(([, r]) => r);
         const allDigestOnly = hasUpdate && updatingEntries.length > 0
             && updatingEntries.every((r) => r.digestUpdate === true && r.tagUpdate !== true);
         const lastError = stackStatusLastError(services);
@@ -1236,7 +1367,7 @@ export class ImageUpdateService {
 
         // The same observation answers "would an unattended update touch this
         // stack", so the Updates view never has to guess.
-        const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
+        const unattendedPolicy = this.unattendedPolicyForStatus(nodeId, stackName, facts);
 
         const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
@@ -1253,16 +1384,54 @@ export class ImageUpdateService {
             };
         }
 
-        if (checkStatus === 'partial' || checkStatus === 'failed') {
+        if (verificationCheckStatus === 'partial' || verificationCheckStatus === 'failed') {
             return {
                 outcome: 'verification_incomplete',
                 warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
             };
         }
-        if (hasUpdate) {
+        // Post-operation verification reads the raw comparison, before any skip
+        // label cleared the report: a refresh that left the same digest in place
+        // is a failed update, not a clean one.
+        if (options?.verification) {
+            const targetServices = options.updatedService
+                ? model.services.filter(spec => spec.name === options.updatedService)
+                : model.services;
+            const targetRefs = new Set<string>();
+            for (const spec of targetServices) {
+                // A build-backed service is built instead of pulled, so its
+                // registry digest is not expected to move.
+                if (spec.hasBuild) continue;
+                if (spec.declaredImage) targetRefs.add(spec.declaredImage);
+                for (const ref of runtimeByService.get(spec.name) ?? []) targetRefs.add(ref);
+            }
+            let evidenceUnavailable = false;
+            let digestRemains = false;
+            for (const ref of targetRefs) {
+                const raw = imageUpdateMap.get(ref);
+                if (!raw) {
+                    evidenceUnavailable = true;
+                    continue;
+                }
+                const rawStatus = normalizeImageCheckStatus(raw);
+                if (rawStatus === 'not_checkable') continue;
+                if (rawStatus !== 'ok' || raw.detection?.digestError) {
+                    evidenceUnavailable = true;
+                    continue;
+                }
+                if (raw.digestUpdate) digestRemains = true;
+            }
+            if (evidenceUnavailable) {
+                return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
+            }
+            if (digestRemains) {
+                return { outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING };
+            }
+        }
+        if (verificationHasUpdate) {
             const updatedService = options?.updatedService;
             if (updatedService) {
-                const staleNames = services.filter((s) => s.hasUpdate).map((s) => s.service);
+                const staleNames = verifiedServices.filter((s) => s.hasUpdate).map((s) => s.service);
                 const siblings = staleNames.filter((name) => name !== updatedService).sort();
                 if (!staleNames.includes(updatedService) && siblings.length > 0) {
                     return {
@@ -1281,37 +1450,27 @@ export class ImageUpdateService {
 
     /**
      * The unattended decision a local status write records, so the Updates view
-     * can report a policy skip without guessing. A model that cannot be
-     * rendered, or a policy read that fails, records skip because the unattended
-     * run fails closed the same way. `undefined` is only for a non-local target,
-     * whose decision is evaluated on its own node and arrives with the facts;
-     * this instance must not guess one from its own filesystem.
+     * can report a policy skip without guessing. It comes from the render the
+     * check already read; a model or label resolution that could not be read
+     * records skip, because the unattended run fails closed the same way.
+     * `undefined` is only for a non-local target, whose decision is evaluated
+     * on its own node and arrives with the facts; this instance must not guess
+     * one from its own filesystem.
      */
-    private async unattendedPolicyForStatus(
+    private unattendedPolicyForStatus(
         nodeId: number,
         stackName: string,
-    ): Promise<StackUpdateUnattendedPolicy | undefined> {
+        facts: EffectiveStackFacts,
+    ): StackUpdateUnattendedPolicy | undefined {
         try {
             const node = NodeRegistry.getInstance().getNode(nodeId);
             if (node && node.type !== 'local') return undefined;
         } catch {
-            // A registry that cannot answer still leaves the render below free
-            // to fail closed; do not turn it into "not evaluated".
+            // A registry that cannot answer still leaves the evaluation below
+            // free to fail closed; do not turn it into "not evaluated".
         }
-        try {
-            // resolveUpdatePolicyPair already bounds the whole evaluation; a
-            // second timeout here would race it into the outer catch, which is
-            // the one path that must not keep a stale allow.
-            const pair = await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' });
-            return toUnattendedStatusPolicy(pair);
-        } catch (error) {
-            console.warn(
-                '[ImageUpdateService] update policy unavailable for %s: %s',
-                sanitizeForLog(stackName),
-                sanitizeForLog(getErrorMessage(error, 'unknown')),
-            );
-            return { decision: 'skip', ineligible: [] };
-        }
+        const labels = facts.model.renderable ? facts.labels : null;
+        return toUnattendedStatusPolicy(evaluateUpdatePolicyPair(labels, stackName, { scope: 'stack' }));
     }
 
     public async recordRemoteCheckFailure(nodeId: number, stack: string, generation: number): Promise<void> {
@@ -1331,6 +1490,7 @@ export class ImageUpdateService {
         facts: ImageUpdateStackFacts,
         imageResults: Map<string, ImageCheckResult>,
         generation: number,
+        options?: { verification?: boolean },
     ): Promise<StackRecheckResult> {
         const db = DatabaseService.getInstance();
         const model = facts.model;
@@ -1353,10 +1513,20 @@ export class ImageUpdateService {
             return { outcome: 'verification_failed', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
         }
         const prior = new Map(db.getStackServicesJson(nodeId, facts.name).map(service => [service.service, service]));
+        const directives = directivesFromFacts(facts);
         const services = facts.services.map(service => reduceServiceStatus(
             service.name, service.declaredImage, service.runtimeImages, imageResults, prior.get(service.name),
+            directiveFor(directives, service.name),
         ).status);
         const checkStatus = aggregateServiceCheckStatus(services);
+        const remoteBuildServices = new Set(facts.services.filter(spec => spec.hasBuild).map(spec => spec.name));
+        const verifiedServices = options?.verification
+            ? services.filter(service => !remoteBuildServices.has(service.service))
+            : services;
+        const verificationCheckStatus = options?.verification
+            ? aggregateServiceCheckStatus(verifiedServices)
+            : checkStatus;
+        const verificationHasUpdate = verifiedServices.some(service => service.hasUpdate);
         const hasUpdate = services.some(service => service.hasUpdate);
         const lastError = stackStatusLastError(services);
         const committed = await this.withStackWriteLock(nodeId, facts.name, generation, gen => {
@@ -1372,10 +1542,43 @@ export class ImageUpdateService {
                 );
             }
         });
-        if (!committed || checkStatus !== 'ok') {
+        if (!committed || verificationCheckStatus !== 'ok') {
             return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
         }
-        return hasUpdate
+        // Hub-owned verification also reads the raw evidence: the target's
+        // label filter decides what is reported, never whether the pull moved.
+        if (options?.verification) {
+            const pulledRefs = new Set(facts.services
+                .filter(service => !service.hasBuild)
+                .flatMap(service => [
+                    ...(service.declaredImage ? [service.declaredImage] : []), ...service.runtimeImages,
+                ]));
+            let evidenceUnavailable = false;
+            let digestRemains = false;
+            for (const image of facts.images) {
+                if (!pulledRefs.has(image.ref)) continue;
+                if (image.ref.includes('@') || image.emptyReason === 'not_checkable') continue;
+                const raw = imageResults.get(image.ref);
+                if (!raw) {
+                    evidenceUnavailable = true;
+                    continue;
+                }
+                const rawStatus = normalizeImageCheckStatus(raw);
+                if (rawStatus === 'not_checkable') continue;
+                if (rawStatus !== 'ok' || raw.detection?.digestError) {
+                    evidenceUnavailable = true;
+                    continue;
+                }
+                if (raw.digestUpdate) digestRemains = true;
+            }
+            if (evidenceUnavailable) {
+                return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
+            }
+            if (digestRemains) {
+                return { outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING };
+            }
+        }
+        return verificationHasUpdate
             ? { outcome: 'still_present', warning: UPDATE_STILL_PRESENT_WARNING }
             : { outcome: 'cleared', warning: null };
     }
@@ -1510,6 +1713,8 @@ export class ImageUpdateService {
     private async writeStackUpdateStatus(
         nodeId: number,
         stackName: string,
+        facts: EffectiveStackFacts | null,
+        directives: DetectionDirectives,
         images: Set<string>,
         imageUpdateMap: Map<string, ImageCheckResult>,
         previousState: Record<string, boolean>,
@@ -1518,28 +1723,24 @@ export class ImageUpdateService {
         db: DatabaseService,
         generation: number,
     ): Promise<{ hasUpdate: boolean; notifyMessage: string; committed: boolean }> {
-        const model = await buildEffectiveServiceModel(nodeId, stackName);
-        if (model.renderable) {
+        const model = facts?.model;
+        if (facts && model?.renderable) {
             const priorByService = new Map(
                 DatabaseService.getInstance().getStackServicesJson(nodeId, stackName).map((s) => [s.service, s]),
             );
             const runtimeByService = this.runtimeImagesByService(stackName, containers);
-            const reductions = model.services.map((spec) => reduceServiceStatus(
-                spec.name,
-                spec.declaredImage,
-                runtimeByService.get(spec.name) ?? [],
-                imageUpdateMap,
-                priorByService.get(spec.name),
-            ));
-            const services = reductions.map((r) => r.status);
+            const services = reduceModelServices(
+                model.services, runtimeByService, imageUpdateMap, priorByService, directives,
+            );
             const checkStatus = aggregateServiceCheckStatus(services);
             const hasUpdate = services.some((s) => s.hasUpdate);
             const lastError = stackStatusLastError(services);
             const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
             // A node-wide check answers the same question a single-stack recheck
-            // does, so it records the same unattended decision. Without this a
-            // full refresh left the Updates view with no policy note.
-            const unattendedPolicy = await this.unattendedPolicyForStatus(nodeId, stackName);
+            // does, so it records the same unattended decision, from the same
+            // render. Without this a full refresh left the Updates view with no
+            // policy note.
+            const unattendedPolicy = this.unattendedPolicyForStatus(nodeId, stackName, facts);
 
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
                 if (checkStatus === 'failed') {
@@ -1682,17 +1883,7 @@ export class ImageUpdateService {
             + ` status=${detection.checkStatus}${nextSuffix}`,
         );
 
-        if (detection.checkStatus === 'not_checkable') {
-            return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
-        }
-
-        return {
-            hasUpdate: detection.hasUpdate,
-            digestUpdate: detection.digestUpdate,
-            tagUpdate: detection.tagUpdate,
-            checkStatus: detection.checkStatus,
-            ...(detection.reason ? { error: detection.reason } : {}),
-        };
+        return checkResultFromDetection(detection);
     }
 }
 

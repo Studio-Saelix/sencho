@@ -16,7 +16,11 @@ vi.mock('./stack/StackActivityTimeline', () => ({
 // off so the panel surface stays exactly what these tests assert against. The
 // active node is mutable so the footer-link tests can simulate a remote node.
 const { nodeState } = vi.hoisted(() => ({
-  nodeState: { activeNode: { id: 1 } as unknown, unsupportedCapabilities: undefined as string[] | undefined },
+  nodeState: {
+    activeNode: { id: 1 } as unknown,
+    unsupportedCapabilities: undefined as string[] | undefined,
+    nodeMeta: new Map<number, { capabilities: string[] }>(),
+  },
 }));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
@@ -27,6 +31,7 @@ vi.mock('@/context/NodeContext', () => ({
     hasCapability: (capability: string) => nodeState.unsupportedCapabilities === undefined
       ? false
       : !nodeState.unsupportedCapabilities.includes(capability),
+    nodeMeta: nodeState.nodeMeta,
   }),
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
@@ -252,6 +257,36 @@ describe('StackAnatomyPanel update banner', () => {
     await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
     expect(screen.getByText((t) => typeof t === 'string' && t.includes('newer tag') && t.includes('edit Compose pin'))).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'apply' })).not.toBeInTheDocument();
+  });
+
+  it('shows the service changelog link and Copy skip label in the banner', async () => {
+    nodeState.nodeMeta.set(1, { capabilities: ['sencho-label-detection-v1'] });
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [{
+            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor', check_status: 'ok',
+            changelog_url: 'https://nginx.org/en/CHANGES',
+          }],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.26',
+            semver_bump: 'minor', update_kind: 'tag', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false, check_status: 'ok',
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.getByTestId('update-changelog-link')).toHaveAttribute('href', 'https://nginx.org/en/CHANGES');
+    expect(screen.getByTestId('update-copy-skip-label')).toHaveAttribute('title', 'io.sencho.update.ignore: "1.26"');
+    nodeState.nodeMeta.clear();
   });
 
   it('says the node checks the installed image when it cannot evaluate a candidate', async () => {
@@ -1042,7 +1077,7 @@ describe('StackAnatomyPanel hidden helper chips', () => {
     senchoLabels: {
       renderable: true,
       services: Object.fromEntries(
-        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, update: null, notifyRoute: null, ...over }]),
+        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, update: null, notifyRoute: null, updateCheck: true, updateIgnore: [], updateChangelog: null, ...over }]),
       ),
       entries: [],
     },

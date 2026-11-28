@@ -11,18 +11,28 @@
  * mints the one-use observation token bound to the canonical facts hash.
  */
 import DockerController from './DockerController';
-import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { readEffectiveStackFacts } from './effectiveServiceModel';
 import { collectTargetImageAuthority } from './imageUpdateTargetAuthority';
 import {
     hashImageUpdateFacts,
     IMAGE_UPDATE_FACTS_IMAGE_LIMIT,
     type ImageUpdateBoundFacts,
+    type ImageUpdateDetectWireResult,
     type ImageUpdateImageFacts,
     type ImageUpdateLocalFacts,
     type ImageUpdateStackFacts,
 } from './imageUpdateFacts';
 import { ImageUpdateObservationService } from './ImageUpdateObservationService';
-import { resolveUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
+import { evaluateUpdatePolicyPair, toUnattendedStatusPolicy } from './updatePolicy';
+import {
+    checkableRefsForStack,
+    directivesFromResolution,
+    directivesToFacts,
+    NO_DETECTION_DIRECTIVES,
+    uncheckedRefs,
+    type DetectionDirectives,
+} from './updateDetectionDirectives';
+import type { SenchoLabelResolution } from '../helpers/senchoLabels';
 import { configIdForLocalBuild, parseImageRef, selectLocalRepoDigests } from './registry-api';
 import { NodeRegistry } from './NodeRegistry';
 import { withTimeout } from '../utils/withTimeout';
@@ -40,8 +50,40 @@ export class ImageUpdateFactsError extends Error {
     }
 }
 
+/** What a hub asked the facts for, beyond the canonical evidence. */
+export interface ImageUpdateFactsOptions {
+    /** The unattended decision (`io.sencho.update`). */
+    includePolicy?: boolean;
+    /** The update detection labels, and the candidate digest on each result. */
+    detection?: boolean;
+    /**
+     * Probe every image, including those only checks-off services use. Sent for
+     * the pre-flight of an unattended update, which verifies every image it
+     * would pull. Meaningful only with `detection`.
+     */
+    probeAll?: boolean;
+}
+
 const COMPOSE_PROJECT_LABEL = 'com.docker.compose.project';
 const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
+
+/** Legacy response shape: the candidate digest exists only when detection was requested. */
+function stripCandidateDigest(result: ImageUpdateDetectWireResult): ImageUpdateDetectWireResult {
+    const { candidateDigest: _projected, ...rest } = result;
+    return rest;
+}
+
+function projectLegacyImage(image: ImageUpdateImageFacts): ImageUpdateImageFacts {
+    if (image.authority.source === 'unchecked') return image;
+    return {
+        ...image,
+        authority: {
+            source: image.authority.source,
+            result: stripCandidateDigest(image.authority.result),
+            observedAt: image.authority.observedAt,
+        },
+    };
+}
 
 export class ImageUpdateFactsService {
     private static instance: ImageUpdateFactsService | null = null;
@@ -66,13 +108,25 @@ export class ImageUpdateFactsService {
 
     /** No-probe canonical snapshot. Safe to call under the stack write lock. */
     async readLocal(nodeId: number, stackName: string): Promise<ImageUpdateBoundFacts> {
+        return (await this.readLocalWithLabels(nodeId, stackName)).bound;
+    }
+
+    /** The canonical snapshot and the label resolution of the same render. */
+    private async readLocalWithLabels(
+        nodeId: number,
+        stackName: string,
+    ): Promise<{ bound: ImageUpdateBoundFacts; labels: SenchoLabelResolution | null; directives: DetectionDirectives }> {
         const node = NodeRegistry.getInstance().getNode(nodeId);
         if (!node || node.type !== 'local') {
             throw new ImageUpdateFactsError('IMAGE_UPDATE_FACTS_NOT_FOUND', 404, 'Local node not found');
         }
-        const model = await buildEffectiveServiceModel(nodeId, stackName);
+        const { model, labels } = await readEffectiveStackFacts(nodeId, stackName);
         if (!model.renderable) {
-            return { model: { renderable: false, code: model.code, error: model.error }, services: [], images: [] };
+            return {
+                bound: { model: { renderable: false, code: model.code, error: model.error }, services: [], images: [] },
+                labels: null,
+                directives: NO_DETECTION_DIRECTIVES,
+            };
         }
 
         const docker = DockerController.getInstance(nodeId);
@@ -106,46 +160,93 @@ export class ImageUpdateFactsService {
             );
         }
 
-        return { model: { renderable: true }, services, images: await this.inspectRefs(docker, [...refs]) };
+        const directives = directivesFromResolution(labels);
+        const directiveFacts = directivesToFacts(directives).filter(entry =>
+            model.services.some(service => service.name === entry.service));
+        return {
+            bound: {
+                model: { renderable: true },
+                services,
+                images: await this.inspectRefs(docker, [...refs]),
+                // Part of the canonical evidence hash: a label-only edit between
+                // observation and execution makes the observation stale.
+                ...(directiveFacts.length > 0 ? { directives: directiveFacts } : {}),
+            },
+            labels,
+            directives,
+        };
     }
 
     async collect(
         nodeId: number,
         stackName: string,
         requestNonce: string,
-        includePolicy = false,
+        options: ImageUpdateFactsOptions = {},
     ): Promise<ImageUpdateStackFacts> {
-        const bound = await this.readLocal(nodeId, stackName);
+        const { bound, labels, directives } = await this.readLocalWithLabels(nodeId, stackName);
         const observationRevision = this.nextRevision();
         const factsHash = hashImageUpdateFacts(bound);
-        const images = await this.probeAuthorities(bound);
+        const unchecked = options.detection && !options.probeAll
+            ? uncheckedRefs(bound.services.map(service => ({
+                name: service.name,
+                refs: [...(service.declaredImage ? [service.declaredImage] : []), ...service.runtimeImages],
+            })), directives)
+            : new Set<string>();
+        const probed = await this.probeAuthorities(bound, unchecked);
+        // Bind the refs the current labels leave reportable. The candidate
+        // digest is checked under the lock, so a hub with registry credentials
+        // is not refused just because this target's probe was anonymous.
+        const triggerRefs = checkableRefsForStack(bound.services, directives);
+        // The candidate digest is projected out unless the hub asked for
+        // detection, so an older hub's strict parser never sees a key it does not know.
+        const images = options.detection ? probed : probed.map(projectLegacyImage);
         const observationToken = ImageUpdateObservationService.getInstance().issue({
             contractVersion: 1, requestNonce, stack: stackName,
-            observationRevision, factsHash,
+            observationRevision, factsHash, triggerRefs,
         });
         // The decision is evaluated here, where the Compose model lives, so the
         // hub records the same answer an unattended run on this node takes. A
         // model this observation could not render is already a definite skip;
         // re-rendering it would let a racing file change disagree with the
         // facts the hub is about to record.
-        const unattendedPolicy = includePolicy
+        // It comes from the same render as the facts, so the decision and the
+        // evidence cannot describe two different files.
+        const unattendedPolicy = options.includePolicy
             ? (bound.model.renderable
-                ? toUnattendedStatusPolicy(await resolveUpdatePolicyPair(nodeId, stackName, { scope: 'stack' }))
+                ? toUnattendedStatusPolicy(evaluateUpdatePolicyPair(labels, stackName, { scope: 'stack' }))
                 : { decision: 'skip' as const, ineligible: [] })
             : undefined;
+        const known = new Set(bound.services.map(service => service.name));
+        // `bound.directives` is binding evidence only; the response carries the
+        // field solely when the request asked for detection, so a legacy parser
+        // never sees a key it does not know.
+        const { directives: _bindingDirectives, ...boundFacts } = bound;
         return {
-            name: stackName, observationRevision, observationToken, ...bound, images,
+            name: stackName, observationRevision, observationToken, ...boundFacts, images,
             ...(unattendedPolicy ? { unattendedPolicy } : {}),
+            ...(options.detection
+                ? { directives: directivesToFacts(directives).filter(entry => known.has(entry.service)) }
+                : {}),
         };
     }
 
-    private async probeAuthorities(bound: ImageUpdateBoundFacts): Promise<ImageUpdateImageFacts[]> {
+    /**
+     * Target-credential authority per image. A ref only checks-off services use
+     * is left unchecked without a registry request. The result keeps the
+     * candidate digest here because the observation binds the trigger decision;
+     * `collect` projects it out for a legacy response.
+     */
+    private async probeAuthorities(
+        bound: ImageUpdateBoundFacts,
+        unchecked: ReadonlySet<string>,
+    ): Promise<ImageUpdateImageFacts[]> {
         const probed: ImageUpdateImageFacts[] = [];
         for (const image of bound.images) {
-            probed.push({
-                ...image,
-                authority: await collectTargetImageAuthority(image),
-            });
+            if (unchecked.has(image.ref)) {
+                probed.push({ ...image, authority: { source: 'unchecked', result: null, observedAt: Date.now() } });
+                continue;
+            }
+            probed.push({ ...image, authority: await collectTargetImageAuthority(image) });
         }
         return probed;
     }

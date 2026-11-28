@@ -9,7 +9,12 @@ export interface UpdateVerification {
 }
 
 export interface HubVerificationTransport {
-  recheckRemoteStack(nodeId: number, stack: string, signal: AbortSignal): Promise<{ warning?: string | null }>;
+  recheckRemoteStack(
+    nodeId: number,
+    stack: string,
+    signal: AbortSignal,
+    options?: { verification?: boolean },
+  ): Promise<{ warning?: string | null }>;
 }
 
 export interface HubVerificationInput {
@@ -54,7 +59,9 @@ export async function awaitHubPostUpdateVerification(input: HubVerificationInput
         return skippedVerification('target_local');
       }
       if (controller.signal.aborted) return { status: 'verification_incomplete', source: 'hub_authority', completedAt: Date.now(), detail: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
-      const result = await input.transport.recheckRemoteStack(input.nodeId, input.stack, controller.signal);
+      const result = await input.transport.recheckRemoteStack(
+        input.nodeId, input.stack, controller.signal, { verification: true },
+      );
       return { status: result.warning ? 'verification_incomplete' : 'verified', source: 'hub_authority', completedAt: Date.now(), detail: result.warning ?? null };
     } catch (error) {
       console.warn('[HubVerification] Post-update verification failed:', error);

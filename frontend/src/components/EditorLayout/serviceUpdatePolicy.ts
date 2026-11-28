@@ -1,8 +1,12 @@
 import {
+  SENCHO_UPDATE_CHECK_LABEL,
+  SENCHO_UPDATE_IGNORE_LABEL,
   SENCHO_UPDATE_LABEL,
+  updateCheckOf,
   updatePolicyOf,
   type SenchoLabelResolution,
 } from '@/lib/senchoLabels';
+import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 /**
  * How the service's `io.sencho.update` label reads next to its links, or null
@@ -48,4 +52,32 @@ export function serviceUpdateButtonState(
     disabled: true,
     title: `${SENCHO_UPDATE_LABEL} is set to disabled in the Compose file, so updates are off for this service. Change the label to allow them.`,
   };
+}
+
+/**
+ * How the service's update detection labels read next to its links. Checks off
+ * comes from the label itself; a skip shows only when the last check actually
+ * skipped a pending update, so the chip never claims a skip that matched
+ * nothing.
+ */
+export function detectionChips(
+  resolution: SenchoLabelResolution | null | undefined,
+  service: string | undefined,
+  status: Pick<StackServiceUpdateStatus, 'detection'> | undefined,
+): { key: 'off' | 'ignored'; label: string; title: string }[] {
+  const chips: { key: 'off' | 'ignored'; label: string; title: string }[] = [];
+  if (!updateCheckOf(resolution, service)) {
+    chips.push({
+      key: 'off',
+      label: 'Update checks: off',
+      title: `${SENCHO_UPDATE_CHECK_LABEL}: false. Sencho does not check this service's image for updates. A stack update still pulls its registry image; a build-backed service is built instead.`,
+    });
+  } else if (status?.detection === 'ignored') {
+    chips.push({
+      key: 'ignored',
+      label: 'Update skipped',
+      title: `${SENCHO_UPDATE_IGNORE_LABEL} skips the pending update for this service. A newer update reports again. A stack update still pulls its registry image; a build-backed service is built instead.`,
+    });
+  }
+  return chips;
 }

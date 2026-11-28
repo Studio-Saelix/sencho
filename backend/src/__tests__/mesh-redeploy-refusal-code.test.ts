@@ -65,7 +65,7 @@ describe('MeshService.triggerRedeploy (registry delivery refusal)', () => {
         verificationMocks.recheck.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
         const svc = MeshService.getInstance();
         svc.triggerRedeploy(nodeId, stackName, 'admin');
-        await vi.waitFor(() => expect(verificationMocks.recheck).toHaveBeenCalledWith(nodeId, stackName, expect.any(AbortSignal)));
+        await vi.waitFor(() => expect(verificationMocks.recheck).toHaveBeenCalledWith(nodeId, stackName, expect.any(AbortSignal), { verification: true }));
         expect(svc.getActivity({ source: 'mesh' }).some(event => event.message === `mesh redeploy ok for ${stackName}`)).toBe(false);
         release({ warning: null });
         await vi.waitFor(() => expect(svc.getActivity({ source: 'mesh' }).some(event => event.message === `mesh redeploy ok for ${stackName}`)).toBe(true));

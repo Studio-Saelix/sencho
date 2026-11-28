@@ -95,7 +95,6 @@ function card(over: Partial<StackCard> = {}): StackCard {
         check_status: 'ok',
       },
       rollback_target: null,
-      changelog: 'Fixes. Security patch.',
     },
     ...over,
   };
@@ -108,7 +107,6 @@ function previewSummary(over: Record<string, unknown> = {}) {
     stack_name: 'redis',
     images: [],
     rollback_target: null,
-    changelog: null,
     summary: {
       has_update: false,
       primary_image: 'redis',
@@ -232,7 +230,6 @@ describe('verification preview helpers', () => {
       stack_name: 'redis',
       images: [],
       rollback_target: null,
-      changelog: null,
       summary: {
         has_update: true,
         primary_image: 'redis',
@@ -257,7 +254,6 @@ describe('verification preview helpers', () => {
       stack_name: 'redis',
       images: [],
       rollback_target: null,
-      changelog: null,
       summary: {
         has_update: false,
         primary_image: 'redis',
@@ -328,6 +324,22 @@ describe('verification preview helpers', () => {
   });
 });
 
+it('shows the service changelog link and Copy skip label on the phone card', () => {
+  mockNodeMeta.set(1, { capabilities: ['sencho-label-detection-v1'] });
+  const digest = `sha256:${'d'.repeat(64)}`;
+  const base = card();
+  render(<MobileReadinessCard card={card({
+    preview: {
+      ...base.preview!,
+      images: [{ ...base.preview!.images[0], candidate_digest: digest, changelog_url: 'https://example.com/nextcloud/releases' }],
+    },
+  })} onApply={vi.fn()} />);
+  expect(screen.getByTestId('update-changelog-link')).toHaveAttribute('href', 'https://example.com/nextcloud/releases');
+  expect(screen.getByTestId('update-copy-skip-label')).toHaveAttribute('title', `io.sencho.update.ignore: "${digest}"`);
+  expect(screen.queryByText(/No changelog available/)).toBeNull();
+  mockNodeMeta.clear();
+});
+
 it('enables Apply for a safe, non-blocked update', async () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
@@ -360,7 +372,6 @@ it('offers Open stack editor instead of Apply for tag-only advisory updates', ()
             check_status: 'ok',
           },
           rollback_target: null,
-          changelog: 'Fixes.',
         },
       })}
       onApply={vi.fn()}
@@ -390,7 +401,6 @@ function tagOnlyPhonePreview(
       ...summary,
     },
     rollback_target: null,
-    changelog: 'Fixes.',
   };
 }
 
@@ -454,7 +464,7 @@ it('offers Open stack editor, with the reason, when the update is blocked (major
     <MobileReadinessCard
       card={card({
         preview: {
-          stack_name: 'gitea', images: [], rollback_target: null, changelog: 'Breaking.',
+          stack_name: 'gitea', images: [], rollback_target: null,
           summary: {
             has_update: true, primary_image: 'gitea', current_tag: '1.21', next_tag: '1.22',
             semver_bump: 'major', update_kind: 'tag', blocked: true, blocked_reason: 'Major version bump',
@@ -473,7 +483,7 @@ it('disables Apply for verification-only preview (no confirmed update)', () => {
     <MobileReadinessCard
       card={card({
         preview: {
-          stack_name: 'redis', images: [], rollback_target: null, changelog: null,
+          stack_name: 'redis', images: [], rollback_target: null,
           summary: {
             has_update: false,
             primary_image: 'redis',
@@ -502,7 +512,7 @@ it('holds full-stack Apply for review when one image confirms an update and anot
     <MobileReadinessCard
       card={card({
         preview: {
-          stack_name: 'mixed', rollback_target: null, changelog: null,
+          stack_name: 'mixed', rollback_target: null,
           images: [
             { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, digest_update: true, semver_bump: 'patch', digest_error: null },
             { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, digest_update: false, semver_bump: 'none', digest_error: 'Registry unreachable' },
@@ -542,7 +552,7 @@ it('shows the blocked (major) badge, not the review-required badge, when both ap
     <MobileReadinessCard
       card={card({
         preview: {
-          stack_name: 'gitea', images: [], rollback_target: null, changelog: null,
+          stack_name: 'gitea', images: [], rollback_target: null,
           summary: {
             has_update: true, primary_image: 'gitea', current_tag: '1.21', next_tag: '2.0',
             semver_bump: 'major', update_kind: 'tag', blocked: true, blocked_reason: 'Major version bump',
@@ -604,7 +614,6 @@ it('offers per-service Apply when build-only companions make the stack multi-ser
             check_status: 'ok',
           },
           rollback_target: null,
-          changelog: 'Fixes.',
         },
       })}
     />,
@@ -868,7 +877,6 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
         check_status: 'ok' as const,
       },
       rollback_target: null,
-      changelog: 'Fixes.',
     };
     const refreshedPreview = {
       ...multiPreview,
@@ -943,7 +951,6 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       ],
       summary: { has_update: true, primary_image: 'nextcloud', current_tag: '27', next_tag: '27', semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null, check_status: 'ok' },
       rollback_target: null,
-      changelog: null,
     };
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
@@ -1007,7 +1014,6 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       verification_error: null,
     },
     rollback_target: null,
-    changelog: 'Fixes.',
   };
 
   // The full-stack update goes through the shared executor, which posts with apiFetch.
@@ -1290,7 +1296,6 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           verification_error: 'Registry unreachable',
         },
         rollback_target: null,
-        changelog: null,
       }),
     });
     vi.mocked(requestServiceUpdate).mockResolvedValue({
@@ -1413,7 +1418,6 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               verification_error: null,
             },
             rollback_target: null,
-            changelog: null,
           }),
         });
       }
@@ -1499,7 +1503,6 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               verification_error: 'Could not verify digest',
             },
             rollback_target: null,
-            changelog: null,
           }),
         });
       }
@@ -1569,7 +1572,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
               check_status: 'ok', verification_failed: false, verification_error: null,
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -1584,7 +1587,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
               rebuild_available: false, verification_failed: true, verification_error: 'verify failed',
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -1642,7 +1645,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
               rebuild_available: false, check_status: 'ok', verification_failed: false, verification_error: null,
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -1691,7 +1694,6 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
         ...summary,
       },
       rollback_target: null,
-      changelog: null,
     };
   }
 
@@ -1885,7 +1887,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
               // verification_failed and rebuild_available intentionally omitted (legacy remote shape).
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -1936,7 +1938,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
               // check_status, verification_failed, and rebuild_available intentionally omitted (legacy remote shape).
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -1987,7 +1989,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
               semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
               rebuild_available: false, verification_failed: true, verification_error: 'Could not verify digest',
             },
-            rollback_target: null, changelog: null,
+            rollback_target: null,
           }),
         });
       }
@@ -2157,6 +2159,15 @@ describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
       images: [{ check_status: 'ok' }],
       summary: { has_update: false },
     })).toBe(true);
+  });
+
+  it('retains a negative preview whose image a detection label hid or cleared', () => {
+    for (const detection of ['ignored', 'off'] as const) {
+      expect(isAuthoritativeNegativePreview({
+        images: [{ check_status: 'ok', detection }],
+        summary: { has_update: false, check_status: 'ok' },
+      })).toBe(false);
+    }
   });
 
   it('retains when image check_status is missing', () => {

@@ -56,6 +56,8 @@ export interface ClassifyImageRemediationInput {
 interface IndexedService {
   stackName: string;
   service: StackServiceStatus;
+  /** The service ref the finding image matched, so a skip is attributed to it. */
+  matchedRef: string;
   checkedAt: number;
 }
 
@@ -78,7 +80,7 @@ export function buildUpdateServiceIndex(
       for (const ref of collectServiceRefs(service)) {
         const key = normalizeImageRef(ref);
         if (!key) continue;
-        const entry: IndexedService = { stackName, service, checkedAt: detail.checkedAt };
+        const entry: IndexedService = { stackName, service, matchedRef: ref, checkedAt: detail.checkedAt };
         const list = index.get(key);
         if (list) list.push(entry);
         else index.set(key, [entry]);
@@ -86,6 +88,22 @@ export function buildUpdateServiceIndex(
     }
   }
   return index;
+}
+
+/**
+ * True when the service's own check found a newer image for this ref: a
+ * service-wide reported update, or a skip whose ref-level evidence names this
+ * ref. A skip hides the update from reporting; it does not mean upstream has
+ * nothing newer, so it is never read as waiting on upstream. The skip is
+ * matched to the ref that carried it, never to every image the service runs.
+ */
+function newerImageExists(service: StackServiceStatus, ref: string): boolean {
+  return service.hasUpdate || (service.ignoredRefs?.includes(ref) ?? false);
+}
+
+/** A skip row written before ref-level evidence existed cannot prove which ref it cleared. */
+function hasUnattributedSkip(service: StackServiceStatus): boolean {
+  return service.detection === 'ignored' && service.ignoredRefs === undefined;
 }
 
 function isStackFresh(checkedAt: number, now: number, freshnessWindowMs: number): boolean {
@@ -105,14 +123,15 @@ function classifyMatches(
   let anyUncertain = false;
   let anyAuthoritativeNegative = false;
 
-  for (const { service, checkedAt } of matches) {
+  for (const { service, matchedRef, checkedAt } of matches) {
     if (service.checkStatus === 'not_checkable') continue;
     sawCheckable = true;
-    if (service.checkStatus !== 'ok' || !isStackFresh(checkedAt, now, freshnessWindowMs)) {
+    if (service.checkStatus !== 'ok' || !isStackFresh(checkedAt, now, freshnessWindowMs)
+      || hasUnattributedSkip(service)) {
       anyUncertain = true;
       continue;
     }
-    if (service.hasUpdate) anyConfirmedUpdate = true;
+    if (newerImageExists(service, matchedRef)) anyConfirmedUpdate = true;
     else anyAuthoritativeNegative = true;
   }
 
@@ -151,8 +170,8 @@ function confirmedUpdateServices(
   now: number,
 ): UpdateServiceTarget[] {
   return matches
-    .filter(({ service, checkedAt }) => service.checkStatus === 'ok'
-      && service.hasUpdate
+    .filter(({ service, matchedRef, checkedAt }) => service.checkStatus === 'ok'
+      && newerImageExists(service, matchedRef)
       && isStackFresh(checkedAt, now, freshnessWindowMs))
     .map(({ stackName, service }) => ({ imageRef, stackName, serviceName: service.service }));
 }

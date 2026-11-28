@@ -307,31 +307,45 @@ describe('policyLabelRowState', () => {
     ...(state ? { behavior: { state } } : {}),
   });
 
+  const BOTH = { policy: true, detection: true };
+  const NEITHER = { policy: false, detection: false };
+
   it('reads the row behavior for a node that evaluates the labels', () => {
-    expect(policyLabelRowState(row('io.sencho.update', 'active'), true)).toBe('active');
+    expect(policyLabelRowState(row('io.sencho.update', 'active'), BOTH)).toBe('active');
     // An unrecognized value is reported as invalid by the node, which is the Ignored state.
-    expect(policyLabelRowState(row('io.sencho.update', 'invalid'), true)).toBe('ignored');
-    expect(policyLabelRowState(row('io.sencho.notify.route', 'active'), true)).toBe('active');
+    expect(policyLabelRowState(row('io.sencho.update', 'invalid'), BOTH)).toBe('ignored');
+    expect(policyLabelRowState(row('io.sencho.notify.route', 'active'), BOTH)).toBe('active');
     // A copy the audit reports as inert carries no policy state of its own.
-    expect(policyLabelRowState(row('io.sencho.update', 'inert'), true)).toBeNull();
+    expect(policyLabelRowState(row('io.sencho.update', 'inert'), BOTH)).toBeNull();
   });
 
   it('never claims a state for a label outside the behavioral pair', () => {
-    expect(policyLabelRowState(row('io.sencho.url', 'active'), true)).toBeNull();
-    expect(policyLabelRowState(row('traefik.enable', 'active'), true)).toBeNull();
+    expect(policyLabelRowState(row('io.sencho.url', 'active'), BOTH)).toBeNull();
+    expect(policyLabelRowState(row('traefik.enable', 'active'), BOTH)).toBeNull();
   });
 
   it('reports an older node as not evaluating the label, whatever the row claims', () => {
-    expect(policyLabelRowState(row('io.sencho.update', 'active'), false)).toBe('not-evaluated');
-    expect(policyLabelRowState(row('io.sencho.notify.route', 'invalid'), false)).toBe('not-evaluated');
+    expect(policyLabelRowState(row('io.sencho.update', 'active'), NEITHER)).toBe('not-evaluated');
+    expect(policyLabelRowState(row('io.sencho.notify.route', 'invalid'), NEITHER)).toBe('not-evaluated');
     expect(POLICY_LABEL_NOT_EVALUATED_COPY).toContain('does not evaluate this label');
   });
 
+  it('answers each label family from its own capability', () => {
+    const policyOnly = { policy: true, detection: false };
+    expect(policyLabelRowState(row('io.sencho.update', 'active'), policyOnly)).toBe('active');
+    for (const key of ['io.sencho.update.check', 'io.sencho.update.ignore', 'io.sencho.update.changelog']) {
+      // An older node reports the detection keys as unrecognized; the row reads Not evaluated.
+      expect(policyLabelRowState(row(key, 'unsupported'), policyOnly)).toBe('not-evaluated');
+      expect(policyLabelRowState(row(key, 'active'), BOTH)).toBe('active');
+      expect(policyLabelRowState(row(key, 'invalid'), BOTH)).toBe('ignored');
+    }
+  });
+
   it('shows the routing note only for an active notify.route row', () => {
-    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), true)).toBe(true);
-    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'invalid'), true)).toBe(false);
-    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), false)).toBe(false);
-    expect(showsNotifyRouteMatch(row('io.sencho.update', 'active'), true)).toBe(false);
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), BOTH)).toBe(true);
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'invalid'), BOTH)).toBe(false);
+    expect(showsNotifyRouteMatch(row('io.sencho.notify.route', 'active'), NEITHER)).toBe(false);
+    expect(showsNotifyRouteMatch(row('io.sencho.update', 'active'), BOTH)).toBe(false);
     expect(NOTIFY_ROUTE_MATCH_COPY).toBe('Matched by the routing rules of the instance that runs this stack.');
   });
 });

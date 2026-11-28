@@ -1,18 +1,10 @@
 import DockerController from './DockerController';
-import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
-import {
-    extractServiceImagesFromCompose,
-    loadDotEnv,
-    loadEffectiveServiceImages,
-    loadStackBuildServices,
-    type ComposeServiceImage,
-} from './ImageUpdateService';
 import {
     configIdForLocalBuild,
     parseImageRef,
     selectLocalRepoDigests,
-    compareLocalToRemoteTag,
+    compareLocalToRemoteTagDetailed,
     listRegistryTagsResult,
     type ParsedRef,
     type RegistryCredentials,
@@ -33,6 +25,15 @@ import {
     PREVIEW_TAG_LIST_PAGE_SIZE,
     type TagEnumOutcome,
 } from './imageUpdateDetect';
+import { readEffectiveStackFacts } from './effectiveServiceModel';
+import {
+    applyIgnore,
+    directiveFor,
+    directivesFromResolution,
+    ignoreEntryText,
+    type ServiceDetectionDirective,
+    type ServiceDetectionState,
+} from './updateDetectionDirectives';
 
 export type { SemverBump, PreviewImageCheckStatus, TagEnumOutcome, ListRegistryTagsResultFn };
 export {
@@ -79,6 +80,21 @@ export interface UpdatePreviewImage {
      * masking never hides an unverified image from the mixed-state gate.
      */
     digest_error: string | null;
+    /**
+     * What the service's update detection labels did: `off` when its checks
+     * are off (the image was not checked for it), `ignored` when every pending
+     * update was skipped. Absent when no label changed the result.
+     */
+    detection?: ServiceDetectionState;
+    /**
+     * The registry's current digest for the tag when this is a same-tag
+     * rebuild: the entry that skips it in `io.sencho.update.ignore`.
+     */
+    candidate_digest?: string | null;
+    /** The service's `io.sencho.update.changelog` link, on a pending update only. */
+    changelog_url?: string | null;
+    /** The entries already saved in the service's `io.sencho.update.ignore` label. */
+    ignore_entries?: string[];
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -137,32 +153,6 @@ function maxBump(a: SemverBump, b: SemverBump): SemverBump {
     return rank(a) >= rank(b) ? a : b;
 }
 
-async function loadStackImages(
-    nodeId: number,
-    stackName: string,
-): Promise<ComposeServiceImage[]> {
-    // A multi-file / context-dir Git stack resolves images from the effective
-    // merged model so override-only services are included; single-file stacks
-    // fall through to the root-compose parse below.
-    const effective = await loadEffectiveServiceImages(nodeId, stackName);
-    if (effective) return effective;
-
-    const fs = FileSystemService.getInstance(nodeId);
-    const composeContent = await fs.getStackContent(stackName);
-    let envVars: Record<string, string> = {};
-    try {
-        const envContent = await fs.getEnvContent(stackName);
-        envVars = loadDotEnv(envContent);
-    } catch {
-        // No env file - fall back to process.env only
-    }
-    const merged: Record<string, string> = { ...envVars };
-    for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined) merged[k] = v;
-    }
-    return extractServiceImagesFromCompose(composeContent, merged);
-}
-
 export type LocalDigestEmptyReason = 'not_checkable' | 'inspect_failed' | 'unresolved';
 
 export interface LocalDigestInfo {
@@ -179,7 +169,7 @@ export interface LocalDigestInfo {
 
 export interface ComputePreviewDeps {
     getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
-    compareDigest: typeof compareLocalToRemoteTag;
+    compareDigest: typeof compareLocalToRemoteTagDetailed;
     listRegistryTagsResult: ListRegistryTagsResultFn;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
 }
@@ -202,7 +192,68 @@ function imageFromDetect(
         check_status: detected.checkStatus,
         check_error: detected.reason,
         digest_error: detected.digestError,
+        candidate_digest: detected.digestUpdate ? detected.candidateDigest : null,
     };
+}
+
+/**
+ * The image a checks-off service shows: not checked and never "up to date",
+ * but carrying the raw verification of the image in the pull roster. A failed
+ * digest lookup must stay visible to the full-stack gates even though the
+ * service reports nothing.
+ */
+function uncheckedServiceImage(
+    service: string,
+    base: UpdatePreviewImage,
+    detected: ImageUpdateDetectResult | null,
+): UpdatePreviewImage {
+    return {
+        ...(detected
+            ? imageFromDetect(service, base.image, base.current_tag, detected)
+            : { ...base }),
+        service,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        next_tag: null,
+        semver_bump: 'none',
+        candidate_digest: null,
+        changelog_url: null,
+        detection: 'off',
+    };
+}
+
+/**
+ * One service's view of an image's detection, under its detection directive:
+ * checks off show the image as not checked, skipped candidates are cleared,
+ * and the changelog link rides on a pending update. `detected` is null when
+ * the image never reached the registry, so there is nothing to skip.
+ */
+export function servicePreviewImage(
+    service: string,
+    base: UpdatePreviewImage,
+    detected: ImageUpdateDetectResult | null,
+    directive: ServiceDetectionDirective,
+): UpdatePreviewImage {
+    if (!directive.check) return uncheckedServiceImage(service, base, detected);
+    let image: UpdatePreviewImage = { ...base, service };
+    if (detected && directive.ignore.length > 0) {
+        const applied = applyIgnore(detected, directive.ignore, base.current_tag);
+        if (applied.ignored) {
+            image = {
+                ...imageFromDetect(service, base.image, base.current_tag, applied.result),
+                ...(applied.result.hasUpdate ? {} : { detection: 'ignored' as const }),
+            };
+        }
+    }
+    // The saved entries ride along so the Copy skip verb can keep them instead
+    // of replacing the label with only the newest candidate.
+    if (directive.ignore.length > 0) {
+        image = { ...image, ignore_entries: directive.ignore.map(ignoreEntryText) };
+    }
+    return image.has_update && directive.changelogUrl
+        ? { ...image, changelog_url: directive.changelogUrl }
+        : image;
 }
 
 function notCheckableImage(service: string, imageRef: string): UpdatePreviewImage {
@@ -243,9 +294,18 @@ export async function computeImagePreview(
     imageRef: string,
     deps: ComputePreviewDeps,
 ): Promise<UpdatePreviewImage> {
+    return (await computeImageDetection(service, imageRef, deps)).preview;
+}
+
+/** The preview of one image plus the detection behind it, or null when it never reached the registry. */
+async function computeImageDetection(
+    service: string,
+    imageRef: string,
+    deps: ComputePreviewDeps,
+): Promise<{ preview: UpdatePreviewImage; detected: ImageUpdateDetectResult | null }> {
     const parsed = parseImageRef(imageRef);
     if (!parsed) {
-        return notCheckableImage(service, imageRef);
+        return { preview: notCheckableImage(service, imageRef), detected: null };
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
@@ -255,17 +315,20 @@ export async function computeImagePreview(
     // funneled into detectImageUpdate's "no local digest" error path, which
     // would misreport it as a verification failure instead of not applicable.
     if (localInfo.emptyReason === 'not_checkable') {
-        return notCheckableImage(service, imageRef);
+        return { preview: notCheckableImage(service, imageRef), detected: null };
     }
     // Inspect failure and unresolved RepoDigests never reach the registry, and
     // detectImageUpdate's generic "no local digest" reason would blur these two
     // distinct causes together; keep the specific reason, matching what
     // ImageUpdateService.checkImage reports for the same two cases.
     if (localInfo.emptyReason === 'inspect_failed') {
-        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image');
+        return { preview: failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image'), detected: null };
     }
     if (localInfo.emptyReason === 'unresolved') {
-        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest');
+        return {
+            preview: failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest'),
+            detected: null,
+        };
     }
     const detected = await detectImageUpdate({
         localDigests: localInfo.digests,
@@ -279,7 +342,7 @@ export async function computeImagePreview(
             listRegistryTagsResult: deps.listRegistryTagsResult,
         },
     });
-    return imageFromDetect(service, imageRef, parsed.tag, detected);
+    return { preview: imageFromDetect(service, imageRef, parsed.tag, detected), detected };
 }
 
 function buildRollbackTarget(image: string, currentTag: string): string | null {
@@ -355,9 +418,11 @@ export function buildSummary(
 /** True when a preview is safe to clear sticky scanner state. */
 export function isAuthoritativeNegativePreview(preview: UpdatePreview): boolean {
     // Every declared image must be explicitly ok. Mixed ok + not_checkable must
-    // not clear sticky rows that may still track unresolved services.
+    // not clear sticky rows that may still track unresolved services. A label
+    // that hides or clears an update is not a negative either: deleting its row
+    // would erase the evidence Security reads for a skipped candidate.
     return preview.images.length > 0
-        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.images.every((i) => i.check_status === 'ok' && i.detection === undefined)
         && preview.summary.has_update === false;
 }
 
@@ -411,10 +476,19 @@ export class UpdatePreviewService {
             const { RemoteImageUpdateService } = await import('./RemoteImageUpdateService');
             return RemoteImageUpdateService.getInstance().getPreview(nodeId, stackName, AbortSignal.timeout(90_000));
         }
-        const [stackImages, buildServices] = await Promise.all([
-            loadStackImages(nodeId, stackName),
-            loadStackBuildServices(nodeId, stackName),
-        ]);
+        // One effective snapshot for the image roster, the build services and
+        // the labels, so the preview describes exactly what a whole-stack
+        // Compose update would pull and rebuild (includes and overrides alike).
+        const facts = await readEffectiveStackFacts(nodeId, stackName);
+        if (!facts.model.renderable) throw new Error(facts.model.error);
+        // A build-backed service is built, not pulled, so its registry image is
+        // not part of the update operation and must not hold or drive it.
+        const stackImages = facts.model.services.flatMap(service =>
+            service.declaredImage && !service.hasBuild
+                ? [{ service: service.name, image: service.declaredImage }]
+                : []);
+        const buildServices = facts.model.services.filter(service => service.hasBuild).map(service => service.name);
+        const directives = directivesFromResolution(facts.labels);
         if (stackImages.length === 0) {
             return buildSummary(stackName, [], buildServices);
         }
@@ -422,7 +496,7 @@ export class UpdatePreviewService {
         const docker = DockerController.getInstance(nodeId);
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
-            compareDigest: compareLocalToRemoteTag,
+            compareDigest: compareLocalToRemoteTagDetailed,
             listRegistryTagsResult,
             getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
@@ -448,18 +522,22 @@ export class UpdatePreviewService {
             },
         };
 
-        // Memoize service-independent detection by image ref so shared images
-        // hit the registry once, then attach each service name separately.
-        const detectByRef = new Map<string, Promise<UpdatePreviewImage>>();
+        // Every image in the pull roster is verified, including one only
+        // checks-off services use: a whole-stack apply pulls it as collateral.
+        // The service's directive hides the result from reporting, never from
+        // the pre-flight. Memoize detection by ref so shared images hit the
+        // registry once, then apply each service's directive separately.
+        const detectByRef = new Map<string, ReturnType<typeof computeImageDetection>>();
         const results = await Promise.all(
             stackImages.map(async ({ service, image }) => {
+                const directive = directiveFor(directives, service);
                 let shared = detectByRef.get(image);
                 if (!shared) {
-                    shared = computeImagePreview('_shared_', image, deps);
+                    shared = computeImageDetection('_shared_', image, deps);
                     detectByRef.set(image, shared);
                 }
-                const base = await shared;
-                return { ...base, service };
+                const { preview, detected } = await shared;
+                return servicePreviewImage(service, preview, detected, directive);
             }),
         );
         return buildSummary(stackName, results, buildServices);

@@ -7,7 +7,8 @@ import {
   type SenchoLabelResolution,
 } from '@/lib/senchoLabels';
 import { RETIRED_URL_LABEL } from '@/lib/serviceUrlLabel';
-import { updatePolicyChip } from './serviceUpdatePolicy';
+import { detectionChips, updatePolicyChip } from './serviceUpdatePolicy';
+import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 const LINK_CLASS = 'inline-flex min-w-0 max-w-full items-center gap-1 text-brand hover:underline max-md:min-h-11';
 const POLICY_CHIP_CLASS =
@@ -28,23 +29,27 @@ interface ServiceSenchoLinksProps {
   applicationLinkShown: boolean;
   /** Set when the retired link label can be renamed in the open compose file by this user. */
   onRenameRetiredUrl?: () => void;
+  /** The service's last update check, for the skipped-update chip. */
+  updateStatus?: Pick<StackServiceUpdateStatus, 'detection'>;
 }
 
 /**
  * Links and diagnostics declared for a service with `io.sencho.*` labels: the
  * named links, the application link when no published port carries it, the
- * update policy in force, and a quiet count of labels Sencho ignored. Every
+ * update policy in force, the update detection state, and a quiet count of
+ * labels Sencho ignored. Every
  * anchor target was validated by the node and is checked again on read.
  */
-export function ServiceSenchoLinks({ resolution, service, applicationLinkShown, onRenameRetiredUrl }: ServiceSenchoLinksProps) {
+export function ServiceSenchoLinks({ resolution, service, applicationLinkShown, onRenameRetiredUrl, updateStatus }: ServiceSenchoLinksProps) {
   const application = applicationLinkShown ? undefined : applicationLink(resolution, service);
   const named = namedLinks(resolution, service);
   const ignored = ignoredLabels(resolution, service);
   const unverified = unverifiedLinkCount(resolution, service);
   const policyChip = updatePolicyChip(resolution, service);
+  const detection = detectionChips(resolution, service, updateStatus);
   const notShown = ignored.length + unverified;
   const canRename = !!onRenameRetiredUrl && ignored.some(entry => entry.key === RETIRED_URL_LABEL);
-  if (!application && named.length === 0 && notShown === 0 && !policyChip) return null;
+  if (!application && named.length === 0 && notShown === 0 && !policyChip && detection.length === 0) return null;
 
   return (
     <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px]" data-testid="service-sencho-links">
@@ -65,6 +70,11 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown, 
           {policyChip.label}
         </span>
       )}
+      {detection.map(chip => (
+        <span key={chip.key} className={POLICY_CHIP_CLASS} title={chip.title} data-testid={`service-update-detection-${chip.key}`}>
+          {chip.label}
+        </span>
+      ))}
       {notShown > 0 && (
         <span
           className="text-warning"

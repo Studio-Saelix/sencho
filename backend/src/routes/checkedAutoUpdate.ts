@@ -7,7 +7,10 @@ import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { isValidStackName } from '../utils/validation';
 import { ImageUpdateFactsService, ImageUpdateFactsError } from '../services/ImageUpdateFactsService';
 import { ImageUpdateObservationService, ImageUpdateObservationError } from '../services/ImageUpdateObservationService';
-import { hashImageUpdateFacts, IMAGE_UPDATE_FACTS_IMAGE_LIMIT } from '../services/imageUpdateFacts';
+import {
+  hashImageUpdateFacts, IMAGE_UPDATE_FACTS_IMAGE_LIMIT, IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT,
+} from '../services/imageUpdateFacts';
+import { digestTriggerAllowed, directivesFromFacts } from '../services/updateDetectionDirectives';
 import { applyAutomaticStackUpdate, type AutomaticUpdateTrigger } from '../services/automaticStackUpdate';
 import { skippedVerification } from '../services/hubPostUpdateVerification';
 
@@ -15,17 +18,40 @@ interface CheckedUpdateRequest {
   contractVersion: 1;
   stack: string;
   digestUpdateImages: string[];
+  /**
+   * The digest each triggering image had when the hub observed it. A hub with
+   * registry credentials supplies these, so the target can evaluate a digest
+   * ignore without its own registry probe. Absent from an older hub.
+   */
+  digestCandidates: Record<string, string | null>;
   observationToken: string;
   /** `scheduled` when a scheduled task asked for it; `automatic` otherwise. */
   trigger: AutomaticUpdateTrigger;
 }
 
+const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+function parseDigestCandidates(value: unknown, images: string[]): Record<string, string | null> | null {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > IMAGE_UPDATE_FACTS_IMAGE_LIMIT) return null;
+  const out: Record<string, string | null> = {};
+  for (const [ref, digest] of entries) {
+    if (!images.includes(ref)) return null;
+    if (digest !== null && (typeof digest !== 'string' || !DIGEST_PATTERN.test(digest))) return null;
+    out[ref] = digest as string | null;
+  }
+  return out;
+}
+
 function parseCheckedRequest(body: unknown): CheckedUpdateRequest | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const value = body as Record<string, unknown>;
-  if (Object.keys(value).some(key => !['contractVersion', 'stack', 'digestUpdateImages', 'observationToken', 'trigger', REGISTRY_DELIVERY_BODY_FIELD].includes(key))) return null;
+  if (Object.keys(value).some(key => !['contractVersion', 'stack', 'digestUpdateImages', 'digestCandidates', 'observationToken', 'trigger', REGISTRY_DELIVERY_BODY_FIELD].includes(key))) return null;
   if (value.contractVersion !== 1 || typeof value.stack !== 'string' || !isValidStackName(value.stack)
-    || typeof value.observationToken !== 'string' || !value.observationToken || value.observationToken.length > 4096
+    || typeof value.observationToken !== 'string' || !value.observationToken
+    || value.observationToken.length > IMAGE_UPDATE_OBSERVATION_TOKEN_LIMIT
     || !Array.isArray(value.digestUpdateImages) || value.digestUpdateImages.length === 0
     || value.digestUpdateImages.length > IMAGE_UPDATE_FACTS_IMAGE_LIMIT
     || !value.digestUpdateImages.every((ref): ref is string => typeof ref === 'string' && ref.length > 0 && ref.length <= 2048)
@@ -33,11 +59,14 @@ function parseCheckedRequest(body: unknown): CheckedUpdateRequest | null {
   // Absent is an older hub, which only ran automatic checks.
   const trigger = value.trigger === undefined ? 'automatic' : value.trigger;
   if (trigger !== 'scheduled' && trigger !== 'automatic') return null;
+  const digestCandidates = parseDigestCandidates(value.digestCandidates, value.digestUpdateImages);
+  if (!digestCandidates) return null;
   return {
     contractVersion: 1,
     stack: value.stack,
     observationToken: value.observationToken,
     digestUpdateImages: value.digestUpdateImages,
+    digestCandidates,
     trigger,
   };
 }
@@ -64,8 +93,22 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
       const facts = await factsService.readLocal(req.nodeId, input.stack);
       const hash = hashImageUpdateFacts(facts);
       if (!facts.model.renderable || binding.factsHash !== hash
-        || input.digestUpdateImages.some(ref => !facts.images.some(image => image.ref === ref) || ref.includes('@'))) {
+        || input.digestUpdateImages.some(ref => !facts.images.some(image => image.ref === ref) || ref.includes('@'))
+        // The trigger decision is part of the observation: a label change that
+        // suppresses one of these images makes the request stale, even when the
+        // hub (an older one) never asked for the labels.
+        || input.digestUpdateImages.some(ref => !binding.triggerRefs.includes(ref))) {
         throw new ImageUpdateObservationError('IMAGE_UPDATE_OBSERVATION_STALE', 409);
+      }
+      const directives = directivesFromFacts(facts);
+      for (const ref of input.digestUpdateImages) {
+        const owners = facts.services
+          .filter(service => !service.hasBuild
+            && (service.declaredImage === ref || service.runtimeImages.includes(ref)))
+          .map(service => service.name);
+        if (!digestTriggerAllowed(owners, directives, input.digestCandidates[ref] ?? null)) {
+          throw new ImageUpdateObservationError('IMAGE_UPDATE_OBSERVATION_STALE', 409);
+        }
       }
       return hash;
     };

@@ -47,7 +47,10 @@ image-update availability, exploit intelligence, exposure, and triage decisions 
 severity alone. A Trivy package fix does not by itself mean Sencho can update the image; when a
 newer image is confirmed available the review queue offers **Review update**, and when no applicable
 update is identified it surfaces **Waiting for upstream image** instead of an impossible update
-instruction. Deploy policies remain orthogonal: they may still block admission on package-fix
+instruction. A newer image that a service skips for that image with `io.sencho.update.ignore`
+still counts as a newer image available, never as waiting for upstream. A skip on
+one of a service's other runtime images does not. A row written before Sencho
+recorded which image the skip cleared stays unknown until the next check rewrites it. Deploy policies remain orthogonal: they may still block admission on package-fix
 Critical/High even when Security posture is Monitoring.
 
 An admin on a node with a ready scanner sees a **Scan this node** button above the review queue. It

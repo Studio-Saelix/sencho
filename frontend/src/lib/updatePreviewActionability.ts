@@ -167,9 +167,13 @@ export function isServiceApplyActionable(
 ): boolean {
   if (!preview) return false;
   if (preview.summary.blocked) return false;
-  if (!summaryCheckOk(preview.summary)) return false;
   const match = (preview.images ?? []).find((i) => i.service === serviceName);
   if (!match) return false;
+  // A service-scoped apply pulls only this service, so another image's failed
+  // or suppressed check must not disable it; its own evidence must hold. An
+  // older preview without per-image check_status falls back to the summary.
+  if (match.check_status != null ? match.check_status !== 'ok' : !summaryCheckOk(preview.summary)) return false;
+  if (match.digest_error) return false;
   if (match.digest_update === true) return true;
   if (match.digest_update !== undefined || match.tag_update !== undefined) return false;
   return Boolean(match.has_update && preview.summary.update_kind !== 'tag');

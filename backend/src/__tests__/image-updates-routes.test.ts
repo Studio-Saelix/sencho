@@ -845,7 +845,7 @@ describe('POST /api/auto-update/execute', () => {
         .send({ target: 'auto-upd-gate' });
       expect(res.status).toBe(200);
       expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true, expect.any(Function));
-      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate');
+      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', { verification: true });
       expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`, { deployedGenerationId: null });
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {
@@ -944,7 +944,7 @@ describe('POST /api/auto-update/execute', () => {
         .send({ target: 'auto-upd-digest' });
       expect(res.status).toBe(200);
       expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true, expect.any(Function));
-      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
+      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-digest', { verification: true });
       expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
     } finally {
       containersSpy.mockRestore();

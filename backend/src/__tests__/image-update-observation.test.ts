@@ -16,6 +16,7 @@ const binding = {
     stack: 'demo',
     observationRevision: 1,
     factsHash: 'b'.repeat(64),
+    triggerRefs: ['demo:1'],
 };
 
 describe('ImageUpdateObservationService', () => {
@@ -45,6 +46,17 @@ describe('ImageUpdateObservationService', () => {
         expect(service.verifyCurrent(token, { stack: binding.stack })).toEqual(binding);
         service.consumeCurrent(token, { stack: binding.stack, factsHash: binding.factsHash });
         expect(() => service.verifyCurrent(token, { stack: binding.stack })).toThrow('IMAGE_UPDATE_OBSERVATION_STALE');
+    });
+
+    it('accepts a token bound to the full image-limit ref list', () => {
+        const service = ImageUpdateObservationService.getInstance();
+        const longBinding = {
+            ...binding,
+            triggerRefs: Array.from({ length: 24 }, (_, i) => `registry.example/${'a'.repeat(180)}:${i}`),
+        };
+        const token = service.issue(longBinding);
+        expect(token.length).toBeGreaterThan(4096);
+        expect(service.verifyCurrent(token, { stack: binding.stack })).toEqual(longBinding);
     });
 
     it('rejects a different stack and expired tokens through the current-facts entry points', () => {
@@ -77,6 +89,7 @@ describe('ImageUpdateObservationService', () => {
         { requestNonce: 'c'.repeat(32) },
         { observationRevision: 2 },
         { factsHash: 'd'.repeat(64) },
+        { triggerRefs: [] },
     ])('rejects changed binding %j without consuming the original', (change) => {
         const service = ImageUpdateObservationService.getInstance();
         const token = service.issue(binding);

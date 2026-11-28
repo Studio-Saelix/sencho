@@ -85,3 +85,72 @@ describe('remote image facts boundary', () => {
         }
     });
 });
+
+describe('update detection labels on the wire', () => {
+    const CANDIDATE = `sha256:${'c'.repeat(64)}`;
+    function detectionResponse(): ImageUpdateFactsResponse {
+        const body = response();
+        const stack = body.stacks[0];
+        stack.images[0].authority = {
+            source: 'anonymous', observedAt: 1,
+            result: {
+                hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: 'latest', digestError: null,
+                tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null, semverBump: 'patch',
+                candidateDigest: CANDIDATE,
+            },
+        };
+        stack.directives = [{ service: 'app', check: true, ignore: [CANDIDATE, '1.2.3'], changelogUrl: 'https://example.com/notes' }];
+        return body;
+    }
+
+    it('accepts directives and the candidate digest when the hub asked for detection', () => {
+        const body = detectionResponse();
+        expect(parseRemoteImageUpdateFacts(body, nonce, 'web', true)).toEqual(body);
+    });
+
+    it('requires the negotiated fields rather than reading an omission as no label', () => {
+        const noDirectives = detectionResponse();
+        delete noDirectives.stacks[0].directives;
+        expect(() => parseRemoteImageUpdateFacts(noDirectives, nonce, 'web', true)).toThrow('Invalid remote image facts');
+
+        const noCandidate = detectionResponse();
+        delete noCandidate.stacks[0].images[0].authority.result!.candidateDigest;
+        expect(() => parseRemoteImageUpdateFacts(noCandidate, nonce, 'web', true)).toThrow('Invalid remote image facts');
+
+        const empty = detectionResponse();
+        empty.stacks[0].directives = [];
+        expect(parseRemoteImageUpdateFacts(empty, nonce, 'web', true)).toEqual(empty);
+    });
+
+    it('refuses directives or a candidate digest the hub did not ask for', () => {
+        const withDirectives = detectionResponse();
+        const result = withDirectives.stacks[0].images[0].authority.result!;
+        delete result.candidateDigest;
+        expect(() => parseRemoteImageUpdateFacts(withDirectives, nonce, 'web')).toThrow('Invalid remote image facts');
+
+        const withCandidate = detectionResponse();
+        delete withCandidate.stacks[0].directives;
+        expect(() => parseRemoteImageUpdateFacts(withCandidate, nonce, 'web')).toThrow('Invalid remote image facts');
+    });
+
+    it.each([
+        ['an unknown service', { service: 'ghost', check: false, ignore: [], changelogUrl: null }],
+        ['a bad ignore entry', { service: 'app', check: true, ignore: ['not a tag'], changelogUrl: null }],
+        ['a padded ignore entry', { service: 'app', check: true, ignore: [' 1.2.3'], changelogUrl: null }],
+        ['nine ignore entries', { service: 'app', check: true, ignore: Array.from({ length: 9 }, (_, i) => `1.0.${i}`), changelogUrl: null }],
+        ['an over-long link', { service: 'app', check: true, ignore: [], changelogUrl: `https://example.com/${'a'.repeat(2100)}` }],
+        ['a link with userinfo', { service: 'app', check: true, ignore: [], changelogUrl: 'https://user:pw@example.com/' }],
+        ['a non-http link', { service: 'app', check: true, ignore: [], changelogUrl: 'javascript:alert(1)' }],
+        ['an extra key', { service: 'app', check: true, ignore: [], changelogUrl: null, secret: 'x' }],
+    ])('rejects a directive with %s', (_name, directive) => {
+        const body = detectionResponse();
+        (body.stacks[0] as unknown as { directives: unknown[] }).directives = [directive];
+        expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web', true)).toThrow('Invalid remote image facts');
+    });
+
+    it('rejects two directives for the same service', () => {
+        const body = detectionResponse();
+        body.stacks[0].directives!.push({ service: 'app', check: false, ignore: [], changelogUrl: null });
+        expect(() => parseRemoteImageUpdateFacts(body, nonce, 'web', true)).toThrow('Invalid remote image facts');
+    });
+});

@@ -1,5 +1,5 @@
 import { RegistryService } from './RegistryService';
-import { compareLocalToRemoteTag, listRegistryTagsResult, parseImageRef, type RegistryTransport } from './registry-api';
+import { compareLocalToRemoteTagDetailed, listRegistryTagsResult, parseImageRef, type RegistryTransport } from './registry-api';
 import { detectImageUpdate, type ImageUpdateDetectResult } from './imageUpdateDetect';
 import type { ImageUpdateImageFacts } from './imageUpdateFacts';
 import { parsePullReference } from '../helpers/registryPullReference';
@@ -71,7 +71,7 @@ export async function probeRemoteImageUpdate(image: ImageUpdateImageFacts, signa
             credentials: credentials.auth ?? null,
             deps: {
                 compareDigest: (digests, registry, repo, tag, platform, auth) =>
-                    compareLocalToRemoteTag(digests, registry, repo, tag, platform, auth, safe.transport),
+                    compareLocalToRemoteTagDetailed(digests, registry, repo, tag, platform, auth, safe.transport),
                 listRegistryTagsResult: (registry, repo, auth, opts) =>
                     listRegistryTagsResult(registry, repo, auth, opts, safe.transport),
             },

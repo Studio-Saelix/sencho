@@ -11,6 +11,7 @@ vi.mock('../helpers/registryDeliveryOutbound', () => ({ prepareOutboundRegistryD
 vi.mock('../utils/outboundTarget', () => ({ safeRemoteFetch: mocks.fetch }));
 vi.mock('../services/hubPostUpdateVerification', () => ({ awaitHubPostUpdateVerification: mocks.recheck }));
 import { AutoUpdateRemoteCoordinator } from '../services/AutoUpdateRemoteCoordinator';
+import type { ImageCheckResult } from '../services/ImageUpdateService';
 
 const CAPABLE = { kind: 'ok' as const, meta: { capabilities: ['remote-image-inspect-v1', 'remote-auto-update-checked-v1', 'sencho-label-policy-v1'] } };
 const TARGET = { apiUrl: 'https://node.example', apiToken: 'token', trustedLoopback: true };
@@ -121,6 +122,69 @@ describe('remote automatic update coordinator', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
+  it('carries the candidate digest so the target can enforce a digest ignore', async () => {
+    const digest = `sha256:${'d'.repeat(64)}`;
+    mocks.meta.mockResolvedValue({
+      kind: 'ok',
+      meta: {
+        capabilities: [
+          'remote-image-inspect-v1', 'remote-auto-update-checked-v1', 'sencho-label-policy-v1',
+          'sencho-label-detection-v1', 'sencho-checked-candidate-digest-v1',
+        ],
+      },
+    });
+    mocks.inspect.mockResolvedValue({
+      facts: {
+        ...FACTS,
+        services: [{ name: 'web', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+        directives: [],
+      },
+      imageResults: new Map([['nginx:1', {
+        hasUpdate: true, digestUpdate: true, checkStatus: 'ok',
+        detection: {
+          hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: '1', digestError: null,
+          tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null,
+          semverBump: 'patch', candidateDigest: digest,
+        },
+      }]]),
+    });
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    const body = JSON.parse(String(mocks.fetch.mock.calls[0][1].body));
+    expect(body.digestCandidates).toEqual({ 'nginx:1': digest });
+  });
+
+  it('omits candidate digests for a detection target that predates the candidate contract', async () => {
+    const digest = `sha256:${'e'.repeat(64)}`;
+    mocks.meta.mockResolvedValue({
+      kind: 'ok',
+      meta: {
+        capabilities: [
+          'remote-image-inspect-v1', 'remote-auto-update-checked-v1', 'sencho-label-policy-v1',
+          'sencho-label-detection-v1',
+        ],
+      },
+    });
+    mocks.inspect.mockResolvedValue({
+      facts: {
+        ...FACTS,
+        services: [{ name: 'web', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+        directives: [],
+      },
+      imageResults: new Map([['nginx:1', {
+        hasUpdate: true, digestUpdate: true, checkStatus: 'ok',
+        detection: {
+          hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: '1', digestError: null,
+          tagEnumKind: 'skipped', tagEnumReason: null, checkStatus: 'ok', reason: null,
+          semverBump: 'patch', candidateDigest: digest,
+        },
+      }]]),
+    });
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    const body = JSON.parse(String(mocks.fetch.mock.calls[0][1].body));
+    expect(body).not.toHaveProperty('digestCandidates');
+    expect(result).toEqual({ handled: true, result: 'Stack "web": updated (nginx:1).' });
+  });
+
   it('carries the trigger the run was asked for', async () => {
     await new AutoUpdateRemoteCoordinator().execute(input());
     const scheduled = JSON.parse(String(mocks.fetch.mock.calls[0][1].body));
@@ -171,6 +235,29 @@ describe('remote automatic update coordinator', () => {
     expect(result.handled ? result.result : null).toBe('Stack "web": updated (nginx:1).');
   });
 
+  it('re-prepares facts after a stale response and skips when the labels now suppress the trigger', async () => {
+    mocks.inspect
+      .mockResolvedValueOnce({
+        facts: { ...FACTS },
+        imageResults: new Map([['nginx:1', { hasUpdate: true, digestUpdate: true, checkStatus: 'ok' }]]),
+      })
+      .mockResolvedValueOnce({
+        facts: {
+          ...FACTS,
+          services: [{ name: 'web', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+          directives: [{ service: 'web', check: false, ignore: [], changelogUrl: null }],
+        },
+        imageResults: new Map([['nginx:1', { hasUpdate: true, digestUpdate: true, checkStatus: 'ok' }]]),
+      });
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'stale_observation', applied: false, healthGateId: null,
+    }), { status: 409 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(mocks.inspect).toHaveBeenCalledTimes(2);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(result.handled ? result.result : null).toContain('update checks off');
+  });
+
   it('reports a Docker endpoint refusal from the target as a failed stack with its reason', async () => {
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
       contractVersion: 1, stack: 'web', result: 'rejected', applied: false, healthGateId: null,
@@ -199,6 +286,20 @@ describe('remote automatic update coordinator', () => {
   it('refuses an unauthorized stack before any machine execution request', async () => {
     mocks.authorize.mockRejectedValue(new Error('denied'));
     await expect(new AutoUpdateRemoteCoordinator().execute(input())).rejects.toThrow('denied');
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a build-only registry image as a trigger', async () => {
+    mocks.inspect.mockResolvedValue({
+      facts: {
+        ...FACTS,
+        services: [{ name: 'builder', declaredImage: 'builder:1', runtimeImages: [], hasBuild: true }],
+        images: [{ ...FACTS.images[0], ref: 'builder:1' }],
+      },
+      imageResults: new Map([['builder:1', { hasUpdate: true, digestUpdate: true, checkStatus: 'ok' }]]),
+    });
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result.handled ? result.result : null).toContain('up to date');
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
@@ -255,5 +356,65 @@ describe('remote automatic update coordinator', () => {
     expect(logged).not.toMatch(/[\r\n]/);
     expect(logged).toContain('boom[INFO] forgedline');
     errorSpy.mockRestore();
+  });
+});
+
+describe('remote automatic update with update detection labels', () => {
+  const DETECTING = { kind: 'ok' as const, meta: { capabilities: [...CAPABLE.meta.capabilities, 'sencho-label-detection-v1'] } };
+  const CANDIDATE = `sha256:${'c'.repeat(64)}`;
+  const rebuild = {
+    hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' as const,
+    detection: {
+      hasUpdate: true, digestUpdate: true, tagUpdate: false, nextTag: '1', digestError: null,
+      tagEnumKind: 'skipped' as const, tagEnumReason: null, checkStatus: 'ok' as const, reason: null,
+      semverBump: 'patch' as const, candidateDigest: CANDIDATE,
+    },
+  };
+  const labeledFacts = (stack: string) => ({
+    ...FACTS, name: stack,
+    services: [{ name: 'app', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false }],
+    directives: [{ service: 'app', check: true, ignore: [CANDIDATE], changelogUrl: null }],
+  });
+
+  it('asks a detection-capable target for its labels while still probing every image', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(mocks.inspect).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), { detection: true, probeAll: true });
+  });
+
+  it('sends no detection keys to a target without the capability', async () => {
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(mocks.inspect).toHaveBeenCalledWith(2, 'web', expect.any(AbortSignal), undefined);
+  });
+
+  it('does not update a stack whose only update is skipped, and says so', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    mocks.inspect.mockImplementation(async (_node: number, stack: string) => ({
+      facts: labeledFacts(stack), imageResults: new Map([['nginx:1', rebuild]]),
+    }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({
+      handled: true,
+      result: 'Stack "web": the only available update is skipped by io.sencho.update.ignore (app); no update applied.',
+    });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('names the skipped service a started update also pulls', async () => {
+    mocks.meta.mockResolvedValue(DETECTING);
+    mocks.inspect.mockImplementation(async (_node: number, stack: string) => ({
+      facts: {
+        ...labeledFacts(stack),
+        services: [
+          { name: 'app', declaredImage: 'nginx:1', runtimeImages: [], hasBuild: false },
+          { name: 'worker', declaredImage: 'worker:1', runtimeImages: [], hasBuild: false },
+        ],
+        images: [...FACTS.images, { ...FACTS.images[0], ref: 'worker:1' }],
+      },
+      imageResults: new Map<string, ImageCheckResult>([['nginx:1', rebuild], ['worker:1', { hasUpdate: true, digestUpdate: true, checkStatus: 'ok' }]]),
+    }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web": updated (worker:1). Also pulled: app (update skipped).' });
+    expect(JSON.parse(String(mocks.fetch.mock.calls[0][1].body)).digestUpdateImages).toEqual(['worker:1']);
   });
 });

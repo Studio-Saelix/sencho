@@ -423,7 +423,7 @@ On a Sencho or Pilot agent container nested inside an LXC, host CPU and memory u
 
 ### Image update availability
 
-`info`/`image_update_available`: `Stack "<name>" has image updates available.` On multi-service stacks the message can name the services that have updates. By default, checks every two hours in interval mode, with a two-minute startup delay. The cadence can be changed or replaced with a cron schedule. Manual refresh carries a two-minute cooldown. Notifies on **state transition only**; the first run also emits catch-up notifications for stacks already known to have updates.
+`info`/`image_update_available`: `Stack "<name>" has image updates available.` On multi-service stacks the message can name the services that have updates. By default, checks every two hours in interval mode, with a two-minute startup delay. The cadence can be changed or replaced with a cron schedule. Manual refresh carries a two-minute cooldown. Notifies on **state transition only**; the first run also emits catch-up notifications for stacks already known to have updates. A service with `io.sencho.update.check: "false"`, or whose pending update is skipped by `io.sencho.update.ignore`, is never named and raises no notification on its own. The message never carries a service's changelog link. See [Sencho Labels · Update checks](/features/sencho-labels#update-checks).
 
 ### Auto-update execution
 
