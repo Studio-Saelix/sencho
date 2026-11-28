@@ -1736,10 +1736,10 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
   }
   try {
     const { content, filename } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
-    // One byte-based bound for every encoding: an ASCII and a multibyte file of
-    // the same on-disk size must get the same answer. The expansion guard
-    // applies this same cap, so checking it here makes the size refusal a 413
-    // before any parse work instead of the guard's size-worded 409.
+    // One UTF-8 byte-based bound: an ASCII and a multibyte file of the same
+    // on-disk size must get the same answer. The expansion guard applies this
+    // same cap, so checking it here makes the size refusal a 413 before any
+    // parse work instead of the guard's size-worded 409.
     if (Buffer.byteLength(content, 'utf8') > MAX_COMPOSE_INPUT_BYTES) {
       console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_INPUT_BYTES} bytes; refusing to parse services`);
       res.status(413).json({ error: 'Compose file too large to parse' });

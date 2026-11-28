@@ -425,7 +425,7 @@ describe('refused stack: GET /services names the refusal', () => {
     expect([...res.body].sort()).toEqual(['db', 'web']);
   });
 
-  it('lists the names a merged services map contributes, like Docker Compose', async () => {
+  it('lists the names a merged services map contributes', async () => {
     writeCompose(
       [
         'x-services: &svcs',
@@ -469,7 +469,7 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.body.error).toContain('explicit YAML merge tag');
   });
 
-  it('lists the names a merged document root contributes, like Docker Compose', async () => {
+  it('lists the names a merged document root contributes', async () => {
     writeCompose(
       [
         'x-root: &root',

@@ -323,6 +323,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                 toast.success('Alert rule added.');
                 setThreshold('');
                 setService('');
+                setTargetAllServices(false);
                 fetchAlerts();
             } else {
                 const err = await res.json().catch(() => ({}));
@@ -783,6 +784,7 @@ function AutoHealTab({
             if (res.ok) {
                 toast.success('Policy added.');
                 setService('');
+                setTargetAllServices(false);
                 setUnhealthyFor('5');
                 setCooldown('5');
                 setMaxRestarts('3');

@@ -198,6 +198,31 @@ describe('ScheduledOperationsView', () => {
     expect(create).toBeEnabled();
   });
 
+  it('shows the 413 size reason and requires an explicit all-services choice', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') {
+        return jsonResponse({ error: 'Compose file too large to parse' }, { ok: false, status: 413 });
+      }
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-web');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file too large to parse');
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+  });
+
   it('blocks Create while the selected stack service lookup is still pending', async () => {
     let resolveServices: ((res: Response) => void) | undefined;
     const pending = new Promise<Response>((resolve) => { resolveServices = resolve; });
@@ -253,6 +278,99 @@ describe('ScheduledOperationsView', () => {
     });
 
     expect(screen.queryByRole('checkbox', { name: 'db' })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+  });
+
+  it('does not silently drop a saved service that the stack no longer lists', async () => {
+    tasksFixture = [makeTask({
+      id: 42, name: 'restart-web', target_type: 'stack', target_id: 'web', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['web']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url === '/stacks/web/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved service selection (web) is not in this stack');
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeDisabled();
+
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'api' }));
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/42' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['api']);
+    });
+  });
+
+  it('keeps a saved service when the stack lists only that service', async () => {
+    tasksFixture = [makeTask({
+      id: 43, name: 'restart-db', target_type: 'stack', target_id: 'db-compose', node_id: 1,
+      action: 'restart', target_services: JSON.stringify(['mariadb']),
+    })];
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['db-compose']);
+      if (url === '/stacks/db-compose/services') return jsonResponse(['mariadb']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update).toBeEnabled();
+    await userEvent.click(update);
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/43' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body).target_services).toEqual(['mariadb']);
+    });
+  });
+
+  it('ignores a late refusal for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'other']);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/other/services') return jsonResponse(['api', 'database']);
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'other' }));
+    expect(await screen.findByRole('checkbox', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonResponse(
+        { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+        { ok: false, status: 409 },
+      ));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'api' })).toBeInTheDocument();
   });
 

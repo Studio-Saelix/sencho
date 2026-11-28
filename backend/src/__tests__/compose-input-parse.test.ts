@@ -1119,4 +1119,19 @@ describe('listComposeServiceNames', () => {
         expect(listComposeServiceNames('%YAML 1.1\n---\nservices:\n  on:\n    image: nginx\n  "true":\n    image: nginx\n'))
             .toEqual(['on', 'true']);
     });
+
+    it('expands a services-map merge and a document-root merge', () => {
+        expect(listComposeServiceNames(
+            'x-svcs: &svcs\n  web:\n    image: nginx\nservices:\n  <<: *svcs\n  db:\n    image: postgres\n',
+        )).toEqual(['web', 'db']);
+        expect(listComposeServiceNames(
+            'x-root: &root\n  services:\n    web:\n      image: nginx\n<<: *root\n',
+        )).toEqual(['web']);
+    });
+
+    it('refuses an explicit merge tag', () => {
+        expect(() => listComposeServiceNames(
+            'x-base: &base\n  image: nginx\nservices:\n  web:\n    !!merge <<: *base\n',
+        )).toThrowError(/explicit YAML merge tag/);
+    });
 });

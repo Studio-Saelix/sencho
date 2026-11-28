@@ -329,6 +329,41 @@ describe('StackAlertSheet Alerts tab', () => {
     expect(screen.getByRole('button', { name: 'api' })).toBeInTheDocument();
   });
 
+  it('ignores a late refusal for a stack that is no longer selected', async () => {
+    let resolveWeb: ((res: Response) => void) | undefined;
+    const webPending = new Promise<Response>((resolve) => { resolveWeb = resolve; });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
+      if (url === '/stacks/web/services') return webPending;
+      if (url === '/stacks/broken/services') return jsonRes(['api']);
+      if (url.startsWith('/alerts')) return jsonRes([]);
+      return jsonRes(null, false);
+    });
+
+    const { rerender } = render(<StackAlertSheet open onOpenChange={() => {}} stackName="web" />);
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url) === '/stacks/web/services')).toBe(true);
+    });
+
+    rerender(<StackAlertSheet open onOpenChange={() => {}} stackName="broken" />);
+    await waitFor(() => expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled());
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    expect(await screen.findByRole('button', { name: 'api' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveWeb!(jsonRes(
+        { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+        false,
+        409,
+      ));
+      await webPending;
+    });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'api' })).toBeInTheDocument();
+  });
+
   it('hides service selector when capability is missing and posts null', async () => {
     nodeState.activeNodeMeta = { version: '0.90.0', capabilities: [] };
     mockHappyPath();

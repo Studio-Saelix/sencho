@@ -146,8 +146,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [availableServices, setAvailableServices] = useState<string[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
   const [servicesError, setServicesError] = useState<string | null>(null);
+  const [servicesNotice, setServicesNotice] = useState<string | null>(null);
   const [targetAllServices, setTargetAllServices] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savedTargetServicesRef = useRef<string[]>([]);
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null);
   const [runsPage, setRunsPage] = useState(1);
   const [runsTotal, setRunsTotal] = useState(0);
@@ -239,11 +241,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   }, []);
 
   useEffect(() => {
+    savedTargetServicesRef.current = formTargetServices;
+  }, [formTargetServices]);
+
+  useEffect(() => {
     const actionDef = getActionById(formAction);
     if (!actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
       setServicesLoading(false);
       setServicesError(null);
+      setServicesNotice(null);
       setTargetAllServices(false);
       return;
     }
@@ -254,6 +261,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setAvailableServices([]);
     setServicesLoading(true);
     setServicesError(null);
+    setServicesNotice(null);
     setTargetAllServices(false);
     const fetchServices = async () => {
       try {
@@ -276,8 +284,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
         if (cancelled) return;
         setServicesLoading(false);
         setAvailableServices(services);
-        if (services.length <= 1) {
+        // A saved edit can name a service the file no longer declares. Clear
+        // the invisible names and require a fresh choice; never let a one-name
+        // list silently turn the saved scope into all services.
+        const missing = savedTargetServicesRef.current.filter((name) => !services.includes(name));
+        if (missing.length > 0) {
           setFormTargetServices([]);
+          setServicesNotice(
+            `The saved service selection (${missing.join(', ')}) is not in this stack's compose file. ` +
+            'Choose a service, or confirm all services.',
+          );
         }
       } catch {
         if (!cancelled) {
@@ -662,15 +678,22 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     ))
     || servicesLoading
     || (!!servicesError && !targetAllServices)
+    || (!!servicesNotice && formTargetServices.length === 0 && !targetAllServices)
     || !canSaveWithCurrentTarget;
 
   const saveDisabledReason = useMemo((): string | null => {
     if (saving || !currentAction || !formName || scheduleInvalid) return null;
+    if (servicesLoading) return "Loading the stack's services...";
+    if (servicesError && !targetAllServices) return 'Choose a service, or confirm all services.';
+    if (servicesNotice && formTargetServices.length === 0 && !targetAllServices) return servicesNotice;
     if (!canSaveWithCurrentTarget) {
       return 'You do not have permission to schedule this action on the selected target.';
     }
     return null;
-  }, [saving, currentAction, formName, scheduleInvalid, canSaveWithCurrentTarget]);
+  }, [
+    saving, currentAction, formName, scheduleInvalid, servicesLoading, servicesError,
+    servicesNotice, targetAllServices, formTargetServices, canSaveWithCurrentTarget,
+  ]);
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
   const timelinePills = filteredTasks
@@ -1094,6 +1117,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                       setAvailableServices([]);
                       setServicesLoading(val !== '');
                       setServicesError(null);
+                      setServicesNotice(null);
                       setTargetAllServices(false);
                     }}
                     placeholder={formNodeId ? "Select stack..." : "Select a node first"}
@@ -1113,7 +1137,22 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     </label>
                   </div>
                 )}
-                {currentAction.supportsServiceSelection && formTargetId && !servicesError && availableServices.length > 1 && (
+                {currentAction.supportsServiceSelection && formTargetId && !servicesError && servicesNotice && (
+                  <div className="space-y-2">
+                    <p role="alert" className="text-xs text-warning">{servicesNotice}</p>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <Checkbox
+                        checked={targetAllServices}
+                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                      />
+                      <span>Target all services in this stack</span>
+                    </label>
+                  </div>
+                )}
+                {currentAction.supportsServiceSelection && formTargetId && !servicesError && (
+                  availableServices.length > 1
+                  || (availableServices.length === 1 && (formTargetServices.length > 0 || !!servicesNotice))
+                ) && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
                     <div className="grid grid-cols-2 gap-2">

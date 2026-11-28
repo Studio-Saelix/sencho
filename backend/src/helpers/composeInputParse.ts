@@ -306,7 +306,7 @@ export function parseComposeYaml(content: string, options: ParseComposeYamlOptio
     if (hasTaggedMergeKey(document.contents)) {
         throw new UnsupportedComposeMergeError('tagged YAML merge keys are not supported');
     }
-    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT, merge: expandMerges });
+    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
 }
 
 /**
@@ -319,7 +319,8 @@ export function parseComposeYaml(content: string, options: ParseComposeYamlOptio
  * attributes. The caller must have bounded the source with the expansion guard
  * first: merge expansion copies an anchor once per reference, and the guard is
  * what caps that copy count. Throws `ComposeServiceListRefusal` for an explicit
- * merge tag, which the parser does not expand.
+ * merge tag, which the parser does not expand; parser errors and the alias
+ * budget error from `parseComposeYaml` are rethrown for the caller to map.
  */
 export function listComposeServiceNames(content: string): string[] {
     let parsed: unknown;
