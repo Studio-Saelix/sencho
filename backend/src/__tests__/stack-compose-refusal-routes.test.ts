@@ -15,7 +15,7 @@ import path from 'path';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
-import { ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
+import { ComposeExpansionRefusal, MAX_COMPOSE_INPUT_BYTES } from '../helpers/composeExpansionGuard';
 
 const REFUSAL = 'Compose file "bomb.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Sencho refused to run it.';
 
@@ -386,6 +386,157 @@ describe('refused stack: GET /services names the refusal', () => {
     expect(res.body.error).toContain('Compose file "compose.yaml"');
     expect(res.body.error).toContain('beyond the 10,000-reference budget');
     expect(res.body.error).not.toContain(stackDir('refused'));
+  });
+
+  it('keeps literal YAML 1.1 service names under ordinary alias reuse', async () => {
+    // Docker Compose lists both `on` and the quoted `true`; the library's 1.1
+    // schema would turn `on` into a boolean key and drop it from the list.
+    const reuse = Array.from({ length: 150 }, (_, i) => `  svc${i}:\n    image: *image`).join('\n');
+    writeCompose(
+      `%YAML 1.1\n---\nx-image: &image nginx:alpine\nservices:\n  on:\n    image: *image\n  "true":\n    image: *image\n${reuse}\n`,
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    const expected = ['on', 'true', ...Array.from({ length: 150 }, (_, i) => `svc${i}`)];
+    expect([...res.body].sort()).toEqual([...expected].sort());
+    expect(res.body).not.toContain('<<');
+  });
+
+  it('lists services when a merge only contributes service attributes', async () => {
+    writeCompose(
+      [
+        'x-base: &base',
+        '  image: nginx:alpine',
+        '  restart: unless-stopped',
+        'services:',
+        '  web:',
+        '    <<: *base',
+        '  db:',
+        '    image: postgres:16',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect([...res.body].sort()).toEqual(['db', 'web']);
+  });
+
+  it('lists the names a merged services map contributes, like Docker Compose', async () => {
+    writeCompose(
+      [
+        'x-services: &svcs',
+        '  web:',
+        '    image: nginx:alpine',
+        'services:',
+        '  <<: *svcs',
+        '  db:',
+        '    image: postgres:16',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect([...res.body].sort()).toEqual(['db', 'web']);
+    expect(res.body).not.toContain('<<');
+  });
+
+  it('answers 409 for an explicit merge tag instead of guessing the names it expands to', async () => {
+    writeCompose(
+      [
+        'x-base: &base',
+        '  image: nginx:alpine',
+        'services:',
+        '  web:',
+        '    !!merge <<: *base',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('compose_inputs_refused');
+    expect(res.body.error).toContain('explicit YAML merge tag');
+  });
+
+  it('lists the names a merged document root contributes, like Docker Compose', async () => {
+    writeCompose(
+      [
+        'x-root: &root',
+        '  services:',
+        '    web:',
+        '      image: nginx:alpine',
+        '<<: *root',
+        '',
+      ].join('\n'),
+    );
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+});
+
+describe('refused stack: GET /services size boundary is encoding-independent', () => {
+  const head = 'services:\n  web:\n    image: nginx\n    labels:\n      pad: "';
+  const tail = '"\n';
+  const baseBytes = Buffer.byteLength(head + tail, 'utf8');
+
+  function writeComposeOfBytes(bytes: number, encoding: 'ascii' | 'multibyte') {
+    const remaining = bytes - baseBytes;
+    const unit = encoding === 'multibyte' ? 'é' : 'a';
+    const unitBytes = Buffer.byteLength(unit, 'utf8');
+    const count = Math.floor(remaining / unitBytes);
+    const extra = remaining - count * unitBytes;
+    const content = `${head}${unit.repeat(count)}${'a'.repeat(extra)}${tail}`;
+    expect(Buffer.byteLength(content, 'utf8')).toBe(bytes);
+    fs.mkdirSync(stackDir('refused'), { recursive: true });
+    fs.writeFileSync(path.join(stackDir('refused'), 'compose.yaml'), content);
+  }
+
+  it('accepts an ASCII compose file exactly at the byte limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES, 'ascii');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
+  it('answers 413 for an ASCII compose file one byte over the limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES + 1, 'ascii');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'Compose file too large to parse' });
+  });
+
+  it('accepts a multibyte compose file exactly at the byte limit', async () => {
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES, 'multibyte');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(['web']);
+  });
+
+  it('answers 413 for a multibyte file over the byte limit instead of an alias-worded 409', async () => {
+    // 1,048,577 UTF-8 bytes are only about 524,319 UTF-16 code units, which the
+    // old code-unit check let through to the expansion guard.
+    writeComposeOfBytes(MAX_COMPOSE_INPUT_BYTES + 1, 'multibyte');
+
+    const res = await request(app).get('/api/stacks/refused/services').set('Cookie', authCookie);
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'Compose file too large to parse' });
   });
 });
 

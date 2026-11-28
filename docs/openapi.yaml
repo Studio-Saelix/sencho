@@ -2380,6 +2380,28 @@ components:
                 description: The service, for a service-scoped update or pull.
               updatePolicy:
                 $ref: "#/components/schemas/UpdatePolicyDecision"
+    ComposeInputsRefused:
+      description: |
+        Sencho refused to parse the stack's compose file, so it cannot answer
+        with a service list. The same response is returned by the local node,
+        through the remote-node proxy, and through a Pilot tunnel. The message
+        names the file and the reason and never a value from it, so it is safe
+        to show.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code]
+            properties:
+              error:
+                type: string
+                description: The compose file's name and the reason Sencho refused it.
+              code:
+                type: string
+                enum: [compose_inputs_refused]
+          example:
+            error: 'Compose file "compose.yaml" expands to more than 250,000 nodes, normally through nested YAML aliases. Docker Compose expands aliases without a limit and can run the host out of memory, so Sencho refused to run it. Remove the alias chain or split the file so services do not reuse the same nested anchors.'
+            code: compose_inputs_refused
 
     RecoveryBadRequest:
       description: The request is not valid for this storage.
@@ -3305,7 +3327,15 @@ paths:
       operationId: getStackServices
       tags: [Stacks]
       summary: List stack services
-      description: Returns the service names defined in the stack's compose file.
+      description: |
+        Returns the service names defined in the stack's primary compose file.
+        Names are read with the same YAML core schema Docker Compose uses, so a
+        `%YAML 1.1` directive does not turn a name such as `on` into a boolean,
+        and ordinary YAML merge keys are expanded the way Compose expands them.
+        An alias expansion the expansion guard refuses, a reuse past the shared
+        alias budget, or an explicit merge tag answers `409
+        compose_inputs_refused`; a file over the 1 MiB parse limit answers
+        `413`.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
@@ -3325,6 +3355,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/ComposeInputsRefused"
+        "413":
+          description: The compose file is larger than the 1 MiB parse limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: Compose file too large to parse
         "500":
           $ref: "#/components/responses/InternalError"
 

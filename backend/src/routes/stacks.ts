@@ -7,7 +7,6 @@ import zlib from 'zlib';
 import { promises as fsp } from 'fs';
 import * as tar from 'tar-stream';
 import { inspect } from 'node:util';
-import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService, isComposeBasename } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
@@ -118,8 +117,8 @@ import {
 } from '../helpers/selfStackGuard';
 import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import { COMPOSE_INPUTS_REFUSED_CODE, sendIfComposeInputsRefused } from '../helpers/composeRefusalRoute';
-import { assertComposeSourceWithinExpansionLimits, ComposeExpansionRefusal } from '../helpers/composeExpansionGuard';
-import { MAX_COMPOSE_ALIAS_COUNT } from '../helpers/composeInputParse';
+import { assertComposeSourceWithinExpansionLimits, ComposeExpansionRefusal, MAX_COMPOSE_INPUT_BYTES } from '../helpers/composeExpansionGuard';
+import { ComposeServiceListRefusal, listComposeServiceNames, MAX_COMPOSE_ALIAS_COUNT } from '../helpers/composeInputParse';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { isDataRestoreFenceError, DATA_RESTORE_FENCE_CODE } from '../helpers/dataRestoreFenceError';
 import { RECOVERY_VOLUME_PROTECTED_CODE, sendIfRecoveryVolumeProtected } from '../helpers/recoveryVolumeGuard';
@@ -128,11 +127,6 @@ import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryS
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
 import { projectManagedStackRevision } from '../helpers/gitopsResponse';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
-
-// Authenticated users with edit permission can write arbitrarily large compose
-// files. Refuse to YAML.parse anything beyond this bound so a malformed (or
-// adversarial) file cannot exhaust heap during an env or service lookup.
-const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 
 /** The YAML library's alias-count refusal, distinct from its unresolved-alias ReferenceError. */
 function isYamlAliasBudgetError(error: unknown): boolean {
@@ -1742,8 +1736,12 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
   }
   try {
     const { content, filename } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
-    if (content.length > MAX_COMPOSE_PARSE_BYTES) {
-      console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_PARSE_BYTES} bytes; refusing to parse services`);
+    // One byte-based bound for every encoding: an ASCII and a multibyte file of
+    // the same on-disk size must get the same answer. The expansion guard
+    // applies this same cap, so checking it here makes the size refusal a 413
+    // before any parse work instead of an alias-worded 409.
+    if (Buffer.byteLength(content, 'utf8') > MAX_COMPOSE_INPUT_BYTES) {
+      console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_INPUT_BYTES} bytes; refusing to parse services`);
       res.status(413).json({ error: 'Compose file too large to parse' });
       return;
     }
@@ -1751,10 +1749,19 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
     // file whose aliases expand too far, and the shared alias budget refuses a
     // file that reuses aliases more than an ordinary project does.
     assertComposeSourceWithinExpansionLimits(content, filename);
-    let parsed: { services?: Record<string, unknown> } | null;
+    let services: string[];
     try {
-      parsed = YAML.parse(content, { maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+      // The same core-schema projection the Compose inventory uses, so literal
+      // names such as `on` stay service names instead of becoming booleans.
+      services = listComposeServiceNames(content);
     } catch (error) {
+      if (error instanceof ComposeServiceListRefusal) {
+        res.status(409).json({
+          error: `Compose file "${filename}" ${error.message}`,
+          code: COMPOSE_INPUTS_REFUSED_CODE,
+        });
+        return;
+      }
       if (!isYamlAliasBudgetError(error)) throw error;
       res.status(409).json({
         error: `Compose file "${filename}" expands YAML aliases beyond the ${MAX_COMPOSE_ALIAS_COUNT.toLocaleString('en-US')}-reference budget, so Sencho refused to parse it. Remove some alias reuse or split the file, then try again.`,
@@ -1762,7 +1769,6 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
       });
       return;
     }
-    const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
   } catch (error) {
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));

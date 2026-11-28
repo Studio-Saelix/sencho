@@ -247,6 +247,35 @@ function hasTaggedMergeKey(node: unknown): boolean {
     return false;
 }
 
+/** Raised when a Compose document uses a merge form this parser will not expand. */
+export class UnsupportedComposeMergeError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'UnsupportedComposeMergeError';
+    }
+}
+
+/**
+ * Raised when a Compose document's service names cannot be listed. The reason
+ * is a sentence the caller can prefix with the file's name.
+ */
+export class ComposeServiceListRefusal extends Error {
+    constructor(reason: string) {
+        super(reason);
+        this.name = 'ComposeServiceListRefusal';
+    }
+}
+
+export interface ParseComposeYamlOptions {
+    /**
+     * Expand YAML merge keys (`<<`) into the returned value. The inventory
+     * leaves this off so it can inspect merges for hidden declarations; a name
+     * projection may turn it on only after the expansion guard has bounded the
+     * source, because expansion copies an anchor once per reference.
+     */
+    expandMerges?: boolean;
+}
+
 /**
  * Parse a Compose document under the parser's finite alias budget.
  *
@@ -261,13 +290,48 @@ function hasTaggedMergeKey(node: unknown): boolean {
  * merges are still refused because yaml expands them under any schema, before
  * materialisation.
  */
-export function parseComposeYaml(content: string): unknown {
-    const document = YAML.parseDocument(content, { schema: 'core', resolveKnownTags: true });
+export function parseComposeYaml(content: string, options: ParseComposeYamlOptions = {}): unknown {
+    const expandMerges = options.expandMerges === true;
+    const document = YAML.parseDocument(content, {
+        schema: 'core',
+        resolveKnownTags: true,
+        merge: expandMerges,
+    });
     if (document.errors.length > 0) throw document.errors[0];
     if (hasTaggedMergeKey(document.contents)) {
-        throw new Error('tagged YAML merge keys are not supported');
+        throw new UnsupportedComposeMergeError('tagged YAML merge keys are not supported');
     }
-    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT });
+    return document.toJS({ maxAliasCount: MAX_COMPOSE_ALIAS_COUNT, merge: expandMerges });
+}
+
+/**
+ * Project a Compose document to the exact service names Docker Compose sees.
+ *
+ * Names stay literal: the document is read with the core schema, so a
+ * `%YAML 1.1` directive cannot turn the service `on` into the boolean `true`.
+ * Merge keys are expanded the way Compose expands them, so a `<<` on the
+ * `services` map contributes its service names and a merge inside one service
+ * definition only contributes attributes. The caller must have bounded the
+ * source with the expansion guard first: merge expansion copies an anchor once
+ * per reference, and the guard is what caps that copy count.
+ */
+export function listComposeServiceNames(content: string): string[] {
+    let parsed: unknown;
+    try {
+        parsed = parseComposeYaml(content, { expandMerges: true });
+    } catch (error) {
+        if (error instanceof UnsupportedComposeMergeError) {
+            throw new ComposeServiceListRefusal(
+                'uses an explicit YAML merge tag, which Sencho does not expand when listing services. ' +
+                'Replace it with an ordinary merge or list the services directly, then try again.',
+            );
+        }
+        throw error;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    const services = (parsed as Record<string, unknown>).services;
+    if (!services || typeof services !== 'object' || Array.isArray(services)) return [];
+    return Object.keys(services as Record<string, unknown>);
 }
 
 /**

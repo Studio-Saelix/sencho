@@ -2,13 +2,15 @@
 export const COMPOSE_INPUTS_REFUSED_CODE = 'compose_inputs_refused';
 
 /**
- * Reads Sencho's own refusal text from a failed container-list response.
+ * Reads Sencho's own refusal text from a failed response.
  *
- * The container list of a stack whose compose files the expansion guard refuses
- * answers 409 `{ error, code: 'compose_inputs_refused' }` (directly, through a
- * proxied node, and through a Pilot tunnel). The text names the file and the
- * reason and never a value from it, so it is safe to show. Returns null for any
- * other failure, so callers keep their generic wording for those.
+ * A stack whose compose inputs Sencho refuses answers 409
+ * `{ error, code: 'compose_inputs_refused' }` (directly, through a proxied
+ * node, and through a Pilot tunnel). Container lists and service lists use the
+ * same envelope, so both readers show the operator the file and the reason
+ * instead of a generic failure. The text names the file and the reason and
+ * never a value from it, so it is safe to show. Returns null for any other
+ * failure, so callers keep their generic wording for those.
  */
 export async function readComposeInputsRefusal(res: Response): Promise<string | null> {
   if (res.status !== 409) return null;

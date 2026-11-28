@@ -15,11 +15,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Combobox } from '@/components/ui/combobox';
+import { Checkbox } from '@/components/ui/checkbox';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Trash2, HelpCircle, AlertTriangle, Info, CheckCircle2, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { readComposeInputsRefusal } from '@/lib/composeInputsRefusal';
 import { SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '@/lib/capabilities';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
@@ -38,7 +40,7 @@ interface StackAlert {
 type ServicesState =
     | { status: 'idle' | 'loading' }
     | { status: 'success'; options: string[] }
-    | { status: 'error' };
+    | { status: 'error'; message: string };
 
 interface AutoHealPolicy {
     id?: number;
@@ -200,6 +202,8 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
         enabledTypes: [],
     });
     const [servicesState, setServicesState] = useState<ServicesState>({ status: 'idle' });
+    const [targetAllServices, setTargetAllServices] = useState(false);
+    const [missingInitialService, setMissingInitialService] = useState<string | null>(null);
 
     const [service, setService] = useState('');
     const [metric, setMetric] = useState('cpu_percent');
@@ -223,19 +227,38 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
 
         let cancelled = false;
         setServicesState({ status: 'loading' });
+        setTargetAllServices(false);
+        setMissingInitialService(null);
         setService('');
 
         void (async () => {
             try {
                 const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
-                if (!res.ok) throw new Error(`services ${res.status}`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    const refusal = await readComposeInputsRefusal(res);
+                    if (cancelled) return;
+                    setServicesState({
+                        status: 'error',
+                        message: refusal ?? 'Could not load the Compose services for this stack.',
+                    });
+                    return;
+                }
                 const names = await res.json() as string[];
                 if (cancelled) return;
                 setServicesState({ status: 'success', options: names });
                 setService(preselectListedService(initialService, names));
+                setMissingInitialService(
+                    initialService && !names.includes(initialService) ? initialService : null,
+                );
             } catch (e) {
                 console.error('[StackAlertSheet] Failed to fetch stack services', e);
-                if (!cancelled) setServicesState({ status: 'error' });
+                if (!cancelled) {
+                    setServicesState({
+                        status: 'error',
+                        message: 'Could not load the Compose services for this stack.',
+                    });
+                }
             }
         })();
 
@@ -338,6 +361,13 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             ? servicesState.options.map(n => ({ value: n, label: n }))
             : []),
     ];
+
+    // A failed lookup, or a requested service this stack does not list, is not
+    // an all-services choice until the operator says so.
+    const needsExplicitAllServices = canScopeService
+        && service === ''
+        && !targetAllServices
+        && (servicesState.status === 'error' || missingInitialService !== null);
 
     const renderTargetLabel = (alert: StackAlert) => {
         if (!alert.service_name) {
@@ -466,7 +496,21 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
             {canEditAlerts && (
                 <SheetSection title="Add new rule">
                     <div className="space-y-3">
-                        {canScopeService && (
+                        {canScopeService && servicesState.status === 'error' ? (
+                            <div className="space-y-2">
+                                <Label>Service</Label>
+                                <p role="alert" className="text-xs text-destructive">
+                                    {servicesState.message}
+                                </p>
+                                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                    <Checkbox
+                                        checked={targetAllServices}
+                                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                    />
+                                    <span>Target all services in this stack</span>
+                                </label>
+                            </div>
+                        ) : canScopeService && (
                             <div className="space-y-2">
                                 <Label>Service</Label>
                                 <Combobox
@@ -475,13 +519,22 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                     onValueChange={setService}
                                     placeholder="All services"
                                     searchPlaceholder="Search services..."
-                                    emptyText={servicesState.status === 'error' ? 'Could not load services.' : 'No services found.'}
-                                    disabled={servicesState.status === 'loading' || servicesState.status === 'error'}
+                                    emptyText="No services found."
+                                    disabled={servicesState.status === 'loading'}
                                 />
-                                {servicesState.status === 'error' && (
-                                    <p className="text-xs text-muted-foreground">
-                                        Could not load Compose services. The rule will target all services.
-                                    </p>
+                                {missingInitialService && (
+                                    <>
+                                        <p className="text-xs text-warning">
+                                            Service "{missingInitialService}" is not in this stack's compose file. Choose a service, or confirm all services below.
+                                        </p>
+                                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                            <Checkbox
+                                                checked={targetAllServices}
+                                                onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                            />
+                                            <span>Target all services in this stack</span>
+                                        </label>
+                                    </>
                                 )}
                             </div>
                         )}
@@ -555,7 +608,11 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                             </div>
                         </div>
 
-                        <Button className="w-full mt-2" onClick={addAlert} disabled={isLoading}>
+                        <Button
+                            className="w-full mt-2"
+                            onClick={addAlert}
+                            disabled={isLoading || needsExplicitAllServices}
+                        >
                             {isLoading ? (
                                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</>
                             ) : (
@@ -606,6 +663,9 @@ function AutoHealTab({
     const [saving, setSaving] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [serviceOptions, setServiceOptions] = useState<{ value: string; label: string }[]>([]);
+    const [servicesError, setServicesError] = useState<string | null>(null);
+    const [targetAllServices, setTargetAllServices] = useState(false);
+    const [missingInitialService, setMissingInitialService] = useState<string | null>(null);
 
     const [service, setService] = useState('');
     const [unhealthyFor, setUnhealthyFor] = useState('5');
@@ -615,25 +675,43 @@ function AutoHealTab({
 
     useEffect(() => {
         if (!open || !stackName) return;
+        let cancelled = false;
         setLoading(true);
         setService('');
+        setServiceOptions([]);
+        setServicesError(null);
+        setTargetAllServices(false);
+        setMissingInitialService(null);
         apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
             .then(res => res.json() as Promise<AutoHealPolicy[]>)
-            .then(data => setPolicies(data))
-            .catch(() => toast.error('Failed to load auto-heal policies.'))
-            .finally(() => setLoading(false));
+            .then(data => { if (!cancelled) setPolicies(data); })
+            .catch(() => { if (!cancelled) toast.error('Failed to load auto-heal policies.'); })
+            .finally(() => { if (!cancelled) setLoading(false); });
 
         void (async () => {
             try {
                 const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
-                if (!res.ok) throw new Error(`services ${res.status}`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    const refusal = await readComposeInputsRefusal(res);
+                    if (cancelled) return;
+                    setServicesError(refusal ?? 'Could not load the Compose services for this stack.');
+                    return;
+                }
                 const names = await res.json() as string[];
+                if (cancelled) return;
                 setServiceOptions(names.map(n => ({ value: n, label: n })));
                 setService(preselectListedService(initialService, names));
+                setMissingInitialService(
+                    initialService && !names.includes(initialService) ? initialService : null,
+                );
             } catch (e) {
                 console.error('[StackAlertSheet] Failed to fetch stack services', e);
+                if (!cancelled) setServicesError('Could not load the Compose services for this stack.');
             }
         })();
+
+        return () => { cancelled = true; };
     }, [open, stackName, initialService]);
 
     const handleToggle = async (id: number, enabled: boolean) => {
@@ -722,6 +800,12 @@ function AutoHealTab({
         ...serviceOptions,
     ];
 
+    // A failed lookup, or a requested service this stack does not list, is not
+    // an all-services choice until the operator says so.
+    const needsExplicitAllServices = service === ''
+        && !targetAllServices
+        && (servicesError !== null || missingInitialService !== null);
+
     return (
         <>
             <SheetSection title="Active policies">
@@ -754,17 +838,47 @@ function AutoHealTab({
             {canEditAutoHeal && (
             <SheetSection title="Add new policy">
                 <div className="space-y-3">
-                    <div className="space-y-2">
-                        <Label>Service</Label>
-                        <Combobox
-                            options={serviceComboOptions}
-                            value={service}
-                            onValueChange={setService}
-                            placeholder="All services"
-                            searchPlaceholder="Search services..."
-                            emptyText="No services found."
-                        />
-                    </div>
+                    {servicesError ? (
+                        <div className="space-y-2">
+                            <Label>Service</Label>
+                            <p role="alert" className="text-xs text-destructive">
+                                {servicesError}
+                            </p>
+                            <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                <Checkbox
+                                    checked={targetAllServices}
+                                    onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                />
+                                <span>Target all services in this stack</span>
+                            </label>
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            <Label>Service</Label>
+                            <Combobox
+                                options={serviceComboOptions}
+                                value={service}
+                                onValueChange={setService}
+                                placeholder="All services"
+                                searchPlaceholder="Search services..."
+                                emptyText="No services found."
+                            />
+                            {missingInitialService && (
+                                <>
+                                    <p className="text-xs text-warning">
+                                        Service "{missingInitialService}" is not in this stack's compose file. Choose a service, or confirm all services below.
+                                    </p>
+                                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                        <Checkbox
+                                            checked={targetAllServices}
+                                            onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                                        />
+                                        <span>Target all services in this stack</span>
+                                    </label>
+                                </>
+                            )}
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-2">
@@ -819,7 +933,7 @@ function AutoHealTab({
                     <Button
                         className="w-full mt-2"
                         onClick={handleAddPolicy}
-                        disabled={saving}
+                        disabled={saving || needsExplicitAllServices}
                     >
                         {saving ? (
                             <><Loader2 className="h-4 w-4 mr-2 animate-spin" strokeWidth={1.5} />Saving...</>

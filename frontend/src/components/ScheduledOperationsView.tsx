@@ -15,6 +15,7 @@ import { toast } from '@/components/ui/toast-store';
 import { copyToClipboard } from '@/lib/clipboard';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { readComposeInputsRefusal } from '@/lib/composeInputsRefusal';
 import { excludeLikelySenchoContainers } from '@/lib/senchoContainerFilter';
 import { Combobox } from '@/components/ui/combobox';
 import { SegmentedControl } from '@/components/ui/segmented-control';
@@ -143,6 +144,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     { kind: 'idle' } | { kind: 'loading' } | { kind: 'unavailable' } | { kind: 'ready'; data: LabelMatchPreview }
   >({ kind: 'idle' });
   const [availableServices, setAvailableServices] = useState<string[]>([]);
+  const [servicesError, setServicesError] = useState<string | null>(null);
+  const [targetAllServices, setTargetAllServices] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null);
   const [runsPage, setRunsPage] = useState(1);
@@ -238,9 +241,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     const actionDef = getActionById(formAction);
     if (!actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
+      setServicesError(null);
+      setTargetAllServices(false);
       return;
     }
     let cancelled = false;
+    // Drop the previous target's names before the lookup starts, so a refusal
+    // for this target can never leave another stack's services selectable.
+    setAvailableServices([]);
+    setServicesError(null);
+    setTargetAllServices(false);
     const fetchServices = async () => {
       try {
         // Load services from the selected node so remote-node restart schedules
@@ -249,15 +259,25 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
         const res = formNodeId
           ? await fetchForNode(endpoint, parseInt(formNodeId, 10))
           : await apiFetch(endpoint);
-        if (res.ok && !cancelled) {
-          const services = (await res.json()) as string[];
-          setAvailableServices(services);
-          if (services.length <= 1) {
-            setFormTargetServices([]);
-          }
+        if (cancelled) return;
+        if (!res.ok) {
+          const refusal = await readComposeInputsRefusal(res);
+          if (cancelled) return;
+          setFormTargetServices([]);
+          setServicesError(refusal ?? 'Could not load the Compose services for this stack.');
+          return;
+        }
+        const services = (await res.json()) as string[];
+        if (cancelled) return;
+        setAvailableServices(services);
+        if (services.length <= 1) {
+          setFormTargetServices([]);
         }
       } catch {
-        // Non-critical
+        if (!cancelled) {
+          setFormTargetServices([]);
+          setServicesError('Could not load the Compose services for this stack.');
+        }
       }
     };
     fetchServices();
@@ -633,6 +653,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       !formSelectorValue.trim()
       || (formLabelScope === 'node' && !formNodeId)
     ))
+    || (!!servicesError && !targetAllServices)
     || !canSaveWithCurrentTarget;
 
   const saveDisabledReason = useMemo((): string | null => {
@@ -1059,12 +1080,30 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <Combobox
                     options={stacks.map(s => ({ value: s, label: s }))}
                     value={formTargetId}
-                    onValueChange={(val) => { setFormTargetId(val); setFormTargetServices([]); }}
+                    onValueChange={(val) => {
+                      setFormTargetId(val);
+                      setFormTargetServices([]);
+                      setServicesError(null);
+                      setTargetAllServices(false);
+                    }}
                     placeholder={formNodeId ? "Select stack..." : "Select a node first"}
                     disabled={!formNodeId}
                   />
                 </div>
-                {currentAction.supportsServiceSelection && formTargetId && availableServices.length > 1 && (
+                {currentAction.supportsServiceSelection && formTargetId && servicesError && (
+                  <div className="space-y-2">
+                    <Label>Services</Label>
+                    <p role="alert" className="text-xs text-destructive">{servicesError}</p>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <Checkbox
+                        checked={targetAllServices}
+                        onCheckedChange={(checked) => setTargetAllServices(checked === true)}
+                      />
+                      <span>Target all services in this stack</span>
+                    </label>
+                  </div>
+                )}
+                {currentAction.supportsServiceSelection && formTargetId && !servicesError && availableServices.length > 1 && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
                     <div className="grid grid-cols-2 gap-2">

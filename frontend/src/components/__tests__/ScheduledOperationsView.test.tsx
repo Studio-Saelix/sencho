@@ -155,6 +155,26 @@ describe('ScheduledOperationsView', () => {
     await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
   });
 
+  it('shows a refusal on a prefilled stack without a node through apiFetch', async () => {
+    mockedFetch.mockImplementation(async (url: string) => {
+      if (url === '/scheduled-tasks') return jsonResponse([]);
+      if (url === '/nodes') return jsonResponse(nodesFixture);
+      if (url === '/stacks') return jsonResponse(['broken']);
+      if (url === '/stacks/broken/services') {
+        return jsonResponse(
+          { error: 'Compose file "compose.yaml" is too complex to list.', code: 'compose_inputs_refused' },
+          { ok: false, status: 409 },
+        );
+      }
+      return jsonResponse({});
+    });
+
+    render(<ScheduledOperationsView prefill={{ stackName: 'broken', nodeId: null }} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" is too complex to list.');
+    expect(mockedFetchForNode).not.toHaveBeenCalledWith('/stacks/broken/services', expect.anything());
+  });
+
   it('clears the stale stack when the user changes the node', async () => {
     render(<ScheduledOperationsView />);
 
@@ -382,6 +402,62 @@ describe('ScheduledOperationsView', () => {
 
     const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
     expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
+  });
+
+  it('shows the refusal, clears stale services, and requires an explicit all-services choice', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web', 'broken']);
+      if (url === '/stacks/web/services') return jsonResponse(['web', 'db']);
+      if (url === '/stacks/broken/services') {
+        return jsonResponse(
+          {
+            error: 'Compose file "compose.yaml" expands YAML aliases beyond the 10,000-reference budget, so Sencho refused to parse it.',
+            code: 'compose_inputs_refused',
+          },
+          { ok: false, status: 409 },
+        );
+      }
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nightly stack restart'), 'restart-broken');
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
+    expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
+
+    // A refusal for a different stack must drop the previous stack's names.
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'broken' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Compose file "compose.yaml" expands YAML aliases');
+    expect(screen.queryByRole('checkbox', { name: 'db' })).not.toBeInTheDocument();
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(create).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Target all services in this stack/ }));
+    expect(create).toBeEnabled();
+    await userEvent.click(create);
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        target_type: 'stack',
+        target_id: 'broken',
+        node_id: 2,
+        target_services: null,
+      });
+    });
   });
 
   it('renders the five registry category lanes in the timeline view', async () => {
